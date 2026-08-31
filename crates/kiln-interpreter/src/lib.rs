@@ -12,7 +12,7 @@ use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds,
+    Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     node_http::{
         Http1Decoder, Http1ResponseDecoder, HttpRequestEvent, HttpResponse, HttpResponseEvent,
     },
@@ -307,6 +307,7 @@ pub enum Native {
     NodeEventOnce,
     NodeEventEmit,
     NodeEventListeners,
+    NodeEventRemoveListener,
     NodeEventRemoveAllListeners,
     NodeEventSetMaxListeners,
     NodeNet,
@@ -342,6 +343,10 @@ pub enum Native {
     NodeServerAddress,
     NodeServerSetTimeout,
     NodeResponseSetHeader,
+    NodeResponseGetHeader,
+    NodeResponseGetHeaders,
+    NodeResponseHasHeader,
+    NodeResponseRemoveHeader,
     NodeResponseWriteHead,
     NodeResponseWrite,
     NodeResponseEnd,
@@ -443,6 +448,7 @@ pub enum Native {
     ClearTimeout,
     ClearInterval,
     QueueMicrotask,
+    ProcessNextTick,
     DateConstructor,
     DateNow,
     DateUtc,
@@ -1136,6 +1142,9 @@ impl Native {
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "listeners") => {
                 Some(Value::Native(Self::NodeEventListeners))
             }
+            (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeListener" | "off") => {
+                Some(Value::Native(Self::NodeEventRemoveListener))
+            }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeAllListeners") => {
                 Some(Value::Native(Self::NodeEventRemoveAllListeners))
             }
@@ -1729,6 +1738,7 @@ struct NodeConnection {
     response: Option<Value>,
     close_after_finish: bool,
     closed: bool,
+    applying_read_completion: bool,
 }
 
 #[derive(Debug)]
@@ -1761,7 +1771,7 @@ struct HttpResponseState {
 #[derive(Debug)]
 struct HttpIncomingState {
     stream: kiln_host_abi::ResourceId,
-    encoding: Option<String>,
+    readable: Rc<RefCell<ReadableState>>,
 }
 
 #[derive(Debug)]
@@ -2231,9 +2241,8 @@ fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
         Value::Object(object) => object.borrow().is_extensible(),
         Value::Function(closure) => closure.properties.borrow().is_extensible(),
         Value::Array(items) => items.properties.borrow().is_extensible(),
-        Value::Native(_) | Value::Callback(_) | Value::Bound(_) | Value::Settler(..) => {
-            intrinsics.extensible(target)
-        }
+        Value::Bound(bound) => bound.properties.borrow().is_extensible(),
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => intrinsics.extensible(target),
         // Every other object here is exotic and has no property store of its own to close. A
         // definition on one is dropped rather than refused, and reporting it closed would turn
         // that silence into a throw the specification does not ask for.
@@ -2272,7 +2281,13 @@ fn own_property_state(
         // A built-in keeps what a program changed in the realm's store and everything else in
         // the tables, so a property it has never touched still reads as the specification built
         // it. `own_attributes` has already decided which of the two is answering.
-        Value::Native(_) | Value::Callback(_) | Value::Bound(_) | Value::Settler(..) => {
+        Value::Bound(bound) => bound
+            .properties
+            .borrow()
+            .get_own_property(key)
+            .cloned()
+            .or_else(|| tabulated_property(target, key)),
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
             match intrinsics.overridden(target, key) {
                 Overridden::Held(property, _) => Some(property),
                 // Unreachable: `own_attributes` answered `None` for a removed property, so the
@@ -2371,6 +2386,10 @@ fn install_property(
     match target {
         Value::Object(object) => object.borrow_mut().install(key, property, attributes),
         Value::Function(closure) => closure
+            .properties
+            .borrow_mut()
+            .install(key, property, attributes),
+        Value::Bound(bound) => bound
             .properties
             .borrow_mut()
             .install(key, property, attributes),
@@ -3348,6 +3367,19 @@ pub struct GeneratorState {
 }
 
 impl PartialEq for GeneratorState {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+#[derive(Debug)]
+struct ModuleSuspension {
+    stack: Vec<Value>,
+    handlers: Vec<Handler>,
+    instruction: usize,
+}
+
+impl PartialEq for ModuleSuspension {
     fn eq(&self, other: &Self) -> bool {
         std::ptr::eq(self, other)
     }
@@ -4502,18 +4534,24 @@ pub struct ModuleRealmSession {
 }
 
 struct ModuleRealmShared {
+    realm: Realm<Job, Timer>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    symbol_serial: u64,
+    symbol_registry: Vec<(String, Value)>,
 }
 
 impl Default for ModuleRealmSession {
     fn default() -> Self {
         Self {
             shared: Rc::new(RefCell::new(ModuleRealmShared {
+                realm: Realm::new(),
                 pending_host: Vec::new(),
                 pending_node: Vec::new(),
                 node_servers: Vec::new(),
+                symbol_serial: 0,
+                symbol_registry: Vec::new(),
             })),
         }
     }
@@ -5727,9 +5765,9 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         vm.module_realm = Some(Rc::clone(&session.shared));
     }
     let execution = if enter_runtime {
-        runtime.enter(|| vm.run())
+        runtime.enter(|| vm.run_module_body())
     } else {
-        vm.run()
+        vm.run_module_body()
     }?;
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
@@ -5739,6 +5777,20 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         } else if vm.async_host.is_none() {
             vm.run_event_loop(runtime)?;
         }
+    }
+    // A module that awaited finished somewhere inside that drain rather than at the `run` above,
+    // so what it came to is read here. A rejection is reported the way an uncaught throw from a
+    // module body without any `await` in it already is: the module failed, and saying so as a
+    // rejection nobody handled would describe the same failure less plainly.
+    if let Some(Settled::Rejected(reason)) = vm.module_outcome() {
+        let trace = captured_trace(&reason);
+        let instruction = vm.instruction;
+        let message = vm.describe_uncaught(&reason, instruction);
+        return Err(ExecutionError::Uncaught {
+            instruction,
+            message,
+            trace,
+        });
     }
     let execution = ExecutionResult {
         steps: vm.steps,
@@ -5840,6 +5892,13 @@ enum Sink {
     /// generator that yields promises hands back their *values*. Without this the consumer got
     /// the promise itself, and `for await (const x of gen())` bound `x` to a promise.
     AsyncGeneratorYield(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
+    ModuleAwait(Rc<RefCell<ModuleSuspension>>),
+    /// `AsyncGeneratorAwaitReturn`: the argument of a `return()` on a generator with no body
+    /// left to unwind, being awaited before it becomes the final step.
+    ///
+    /// The generator itself is not carried because there is nothing to resume -- it is already
+    /// finished, and all that remains is to decide the step this `return()` promised.
+    AsyncGeneratorReturn(Rc<RefCell<PromiseState>>),
 }
 
 /// One `Array.fromAsync` in flight.
@@ -5917,6 +5976,10 @@ impl PromiseState {
 /// `queueMicrotask` between two `then`s runs between them.
 #[derive(Debug)]
 enum Job {
+    /// Node's next-tick queue drains ahead of the ordinary ECMAScript microtask queue. It uses
+    /// the same realm owner and checkpoint, but a distinct lane so Promise jobs cannot overtake
+    /// callbacks Node promises will run first.
+    NextTick(Value, Vec<Value>),
     /// `queueMicrotask(callback)`.
     Callback(Value, Vec<Value>),
     /// A settled promise's reaction, waiting to be run.
@@ -6102,6 +6165,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
     unhandled: Option<Value>,
+    module_suspension: Option<Rc<RefCell<ModuleSuspension>>>,
+    module_completion: Option<Rc<RefCell<PromiseState>>>,
     /// `Symbol.for`'s registry: one symbol per key, for the whole run. Its point is that two
     /// lookups of one key are the *same* symbol, which is what makes it usable across module
     /// boundaries where `Symbol()` would produce two.
@@ -6225,6 +6290,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             commonjs_loader: None,
             caught: None,
             unhandled: None,
+            module_suspension: None,
+            module_completion: None,
             symbol_registry: Vec::new(),
             random_state: entropy_seed,
             closures: Vec::new(),
@@ -6277,6 +6344,20 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn with_realm<R>(&self, operation: impl FnOnce(&Realm<Job, Timer>) -> R) -> R {
+        match &self.module_realm {
+            Some(shared) => operation(&shared.borrow().realm),
+            None => operation(&self.realm),
+        }
+    }
+
+    fn with_realm_mut<R>(&mut self, operation: impl FnOnce(&mut Realm<Job, Timer>) -> R) -> R {
+        match &self.module_realm {
+            Some(shared) => operation(&mut shared.borrow_mut().realm),
+            None => operation(&mut self.realm),
+        }
+    }
+
     fn push_pending_node(&mut self, pending: PendingNodeRequest) {
         if let Some(realm) = &self.module_realm {
             realm.borrow_mut().pending_node.push(pending);
@@ -6434,29 +6515,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        if matches!(
-            native,
-            Native::NodeReadablePush | Native::NodeReadableRead | Native::NodeReadableDestroy
-        ) || node_readable_state(receiver).is_ok()
-        {
+        if node_readable_state(receiver).is_ok() {
             return self.dispatch_memory_readable(native, receiver, arguments, instruction);
         }
         let state = node_http_incoming(receiver)?;
-        if matches!(native, Native::NodeReadableSetEncoding) {
-            let encoding = arguments
-                .first()
-                .map(Value::to_display_string)
-                .unwrap_or_else(|| "utf8".into())
-                .to_ascii_lowercase();
-            if !matches!(encoding.as_str(), "utf8" | "utf-8") {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: format!("unsupported Node stream encoding: {encoding}"),
-                });
-            }
-            state.borrow_mut().encoding = Some("utf8".into());
-            return Ok(receiver.clone());
+        let (resource, readable) = {
+            let state = state.borrow();
+            (state.stream, Rc::clone(&state.readable))
+        };
+        let result = self.dispatch_readable_state(
+            native,
+            receiver,
+            arguments,
+            instruction,
+            &readable,
+            false,
+        )?;
+        if !matches!(
+            native,
+            Native::NodeReadablePause | Native::NodeReadableResume
+        ) {
+            return Ok(result);
         }
-        let resource = state.borrow().stream;
         let owner = self
             .http_server_for_stream(resource)
             .ok_or_else(|| ExecutionError::Host {
@@ -6478,14 +6558,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     connection.driver.pause_reading();
                     Vec::new()
                 }
-                Native::NodeReadableResume => connection.driver.resume_reading(),
+                Native::NodeReadableResume => {
+                    let actions = connection.driver.resume_reading();
+                    if connection.applying_read_completion {
+                        Vec::new()
+                    } else {
+                        actions
+                    }
+                }
                 _ => unreachable!("only readable flow-control natives dispatch here"),
             }
         };
         for action in actions {
             self.start_http_stream_action(&owner, resource, action, instruction)?;
         }
-        Ok(receiver.clone())
+        Ok(result)
     }
 
     fn dispatch_memory_readable(
@@ -6496,34 +6583,63 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let state = node_readable_state(receiver)?;
+        self.dispatch_readable_state(native, receiver, arguments, instruction, &state, true)
+    }
+
+    fn dispatch_readable_state(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+        state: &Rc<RefCell<ReadableState>>,
+        call_read_hook: bool,
+    ) -> Result<Value, ExecutionError> {
         match native {
             Native::NodeReadablePush => {
                 let chunk = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let (event, ready) = {
+                let (event, payload, emit_end, ready) = {
                     let mut state = state.borrow_mut();
                     if matches!(chunk, Value::Null) {
                         state.ended = true;
                         state.reading = false;
-                        ("readable", false)
+                        let emit_end =
+                            state.flowing && state.buffer.is_empty() && !state.end_emitted;
+                        if emit_end {
+                            state.end_emitted = true;
+                        }
+                        ("readable", Vec::new(), emit_end, false)
                     } else {
                         let empty = matches!(&chunk, Value::String(text) if text.is_empty());
-                        if !empty {
-                            state.buffer.push(chunk);
+                        if !empty && !state.flowing {
+                            state.buffer.push(chunk.clone());
                         }
                         state.reading = state.buffer.len() < state.high_water_mark && !state.ended;
                         (
                             if state.flowing { "data" } else { "readable" },
+                            state.flowing.then_some(chunk).into_iter().collect(),
+                            false,
                             state.buffer.len() < state.high_water_mark,
                         )
                     }
                 };
                 sync_readable_public_state(receiver, &state.borrow());
+                let mut event_arguments = vec![Value::String(event.into())];
+                event_arguments.extend(payload);
                 self.dispatch_node_event(
                     Native::NodeEventEmit,
                     receiver,
-                    &[Value::String(event.into())],
+                    &event_arguments,
                     instruction,
                 )?;
+                if emit_end {
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        receiver,
+                        &[Value::String("end".into())],
+                        instruction,
+                    )?;
+                }
                 return Ok(Value::Boolean(ready));
             }
             Native::NodeReadableRead => {
@@ -6545,7 +6661,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     (value, call_read, emit_end)
                 };
                 sync_readable_public_state(receiver, &state.borrow());
-                if call_read {
+                if call_read && call_read_hook {
                     let callback = self.read_property(receiver, "_read", instruction)?;
                     if is_callable(&callback) {
                         self.call_value(&callback, receiver.clone(), Vec::new(), instruction)?;
@@ -6598,8 +6714,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(receiver.clone());
             }
             Native::NodeReadablePause | Native::NodeReadableResume => {
-                state.borrow_mut().flowing = matches!(native, Native::NodeReadableResume);
+                let resume = matches!(native, Native::NodeReadableResume);
+                let buffered = {
+                    let mut state = state.borrow_mut();
+                    state.flowing = resume;
+                    if resume {
+                        std::mem::take(&mut state.buffer)
+                    } else {
+                        Vec::new()
+                    }
+                };
                 sync_readable_public_state(receiver, &state.borrow());
+                for chunk in buffered {
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        receiver,
+                        &[Value::String("data".into()), chunk],
+                        instruction,
+                    )?;
+                }
+                let emit_end = {
+                    let mut state = state.borrow_mut();
+                    let emit = resume && state.ended && !state.end_emitted;
+                    if emit {
+                        state.end_emitted = true;
+                    }
+                    emit
+                };
+                if emit_end {
+                    sync_readable_public_state(receiver, &state.borrow());
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        receiver,
+                        &[Value::String("end".into())],
+                        instruction,
+                    )?;
+                }
                 return Ok(receiver.clone());
             }
             _ => {}
@@ -6869,6 +7019,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(receiver.clone())
             }
             Native::NodeResponseSetHeader
+            | Native::NodeResponseGetHeader
+            | Native::NodeResponseGetHeaders
+            | Native::NodeResponseHasHeader
+            | Native::NodeResponseRemoveHeader
             | Native::NodeResponseWriteHead
             | Native::NodeResponseWrite
             | Native::NodeResponseEnd => {
@@ -6959,6 +7113,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     response: None,
                     close_after_finish: false,
                     closed: false,
+                    applying_read_completion: false,
                 };
                 let actions = stream.driver.start_reading();
                 state.borrow_mut().streams.push(stream);
@@ -7048,6 +7203,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         match action {
             StreamAction::Start(operation) => {
+                if matches!(operation, AsyncHostOp::TcpRead { .. })
+                    && server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.driver.resource() == resource)
+                        .is_some_and(|stream| stream.driver.has_pending_read())
+                {
+                    return Ok(());
+                }
                 let host = self.async_host.ok_or_else(|| ExecutionError::Host {
                     instruction,
                     message: "node:http requires the Node execution Adapter".into(),
@@ -7192,6 +7357,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             StreamAction::Event(StreamEvent::Drain | StreamEvent::End) => {
+                if matches!(action, StreamAction::Event(StreamEvent::End))
+                    && matches!(
+                        server.borrow().protocol,
+                        ServerProtocol::Http | ServerProtocol::HttpClient
+                    )
+                {
+                    let incoming = server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.driver.resource() == resource)
+                        .and_then(|stream| match server.borrow().protocol {
+                            ServerProtocol::Http => stream.request.clone(),
+                            ServerProtocol::HttpClient => stream.response.clone(),
+                            ServerProtocol::Net => None,
+                        });
+                    if let Some(incoming) = incoming {
+                        let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
+                        self.dispatch_readable_state(
+                            Native::NodeReadablePush,
+                            &incoming,
+                            &[Value::Null],
+                            instruction,
+                            &readable,
+                            false,
+                        )?;
+                    }
+                }
                 if let Some(socket) = node_net_socket_value(server, resource) {
                     let event = match action {
                         StreamAction::Event(StreamEvent::Drain) => "drain",
@@ -7247,34 +7440,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             HttpRequestEvent::Data(bytes) => {
                 let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
-                let body = match node_http_incoming(&incoming)?.borrow().encoding.as_deref() {
+                let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
+                let body = match readable.borrow().encoding.as_deref() {
                     Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
                     _ => node_bytes_value(bytes),
                 };
-                self.dispatch_node_event(
-                    Native::NodeEventEmit,
+                self.dispatch_readable_state(
+                    Native::NodeReadablePush,
                     &incoming,
-                    &[Value::String("data".into()), body],
+                    &[body],
                     instruction,
+                    &readable,
+                    false,
                 )?;
                 Ok(())
             }
             HttpRequestEvent::End => {
+                // HTTP framing ended, but the socket may remain open for keep-alive. Deliver the
+                // message EOF now; transport EOF is a separate StreamEvent and must not own the
+                // request body's lifecycle.
                 let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
-                self.dispatch_node_event(
-                    Native::NodeEventEmit,
+                let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
+                self.dispatch_readable_state(
+                    Native::NodeReadablePush,
                     &incoming,
-                    &[Value::String("end".into())],
+                    &[Value::Null],
                     instruction,
+                    &readable,
+                    false,
                 )?;
-                if let Some(connection) = server
-                    .borrow_mut()
-                    .streams
-                    .iter_mut()
-                    .find(|stream| stream.driver.resource() == resource)
-                {
-                    connection.request = None;
-                }
                 Ok(())
             }
         }
@@ -7307,14 +7501,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             request.type_name()
                         ),
                     })?;
-                let mut incoming = ObjectData::default();
-                incoming.node_events = Some(Vec::new());
-                incoming.node_object = Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
-                    HttpIncomingState {
-                        stream: resource,
-                        encoding: None,
-                    },
-                ))));
+                let mut incoming = ObjectData {
+                    node_events: Some(Vec::new()),
+                    node_object: Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
+                        HttpIncomingState {
+                            stream: resource,
+                            readable: new_readable_state(16 * 1024, None),
+                        },
+                    )))),
+                    ..Default::default()
+                };
                 incoming.set("statusCode", Value::Number(f64::from(head.status)));
                 incoming.set("statusMessage", Value::String(head.reason.clone()));
                 incoming.set("on", Value::Native(Native::NodeEventOn));
@@ -7357,15 +7553,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                         message: "HTTP response body arrived before its head".into(),
                     })?;
-                let body = match node_http_incoming(&incoming)?.borrow().encoding.as_deref() {
+                let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
+                let body = match readable.borrow().encoding.as_deref() {
                     Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
                     _ => node_bytes_value(bytes),
                 };
-                self.dispatch_node_event(
-                    Native::NodeEventEmit,
+                self.dispatch_readable_state(
+                    Native::NodeReadablePush,
                     &incoming,
-                    &[Value::String("data".into()), body],
+                    &[body],
                     instruction,
+                    &readable,
+                    false,
                 )?;
                 Ok(())
             }
@@ -7380,21 +7579,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                         message: "HTTP response ended before its head".into(),
                     })?;
-                self.dispatch_node_event(
-                    Native::NodeEventEmit,
+                let readable = Rc::clone(&node_http_incoming(&incoming)?.borrow().readable);
+                self.dispatch_readable_state(
+                    Native::NodeReadablePush,
                     &incoming,
-                    &[Value::String("end".into())],
+                    &[Value::Null],
                     instruction,
+                    &readable,
+                    false,
                 )?;
-                if let Some(connection) = owner
-                    .borrow_mut()
-                    .streams
-                    .iter_mut()
-                    .find(|stream| stream.driver.resource() == resource)
-                {
-                    connection.request = None;
-                    connection.response = None;
-                }
                 Ok(())
             }
         }
@@ -7425,18 +7618,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         request: kiln_runtime::node_http::HttpRequest,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let mut incoming = ObjectData::default();
-        incoming.node_events = Some(Vec::new());
-        incoming.node_object = Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
-            HttpIncomingState {
-                stream: resource,
-                encoding: None,
-            },
-        ))));
+        let mut incoming = ObjectData {
+            node_events: Some(Vec::new()),
+            node_object: Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
+                HttpIncomingState {
+                    stream: resource,
+                    readable: new_readable_state(16 * 1024, None),
+                },
+            )))),
+            ..Default::default()
+        };
         incoming.set("method", Value::String(request.method.clone()));
         incoming.set("url", Value::String(request.target.clone()));
         incoming.set("on", Value::Native(Native::NodeEventOn));
         incoming.set("once", Value::Native(Native::NodeEventOnce));
+        incoming.set(
+            "removeListener",
+            Value::Native(Native::NodeEventRemoveListener),
+        );
+        incoming.set("off", Value::Native(Native::NodeEventRemoveListener));
+        incoming.set(
+            "removeAllListeners",
+            Value::Native(Native::NodeEventRemoveAllListeners),
+        );
         incoming.set("emit", Value::Native(Native::NodeEventEmit));
         incoming.set("pause", Value::Native(Native::NodeReadablePause));
         incoming.set("resume", Value::Native(Native::NodeReadableResume));
@@ -7470,10 +7674,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ended: false,
             object: None,
         }));
-        let mut response = ObjectData::default();
-        response.node_events = Some(Vec::new());
-        response.node_object = Some(NodeObject::HttpResponse(Rc::clone(&response_state)));
+        let mut response = ObjectData {
+            node_events: Some(Vec::new()),
+            node_object: Some(NodeObject::HttpResponse(Rc::clone(&response_state))),
+            ..Default::default()
+        };
         response.set("setHeader", Value::Native(Native::NodeResponseSetHeader));
+        response.set("getHeader", Value::Native(Native::NodeResponseGetHeader));
+        response.set("getHeaders", Value::Native(Native::NodeResponseGetHeaders));
+        response.set("hasHeader", Value::Native(Native::NodeResponseHasHeader));
+        response.set(
+            "removeHeader",
+            Value::Native(Native::NodeResponseRemoveHeader),
+        );
         response.set("writeHead", Value::Native(Native::NodeResponseWriteHead));
         response.set("write", Value::Native(Native::NodeResponseWrite));
         response.set("end", Value::Native(Native::NodeResponseEnd));
@@ -7540,6 +7753,53 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Ok(receiver.clone())
             }
+            Native::NodeResponseGetHeader => {
+                let name = arguments
+                    .first()
+                    .unwrap_or(&Value::Undefined)
+                    .to_display_string();
+                Ok(state
+                    .borrow()
+                    .headers
+                    .iter()
+                    .find(|(key, _)| key.eq_ignore_ascii_case(&name))
+                    .map(|(_, value)| Value::String(value.clone()))
+                    .unwrap_or(Value::Undefined))
+            }
+            Native::NodeResponseGetHeaders => {
+                let mut headers = ObjectData::default();
+                for (name, value) in &state.borrow().headers {
+                    headers.set(&name.to_ascii_lowercase(), Value::String(value.clone()));
+                }
+                // Node returns a null-prototype dictionary so names such as `constructor` are
+                // headers, never inherited object behavior.
+                headers.set_prototype(Value::Null);
+                Ok(Value::Object(Rc::new(RefCell::new(headers))))
+            }
+            Native::NodeResponseHasHeader => {
+                let name = arguments
+                    .first()
+                    .unwrap_or(&Value::Undefined)
+                    .to_display_string();
+                Ok(Value::Boolean(
+                    state
+                        .borrow()
+                        .headers
+                        .iter()
+                        .any(|(key, _)| key.eq_ignore_ascii_case(&name)),
+                ))
+            }
+            Native::NodeResponseRemoveHeader => {
+                let name = arguments
+                    .first()
+                    .unwrap_or(&Value::Undefined)
+                    .to_display_string();
+                state
+                    .borrow_mut()
+                    .headers
+                    .retain(|(key, _)| !key.eq_ignore_ascii_case(&name));
+                Ok(Value::Undefined)
+            }
             Native::NodeResponseWriteHead => {
                 let status = arguments.first().map(Value::as_number).unwrap_or(200.0);
                 if !(100.0..=999.0).contains(&status) || status.fract() != 0.0 {
@@ -7599,8 +7859,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             headers: std::mem::take(&mut state.headers),
                             body: Vec::new(),
                         };
-                        let encoded = response.encode_stream_head(state.keep_alive);
-                        encoded
+                        response.encode_stream_head(state.keep_alive)
                     } else {
                         Vec::new()
                     };
@@ -7828,7 +8087,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &mut buckets[index]
                     } else {
                         buckets.push(NodeEventBucket {
-                            name: event,
+                            name: event.clone(),
                             listeners: Vec::new(),
                         });
                         buckets.last_mut().expect("bucket appended")
@@ -7837,6 +8096,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     callback: listener,
                     once: matches!(native, Native::NodeEventOnce),
                 });
+                drop(data);
+                // Attaching a `data` listener switches a Readable to flowing mode. Do this after
+                // registration so any bytes already buffered while the transport or a framework
+                // was paused are delivered to the listener that caused the transition.
+                if event == "data"
+                    && (node_readable_state(receiver).is_ok()
+                        || node_http_incoming(receiver).is_ok())
+                {
+                    self.dispatch_node_readable(
+                        Native::NodeReadableResume,
+                        receiver,
+                        &[],
+                        instruction,
+                    )?;
+                }
                 Ok(receiver.clone())
             }
             Native::NodeEventEmit => {
@@ -7871,6 +8145,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .map(|listener| listener.callback)
                         .collect(),
                 )))
+            }
+            Native::NodeEventRemoveListener => {
+                let event = arguments
+                    .first()
+                    .unwrap_or(&Value::Undefined)
+                    .to_display_string();
+                let listener = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&listener) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The listener argument must be a function".into(),
+                    });
+                }
+                // Node removes the most recently added matching listener. This matters when the
+                // same callback was registered repeatedly and preserves the order of survivors.
+                remove_last_node_listener(object, &event, &listener);
+                Ok(receiver.clone())
             }
             Native::NodeEventRemoveAllListeners => {
                 let mut data = object.borrow_mut();
@@ -7988,11 +8278,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 } => {
                     let actions = {
                         let mut server = server.borrow_mut();
-                        server
+                        let stream = server
                             .streams
                             .iter_mut()
                             .find(|stream| stream.driver.resource() == resource)
-                            .and_then(|stream| stream.driver.completed(completion))
+                            .ok_or_else(|| ExecutionError::Host {
+                                instruction: self.instruction,
+                                message: "completion lost its node:http stream".into(),
+                            })?;
+                        stream.applying_read_completion = true;
+                        stream
+                            .driver
+                            .completed(completion)
                             .ok_or_else(|| ExecutionError::Host {
                                 instruction: self.instruction,
                                 message: "completion lost its node:http stream".into(),
@@ -8000,6 +8297,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     for action in actions {
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
+                    }
+                    if let Some(stream) = server
+                        .borrow_mut()
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.driver.resource() == resource)
+                    {
+                        stream.applying_read_completion = false;
                     }
                     let still_pending = if let Some(realm) = &self.module_realm {
                         realm.borrow().pending_node.iter().any(|pending| {
@@ -8076,6 +8381,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             response: None,
                             close_after_finish: false,
                             closed: false,
+                            applying_read_completion: false,
                         };
                         let actions = connection.driver.start_reading();
                         let owner = Rc::new(RefCell::new(NodeServerState {
@@ -8192,29 +8498,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     !realm.pending_host.is_empty() || !realm.pending_node.is_empty()
                 },
             );
-            if has_pending {
-                let completion =
-                    runtime
-                        .next_host_completion()
-                        .ok_or_else(|| ExecutionError::Host {
-                            instruction: self.instruction,
-                            message: "Node host lost a pending request".to_owned(),
-                        })?;
-                runtime.enter(|| self.settle_host_completion(completion))?;
-                continue;
-            }
-            let Some(WorkItem::Timer { work: timer, .. }) = runtime.next_timer(&mut self.realm)
-            else {
+            let turn = self.with_realm_mut(|realm| {
+                if has_pending {
+                    runtime.next_turn(realm)
+                } else {
+                    runtime.next_timer(realm).map(RuntimeTurn::Timer)
+                }
+            });
+            let Some(turn) = turn else {
                 return Ok(());
             };
-            runtime.enter(|| {
-                self.call_value(
-                    &timer.callback,
-                    Value::Undefined,
-                    timer.arguments,
-                    self.instruction,
-                )
-            })?;
+            match turn {
+                RuntimeTurn::Completion(completion) => {
+                    runtime.enter(|| self.settle_host_completion(completion))?;
+                }
+                RuntimeTurn::Timer(WorkItem::Timer { work: timer, .. }) => {
+                    runtime.enter(|| {
+                        self.call_value(
+                            &timer.callback,
+                            Value::Undefined,
+                            timer.arguments,
+                            self.instruction,
+                        )
+                    })?;
+                }
+                RuntimeTurn::Timer(WorkItem::Microtask(_)) => {
+                    unreachable!("next_turn selects timers after microtasks are drained")
+                }
+            }
         }
     }
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
@@ -8684,10 +8995,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Fall through to the shared super-call path by re-dispatching with a known
                     // count: forwarding differs from `super(a, b)` only in where the count came
                     // from.
-                    self.super_call(argc as u16, current)?;
+                    let called = self.super_call(argc as u16, current);
+                    // Through `catchable` for the same reason `New` is: a parent that is not a
+                    // constructor -- `class S extends Symbol` -- is a `TypeError` the program is
+                    // entitled to catch, and a bare `?` ended the run instead.
+                    if self.catchable(called, current)?.is_none() {
+                        continue;
+                    }
                 }
                 Instruction::SuperCall { argc } => {
-                    self.super_call(*argc, current)?;
+                    let called = self.super_call(*argc, current);
+                    if self.catchable(called, current)?.is_none() {
+                        continue;
+                    }
                 }
                 Instruction::SuperApply => {
                     let arguments = self.pop(current)?;
@@ -8699,7 +9019,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     };
                     let arguments = arguments.borrow().clone();
-                    self.super_call_with(arguments, current)?;
+                    let called = self.super_call_with(arguments, current);
+                    if self.catchable(called, current)?.is_none() {
+                        continue;
+                    }
                 }
                 Instruction::PushHandler(target) => {
                     self.handlers.push(Handler {
@@ -10002,7 +10325,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         let mut descriptors = Vec::new();
-        for key in own_property_keys(&self.intrinsics, source) {
+        // `Object.defineProperties` consumes `[[OwnPropertyKeys]]`, not
+        // `Object.getOwnPropertyNames`: symbol descriptors participate too. Symbols use the
+        // reserved-key representation internally, so ask for the raw own keys here rather than
+        // the string-only reflection view.
+        for key in own_property_keys_including_symbols(&self.intrinsics, source) {
             if !own_attributes(&self.intrinsics, source, &key)
                 .is_some_and(|attributes| attributes.enumerable)
             {
@@ -10500,6 +10827,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeEventOnce
                 | Native::NodeEventEmit
                 | Native::NodeEventListeners
+                | Native::NodeEventRemoveListener
                 | Native::NodeEventRemoveAllListeners
                 | Native::NodeEventSetMaxListeners
         ) {
@@ -10541,6 +10869,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeServerAddress
                 | Native::NodeServerSetTimeout
                 | Native::NodeResponseSetHeader
+                | Native::NodeResponseGetHeader
+                | Native::NodeResponseGetHeaders
+                | Native::NodeResponseHasHeader
+                | Native::NodeResponseRemoveHeader
                 | Native::NodeResponseWriteHead
                 | Native::NodeResponseWrite
                 | Native::NodeResponseEnd
@@ -10947,17 +11279,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     arguments: arguments.get(2..).unwrap_or_default().to_vec(),
                 };
                 let delay = duration_from_milliseconds(delay);
-                let id = if matches!(native, Native::SetInterval) {
-                    self.realm.set_interval(delay, timer)
-                } else {
-                    self.realm.set_timeout(delay, timer)
-                };
+                let id = self.with_realm_mut(|realm| {
+                    if matches!(native, Native::SetInterval) {
+                        realm.set_interval(delay, timer)
+                    } else {
+                        realm.set_timeout(delay, timer)
+                    }
+                });
                 Ok(Value::Number(id.get() as f64))
             }
             Native::ClearTimeout | Native::ClearInterval => {
                 let id = argument_number(arguments);
                 if id.is_finite() && id >= 1.0 && id.fract() == 0.0 && id <= u64::MAX as f64 {
-                    self.realm.clear_timeout(TimerId::new(id as u64));
+                    self.with_realm_mut(|realm| realm.clear_timeout(TimerId::new(id as u64)));
                 }
                 Ok(Value::Undefined)
             }
@@ -11081,17 +11415,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // and is the whole point of the clock being the machine's. ADR 0015.
             // The same virtual clock `Date.now` reads, so a program that measures with one and
             // reports with the other stays consistent.
-            Native::DateNow | Native::PerformanceNow => {
-                Ok(Value::Number(self.realm.now().as_secs_f64() * 1_000.0))
-            }
+            Native::DateNow | Native::PerformanceNow => Ok(Value::Number(
+                self.with_realm(|realm| realm.now()).as_secs_f64() * 1_000.0,
+            )),
             Native::ProcessHrtimeBigInt => {
-                let nanoseconds = self.realm.now().as_nanos();
+                let nanoseconds = self.with_realm(|realm| realm.now()).as_nanos();
                 Ok(Value::BigInt(Rc::new(num_bigint::BigInt::from(
                     nanoseconds,
                 ))))
             }
             Native::ProcessHrtime => {
-                let mut nanoseconds = self.realm.now().as_nanos();
+                let mut nanoseconds = self.with_realm(|realm| realm.now()).as_nanos();
                 if let Some(Value::Array(previous)) = arguments.first() {
                     let previous = previous.borrow();
                     let seconds = previous.first().map(Value::as_number).unwrap_or(0.0);
@@ -11623,6 +11957,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let key = arguments
                     .first()
                     .map_or_else(String::new, Value::to_display_string);
+                if let Some(realm) = &self.module_realm {
+                    let mut realm = realm.borrow_mut();
+                    if let Some((_, symbol)) =
+                        realm.symbol_registry.iter().find(|(name, _)| *name == key)
+                    {
+                        return Ok(symbol.clone());
+                    }
+                    realm.symbol_serial += 1;
+                    let symbol = Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
+                        serial: realm.symbol_serial,
+                        description: Some(key.clone()),
+                    })));
+                    realm.symbol_registry.push((key, symbol.clone()));
+                    return Ok(symbol);
+                }
                 if let Some((_, symbol)) =
                     self.symbol_registry.iter().find(|(name, _)| *name == key)
                 {
@@ -11640,6 +11989,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let Some(Value::Symbol(symbol)) = arguments.first() else {
                     return Ok(Value::Undefined);
                 };
+                if let Some(realm) = &self.module_realm {
+                    return Ok(realm
+                        .borrow()
+                        .symbol_registry
+                        .iter()
+                        .find(|(_, registered)| {
+                            matches!(registered, Value::Symbol(other) if other == symbol)
+                        })
+                        .map_or(Value::Undefined, |(key, _)| Value::String(key.clone())));
+                }
                 // Only a registered symbol has a key; one from `Symbol()` does not, which is how
                 // a program tells the two apart.
                 Ok(self
@@ -11652,7 +12011,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::DateConstructor => {
                 let time = match arguments.len() {
-                    0 => self.realm.now().as_secs_f64() * 1_000.0,
+                    0 => self.with_realm(|realm| realm.now()).as_secs_f64() * 1_000.0,
                     1 => match arguments.first() {
                         // `new Date(otherDate)` copies the instant rather than stringifying it.
                         Some(Value::Date(existing)) => existing.get(),
@@ -11842,15 +12201,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Array(ArrayData::new(results)))
             }
             Native::QueueMicrotask => {
-                self.realm.queue_microtask(Job::Callback(
-                    arguments.first().cloned().unwrap_or(Value::Undefined),
-                    Vec::new(),
-                ));
+                self.with_realm_mut(|realm| {
+                    realm.queue_microtask(Job::Callback(
+                        arguments.first().cloned().unwrap_or(Value::Undefined),
+                        Vec::new(),
+                    ))
+                });
+                Ok(Value::Undefined)
+            }
+            Native::ProcessNextTick => {
+                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: callback.type_name(),
+                    });
+                }
+                self.with_realm_mut(|realm| {
+                    realm.queue_next_tick(Job::NextTick(
+                        callback,
+                        arguments.get(1..).unwrap_or_default().to_vec(),
+                    ))
+                });
                 Ok(Value::Undefined)
             }
             // Every call has to produce a symbol distinct from every other, so this needs the
             // counter rather than only its arguments.
             Native::SymbolConstructor => {
+                if let Some(realm) = &self.module_realm {
+                    let mut realm = realm.borrow_mut();
+                    realm.symbol_serial += 1;
+                    return Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
+                        serial: realm.symbol_serial,
+                        description: match arguments.first() {
+                            None | Some(Value::Undefined) => None,
+                            Some(value) => Some(value.to_display_string()),
+                        },
+                    }))));
+                }
                 self.symbol_serial += 1;
                 Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
                     serial: self.symbol_serial,
@@ -14441,7 +14829,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// awaits go: the source may be an async iterator, every element is awaited, and so is
     /// whatever the mapper returned. That makes it a state machine rather than a loop -- each
     /// await hands control back to the microtask queue and the walk resumes from
-    /// [`Vm::from_async_resume`], which is why everything it needs between steps lives in
+    /// [`Vm::async_resume`], which is why everything it needs between steps lives in
     /// [`FromAsync`] rather than on the Rust stack.
     ///
     /// Nothing after the promise exists can throw to the caller: it is holding a promise and
@@ -14456,18 +14844,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let handle = Value::Promise(Rc::clone(&result));
         let receiver = receiver.clone();
         let arguments = arguments.to_vec();
-        let started = self.catching(|vm| {
-            vm.from_async_begin(&receiver, &arguments, &Rc::clone(&result), instruction)
-        });
+        let started = self
+            .catching(|vm| vm.async_begin(&receiver, &arguments, &Rc::clone(&result), instruction));
         match started {
-            Ok(state) => self.from_async_pump(&state, instruction),
+            Ok(state) => self.async_pump(&state, instruction),
             Err(reason) => self.settle(&result, &Settled::Rejected(reason)),
         }
         Ok(handle)
     }
 
     /// Settle what the walk will be before the first element is asked for.
-    fn from_async_begin(
+    fn async_begin(
         &mut self,
         receiver: &Value,
         arguments: &[Value],
@@ -14564,15 +14951,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// Advance the walk, turning any failure into a rejection of the caller's promise.
-    fn from_async_pump(&mut self, state: &Rc<FromAsync>, instruction: usize) {
+    fn async_pump(&mut self, state: &Rc<FromAsync>, instruction: usize) {
         let state = Rc::clone(state);
-        if let Err(reason) = self.catching(|vm| vm.from_async_advance(&state, instruction)) {
-            self.from_async_fail(&state, reason, instruction);
+        if let Err(reason) = self.catching(|vm| vm.async_advance(&state, instruction)) {
+            self.async_fail(&state, reason, instruction);
         }
     }
 
     /// Ask the source for its next element and await it.
-    fn from_async_advance(
+    fn async_advance(
         &mut self,
         state: &Rc<FromAsync>,
         instruction: usize,
@@ -14590,7 +14977,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // it is each value that has to be.
                 if !synchronous {
                     state.stage.set(FromAsyncStage::Step);
-                    self.from_async_await(state, step);
+                    self.async_await(state, step);
                     return Ok(());
                 }
                 if !is_reflect_target(&step) {
@@ -14598,28 +14985,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let done = self.read_property(&step, "done", instruction)?;
                 if done.is_truthy() {
-                    return self.from_async_finish(state, instruction);
+                    return self.async_finish(state, instruction);
                 }
                 let value = self.read_property(&step, "value", instruction)?;
                 state.stage.set(FromAsyncStage::Element);
-                self.from_async_await(state, value);
+                self.async_await(state, value);
                 Ok(())
             }
             FromAsyncSource::ArrayLike { source, length } => {
                 let index = state.index.get();
                 if index >= length {
-                    return self.from_async_finish(state, instruction);
+                    return self.async_finish(state, instruction);
                 }
                 let value = self.read_property(&source, &index.to_string(), instruction)?;
                 state.stage.set(FromAsyncStage::Element);
-                self.from_async_await(state, value);
+                self.async_await(state, value);
                 Ok(())
             }
         }
     }
 
     /// `Await(value)`: hand control back to the queue and resume when it settles.
-    fn from_async_await(&mut self, state: &Rc<FromAsync>, value: Value) {
+    fn async_await(&mut self, state: &Rc<FromAsync>, value: Value) {
         // A promise is awaited as itself rather than wrapped, which is what keeps the count of
         // ticks -- and so the count of `then` calls a test can observe -- the specification's.
         let promise = match &value {
@@ -14640,24 +15027,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// One `await` inside `Array.fromAsync` settling.
-    fn from_async_resume(&mut self, state: &Rc<FromAsync>, outcome: Settled, instruction: usize) {
+    fn async_resume(&mut self, state: &Rc<FromAsync>, outcome: Settled, instruction: usize) {
         let value = match outcome {
             // A rejected element rejects the whole thing, and the iterator is released on the
             // way out: the walk opened it and nothing else will.
             Settled::Rejected(reason) => {
-                self.from_async_fail(state, reason, instruction);
+                self.async_fail(state, reason, instruction);
                 return;
             }
             Settled::Fulfilled(value) => value,
         };
         let state = Rc::clone(state);
-        if let Err(reason) = self.catching(|vm| vm.from_async_deliver(&state, value, instruction)) {
-            self.from_async_fail(&state, reason, instruction);
+        if let Err(reason) = self.catching(|vm| vm.async_deliver(&state, value, instruction)) {
+            self.async_fail(&state, reason, instruction);
         }
     }
 
     /// What an awaited value means, which depends on which await it was.
-    fn from_async_deliver(
+    fn async_deliver(
         &mut self,
         state: &Rc<FromAsync>,
         value: Value,
@@ -14670,20 +15057,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let done = self.read_property(&value, "done", instruction)?;
                 if done.is_truthy() {
-                    return self.from_async_finish(state, instruction);
+                    return self.async_finish(state, instruction);
                 }
                 // Not awaited a second time: an async iterator's protocol has already resolved
                 // the value, and awaiting it again would cost a tick a test can count.
                 let element = self.read_property(&value, "value", instruction)?;
-                self.from_async_element(state, element, instruction)
+                self.async_element(state, element, instruction)
             }
-            FromAsyncStage::Element => self.from_async_element(state, value, instruction),
-            FromAsyncStage::Mapped => self.from_async_place(state, value, instruction),
+            FromAsyncStage::Element => self.async_element(state, value, instruction),
+            FromAsyncStage::Mapped => self.async_place(state, value, instruction),
         }
     }
 
     /// An element has arrived: map it, or place it as it is.
-    fn from_async_element(
+    fn async_element(
         &mut self,
         state: &Rc<FromAsync>,
         value: Value,
@@ -14691,7 +15078,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         let mapper = state.mapper.clone();
         if !is_callable(&mapper) {
-            return self.from_async_place(state, value, instruction);
+            return self.async_place(state, value, instruction);
         }
         let mapped = self.call_value(
             &mapper,
@@ -14700,12 +15087,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction,
         )?;
         state.stage.set(FromAsyncStage::Mapped);
-        self.from_async_await(state, mapped);
+        self.async_await(state, mapped);
         Ok(())
     }
 
     /// Store one element and ask for the next.
-    fn from_async_place(
+    fn async_place(
         &mut self,
         state: &Rc<FromAsync>,
         value: Value,
@@ -14732,11 +15119,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction,
         )?;
         state.index.set(index + 1);
-        self.from_async_advance(state, instruction)
+        self.async_advance(state, instruction)
     }
 
     /// The source is spent: publish the length and hand the collection over.
-    fn from_async_finish(
+    fn async_finish(
         &mut self,
         state: &Rc<FromAsync>,
         instruction: usize,
@@ -14763,7 +15150,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     /// Release the iterator, if there is one, and reject.
-    fn from_async_fail(&mut self, state: &Rc<FromAsync>, reason: Value, instruction: usize) {
+    fn async_fail(&mut self, state: &Rc<FromAsync>, reason: Value, instruction: usize) {
         let iterator = match &*state.source.borrow() {
             FromAsyncSource::Iterator { iterator, .. } => Some(iterator.clone()),
             FromAsyncSource::ArrayLike { .. } => None,
@@ -15022,7 +15409,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // array walk.
                 CallbackMethod::GeneratorNext
                 | CallbackMethod::GeneratorReturn
-                | CallbackMethod::AsyncGeneratorNext => {
+                | CallbackMethod::GeneratorThrow
+                | CallbackMethod::AsyncGeneratorNext
+                | CallbackMethod::AsyncGeneratorReturn
+                | CallbackMethod::AsyncGeneratorThrow => {
                     unreachable!("generator methods are handled by `invoke`")
                 }
                 CallbackMethod::Reduce => {
@@ -15071,7 +15461,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(match method {
             CallbackMethod::GeneratorNext
             | CallbackMethod::GeneratorReturn
-            | CallbackMethod::AsyncGeneratorNext => {
+            | CallbackMethod::GeneratorThrow
+            | CallbackMethod::AsyncGeneratorNext
+            | CallbackMethod::AsyncGeneratorReturn
+            | CallbackMethod::AsyncGeneratorThrow => {
                 unreachable!("generator methods are handled by `invoke`")
             }
             CallbackMethod::Reduce | CallbackMethod::ReduceRight => {
@@ -15814,6 +16207,158 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
+    /// Enter a module body, arming a resumption if it stops at a top-level `await`.
+    ///
+    /// A module that never awaits runs exactly as it did before: one `run`, one completion. One
+    /// that does becomes an async evaluation, and the value this returns is no longer what the
+    /// body produced -- the body has not produced anything yet.
+    fn run_module_body(&mut self) -> Result<ExecutionResult, ExecutionError> {
+        let outcome = self.run()?;
+        if self.suspended {
+            self.suspend_module(outcome.value, 0, 0);
+            return Ok(ExecutionResult {
+                value: Value::Undefined,
+                steps: self.steps,
+            });
+        }
+        Ok(outcome)
+    }
+
+    /// Put the module body aside on `awaited`, to be resumed by the microtask that settles it.
+    ///
+    /// `stack_base` and `handler_base` say where the body's own registers begin: zero on the run
+    /// that started it, and wherever the microtask drain happened to be on every resumption
+    /// after that.
+    fn suspend_module(&mut self, awaited: Value, stack_base: usize, handler_base: usize) {
+        if self.module_completion.is_none() {
+            let completion = PromiseState::pending();
+            // Read by whoever ran the module rather than by a handler, so a module that throws
+            // after its first `await` is reported as the module failing rather than as a
+            // rejection nobody was waiting for. Every suspension of one body settles this same
+            // promise: a module is evaluated once, however many times it stops on the way.
+            completion.borrow_mut().handled = true;
+            self.module_completion = Some(completion);
+        }
+        let state = Rc::new(RefCell::new(ModuleSuspension {
+            stack: self.stack.split_off(stack_base),
+            handlers: self.handlers.split_off(handler_base),
+            instruction: self.instruction,
+        }));
+        self.module_suspension = Some(Rc::clone(&state));
+        self.suspended = false;
+        let target = match awaited {
+            Value::Promise(inner) => inner,
+            other => {
+                let pending = PromiseState::pending();
+                self.resolve_promise(&pending, other);
+                pending
+            }
+        };
+        self.react(
+            &target,
+            Value::Undefined,
+            Value::Undefined,
+            Sink::ModuleAwait(state),
+            false,
+        );
+    }
+
+    /// Resume a suspended module body with what its `await` produced.
+    fn resume_module_body(
+        &mut self,
+        state: &Rc<RefCell<ModuleSuspension>>,
+        outcome: Settled,
+    ) -> Result<(), ExecutionError> {
+        let stack_base = self.stack.len();
+        let handler_base = self.handlers.len();
+        let (saved_stack, saved_handlers, instruction) = {
+            let mut suspension = state.borrow_mut();
+            (
+                std::mem::take(&mut suspension.stack),
+                std::mem::take(&mut suspension.handlers),
+                suspension.instruction,
+            )
+        };
+        let completion = self
+            .module_completion
+            .clone()
+            .unwrap_or_else(PromiseState::pending);
+        // Outermost, so the body's own `try` blocks are reached first and only what none of them
+        // wanted arrives here. The run that would otherwise have reported a throw returned when
+        // the body first suspended, so without this the failure would escape a microtask drain
+        // as a machine error rather than as the module's rejection.
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: stack_base,
+            native_depth: self.native_depth,
+        });
+        self.stack.extend(saved_stack);
+        for mut handler in saved_handlers {
+            handler.stack_height += stack_base;
+            // Re-recorded rather than carried: a microtask drain sits deeper on the Rust stack
+            // than the run that started the body, and a handler that remembered the old depth
+            // would be judged unreachable from here.
+            handler.native_depth = self.native_depth;
+            handler.frame_depth = self.frames.len();
+            self.handlers.push(handler);
+        }
+        self.instruction = instruction;
+        self.suspended = false;
+
+        let result = match outcome {
+            Settled::Fulfilled(value) => {
+                self.stack.push(value);
+                self.run()
+            }
+            // Raised at the `await`, so a `try` written around it in the module body catches it
+            // exactly as it would inside an async function.
+            Settled::Rejected(reason) => match self.unwind(reason, instruction) {
+                Ok(()) => self.run(),
+                Err(error) => Err(error),
+            },
+        };
+
+        match result {
+            Ok(execution) if self.suspended => {
+                self.suspend_module(execution.value, stack_base, handler_base + 1);
+                self.handlers.truncate(handler_base);
+                Ok(())
+            }
+            Ok(execution) => {
+                self.stack.truncate(stack_base);
+                self.handlers.truncate(handler_base);
+                self.module_suspension = None;
+                self.resolve_promise(&completion, execution.value);
+                Ok(())
+            }
+            Err(ExecutionError::CaughtByHost | ExecutionError::ThrownAcrossNative) => {
+                let reason = self.caught.take().unwrap_or(Value::Undefined);
+                self.stack.truncate(stack_base);
+                self.handlers.truncate(handler_base);
+                self.module_suspension = None;
+                self.settle(&completion, &Settled::Rejected(reason));
+                Ok(())
+            }
+            Err(error) => {
+                self.stack.truncate(stack_base);
+                self.handlers.truncate(handler_base);
+                self.module_suspension = None;
+                Err(error)
+            }
+        }
+    }
+
+    /// What a module's evaluation came to, once every job it queued has run.
+    ///
+    /// `None` for a module that never awaited, and for one whose `await` is still waiting: the
+    /// first never had a completion, and the second has one nothing can settle.
+    fn module_outcome(&self) -> Option<Settled> {
+        self.module_completion
+            .as_ref()
+            .and_then(|completion| completion.borrow().settled.clone())
+    }
+
     /// Advance an async generator one consumer step, settling `step` when it stops.
     ///
     /// An async generator suspends for two reasons. An `await` is invisible to the consumer: the
@@ -15888,6 +16433,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         resume: Resume,
         instruction: usize,
     ) -> Result<Result<(Value, bool), Value>, ExecutionError> {
+        // A `.return()` unwinds by throwing a marker, and the host handler installed just below
+        // catches everything -- including that marker, which is not an exception. What it means
+        // is that the body ran out of `finally` blocks and finished with the value the consumer
+        // asked to return, so the value has to be kept here to answer with.
+        let returning = match &resume {
+            Resume::Return(value) => Some(value.clone()),
+            Resume::Send(_) | Resume::Throw(_) => None,
+        };
         let installed = self.handlers.len();
         self.handlers.push(Handler {
             target: HOST_HANDLER,
@@ -15900,7 +16453,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match outcome {
             Ok(value) => Ok(Ok(value)),
             Err(ExecutionError::CaughtByHost) => {
-                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+                let caught = self.caught.take().unwrap_or(Value::Undefined);
+                if let (Value::Native(Native::ReturnSignal), Some(value)) = (&caught, returning) {
+                    generator.borrow_mut().done = true;
+                    return Ok(Ok((value, true)));
+                }
+                Ok(Err(caught))
+            }
+            Err(ExecutionError::GeneratorReturned) => {
+                generator.borrow_mut().done = true;
+                Ok(Ok((returning.unwrap_or(Value::Undefined), true)))
             }
             Err(error) => Err(error),
         }
@@ -15927,8 +16489,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.unhandled = Some(reason.clone());
         }
         for reaction in reactions {
-            self.realm
-                .queue_microtask(Job::React(outcome.clone(), reaction));
+            self.with_realm_mut(|realm| {
+                realm.queue_microtask(Job::React(outcome.clone(), reaction))
+            });
         }
     }
 
@@ -15951,8 +16514,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // resolution has already been decided by the time anyone could catch it.
                     Err(reason) => self.settle(promise, &Settled::Rejected(reason)),
                     Ok(then) if is_callable(&then) => {
-                        self.realm
-                            .queue_microtask(Job::Thenable(Rc::clone(promise), value, then));
+                        self.with_realm_mut(|realm| {
+                            realm.queue_microtask(Job::Thenable(Rc::clone(promise), value, then))
+                        });
                     }
                     Ok(_) => self.settle(promise, &Settled::Fulfilled(value)),
                 }
@@ -15972,8 +16536,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.settle(promise, &Settled::Rejected(error));
             return;
         }
-        self.realm
-            .queue_microtask(Job::Adopt(Rc::clone(promise), Rc::clone(inner)));
+        self.with_realm_mut(|realm| {
+            realm.queue_microtask(Job::Adopt(Rc::clone(promise), Rc::clone(inner)))
+        });
     }
 
     /// Attach a reaction to a promise, queueing it immediately if the promise has already settled.
@@ -16006,7 +16571,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             state.settled.clone()
         };
         match settled {
-            Some(outcome) => self.realm.queue_microtask(Job::React(outcome, reaction)),
+            Some(outcome) => {
+                self.with_realm_mut(|realm| realm.queue_microtask(Job::React(outcome, reaction)))
+            }
             None => promise.borrow_mut().reactions.push(reaction),
         }
     }
@@ -16023,7 +16590,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Sink::FromAsync(state) => {
                 let state = Rc::clone(state);
-                self.from_async_resume(&state, outcome, self.instruction);
+                self.async_resume(&state, outcome, self.instruction);
                 return Ok(());
             }
             Sink::AsyncGeneratorYield(generator, step) => {
@@ -16041,6 +16608,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.drive_async_generator(&generator, &step, Resume::Throw(reason))
                     }
                 };
+            }
+            Sink::AsyncGeneratorReturn(step) => {
+                let step = Rc::clone(step);
+                match outcome {
+                    Settled::Fulfilled(value) => {
+                        let result = iteration_result(value, true);
+                        self.settle(&step, &Settled::Fulfilled(result));
+                    }
+                    // A `return()` handed a rejected promise rejects the step: the value never
+                    // arrived, so there is no completion to report as done.
+                    Settled::Rejected(reason) => self.settle(&step, &Settled::Rejected(reason)),
+                }
+                return Ok(());
+            }
+            Sink::ModuleAwait(state) => {
+                let state = Rc::clone(state);
+                return self.resume_module_body(&state, outcome);
             }
             Sink::Replay(promise, recorded) => {
                 let promise = Rc::clone(promise);
@@ -16293,7 +16877,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `.catch` on the next line must not be a failure, and by the time the queue is
             // empty every handler that was going to attach has.
             runtime.enter(|| self.check_unhandled_rejection())?;
-            let Some(WorkItem::Timer { work: timer, .. }) = runtime.next_timer(&mut self.realm)
+            let Some(WorkItem::Timer { work: timer, .. }) =
+                self.with_realm_mut(|realm| runtime.next_timer(realm))
             else {
                 return Ok(());
             };
@@ -16337,8 +16922,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The ECMAScript microtask checkpoint, independent of which infrastructure turn reached it.
     /// Tokio owns polling; this queue owns language ordering.
     fn drain_microtask_jobs(&mut self) -> Result<(), ExecutionError> {
-        while let Some(job) = self.realm.pop_microtask() {
+        while let Some(job) =
+            self.with_realm_mut(|realm| realm.pop_next_tick().or_else(|| realm.pop_microtask()))
+        {
             match job {
+                Job::NextTick(callback, arguments) => self
+                    .call_value(&callback, Value::Undefined, arguments, self.instruction)
+                    .map(|_| ()),
                 Job::Callback(callback, arguments) => self
                     .call_value(&callback, Value::Undefined, arguments, self.instruction)
                     .map(|_| ()),
@@ -16441,7 +17031,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 method,
                 CallbackMethod::GeneratorNext
                     | CallbackMethod::GeneratorReturn
+                    | CallbackMethod::GeneratorThrow
                     | CallbackMethod::AsyncGeneratorNext
+                    | CallbackMethod::AsyncGeneratorReturn
+                    | CallbackMethod::AsyncGeneratorThrow
             ),
             Value::Native(native) => native.walks_an_array(),
             _ => false,
@@ -16670,6 +17263,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ordinary_object([("node".to_owned(), Value::String("22.0.0".to_owned()))]),
         );
         process.set_non_enumerable("hrtime", Value::Native(Native::ProcessHrtime));
+        process.set_non_enumerable("nextTick", Value::Native(Native::ProcessNextTick));
         process.set_non_enumerable(
             "getBuiltinModule",
             Value::Native(Native::ProcessGetBuiltinModule),
@@ -16793,6 +17387,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// `None` for a parent that has no object of its own to make -- the derived class then keeps
     /// the instance it allocated, which is the ordinary case.
+    /// `new Promise(executor)`.
+    ///
+    /// Its own function because `class P extends Promise` reaches it through `super()`, and a
+    /// second copy of the executor's error handling in that path is exactly the kind of drift
+    /// that makes one form of a constructor behave differently from the other.
+    fn construct_promise(
+        &mut self,
+        arguments: &[Value],
+        current: usize,
+    ) -> Result<Value, ExecutionError> {
+        let promise = PromiseState::pending();
+        let executor = arguments.first().cloned().unwrap_or(Value::Undefined);
+        // The executor runs *now*, synchronously, which is what lets it capture something and
+        // settle the promise later.
+        let outcome = self.call_catching(
+            &executor,
+            Value::Undefined,
+            vec![
+                Value::Settler(Rc::clone(&promise), false),
+                Value::Settler(Rc::clone(&promise), true),
+            ],
+            current,
+        )?;
+        // An executor that throws rejects the promise, rather than failing the program:
+        // `new Promise(() => { throw e })` is how a rejection is often written.
+        if let Err(thrown) = outcome {
+            self.settle(&promise, &Settled::Rejected(thrown));
+        }
+        Ok(Value::Promise(promise))
+    }
+
     fn construct_exotic(
         &mut self,
         parent: Native,
@@ -16840,6 +17465,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // direct `new Iterator()` is refused, and that never reaches here.
             Native::IteratorConstructor => {
                 Value::Object(Rc::new(RefCell::new(ObjectData::default())))
+            }
+            // The rest of the constructible built-ins, each doing through `super()` exactly what
+            // it does through `new`. They were reachable one way and not the other, which is not
+            // a distinction the language draws: `class MyF64 extends Float64Array {}` is how
+            // half of Test262's resizable-buffer corpus builds the view it then tests.
+            Native::TypedArrayConstructor(_) => {
+                call_native(&self.intrinsics, parent, &Value::Undefined, arguments)?
+            }
+            Native::ArrayBufferConstructor => {
+                self.construct_array_buffer(false, arguments, current)?
+            }
+            Native::SharedArrayBufferConstructor => {
+                self.construct_array_buffer(true, arguments, current)?
+            }
+            Native::DataViewConstructor => self.construct_data_view(arguments, current)?,
+            Native::PromiseConstructor => self.construct_promise(arguments, current)?,
+            Native::FunctionConstructor => self.function_from_source(arguments)?,
+            Native::UrlConstructor => self.dispatch_native(
+                Native::UrlConstructor,
+                &Value::Undefined,
+                arguments,
+                current,
+            )?,
+            Native::Intl(intl::Op::Constructor(service)) => {
+                self.intl_construct(service, arguments, current)?
+            }
+            Native::Temporal(temporal::Op::Constructor(kind)) => {
+                self.temporal_construct(kind, arguments, current)?
             }
             _ => return Ok(None),
         }))
@@ -17031,25 +17684,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.stack.push(regexp);
             }
             Value::Native(Native::PromiseConstructor) => {
-                let promise = PromiseState::pending();
-                let executor = arguments.first().cloned().unwrap_or(Value::Undefined);
-                // The executor runs *now*, synchronously, which is what lets it capture
-                // something and settle the promise later.
-                let outcome = self.call_catching(
-                    &executor,
-                    Value::Undefined,
-                    vec![
-                        Value::Settler(Rc::clone(&promise), false),
-                        Value::Settler(Rc::clone(&promise), true),
-                    ],
-                    current,
-                )?;
-                // An executor that throws rejects the promise, rather than failing the program:
-                // `new Promise(() => { throw e })` is how a rejection is often written.
-                if let Err(thrown) = outcome {
-                    self.settle(&promise, &Settled::Rejected(thrown));
-                }
-                self.stack.push(Value::Promise(promise));
+                let promise = self.construct_promise(&arguments, current)?;
+                self.stack.push(promise);
             }
             Value::Native(
                 kind @ (Native::SetConstructor
@@ -18395,6 +19031,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A built-in keeps what a program defined on it in the realm's store, accessors
             // included: `Object.defineProperty(Math, "x", { get })` has to run its getter here
             // rather than read as undefined.
+            Value::Bound(bound) => bound.properties.borrow().lookup(name),
             Value::Native(_) | Value::Callback(_) => match self.intrinsics.overridden(target, name)
             {
                 Overridden::Held(property, _) => Some(property),
@@ -18546,6 +19183,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Object(object) => {
                 let object = object.borrow();
+                if let Some(NodeObject::HttpResponse(state)) = &object.node_object {
+                    return match name {
+                        "statusCode" => Value::Number(f64::from(state.borrow().status)),
+                        "headersSent" => Value::Boolean(state.borrow().streaming),
+                        "writableEnded" | "finished" => Value::Boolean(state.borrow().ended),
+                        _ => object
+                            .get(name)
+                            .unwrap_or_else(|| inherited_object_property(&self.intrinsics, name)),
+                    };
+                }
                 if let Some(NodeObject::Url(state)) = &object.node_object {
                     return match name {
                         "href" => Value::String(state.href.clone()),
@@ -18648,7 +19295,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // wraps, which is what makes a stack trace through one readable.
             // A bound function reports the arity still to be supplied and prefixes the name of
             // what it wraps, which is what makes a stack trace through one readable.
-            Value::Bound(_) => identity_property(target, name)
+            Value::Bound(bound) => bound
+                .properties
+                .borrow()
+                .get(name)
+                .or_else(|| identity_property(target, name))
                 .unwrap_or_else(|| function_property(&self.intrinsics, name)),
             Value::CommonJsRequire(require) if name == "resolve" => {
                 Value::CommonJsResolve(Rc::clone(require))
@@ -18898,6 +19549,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // avoid, so it is left to fail rather than half-work.
             Value::Generator(state) if is_async_generator(state) => match name {
                 "next" => Value::Callback(CallbackMethod::AsyncGeneratorNext),
+                // `return` and `throw` answer with promises for the same reason `next` does: the
+                // body may `await` inside a `finally`, or inside the `catch` that receives the
+                // thrown value, and none of that can finish inside this call.
+                "return" => Value::Callback(CallbackMethod::AsyncGeneratorReturn),
+                "throw" => Value::Callback(CallbackMethod::AsyncGeneratorThrow),
                 key if key == WellKnown::AsyncIterator.property_key() => {
                     Value::Native(Native::IteratorSelf)
                 }
@@ -18908,6 +19564,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Generator(_) => match name {
                 "next" => Value::Callback(CallbackMethod::GeneratorNext),
                 "return" => Value::Callback(CallbackMethod::GeneratorReturn),
+                // `throw` raises at the suspension point, so the generator's own `try` sees it.
+                // Without it a delegating `yield*` had nothing to forward a thrown completion to.
+                "throw" => Value::Callback(CallbackMethod::GeneratorThrow),
                 // Everything else comes from `%IteratorPrototype%`, which a generator object
                 // reaches through two links of its chain -- and which is the only reason
                 // `g().map(f)` is a thing a program can write.
@@ -18988,7 +19647,88 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.drive_async_generator(&generator, &step, Resume::Send(sent))?;
                 Ok(Some(Value::Promise(step)))
             }
+            // `return` and `throw` on an async generator, both of which finish -- or unwind --
+            // the body and answer with a promise of the resulting step. The two share a path
+            // because the only thing that differs is which abrupt completion is delivered.
+            Value::Callback(
+                method @ (CallbackMethod::AsyncGeneratorReturn
+                | CallbackMethod::AsyncGeneratorThrow),
+            ) => {
+                let Value::Generator(generator) = &receiver else {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: receiver.type_name(),
+                    });
+                };
+                let generator = Rc::clone(generator);
+                let sent = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let step = PromiseState::pending();
+                let returning = matches!(method, CallbackMethod::AsyncGeneratorReturn);
+                let entered = {
+                    let state = generator.borrow();
+                    state.started && !state.done
+                };
+                if entered {
+                    let resume = if returning {
+                        Resume::Return(sent)
+                    } else {
+                        Resume::Throw(sent)
+                    };
+                    self.drive_async_generator(&generator, &step, resume)?;
+                } else {
+                    // Never entered, or already finished: there is nothing to unwind, so the
+                    // completion is answered directly. `return` still awaits its argument --
+                    // `AsyncGeneratorAwaitReturn` does -- which is observable as a tick and as a
+                    // rejection when the argument is a rejected promise.
+                    generator.borrow_mut().done = true;
+                    if returning {
+                        let target = match sent {
+                            Value::Promise(inner) => inner,
+                            other => {
+                                let pending = PromiseState::pending();
+                                self.resolve_promise(&pending, other);
+                                pending
+                            }
+                        };
+                        self.react(
+                            &target,
+                            Value::Undefined,
+                            Value::Undefined,
+                            Sink::AsyncGeneratorReturn(Rc::clone(&step)),
+                            false,
+                        );
+                    } else {
+                        self.settle(&step, &Settled::Rejected(sent));
+                    }
+                }
+                Ok(Some(Value::Promise(step)))
+            }
             // Generator methods drive the machine, so they cannot go through `array_callback`.
+            Value::Callback(CallbackMethod::GeneratorThrow) => {
+                let Value::Generator(generator) = &receiver else {
+                    return Err(ExecutionError::NotCallable {
+                        instruction,
+                        value: receiver.type_name(),
+                    });
+                };
+                let generator = Rc::clone(generator);
+                let thrown = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let entered = {
+                    let state = generator.borrow();
+                    state.started && !state.done
+                };
+                if !entered {
+                    // A generator that never started, or that has finished, has no `try` to
+                    // catch this: the specification marks it completed and rethrows at the
+                    // caller, which is where the value came from.
+                    generator.borrow_mut().done = true;
+                    self.caught = Some(thrown);
+                    return Err(ExecutionError::ThrownAcrossNative);
+                }
+                let (value, done) =
+                    self.resume_generator_with(&generator, Resume::Throw(thrown), instruction)?;
+                Ok(Some(iteration_result(value, done)))
+            }
             Value::Callback(
                 method @ (CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn),
             ) => {
@@ -19233,6 +19973,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Function(closure) if property_key != "prototype" => {
                 closure.properties.borrow().lookup(&property_key)
             }
+            Value::Bound(bound) => bound.properties.borrow().lookup(&property_key),
             Value::Array(items) => items.properties.borrow().lookup(&property_key),
             Value::Native(_) | Value::Callback(_) => {
                 match self.intrinsics.overridden(target, &property_key) {
@@ -19418,6 +20159,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Object(object) => {
                 let name = key.property_key();
+                if name == "statusCode"
+                    && let Some(NodeObject::HttpResponse(state)) = &object.borrow().node_object
+                {
+                    let status = value.as_number();
+                    if !(100.0..=999.0).contains(&status) || status.fract() != 0.0 {
+                        return Err(ExecutionError::InvalidHttpStatus);
+                    }
+                    state.borrow_mut().status = status as u16;
+                    return Ok(());
+                }
                 if self.inherited_setter(object, target, &name, &value, instruction)? {
                     return Ok(());
                 }
@@ -19438,6 +20189,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(());
                 }
                 closure.properties.borrow_mut().set(&name, value);
+                Ok(())
+            }
+            Value::Bound(bound) => {
+                let name = key.property_key();
+                if self.inherited_setter(&bound.properties, target, &name, &value, instruction)? {
+                    return Ok(());
+                }
+                bound.properties.borrow_mut().set(&name, value);
                 Ok(())
             }
             // A built-in is an object, and the specification makes almost every own property of
@@ -19957,7 +20716,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // global object.
             this_value: std::mem::replace(&mut self.this_value, Value::Undefined),
             new_target: std::mem::replace(&mut self.new_target, Value::Undefined),
-            arguments: std::mem::replace(&mut self.arguments, Vec::new()),
+            arguments: std::mem::take(&mut self.arguments),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
             global_base: self.global_base,
@@ -20056,18 +20815,8 @@ fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Value {
     let encoding = own_data_property(&options, "encoding")
         .filter(|value| !matches!(value, Value::Undefined))
         .map(|value| value.to_display_string().to_ascii_lowercase());
-    let public = Rc::new(RefCell::new(ObjectData::default()));
-    let state = Rc::new(RefCell::new(ReadableState {
-        buffer: Vec::new(),
-        high_water_mark,
-        ended: false,
-        end_emitted: false,
-        reading: false,
-        flowing: false,
-        destroyed: false,
-        encoding,
-        public: Rc::clone(&public),
-    }));
+    let state = new_readable_state(high_water_mark, encoding);
+    let public = Rc::clone(&state.borrow().public);
     let initializes_existing = matches!(receiver, Some(Value::Object(_)));
     let object = match receiver {
         Some(Value::Object(object)) => Rc::clone(object),
@@ -20086,6 +20835,24 @@ fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Value {
     }
     sync_readable_public_state(&Value::Object(Rc::clone(&object)), &state.borrow());
     Value::Object(object)
+}
+
+fn new_readable_state(
+    high_water_mark: usize,
+    encoding: Option<String>,
+) -> Rc<RefCell<ReadableState>> {
+    let public = Rc::new(RefCell::new(ObjectData::default()));
+    Rc::new(RefCell::new(ReadableState {
+        buffer: Vec::new(),
+        high_water_mark,
+        ended: false,
+        end_emitted: false,
+        reading: false,
+        flowing: false,
+        destroyed: false,
+        encoding,
+        public,
+    }))
 }
 
 fn node_readable_state(receiver: &Value) -> Result<Rc<RefCell<ReadableState>>, ExecutionError> {
@@ -20171,9 +20938,11 @@ fn sync_writable_public_state(receiver: &Value, state: &WritableState) {
 }
 
 fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
-    let mut data = ObjectData::default();
-    data.node_events = Some(Vec::new());
-    data.node_object = Some(NodeObject::NodeServer(Rc::clone(state)));
+    let mut data = ObjectData {
+        node_events: Some(Vec::new()),
+        node_object: Some(NodeObject::NodeServer(Rc::clone(state))),
+        ..Default::default()
+    };
     data.set("listen", Value::Native(Native::NodeServerListen));
     data.set("close", Value::Native(Native::NodeServerClose));
     data.set("address", Value::Native(Native::NodeServerAddress));
@@ -20184,6 +20953,15 @@ fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
     data.set("on", Value::Native(Native::NodeEventOn));
     data.set("once", Value::Native(Native::NodeEventOnce));
     data.set("emit", Value::Native(Native::NodeEventEmit));
+    data.set(
+        "removeListener",
+        Value::Native(Native::NodeEventRemoveListener),
+    );
+    data.set("off", Value::Native(Native::NodeEventRemoveListener));
+    data.set(
+        "removeAllListeners",
+        Value::Native(Native::NodeEventRemoveAllListeners),
+    );
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::downgrade(&object));
     Value::Object(object)
@@ -20211,9 +20989,11 @@ fn node_net_socket(
 }
 
 fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
-    let mut data = ObjectData::default();
-    data.node_events = Some(Vec::new());
-    data.node_object = Some(NodeObject::NetSocket(Rc::clone(state)));
+    let mut data = ObjectData {
+        node_events: Some(Vec::new()),
+        node_object: Some(NodeObject::NetSocket(Rc::clone(state))),
+        ..Default::default()
+    };
     data.set("on", Value::Native(Native::NodeEventOn));
     data.set("once", Value::Native(Native::NodeEventOnce));
     data.set("emit", Value::Native(Native::NodeEventEmit));
@@ -20310,9 +21090,11 @@ fn node_http_client_request(
 }
 
 fn node_http_client_request_object(state: &Rc<RefCell<HttpClientRequestState>>) -> Value {
-    let mut data = ObjectData::default();
-    data.node_events = Some(Vec::new());
-    data.node_object = Some(NodeObject::HttpClientRequest(Rc::clone(state)));
+    let mut data = ObjectData {
+        node_events: Some(Vec::new()),
+        node_object: Some(NodeObject::HttpClientRequest(Rc::clone(state))),
+        ..Default::default()
+    };
     data.set("write", Value::Native(Native::NodeClientRequestWrite));
     data.set("end", Value::Native(Native::NodeClientRequestEnd));
     data.set("on", Value::Native(Native::NodeEventOn));
@@ -20323,9 +21105,11 @@ fn node_http_client_request_object(state: &Rc<RefCell<HttpClientRequestState>>) 
     Value::Object(object)
 }
 
+type HttpRequestArguments = (String, u16, String, String, Vec<(String, String)>, Value);
+
 fn node_http_request_arguments(
     arguments: &[Value],
-) -> Result<(String, u16, String, String, Vec<(String, String)>, Value), ExecutionError> {
+) -> Result<HttpRequestArguments, ExecutionError> {
     let options = arguments
         .first()
         .ok_or_else(|| ExecutionError::TypeErrorMessage {
@@ -20408,11 +21192,26 @@ fn encode_http_client_request(state: &HttpClientRequestState) -> Vec<u8> {
 fn node_listen_arguments(
     arguments: &[Value],
 ) -> Result<(u16, String, Option<Value>), ExecutionError> {
-    let port = arguments.first().map(Value::as_number).unwrap_or(f64::NAN);
+    let options = arguments.first();
+    let port = match options {
+        Some(Value::Object(_)) => options
+            .and_then(|options| own_data_property(options, "port"))
+            .map_or(f64::NAN, |value| value.as_number()),
+        Some(value) => value.as_number(),
+        None => f64::NAN,
+    };
     if !port.is_finite() || port.fract() != 0.0 || !(0.0..=65535.0).contains(&port) {
         return Err(ExecutionError::InvalidPort);
     }
-    let mut host = "0.0.0.0".to_owned();
+    let mut host = match options {
+        Some(options @ Value::Object(_)) => own_data_property(options, "host")
+            .and_then(|value| match value {
+                Value::String(host) => Some(host),
+                _ => None,
+            })
+            .unwrap_or_else(|| "0.0.0.0".to_owned()),
+        _ => "0.0.0.0".to_owned(),
+    };
     let mut callback = None;
     for argument in arguments.iter().skip(1) {
         if is_callable(argument) {
@@ -20471,14 +21270,18 @@ fn node_bytes_value(bytes: Vec<u8>) -> Value {
 
 fn url_object(state: UrlState) -> Value {
     let state = Rc::new(state);
-    let mut object = ObjectData::default();
-    object.node_object = Some(NodeObject::Url(state));
+    let object = ObjectData {
+        node_object: Some(NodeObject::Url(state)),
+        ..Default::default()
+    };
     Value::Object(Rc::new(RefCell::new(object)))
 }
 
 fn url_search_params_object(state: Rc<UrlState>) -> Value {
-    let mut object = ObjectData::default();
-    object.node_object = Some(NodeObject::UrlSearchParams(state));
+    let mut object = ObjectData {
+        node_object: Some(NodeObject::UrlSearchParams(state)),
+        ..Default::default()
+    };
     object.set("get", Value::Native(Native::UrlSearchParamsGet));
     Value::Object(Rc::new(RefCell::new(object)))
 }
@@ -20631,6 +21434,26 @@ fn remove_node_listener(object: &Rc<RefCell<ObjectData>>, event: &str, listener:
     }
 }
 
+fn remove_last_node_listener(object: &Rc<RefCell<ObjectData>>, event: &str, listener: &Value) {
+    let mut data = object.borrow_mut();
+    let Some(buckets) = data.node_events.as_mut() else {
+        return;
+    };
+    let Some(bucket) = buckets.iter_mut().find(|bucket| bucket.name == event) else {
+        return;
+    };
+    if let Some(index) = bucket
+        .listeners
+        .iter()
+        .rposition(|registered| same_value(&registered.callback, listener))
+    {
+        bucket.listeners.remove(index);
+    }
+    if bucket.listeners.is_empty() {
+        buckets.retain(|bucket| bucket.name != event);
+    }
+}
+
 fn unary(operator: UnaryOp, value: Value) -> Value {
     // A BigInt stays one under negation and bitwise-not; `+x` is the exception, and is a
     // TypeError in the specification precisely so that `+` cannot silently narrow one.
@@ -20660,7 +21483,6 @@ fn unary(operator: UnaryOp, value: Value) -> Value {
 /// modulo 2^32 rather than saturating, and anything not finite becomes zero.
 /// SplitMix64: a full-period generator with good statistical properties in five lines, which is
 /// what a language builtin needs. Its seed comes from the realm's ADR 0031 entropy capability.
-
 fn split_mix_64(state: &mut u64) -> u64 {
     *state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
     let mut mixed = *state;
@@ -21435,6 +22257,7 @@ fn call_native(
                 // it worked and changed nothing at all.
                 Value::Array(items) => items.properties.borrow_mut().freeze(),
                 Value::Function(closure) => closure.properties.borrow_mut().freeze(),
+                Value::Bound(bound) => bound.properties.borrow_mut().freeze(),
                 _ => {}
             }
             // Returns its argument, which is what makes `const o = Object.freeze({…})` read well.
@@ -21444,6 +22267,7 @@ fn call_native(
             Some(Value::Object(object)) => object.borrow().is_frozen(),
             Some(Value::Array(items)) => items.properties.borrow().is_frozen(),
             Some(Value::Function(closure)) => closure.properties.borrow().is_frozen(),
+            Some(Value::Bound(bound)) => bound.properties.borrow().is_frozen(),
             // A primitive cannot be changed at all, so it is frozen by definition.
             _ => true,
         }),
@@ -21484,10 +22308,11 @@ fn call_native(
             match &target {
                 Value::Object(object) => close(&mut object.borrow_mut()),
                 Value::Function(closure) => close(&mut closure.properties.borrow_mut()),
+                Value::Bound(bound) => close(&mut bound.properties.borrow_mut()),
                 Value::Array(items) => close(&mut items.properties.borrow_mut()),
                 // A built-in has no store of its own; the realm keeps one for it, and that is
                 // where the closure has to be recorded or the next `isExtensible` undoes it.
-                Value::Native(_) | Value::Callback(_) | Value::Bound(_) | Value::Settler(..) => {
+                Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
                     intrinsics.close(&target, sealing);
                 }
                 _ => {}
@@ -21503,6 +22328,7 @@ fn call_native(
         Native::ObjectIsSealed => Value::Boolean(match arguments.first() {
             Some(Value::Object(object)) => object.borrow().is_sealed(),
             Some(Value::Function(closure)) => closure.properties.borrow().is_sealed(),
+            Some(Value::Bound(bound)) => bound.properties.borrow().is_sealed(),
             // An array's elements live in dense storage rather than in slots with flags, so
             // sealing one closes its property store and leaves the elements deletable. Reporting
             // it sealed would be a claim this representation cannot keep.
@@ -21555,6 +22381,14 @@ fn call_native(
                 // static methods are own properties of the constructor and are not enumerated,
                 // so `Object.keys(class { static s() {} })` is empty.
                 Some(Value::Function(closure)) => closure
+                    .properties
+                    .borrow()
+                    .entries()
+                    .map(|(key, _)| key)
+                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                    .map(|key| Value::String(key.to_owned()))
+                    .collect(),
+                Some(Value::Bound(bound)) => bound
                     .properties
                     .borrow()
                     .entries()
@@ -21939,6 +22773,10 @@ fn call_native(
                         .properties
                         .borrow_mut()
                         .set_prototype(prototype.clone()),
+                    Value::Bound(bound) => bound
+                        .properties
+                        .borrow_mut()
+                        .set_prototype(prototype.clone()),
                     // Where `prototype_of` already looks for it, so the two agree.
                     Value::Array(items) => items
                         .properties
@@ -22091,6 +22929,7 @@ fn call_native(
         | Native::ClearTimeout
         | Native::ClearInterval
         | Native::QueueMicrotask
+        | Native::ProcessNextTick
         // ...and `Math.random` advances state that lives on the machine.
         | Native::MathRandom
         // Every promise operation settles something, schedules something, or calls back into the
@@ -23367,6 +24206,10 @@ fn call_native(
         | Native::NodeServerAddress
         | Native::NodeServerSetTimeout
         | Native::NodeResponseSetHeader
+        | Native::NodeResponseGetHeader
+        | Native::NodeResponseGetHeaders
+        | Native::NodeResponseHasHeader
+        | Native::NodeResponseRemoveHeader
         | Native::NodeResponseWriteHead
         | Native::NodeResponseWrite
         | Native::NodeResponseEnd => Value::Undefined,
@@ -23384,6 +24227,7 @@ fn call_native(
         | Native::NodeEventOnce
         | Native::NodeEventEmit
         | Native::NodeEventListeners
+        | Native::NodeEventRemoveListener
         | Native::NodeEventRemoveAllListeners
         | Native::NodeEventSetMaxListeners
         | Native::ProcessGetBuiltinModule
@@ -24303,7 +25147,13 @@ fn require_set(receiver: &Value) -> Result<Rc<ArrayData>, ExecutionError> {
 /// and the value a program gets back out of the set disagree.
 fn canonical_key(value: Value) -> Value {
     match value {
-        Value::Number(number) if number == 0.0 => Value::Number(0.0),
+        Value::Number(number) => {
+            if number == 0.0 {
+                Value::Number(0.0)
+            } else {
+                Value::Number(number)
+            }
+        }
         other => other,
     }
 }
@@ -24520,8 +25370,14 @@ pub enum CallbackMethod {
     GeneratorNext,
     /// `return` on a generator: finishes it without resuming.
     GeneratorReturn,
+    /// `throw` on a generator: raises at the suspension point rather than resuming it.
+    GeneratorThrow,
     /// `next` on an async generator: hands back a promise of the step.
     AsyncGeneratorNext,
+    /// `return` on an async generator: unwinds it, and hands back a promise of the final step.
+    AsyncGeneratorReturn,
+    /// `throw` on an async generator: raises at the suspension point, promising the next step.
+    AsyncGeneratorThrow,
     Map,
     ForEach,
     Filter,
@@ -26044,9 +26900,7 @@ fn date_written(method: DateMethod, field: DateField, time: f64, supplied: &[f64
         method,
         DateMethod::SetFullYear | DateMethod::SetUtcFullYear | DateMethod::SetYear
     );
-    let Some(parts) = date_parts(if time.is_nan() && revives { 0.0 } else { time }) else {
-        return None;
-    };
+    let parts = date_parts(if time.is_nan() && revives { 0.0 } else { time })?;
     // The order the fields appear in, so "this one and the ones after it" is a slice.
     let mut values = [
         parts.year as f64,
@@ -26292,7 +27146,7 @@ fn iso_date(text: &str) -> Option<f64> {
         slice
             .bytes()
             .all(|byte| byte.is_ascii_digit())
-            .then(|| ())?;
+            .then_some(())?;
         slice.parse().ok()
     };
     let (year, mut at) = match bytes.first() {
@@ -26919,6 +27773,7 @@ fn inherited_object_property(intrinsics: &Intrinsics, name: &str) -> Value {
 /// with it twice.
 fn tabulated_object_property(name: &str) -> Value {
     match name {
+        "constructor" => Value::Native(Native::ObjectConstructor),
         "hasOwnProperty"
         | "isPrototypeOf"
         | "propertyIsEnumerable"
@@ -27250,6 +28105,12 @@ fn intrinsic_constructor(value: &Value) -> Option<Value> {
 /// Returned unbound, like every other method here: the receiver is the function being called
 /// through, and `CallMethod` supplies it.
 fn function_property(intrinsics: &Intrinsics, name: &str) -> Value {
+    // `Function.prototype` owns its constructor. A compiled or bound function reaches that
+    // table before `Object.prototype`, so answering Object here is observably wrong even though
+    // both values are constructors (`fn.constructor.name` is ecosystem feature detection).
+    if name == "constructor" {
+        return Value::Native(Native::FunctionConstructor);
+    }
     match table_step(
         intrinsics,
         PrototypeTable::Function,
@@ -28273,6 +29134,11 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             keys.push("length".to_owned());
             keys
         }
+        Value::Bound(bound) => {
+            let mut keys = vec!["length".to_owned(), "name".to_owned()];
+            keys.extend(from_object(&bound.properties.borrow()));
+            keys
+        }
         Value::Object(object) => from_object(&object.borrow()),
         Value::Function(closure) => {
             let mut keys = from_object(&closure.properties.borrow());
@@ -28293,7 +29159,7 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             intrinsics.reshape(target, &mut keys);
             keys
         }
-        Value::Native(_) | Value::Callback(_) | Value::Bound(_) | Value::Settler(..) => {
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
             let mut keys = Vec::new();
             if intrinsic_identity(target).is_some() {
                 keys.push("length".to_owned());
@@ -28322,6 +29188,37 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
         }
         Value::TypedArray(view) => (0..view.len()).map(|index| index.to_string()).collect(),
         _ => Vec::new(),
+    }
+}
+
+/// The own-key walk used by operations whose specification includes symbol keys.
+///
+/// Most reflection helpers in this interpreter intentionally return only names because the
+/// current compact symbol representation cannot reconstruct a `Symbol` value from its reserved
+/// slot. Internal algorithms do not need that reconstruction: preserving the slot is enough to
+/// read and define the same symbol-keyed property without losing its identity.
+fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
+    match target {
+        Value::Object(object) => object.borrow().keys().map(str::to_owned).collect(),
+        Value::Function(closure) => closure
+            .properties
+            .borrow()
+            .keys()
+            .map(str::to_owned)
+            .collect(),
+        Value::Bound(bound) => bound
+            .properties
+            .borrow()
+            .keys()
+            .map(str::to_owned)
+            .collect(),
+        Value::Array(items) => items
+            .properties
+            .borrow()
+            .keys()
+            .map(str::to_owned)
+            .collect(),
+        _ => own_property_keys(intrinsics, target),
     }
 }
 
@@ -28362,6 +29259,11 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
                     configurable: false,
                 })
             }),
+        Value::Bound(bound) => bound
+            .properties
+            .borrow()
+            .get_own_attributes(key)
+            .or_else(|| tabulated_attributes(target, key)),
         Value::Array(items) => match key.parse::<usize>() {
             Ok(index) => {
                 let present = matches!(
@@ -28390,7 +29292,7 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
         // per value -- two reads of `Array.prototype.push` produce the same `Copy` marker, so
         // there is no per-value store to put it in -- so the realm's store answers first, and
         // the tables answer for everything it has nothing to say about.
-        Value::Native(_) | Value::Callback(_) | Value::Bound(_) | Value::Settler(..) => {
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
             match intrinsics.overridden(target, key) {
                 Overridden::Held(_, attributes) => Some(attributes),
                 Overridden::Removed => None,
@@ -31579,7 +32481,8 @@ mod tests {
     #[test]
     fn views_observe_array_buffer_detachment() {
         let source = test_buffer(&[9, 10, 11, 12], None, false);
-        let typed = construct_typed_array(TypedKind::Uint8, &[source.clone()]).expect("view");
+        let typed =
+            construct_typed_array(TypedKind::Uint8, std::slice::from_ref(&source)).expect("view");
         let Value::ArrayBuffer(source_data) = &source else {
             unreachable!()
         };

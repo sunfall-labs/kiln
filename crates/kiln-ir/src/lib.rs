@@ -907,6 +907,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
     let mut compiler = Compiler::new(module);
     // A module is strict whatever its text says, so nothing has to pass it in.
     compiler.strict = true;
+    compiler.module_body = true;
     let mut imports = Vec::new();
 
     for import in module.imports.iter().filter(|import| !import.type_only) {
@@ -1117,6 +1118,33 @@ enum Cleanup {
     /// `if (it.return) it.return()` against a hidden `for-of` binding. Held as the binding rather
     /// than as statements because it has no source form to re-compile.
     CloseIterator { binding: String },
+    /// The `using` declarations of one scope, disposed in reverse declaration order.
+    ///
+    /// Held as bindings rather than as a runtime list because which declarations a scope
+    /// contains is a fact about its text: the *number* of resources is static even though
+    /// whether each one was reached is not, and a pair of hidden bindings per declaration says
+    /// both at once -- an empty method binding is a declaration this pass never got to.
+    DisposeResources(Vec<ResourceSlot>),
+}
+
+/// Where one `using` declaration keeps what has to be disposed of, and how.
+#[derive(Clone)]
+struct ResourceSlot {
+    /// The resource itself, which is the receiver its disposal is called against.
+    value: String,
+    /// The method, read once where the declaration is. Reading it again at the end of the scope
+    /// would run an accessor twice and could find a different function the second time.
+    method: String,
+    /// `await using`: the disposal is awaited.
+    awaiting: bool,
+}
+
+/// The `using` declarations of the scope being compiled, and how many have been reached.
+struct ResourceScope {
+    slots: Vec<ResourceSlot>,
+    /// Declarations are handed their slots in source order, which is the order the disposal
+    /// walks backwards.
+    next: usize,
 }
 
 /// What a `break` or a `continue` is allowed to leave.
@@ -1238,6 +1266,13 @@ struct Compiler {
     /// exactly the difference, and a program told its source was invalid takes a different
     /// branch. Every eval binding is boxed, so the runtime check is already there to raise it.
     eval_program: bool,
+    /// Whether this compilation is a *module* body rather than a script or an `eval`.
+    ///
+    /// Only `await` reads it. A module body may await, and doing so makes its evaluation
+    /// asynchronous -- the body stops and the host resumes it; a script has nowhere to put that
+    /// suspension, and `await` there is a plain identifier or a syntax error depending on the
+    /// context, never a suspension.
+    module_body: bool,
     /// Names of the calling frame's bindings borrowed into scope 0 of an eval program.
     ///
     /// Tracked apart from the scope itself because a declaration in the eval'd source has to
@@ -1259,6 +1294,20 @@ struct Compiler {
     loops: Vec<LoopContext>,
     /// Counter for compiler-introduced bindings, so two in one scope never collide.
     hidden_bindings: usize,
+    /// Whether the function being compiled is an async generator.
+    ///
+    /// `yield*` is the only thing that reads it, and it needs it because the two generator kinds
+    /// delegate to *different protocols*: an async `yield*` asks for `@@asyncIterator` and awaits
+    /// each step, and reaching for `@@iterator` instead is observable -- a program that defines
+    /// both sees the wrong one run, and one that defines only a throwing `@@iterator` getter sees
+    /// an exception the specification says can never happen.
+    async_generator: bool,
+    /// The scopes containing `using` declarations that are being compiled, innermost last.
+    ///
+    /// A stack because a block with resources can be written inside another, and each
+    /// declaration belongs to the scope it was written in rather than to the innermost one open
+    /// at the time it runs.
+    resource_scopes: Vec<ResourceScope>,
     /// The `with` statements whose bodies are being compiled, outermost first.
     ///
     /// Every name mentioned inside one is looked for on these objects before the bindings around
@@ -1324,12 +1373,15 @@ impl Compiler {
             captured: names_captured_by_nested_functions(&module.body),
             strict: false,
             eval_program: false,
+            module_body: false,
             outer_names: HashSet::new(),
             // Module scope is boxed too when the module contains a direct eval: a script's
             // top-level bindings are exactly the ones an eval written there can see.
             cell_everything: body_contains_direct_eval(&module.body),
             loops: Vec::new(),
             hidden_bindings: 0,
+            resource_scopes: Vec::new(),
+            async_generator: false,
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
             next_private_scope: 0,
@@ -1472,12 +1524,20 @@ impl Compiler {
                     // and temporal-dead-zone checks. A pattern evaluates its initialiser once
                     // and binds against the result.
                     match declaration.pattern.as_identifier() {
-                        Some(name) => self.variable(
-                            *kind,
-                            name,
-                            declaration.initializer.as_ref(),
-                            declaration.span,
-                        ),
+                        Some(name) => {
+                            self.variable(
+                                *kind,
+                                name,
+                                declaration.initializer.as_ref(),
+                                declaration.span,
+                            );
+                            // `using` binds exactly as `const` does; the registration is the
+                            // whole of what it adds, and it runs after the binding so that a
+                            // disposal method reached through the binding sees it initialised.
+                            if let Some(awaiting) = kind.disposal() {
+                                self.register_resource(name, awaiting, declaration.span);
+                            }
+                        }
                         None => {
                             match &declaration.initializer {
                                 Some(initializer) => self.expression(initializer),
@@ -2228,6 +2288,80 @@ impl Compiler {
     /// function declarations' *values* are emitted early -- which is what the language does, and
     /// is where its temporal dead zone comes from.
     fn statements(&mut self, list: &[Statement]) {
+        let resources = resource_declarations(list);
+        if resources.is_empty() {
+            self.plain_statements(list);
+            return;
+        }
+        self.resource_scope(list, &resources);
+    }
+
+    /// Compile a statement list whose `using` declarations have to be disposed of when control
+    /// leaves it, whichever way it leaves.
+    ///
+    /// The shape is `try`/`finally` with no `catch`, and for the same reason: a disposal has to
+    /// run on every way out, and re-emitting it at each exit is what keeps `break`, `continue`
+    /// and `return` ordinary jumps. It goes on the same cleanup stack a `finally` uses, so a
+    /// non-local exit crossing both runs them in the right order without either knowing about
+    /// the other.
+    fn resource_scope(&mut self, list: &[Statement], resources: &[bool]) {
+        let span = list
+            .first()
+            .map_or(Span::new(0, 0), |statement| statement.span);
+        self.with_resource_scope(resources, span, |compiler| compiler.plain_statements(list));
+    }
+
+    /// Compile `body` with `resources` disposed of on every way out of it.
+    fn with_resource_scope(
+        &mut self,
+        resources: &[bool],
+        span: Span,
+        body: impl FnOnce(&mut Self),
+    ) {
+        let mut slots = Vec::with_capacity(resources.len());
+        for awaiting in resources {
+            let index = self.hidden_bindings;
+            self.hidden_bindings += 1;
+            let slot = ResourceSlot {
+                value: format!("%resource{index}"),
+                method: format!("%dispose{index}"),
+                awaiting: *awaiting,
+            };
+            // Cleared on entry rather than only written on use, because a loop body is one scope
+            // entered many times: without this, a pass that never reached a declaration would
+            // dispose of what the previous pass left in the slot.
+            self.push_constant(Constant::Undefined);
+            self.declare_hidden(&slot.value, span);
+            self.push_constant(Constant::Undefined);
+            self.declare_hidden(&slot.method, span);
+            slots.push(slot);
+        }
+        let cleanup = Cleanup::DisposeResources(slots.clone());
+        self.resource_scopes.push(ResourceScope { slots, next: 0 });
+        self.finalizers.push(cleanup.clone());
+
+        let handler_jump = self.emit_jump(Instruction::PushHandler(0));
+        self.handler_depth += 1;
+        body(self);
+        self.code.push(Instruction::PopHandler);
+        self.handler_depth -= 1;
+
+        self.finalizers.pop();
+        self.emit_finalizer(&cleanup);
+        let done = self.emit_jump(Instruction::Jump(0));
+
+        // The exception is still on the stack for `Throw` to take; the disposals below it push
+        // and pop in balance, so it is still on top when they are done.
+        self.patch_jump(handler_jump);
+        self.emit_finalizer(&cleanup);
+        self.code.push(Instruction::Throw);
+        self.patch_jump(done);
+        self.resource_scopes
+            .pop()
+            .expect("this scope pushed its own resource state");
+    }
+
+    fn plain_statements(&mut self, list: &[Statement]) {
         for statement in list {
             self.hoist_names(statement);
         }
@@ -2625,6 +2759,103 @@ impl Compiler {
                 self.scopes.pop().expect("finalizer scope was just pushed");
             }
             Cleanup::CloseIterator { binding } => self.emit_iterator_close(&binding.clone()),
+            Cleanup::DisposeResources(slots) => self.emit_disposals(&slots.clone()),
+        }
+    }
+
+    /// Record the value a `using` declaration just bound, so the end of the scope disposes of it.
+    ///
+    /// The method is read here rather than at the disposal, which is what the specification's
+    /// `GetDisposeMethod` says and is observable twice over: an accessor runs once, and a value
+    /// with no disposal method is refused where it was declared instead of much later, when the
+    /// program has already used it and cannot do anything about it.
+    fn register_resource(&mut self, name: &str, awaiting: bool, span: Span) {
+        let Some(scope) = self.resource_scopes.last_mut() else {
+            self.error(Some(span), "a `using` declaration outside any scope");
+            return;
+        };
+        let Some(slot) = scope.slots.get(scope.next).cloned() else {
+            self.error(
+                Some(span),
+                "more `using` declarations than this scope counted",
+            );
+            return;
+        };
+        scope.next += 1;
+        debug_assert_eq!(slot.awaiting, awaiting);
+
+        self.load_lexically(name, span);
+        self.code.push(Instruction::Dup);
+        let present = self.emit_jump(Instruction::JumpIfNotNullish(0));
+        // `using x = null` binds and disposes of nothing, and never looks for a method: a
+        // missing resource is the one case the language lets pass.
+        self.code.push(Instruction::Pop);
+        let done = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(present);
+        self.store_hidden(&slot.value);
+        let dispose = self.constant_index(Constant::String("@@dispose".to_owned()));
+        if awaiting {
+            let asynchronous = self.constant_index(Constant::String("@@asyncDispose".to_owned()));
+            self.load_hidden(&slot.value);
+            self.code.push(Instruction::GetProperty(asynchronous));
+            self.code.push(Instruction::Dup);
+            let found = self.emit_jump(Instruction::JumpIfNotNullish(0));
+            // `await using` falls back to the synchronous method, whose result is awaited like
+            // any other -- which is what lets one object serve both forms.
+            self.code.push(Instruction::Pop);
+            self.load_hidden(&slot.value);
+            self.code.push(Instruction::GetProperty(dispose));
+            self.patch_jump(found);
+        } else {
+            self.load_hidden(&slot.value);
+            self.code.push(Instruction::GetProperty(dispose));
+        }
+
+        self.code.push(Instruction::Dup);
+        let callable = self.emit_jump(Instruction::JumpIfNotNullish(0));
+        self.code.push(Instruction::Pop);
+        self.emit_type_error(if awaiting {
+            "the value is not asynchronously disposable"
+        } else {
+            "the value is not disposable"
+        });
+        self.patch_jump(callable);
+        self.store_hidden(&slot.method);
+        self.patch_jump(done);
+    }
+
+    /// Throw a `TypeError` the compiler decided on, built from the realm's own constructor.
+    ///
+    /// Through `LoadBuiltin` rather than by naming `TypeError`, because a program is free to
+    /// shadow that name and the error a language rule raises is not the shadowing program's to
+    /// choose.
+    fn emit_type_error(&mut self, message: &str) {
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(message.to_owned()));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+    }
+
+    /// Dispose of a scope's `using` resources, in reverse declaration order.
+    ///
+    /// A slot whose method binding is still empty belongs to a declaration this exit never
+    /// reached -- an early `return` above it, or a throw from its own initialiser -- and there is
+    /// nothing to dispose of.
+    fn emit_disposals(&mut self, slots: &[ResourceSlot]) {
+        for slot in slots.iter().rev() {
+            self.load_hidden(&slot.method);
+            let skip = self.emit_jump(Instruction::JumpIfFalse(0));
+            self.load_hidden(&slot.value);
+            self.load_hidden(&slot.method);
+            self.code.push(Instruction::NewArray { count: 0 });
+            self.code.push(Instruction::Apply);
+            if slot.awaiting {
+                self.code.push(Instruction::Await);
+            }
+            // The specification discards what a disposal returns; only whether it threw matters.
+            self.code.push(Instruction::Pop);
+            self.patch_jump(skip);
         }
     }
 
@@ -2802,10 +3033,13 @@ impl Compiler {
         awaiting: bool,
         span: Span,
     ) {
-        if awaiting && !self.compiling_function() {
-            // `for await` at module scope is top-level await under another name, and needs the
-            // module itself to be resumable.
-            self.error(Some(span), "top-level `for await` is not supported yet");
+        if awaiting && !self.compiling_function() && !self.module_body {
+            // `for await` at top level is top-level `await` under another name, and a script is
+            // not an evaluation anything can resume.
+            self.error(
+                Some(span),
+                "top-level `for await` is only available in a module",
+            );
             return;
         }
         let iterator_binding = format!("%iter{}", self.hidden_bindings);
@@ -2984,20 +3218,64 @@ impl Compiler {
         let iterator_binding = format!("%delegate{}", self.hidden_bindings);
         let sent_binding = format!("%sent{}", self.hidden_bindings);
         let step_binding = format!("%step{}", self.hidden_bindings);
+        let wrapped_binding = format!("%wrapped{}", self.hidden_bindings);
+        let subject_binding = format!("%subject{}", self.hidden_bindings);
         self.hidden_bindings += 1;
 
         self.scopes.push(HashMap::new());
+
+        // Whether each step has to be awaited, and where. Fixed at compile time by the kind of
+        // generator this `yield*` was written in, exactly as `GetGeneratorKind` fixes it.
+        let asynchronous = self.async_generator;
+        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
+        let value_key = self.constant_index(Constant::String("value".to_owned()));
 
         match value {
             Some(value) => self.expression(value),
             None => self.push_constant(Constant::Undefined),
         }
-        let symbol = self.constant_index(Constant::String("@@iterator".to_owned()));
-        self.code.push(Instruction::CallMethod {
-            name: symbol,
-            argc: 0,
-        });
-        self.declare_hidden(&iterator_binding, span);
+        if asynchronous {
+            // `GetIterator(value, async)`: `@@asyncIterator` decides, and `@@iterator` is only
+            // reached when it is absent. A present-but-not-callable `@@asyncIterator` is a
+            // TypeError raised *without* ever touching `@@iterator` -- which is what the two
+            // must not share a path for.
+            self.declare_hidden(&subject_binding, span);
+            let asynchronous_key =
+                self.constant_index(Constant::String("@@asyncIterator".to_owned()));
+            self.load_hidden(&subject_binding);
+            self.code.push(Instruction::GetProperty(asynchronous_key));
+            let is_async = self.emit_jump(Instruction::JumpIfNotNullish(0));
+
+            // Absent: the sync iterator, whose steps the specification wraps in an
+            // async-from-sync iterator. The wrapper is not materialised -- nothing here hands
+            // it to the program -- but the two places it awaits are, which is the whole of what
+            // it does that the async protocol does not.
+            self.load_hidden(&subject_binding);
+            self.code.push(Instruction::CallMethod {
+                name: symbol,
+                argc: 0,
+            });
+            self.push_constant(Constant::Boolean(true));
+            let chosen = self.emit_jump(Instruction::Jump(0));
+
+            self.patch_jump(is_async);
+            self.load_hidden(&subject_binding);
+            self.code.push(Instruction::CallMethod {
+                name: asynchronous_key,
+                argc: 0,
+            });
+            self.push_constant(Constant::Boolean(false));
+
+            self.patch_jump(chosen);
+            self.declare_hidden(&wrapped_binding, span);
+            self.declare_hidden(&iterator_binding, span);
+        } else {
+            self.code.push(Instruction::CallMethod {
+                name: symbol,
+                argc: 0,
+            });
+            self.declare_hidden(&iterator_binding, span);
+        }
 
         self.push_constant(Constant::Undefined);
         self.declare_hidden(&sent_binding, span);
@@ -3010,6 +3288,15 @@ impl Compiler {
             name: next,
             argc: 1,
         });
+        if asynchronous {
+            // An async iterator answers with a promise of the step, so the step object itself
+            // is what has to be awaited. A wrapped sync iterator answers with the step directly
+            // and it is each *value* that may be a promise, which is awaited further down.
+            self.load_hidden(&wrapped_binding);
+            let sync_step = self.emit_jump(Instruction::JumpIfTruthy(0));
+            self.code.push(Instruction::Await);
+            self.patch_jump(sync_step);
+        }
         self.declare_hidden(&step_binding, span);
 
         self.load_hidden(&step_binding);
@@ -3018,8 +3305,12 @@ impl Compiler {
         let finished = self.emit_jump(Instruction::JumpIfTruthy(0));
 
         // Not done: yield this value out, and keep what the caller sends back.
+        //
+        // No await here even for a wrapped sync iterator: `Yield` inside an async generator
+        // already awaits what it is handed, and `AsyncFromSyncIteratorContinuation` resolves
+        // each value exactly once. Awaiting again would unwrap a promise a second time and
+        // spend a tick the specification does not.
         self.load_hidden(&step_binding);
-        let value_key = self.constant_index(Constant::String("value".to_owned()));
         self.code.push(Instruction::GetProperty(value_key));
         self.code.push(Instruction::Yield);
         self.store_hidden(&sent_binding);
@@ -3029,8 +3320,25 @@ impl Compiler {
         self.patch_jump(finished);
         self.load_hidden(&step_binding);
         self.code.push(Instruction::GetProperty(value_key));
+        if asynchronous {
+            self.await_wrapped_value(&wrapped_binding);
+        }
 
         self.scopes.pop().expect("delegate scope was just pushed");
+    }
+
+    /// Await the value on top of the stack, but only when the delegate is a wrapped sync
+    /// iterator.
+    ///
+    /// `AsyncFromSyncIteratorContinuation` resolves each value before it becomes the step, so a
+    /// sync iterator of promises yielded through an async `yield*` hands on their values. A real
+    /// async iterator has already settled its step by this point and awaiting again would cost a
+    /// tick the specification does not spend.
+    fn await_wrapped_value(&mut self, wrapped_binding: &str) {
+        self.load_hidden(wrapped_binding);
+        let plain = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.code.push(Instruction::Await);
+        self.patch_jump(plain);
     }
 
     fn store_hidden(&mut self, name: &str) {
@@ -3094,7 +3402,28 @@ impl Compiler {
         body: &Statement,
         span: Span,
     ) {
-        let _ = span;
+        // A `using` in a `for` head belongs to the loop rather than to one pass through it: the
+        // head runs once, and what it declares is disposed of when the loop is left -- by the
+        // test failing, by a `break`, by a `return`, or by a throw.
+        let resources = init.map_or_else(Vec::new, |init| {
+            resource_declarations(std::slice::from_ref(init))
+        });
+        if resources.is_empty() {
+            self.for_statement_body(init, test, update, body);
+            return;
+        }
+        self.with_resource_scope(&resources, span, |compiler| {
+            compiler.for_statement_body(init, test, update, body);
+        });
+    }
+
+    fn for_statement_body(
+        &mut self,
+        init: Option<&Statement>,
+        test: Option<&Expression>,
+        update: Option<&Expression>,
+        body: &Statement,
+    ) {
         self.scopes.push(HashMap::new());
         if let Some(init) = init {
             self.statement(init);
@@ -3621,12 +3950,13 @@ impl Compiler {
             // `await` is a `yield` whose resumption the async driver supplies rather than the
             // program: the same suspension, resumed by a promise settling instead of a `next`.
             ExpressionKind::Await(value) => {
-                if !self.compiling_function() {
-                    // Top-level `await` needs the module itself to be resumable, which is a
-                    // different shape from a function that suspends.
+                if !self.compiling_function() && !self.module_body {
+                    // A script has nowhere to put the suspension: only a module body is an
+                    // evaluation the host can stop and resume, which is what makes top-level
+                    // `await` a module-only form rather than a general one.
                     self.error(
                         Some(expression.span),
-                        "top-level `await` is not supported yet",
+                        "top-level `await` is only available in a module",
                     );
                     self.push_constant(Constant::Undefined);
                     return;
@@ -4617,6 +4947,12 @@ impl Compiler {
         // A nested body cannot jump out to an enclosing loop, so it starts with no handlers of
         // its own to account for.
         let outer_handler_depth = std::mem::replace(&mut self.handler_depth, 0);
+        // An arrow cannot contain a `yield`, so it never reads this; every other function body
+        // establishes its own generator kind, and restores the enclosing one on the way out.
+        let outer_async_generator = std::mem::replace(
+            &mut self.async_generator,
+            function.generator && function.asynchronous,
+        );
         let outer = FunctionState {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
@@ -4721,6 +5057,7 @@ impl Compiler {
         self.scopes = restored.scopes;
         self.function_finalizer_depth = outer_finalizer_depth;
         self.handler_depth = outer_handler_depth;
+        self.async_generator = outer_async_generator;
         self.upvalue_names = restored.upvalue_names;
         self.captured = restored.captured;
         self.cell_everything = restored.cell_everything;
@@ -5507,7 +5844,11 @@ impl Compiler {
                     _ if local.imported => EvalDeclaration::Const,
                     VariableKind::Var => EvalDeclaration::Var,
                     VariableKind::Let => EvalDeclaration::Let,
-                    VariableKind::Const => EvalDeclaration::Const,
+                    // A `using` binding cannot be reassigned either, and what an eval'd source
+                    // may do with it is exactly what it may do with a `const`.
+                    VariableKind::Const | VariableKind::Using | VariableKind::AwaitUsing => {
+                        EvalDeclaration::Const
+                    }
                 };
                 order.push((name.clone(), declaration));
             }
@@ -5716,6 +6057,23 @@ impl Compiler {
 /// A `let` or `var` declaration, or any name something assigns to or updates -- including inside
 /// a nested function, which is the case that matters: `export let count` incremented by an
 /// exported `bump()` is the whole reason a live binding is not the same as a snapshot.
+/// Whether each `using` declaration written directly in this statement list is awaited.
+///
+/// Only this level: a `using` inside a nested block belongs to that block's scope and is
+/// disposed of when *it* is left, which is what makes the disposal order the reverse of the
+/// declaration order rather than of the execution order.
+fn resource_declarations(list: &[Statement]) -> Vec<bool> {
+    let mut resources = Vec::new();
+    for statement in list {
+        if let StatementKind::Variable { kind, declarations } = &statement.kind
+            && let Some(awaiting) = kind.disposal()
+        {
+            resources.extend(std::iter::repeat_n(awaiting, declarations.len()));
+        }
+    }
+    resources
+}
+
 fn mutable_module_bindings(body: &[Statement]) -> HashSet<String> {
     let mut names = HashSet::new();
     for statement in body {

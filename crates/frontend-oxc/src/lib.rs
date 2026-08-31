@@ -631,9 +631,10 @@ impl Lowerer {
             VariableDeclarationKind::Var => HirVariableKind::Var,
             VariableDeclarationKind::Let => HirVariableKind::Let,
             VariableDeclarationKind::Const => HirVariableKind::Const,
-            VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing => {
-                return self.unsupported_statement("using declaration", span(declaration.span));
-            }
+            // `using` and `await using` bind exactly as `const` does and add a disposal at the
+            // end of the scope; the kind is what carries that through to lowering.
+            VariableDeclarationKind::Using => HirVariableKind::Using,
+            VariableDeclarationKind::AwaitUsing => HirVariableKind::AwaitUsing,
         };
         let declarations = declaration
             .declarations
