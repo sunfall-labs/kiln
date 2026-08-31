@@ -3,7 +3,7 @@ name: Performance
 # design.md §13 asks CI to record a list of measurements and says a regression should require
 # explicit justification. This workflow records the ones that exist in v0.
 #
-# Three jobs, because the measurements need three different cache policies and there is no
+# Four jobs, because the measurements need different cache policies and there is no
 # single one that is honest for all of them:
 #
 #   clean-build   measures a from-scratch build, so it must NOT restore a target directory - a
@@ -16,6 +16,8 @@ name: Performance
 #                 This is the one that runs on every pull request.
 #   bench         measures the compiler daemon at runtime, so a warm target directory makes the
 #                 job faster and changes nothing it reports.
+#   test262       measures full-suite external Test262 throughput from a pinned temporary checkout
+#                 and reports the daemon-backed execution frontier separately from smoke tests.
 #
 # No job gates on a wall-clock number. A GitHub-hosted runner shares a host with other tenants,
 # and the committed baseline was recorded on a developer's machine of a different architecture;
@@ -124,4 +126,47 @@ jobs:
           name: bench-report-${{ github.run_id }}
           path: bench/results/latest.json
           if-no-files-found: warn
+          retention-days: 30
+
+  test262:
+    name: Pinned Test262 throughput
+    # This network-backed full suite is independent of the fast repository smoke and regression
+    # jobs. Its report records the current execution frontier without slowing their feedback.
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --no-self-update
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test262
+      # test262.sh verifies the detached checkout against the exact commit before and after the
+      # fetch, then uses the normal daemon-backed `kiln test` batch rather than one process/case.
+      - run: bash scripts/test262.sh --out target/test262/results.json
+        continue-on-error: true
+      # Test failures are an expected evolving frontier for this lane, but a missing or
+      # mismatched report is never expected: fail closed if the pin/fetch/runner contract broke.
+      - if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          path = Path("target/test262/results.json")
+          expected = "771005236e88a909635104e03ba12559688c0172"
+          if not path.is_file():
+              raise SystemExit("test262 lane wrote no report")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          if report.get("test262", {}).get("commit") != expected:
+              raise SystemExit("test262 lane report does not name the pinned commit")
+          for field in ("discovered", "executed", "passed", "failed", "unsupported", "elapsed_millis", "throughput_tests_per_second"):
+              if field not in report:
+                  raise SystemExit(f"test262 lane report is missing {field}")
+          PY
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-results-${{ github.run_id }}
+          path: target/test262/results.json
+          if-no-files-found: ignore
           retention-days: 30

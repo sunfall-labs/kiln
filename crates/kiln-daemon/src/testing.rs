@@ -793,6 +793,62 @@ expected_stdout = "bundle\n"
     }
 
     #[test]
+    fn external_layout_fixture_covers_harness_variants_negative_and_unsupported() {
+        let summary = run_corpus("tests/conformance/external-test262/test");
+
+        assert_eq!(summary.discovered, 4);
+        assert_eq!(
+            summary.selected, 5,
+            "ordinary scripts have sloppy and strict variants"
+        );
+        assert_eq!(
+            summary.failed, 0,
+            "the fixture expectations are intentional"
+        );
+        assert_eq!(summary.skipped, 0, "the fixture supplies its harness");
+        assert_eq!(
+            summary.passed, 4,
+            "harness, module, and parse-negative cases execute"
+        );
+        assert_eq!(
+            summary.unsupported, 1,
+            "unsupported language features stay visible"
+        );
+        assert!(
+            summary
+                .cases
+                .iter()
+                .any(|case| case.id == "ordinary.js#sloppy")
+        );
+        assert!(
+            summary
+                .cases
+                .iter()
+                .any(|case| case.id == "ordinary.js#strict")
+        );
+        assert!(
+            summary
+                .cases
+                .iter()
+                .any(|case| case.id == "module.js#module")
+        );
+        assert!(
+            summary
+                .cases
+                .iter()
+                .any(|case| case.id == "negative-parse.js#sloppy"
+                    && matches!(case.outcome, TestOutcome::Pass))
+        );
+        assert!(
+            summary
+                .cases
+                .iter()
+                .any(|case| case.id == "unsupported.js#sloppy"
+                    && matches!(case.outcome, TestOutcome::Unsupported))
+        );
+    }
+
+    #[test]
     fn one_manifest_serves_each_of_its_groups_and_the_whole_corpus() {
         let whole = run_corpus("conformance");
         let groups = [
