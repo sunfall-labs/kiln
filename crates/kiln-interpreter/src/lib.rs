@@ -99,6 +99,24 @@ impl WellKnown {
             .unwrap_or_else(|| unreachable!("every well-known key carries the prefix"))
     }
 
+    /// The well-known symbol a reserved key names, if it names one.
+    ///
+    /// The inverse of [`Self::property_key`], and exact: every other `@@` key in this
+    /// interpreter is an internal slot -- `@@entries`, `@@disposeEntries`, `@@trace` -- and none
+    /// of them collides with a name here. That exactness is what lets reflection tell a
+    /// symbol-keyed property apart from the machine's own bookkeeping, which is the whole
+    /// difficulty of storing symbols as strings.
+    ///
+    /// `@@nodeInspectCustom` is included even though `ALL` excludes it: `Symbol` does not
+    /// publish it, but an object that carries it carries a symbol-keyed property and
+    /// `Object.getOwnPropertySymbols` has to say so.
+    fn from_property_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .chain(std::iter::once(Self::NodeInspectCustom))
+            .find(|symbol| symbol.property_key() == key)
+    }
+
     /// Every well-known symbol, so `Symbol` can publish them all from one list.
     const ALL: [Self; 15] = [
         Self::Iterator,
@@ -168,7 +186,7 @@ impl Symbol {
     pub fn property_key(&self) -> String {
         match self {
             Self::WellKnown(symbol) => symbol.property_key().to_owned(),
-            Self::Unique(symbol) => format!("@@symbol:{}", symbol.serial),
+            Self::Unique(symbol) => format!("{UNIQUE_SYMBOL_PREFIX}{}", symbol.serial),
         }
     }
 
@@ -178,7 +196,19 @@ impl Symbol {
             Self::Unique(symbol) => symbol.description.as_deref().unwrap_or(""),
         }
     }
+
+    /// The serial in a unique symbol's reserved key, or `None` for any other key.
+    ///
+    /// The inverse of the `@@symbol:{serial}` half of [`Self::property_key`]. The serial alone
+    /// is not the symbol -- identity is the allocation's, not the number's -- which is why the
+    /// realm keeps every one it has made and this only says which to look up.
+    fn serial_in_key(key: &str) -> Option<u64> {
+        key.strip_prefix(UNIQUE_SYMBOL_PREFIX)?.parse().ok()
+    }
 }
+
+/// The reserved key prefix a `Symbol(description)` names its properties under.
+const UNIQUE_SYMBOL_PREFIX: &str = "@@symbol:";
 
 impl PartialEq for Symbol {
     fn eq(&self, other: &Self) -> bool {
@@ -6206,6 +6236,7 @@ struct ModuleRealmShared {
     next_http_client_request_id: u64,
     symbol_serial: u64,
     symbol_registry: Vec<(String, Value)>,
+    symbols: Vec<Rc<UniqueSymbol>>,
 }
 
 impl Default for ModuleRealmSession {
@@ -6220,6 +6251,7 @@ impl Default for ModuleRealmSession {
                 next_http_client_request_id: 1,
                 symbol_serial: 0,
                 symbol_registry: Vec::new(),
+                symbols: Vec::new(),
             })),
         }
     }
@@ -8307,6 +8339,15 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
     /// symbol needs: it never leaves the run that made it.
     symbol_serial: u64,
+    /// Every `Symbol(...)` this run has made, by serial.
+    ///
+    /// A symbol-keyed property stores only the *string* the symbol names it under, so nothing on
+    /// the object can hand the symbol itself back -- and `Object.getOwnPropertySymbols` has to
+    /// hand back the same symbol, by identity, not a fresh one with the same description.
+    /// Strongly held, because the last reference to a symbol can legitimately be the property
+    /// key it is stored under: `const o = {}; o[Symbol("k")] = 1;` keeps nothing else, and node
+    /// still reports it.
+    symbols: Vec<Rc<UniqueSymbol>>,
     /// Every closure this run has created, held weakly.
     ///
     /// `F.prototype.constructor` is `F`, and `Rc` frees nothing that is inside a cycle, so every
@@ -8435,6 +8476,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             self_bindings: Vec::new(),
             self_namespaces: Vec::new(),
             symbol_registry: Vec::new(),
+            symbols: Vec::new(),
             random_state: match entropy {
                 EntropyCapability::Deterministic | EntropyCapability::Host => DEFAULT_ENTROPY_SEED,
                 EntropyCapability::Seeded(seed) => seed,
@@ -15502,6 +15544,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
             }
+            // `Object.getOwnPropertySymbols`: the symbol-keyed own properties, and only those.
+            //
+            // It answered `[]` for everything. The properties were there and read back
+            // correctly -- a symbol key is a reserved *string* here -- but nothing could
+            // recover the symbol from the key, so every faithful-copy routine (deep clone, deep
+            // merge, a decorator re-wrapping an object, `Object.assign` over `Reflect.ownKeys`)
+            // silently dropped symbol-keyed data instead of failing.
+            Native::ObjectGetOwnPropertySymbols => {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_an_object(&source) {
+                    return Ok(Value::Array(ArrayData::new(Vec::new())));
+                }
+                let symbols = self
+                    .own_keys_reflected(&source, instruction)?
+                    .into_iter()
+                    .filter(|key| matches!(key, Value::Symbol(_)))
+                    .collect();
+                Ok(Value::Array(ArrayData::new(symbols)))
+            }
             // `Error("x")` is `new Error("x")`: every error constructor answers the same way
             // called or constructed, which is why `throw Error(m)` is as common in real code as
             // `throw new Error(m)`. Reaching the pure table instead answered `undefined`, and
@@ -15668,11 +15729,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if matches!(native, Native::ReflectOwnKeys) {
                     let source = self.reflect_target(Some(&source), "ownKeys")?;
-                    let items = self
-                        .own_keys(&source, instruction)?
-                        .into_iter()
-                        .map(reflection_key_value)
-                        .collect();
+                    let items = self.own_keys_reflected(&source, instruction)?;
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
                 // A proxy answers "what keys do you have" with a trap, not with a property
@@ -16289,32 +16346,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let key = arguments
                     .first()
                     .map_or_else(String::new, Value::to_display_string);
-                if let Some(realm) = &self.module_realm {
-                    let mut realm = realm.borrow_mut();
-                    if let Some((_, symbol)) =
-                        realm.symbol_registry.iter().find(|(name, _)| *name == key)
-                    {
-                        return Ok(symbol.clone());
-                    }
-                    realm.symbol_serial += 1;
-                    let symbol = Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                        serial: realm.symbol_serial,
-                        description: Some(key.clone()),
-                    })));
-                    realm.symbol_registry.push((key, symbol.clone()));
-                    return Ok(symbol);
-                }
-                if let Some((_, symbol)) =
-                    self.symbol_registry.iter().find(|(name, _)| *name == key)
-                {
+                let registered = match &self.module_realm {
+                    Some(realm) => realm.borrow().symbol_registry.clone(),
+                    None => self.symbol_registry.clone(),
+                };
+                if let Some((_, symbol)) = registered.iter().find(|(name, _)| *name == key) {
                     return Ok(symbol.clone());
                 }
-                self.symbol_serial += 1;
-                let symbol = Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                    serial: self.symbol_serial,
-                    description: Some(key.clone()),
-                })));
-                self.symbol_registry.push((key, symbol.clone()));
+                let symbol = self.new_symbol(Some(key.clone()));
+                match &self.module_realm {
+                    Some(realm) => realm
+                        .borrow_mut()
+                        .symbol_registry
+                        .push((key, symbol.clone())),
+                    None => self.symbol_registry.push((key, symbol.clone())),
+                }
                 Ok(symbol)
             }
             Native::SymbolKeyFor => {
@@ -16560,25 +16606,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Every call has to produce a symbol distinct from every other, so this needs the
             // counter rather than only its arguments.
             Native::SymbolConstructor => {
-                if let Some(realm) = &self.module_realm {
-                    let mut realm = realm.borrow_mut();
-                    realm.symbol_serial += 1;
-                    return Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                        serial: realm.symbol_serial,
-                        description: match arguments.first() {
-                            None | Some(Value::Undefined) => None,
-                            Some(value) => Some(value.to_display_string()),
-                        },
-                    }))));
-                }
-                self.symbol_serial += 1;
-                Ok(Value::Symbol(Symbol::Unique(Rc::new(UniqueSymbol {
-                    serial: self.symbol_serial,
-                    description: match arguments.first() {
-                        None | Some(Value::Undefined) => None,
-                        Some(value) => Some(value.to_display_string()),
-                    },
-                }))))
+                let description = match arguments.first() {
+                    None | Some(Value::Undefined) => None,
+                    Some(value) => Some(value.to_display_string()),
+                };
+                Ok(self.new_symbol(description))
             }
             // The two built-ins that compile. Both need the machine -- a compiled program is
             // entered as a frame and run -- so neither can live in `call_native`, which is a
@@ -27812,7 +27844,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Vec<String>, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return Ok(own_property_keys(&self.intrinsics, target));
+            // Symbol keys included: `Reflect.ownKeys`, `Object.assign` and `Object.freeze` all
+            // reach a proxy's target through here, and all three are defined over both kinds.
+            // Internal slots stay out -- copying a collection's `@@entries` would be copying the
+            // machine rather than the object.
+            return Ok(own_property_keys_with_symbols(&self.intrinsics, target));
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -28775,6 +28811,93 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let _ = count;
         Ok(Value::Number(0.0))
+    }
+
+    /// Allocate a `Symbol(description)` and remember it by serial.
+    ///
+    /// The remembering is the point. A symbol-keyed property is stored under the *string*
+    /// `@@symbol:{serial}`, so the object holds the key and not the symbol -- and
+    /// `Object.getOwnPropertySymbols` has to answer with the symbol itself, the same one by
+    /// identity. Nothing else can produce it: `Symbol()` deliberately makes a different symbol
+    /// every time it is called.
+    ///
+    /// Serials come from the module realm when there is one, so that two modules of the same
+    /// program cannot mint the same key for two different symbols.
+    fn new_symbol(&mut self, description: Option<String>) -> Value {
+        let allocate = |serial: &mut u64, symbols: &mut Vec<Rc<UniqueSymbol>>| {
+            *serial += 1;
+            let symbol = Rc::new(UniqueSymbol {
+                serial: *serial,
+                description,
+            });
+            symbols.push(Rc::clone(&symbol));
+            Value::Symbol(Symbol::Unique(symbol))
+        };
+        match &self.module_realm {
+            Some(realm) => {
+                let mut realm = realm.borrow_mut();
+                let ModuleRealmShared {
+                    symbol_serial,
+                    symbols,
+                    ..
+                } = &mut *realm;
+                allocate(symbol_serial, symbols)
+            }
+            None => allocate(&mut self.symbol_serial, &mut self.symbols),
+        }
+    }
+
+    /// The symbol a reserved store key names, or `None` when the key is an internal slot.
+    ///
+    /// Both halves of the question are answered here because both are the same question: this
+    /// interpreter stores a symbol key as a string with a reserved prefix, and so does its own
+    /// bookkeeping -- `@@entries` for a collection, `@@trace` on an error, `@@disposeEntries` on
+    /// a stack. Reflection must report the first kind and must never report the second, and this
+    /// is the one place that line is drawn.
+    fn symbol_of_key(&self, key: &str) -> Option<Symbol> {
+        if let Some(symbol) = WellKnown::from_property_key(key) {
+            return Some(Symbol::WellKnown(symbol));
+        }
+        let serial = Symbol::serial_in_key(key)?;
+        let held = |symbols: &[Rc<UniqueSymbol>]| {
+            symbols
+                .iter()
+                .find(|symbol| symbol.serial == serial)
+                .map(|symbol| Symbol::Unique(Rc::clone(symbol)))
+        };
+        match &self.module_realm {
+            Some(realm) => held(&realm.borrow().symbols),
+            None => held(&self.symbols),
+        }
+    }
+
+    /// The own keys of `target` that a reflection operation reporting symbols sees.
+    ///
+    /// String keys first in the store's order, then symbol keys in theirs, which is
+    /// `OrdinaryOwnPropertyKeys`. Internal slots are dropped: they share the reserved prefix
+    /// with symbol keys and are not properties of the object at all.
+    fn own_keys_reflected(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        let keys = match target {
+            // A proxy answers with a trap rather than a store, and the trap already reports
+            // both kinds -- reduced to reserved strings on the way in, and restored here.
+            Value::Proxy(_) => self.own_keys(target, instruction)?,
+            _ => own_property_keys_with_symbols(&self.intrinsics, target),
+        };
+        let (reserved, named): (Vec<String>, Vec<String>) = keys
+            .into_iter()
+            .partition(|key| key.starts_with(RESERVED_KEY_PREFIX));
+        let mut reflected: Vec<Value> = named.into_iter().map(Value::String).collect();
+        reflected.extend(
+            reserved
+                .into_iter()
+                .filter_map(|key| self.symbol_of_key(&key))
+                .map(Value::Symbol),
+        );
+        Ok(reflected)
     }
 
     /// `Reflect.set` returns the boolean result of `[[Set]]` instead of applying the throwing
@@ -31743,7 +31866,11 @@ fn call_native(
         }),
         // Symbol keys are stored as reserved strings, and a string cannot be turned back into
         // the symbol it came from -- so this reports none rather than inventing any.
-        Native::ObjectGetOwnPropertySymbols => Value::Array(ArrayData::new(Vec::new())),
+        // The machine answers this one: recovering a symbol from the reserved key it is stored
+        // under needs the realm's registry, which a free function has no way to reach.
+        Native::ObjectGetOwnPropertySymbols => {
+            unreachable!("`Object.getOwnPropertySymbols` is dispatched by the interpreter")
+        }
         Native::ObjectGetOwnPropertyDescriptor => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
             let key = arguments
@@ -31754,7 +31881,10 @@ fn call_native(
         Native::ObjectGetOwnPropertyDescriptors => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
             let mut data = ObjectData::default();
-            for key in own_property_keys(intrinsics, target) {
+            // Symbol keys too: this is how a faithful copy is made, and one that quietly leaves
+            // them out is the bug this whole family had. The result object holds them under the
+            // same reserved key the source did, so it needs no registry to build.
+            for key in own_property_keys_with_symbols(intrinsics, target) {
                 if let Some(descriptor) = own_descriptor(intrinsics, target, &key) {
                     data.set(&key, descriptor);
                 }
@@ -40221,26 +40351,33 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
     }
 }
 
-/// Reify a reserved well-known symbol key when a reflection operation returns it to JavaScript.
-///
-/// Internal own-key walks use strings for compactness, but `Reflect.ownKeys` must hand a symbol
-/// back to the program. Unique symbols cannot be reconstructed from their opaque serial here;
-/// well-known symbols are stable and cover the built-in keys that the realm publishes.
-fn reflection_key_value(key: String) -> Value {
-    WellKnown::ALL
-        .into_iter()
-        .find(|symbol| symbol.property_key() == key)
-        .map_or(Value::String(key), |symbol| {
-            Value::Symbol(Symbol::WellKnown(symbol))
-        })
-}
-
 /// The own-key walk used by operations whose specification includes symbol keys.
 ///
 /// Most reflection helpers in this interpreter intentionally return only names because the
 /// current compact symbol representation cannot reconstruct a `Symbol` value from its reserved
 /// slot. Internal algorithms do not need that reconstruction: preserving the slot is enough to
 /// read and define the same symbol-keyed property without losing its identity.
+/// Whether a reserved store key names a symbol-keyed property rather than an internal slot.
+///
+/// The two share the `@@` prefix, which is what made reflection unable to tell them apart and so
+/// report neither. A key is a symbol's exactly when a well-known symbol claims it or it carries
+/// a `Symbol()` serial; everything else -- `@@entries`, `@@trace`, `@@disposeEntries`,
+/// `@@private:x` -- is the machine's own bookkeeping and is not a property of the object at all.
+fn is_symbol_key(key: &str) -> bool {
+    WellKnown::from_property_key(key).is_some() || Symbol::serial_in_key(key).is_some()
+}
+
+/// `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
+///
+/// Distinct from [`own_property_keys_including_symbols`], which hands back every reserved slot
+/// and is what an internal algorithm wants; this is the list a *program* is allowed to see.
+fn own_property_keys_with_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
+    own_property_keys_including_symbols(intrinsics, target)
+        .into_iter()
+        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX) || is_symbol_key(key))
+        .collect()
+}
+
 fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     let mut keys = own_property_keys(intrinsics, target);
     // Ordinary reflection intentionally hides symbol slots, but internal operations such as

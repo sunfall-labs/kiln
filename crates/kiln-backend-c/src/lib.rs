@@ -5739,6 +5739,64 @@ static const kiln_symbol kiln_c99_well_known[] = {
     {"@@toStringTag", 13, "Symbol.toStringTag", 18},
     {"@@toPrimitive", 13, "Symbol.toPrimitive", 18}};
 
+/* Every symbol this run has made, by the value that *is* it.
+ *
+ * A symbol-keyed property stores only the reserved key, so nothing on the object can hand the
+ * symbol back -- and `Reflect.ownKeys` has to answer with the same symbol, by identity, not a
+ * fresh one carrying the same description. The whole `kiln_value` is kept rather than the
+ * `kiln_symbol *` inside it, because `Symbol.for` and `Symbol()` fill `bits` differently and
+ * equality reads what was stored.
+ *
+ * Held for the life of the process, because the last reference to a symbol can legitimately be
+ * the property key it is stored under: `o[Symbol("k")] = 1` keeps nothing else, and the key must
+ * still name a symbol afterwards. */
+static kiln_value *kiln_c99_symbols;
+static size_t kiln_c99_symbol_count;
+static size_t kiln_c99_symbol_capacity;
+
+static int kiln_c99_remember_symbol(kiln_value symbol) {
+    if (kiln_c99_symbol_count == kiln_c99_symbol_capacity) {
+        size_t wanted = kiln_c99_symbol_capacity == 0 ? 8 : kiln_c99_symbol_capacity * 2;
+        kiln_value *grown =
+            (kiln_value *)realloc(kiln_c99_symbols, wanted * sizeof *kiln_c99_symbols);
+        if (grown == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        kiln_c99_symbols = grown;
+        kiln_c99_symbol_capacity = wanted;
+    }
+    kiln_c99_symbols[kiln_c99_symbol_count++] = symbol;
+    return KILN_C99_OK;
+}
+
+/* The symbol a reserved store key names, reporting whether the key names one at all.
+ *
+ * Both halves are the same question. A symbol key and an internal slot are both `@@` strings
+ * here -- `@@iterator` beside `@@error`, `@@symbol:3` beside `@@iterpart` -- and reflection has
+ * to report the first kind and must never report the second. This is the one place that line is
+ * drawn on this side. */
+static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
+    size_t index;
+    size_t known = sizeof kiln_c99_well_known / sizeof *kiln_c99_well_known;
+    for (index = 0; index < known; ++index) {
+        if (kiln_c99_well_known[index].key_len == key_len &&
+            memcmp(kiln_c99_well_known[index].key, key, key_len) == 0) {
+            *out = kiln_c99_value(KILN_VALUE_SYMBOL,
+                                  (uint64_t)(uintptr_t)&kiln_c99_well_known[index],
+                                  (const char *)(uintptr_t)&kiln_c99_well_known[index], 0);
+            return 1;
+        }
+    }
+    for (index = 0; index < kiln_c99_symbol_count; ++index) {
+        const kiln_symbol *symbol = kiln_c99_symbol_of(kiln_c99_symbols[index]);
+        if (symbol->key_len == key_len && memcmp(symbol->key, key, key_len) == 0) {
+            *out = kiln_c99_symbols[index];
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* The string a value names a property under.
  *
  * Distinct from `kiln_c99_text`: a symbol keys a property under its reserved slot, not under its
@@ -5790,7 +5848,7 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     }
     *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)symbol,
                           (const char *)(uintptr_t)symbol, 0);
-    return KILN_C99_OK;
+    return kiln_c99_remember_symbol(*out);
 }
 
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
@@ -5821,7 +5879,7 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     symbol->description = (const char *)registered_key;
     symbol->description_len = (size_t)registered_key_len;
     *out = kiln_c99_value(KILN_VALUE_SYMBOL, id, (const char *)(uintptr_t)symbol, 0);
-    return KILN_C99_OK;
+    return kiln_c99_remember_symbol(*out);
 }
 
 static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
@@ -7801,10 +7859,11 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         *out = built;
         return KILN_C99_OK;
     }
+    /* `OrdinaryOwnPropertyKeys`: the string keys, then the symbol keys, each in insertion order.
+     * Two passes because the order is part of the answer -- a copy that walks them reproduces
+     * it, and the specification puts every symbol after every name. */
     object = kiln_c99_object_of(target);
     for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
-        /* A `@@` key is the machine's own and is not a property of the program's object, however
-         * un-enumerable the rest of them are. */
         if (object->properties[index].key_len >= 2 && object->properties[index].key[0] == '@' &&
             object->properties[index].key[1] == '@') {
             continue;
@@ -7812,6 +7871,21 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
         status = kiln_c99_array_push(built,
                                      kiln_c99_copy_text(object->properties[index].key,
                                                         object->properties[index].key_len));
+    }
+    for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
+        kiln_value symbol;
+        /* A `@@` key is either a symbol-keyed property or the machine's own bookkeeping. The
+         * first is reported and the second never is; asking the symbol registry is what tells
+         * them apart, because the key alone cannot. */
+        if (object->properties[index].key_len < 2 || object->properties[index].key[0] != '@' ||
+            object->properties[index].key[1] != '@') {
+            continue;
+        }
+        if (!kiln_c99_symbol_of_key(object->properties[index].key,
+                                    object->properties[index].key_len, &symbol)) {
+            continue;
+        }
+        status = kiln_c99_array_push(built, symbol);
     }
     *out = built;
     return status;
@@ -15490,9 +15564,29 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = subject;
             return status;
         }
-        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES:
-            return kiln_c99_all_own_keys(host, argc > 0 ? args[0] : kiln_c99_undefined(), result,
-                                         depth, thrown);
+        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES: {
+            /* Names, so the symbol keys `Reflect.ownKeys` reports are dropped again here. The
+             * two operations exist precisely to be different: `getOwnPropertySymbols` is the
+             * other half, and `ownKeys` is both. */
+            kiln_value listed;
+            kiln_value named;
+            status = kiln_c99_all_own_keys(host, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                           &listed, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_new_array(&named);
+            for (index = 0; index < kiln_c99_array_of(listed)->count && status == KILN_C99_OK;
+                 ++index) {
+                kiln_value key = kiln_c99_array_of(listed)->elements[index];
+                if (key.tag == KILN_VALUE_SYMBOL) {
+                    continue;
+                }
+                status = kiln_c99_array_push(named, key);
+            }
+            *result = named;
+            return status;
+        }
         case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY: {
             kiln_value name = argc > 1 ? kiln_c99_property_key(args[1]) : kiln_c99_undefined();
             if (argc < 3 || name.tag != KILN_VALUE_STRING) {
@@ -15537,9 +15631,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             for (index = 0; index < object->count; ++index) {
                 kiln_value described;
                 int found;
+                kiln_value symbol;
                 const char *key = object->properties[index].key;
                 size_t key_len = object->properties[index].key_len;
-                if (key_len >= 2 && key[0] == '@' && key[1] == '@') {
+                /* A symbol-keyed property is described too -- this is how a faithful copy is
+                 * made, and one that quietly leaves them out is the bug this family had. It
+                 * lands in the result under the same reserved key it came from, so nothing here
+                 * needs to know it is a symbol beyond deciding to keep it. */
+                if (key_len >= 2 && key[0] == '@' && key[1] == '@' &&
+                    !kiln_c99_symbol_of_key(key, key_len, &symbol)) {
                     continue;
                 }
                 status = kiln_c99_describe_property(host, args[0], key, key_len, &described, &found,
