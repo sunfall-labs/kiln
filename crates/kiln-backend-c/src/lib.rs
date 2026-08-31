@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 11;
+pub const C_GENERATOR_VERSION: u32 = 12;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -16071,14 +16071,19 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return KILN_C99_OK;
             }
             if (receiver.tag == KILN_VALUE_ARRAY) {
-                /* An array's own properties are its live indices, its `length`, and whatever a
-                 * program put in the store beside them -- the same three the descriptor path
-                 * knows about, so it answers rather than a fourth restatement of them. */
-                kiln_value descriptor;
-                status = kiln_c99_describe_property(host, receiver, key.ptr, key.len, &descriptor,
-                                                    &found, depth, thrown);
+                kiln_array *held = kiln_c99_array_of(receiver);
+                double position = kiln_c99_key_index(key.ptr, key.len);
+                size_t slot;
+                found = kiln_c99_same_name(key.ptr, key.len, "length") ||
+                        (position >= 0.0 && (size_t)position < held->count &&
+                         !kiln_c99_is_hole(held->elements[(size_t)position]));
+                if (!found && held->properties.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *store = kiln_c99_object_of(held->properties);
+                    for (slot = 0; slot < store->count && !found; ++slot)
+                        found = kiln_c99_same_key(&store->properties[slot], key.ptr, key.len);
+                }
                 *result = kiln_c99_boolean(found);
-                return status;
+                return KILN_C99_OK;
             }
             if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
                 int enumerable;
