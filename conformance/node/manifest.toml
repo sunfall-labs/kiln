@@ -167,6 +167,13 @@ features = ["node:http", "node:net", "tokio-net", "half-close", "timers", "resou
 expected_stdout = "pass\n"
 
 [[test]]
+id = "node-v24.7.0/http/legacy-url-querystring"
+source = "upstream-adapted/http-legacy-url-querystring.mjs"
+status = "runnable"
+features = ["node:url", "node:querystring", "commonjs-compatible-builtins", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
 id = "node-v24.7.0/http/client-server-roundtrip"
 source = "../server/s01-http-hello.mjs"
 status = "runnable"

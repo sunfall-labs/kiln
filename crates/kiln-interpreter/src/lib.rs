@@ -336,7 +336,10 @@ pub enum Native {
     NodePathIsAbsolute,
     NodeWorkerThreads,
     NodeWorkerConstructor,
+    NodeQueryString,
+    NodeQueryStringParse,
     NodeUrl,
+    NodeUrlParse,
     NodeEventEmitter,
     NodeEventOn,
     NodeEventOnce,
@@ -1223,7 +1226,13 @@ impl Native {
             (Self::NodePath, "isAbsolute") => Some(Value::Native(Self::NodePathIsAbsolute)),
             (Self::NodePath, "sep") => Some(Value::String("/".to_owned())),
             (Self::NodeWorkerThreads, "Worker") => Some(Value::Native(Self::NodeWorkerConstructor)),
-            (Self::NodeUrl, "URL" | "default") => Some(Value::Native(Self::UrlConstructor)),
+            (Self::NodeQueryString, "parse" | "decode") => {
+                Some(Value::Native(Self::NodeQueryStringParse))
+            }
+            (Self::NodeQueryString, "default") => Some(Value::Native(Self::NodeQueryString)),
+            (Self::NodeUrl, "URL") => Some(Value::Native(Self::UrlConstructor)),
+            (Self::NodeUrl, "parse") => Some(Value::Native(Self::NodeUrlParse)),
+            (Self::NodeUrl, "default") => Some(Value::Native(Self::NodeUrl)),
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
             }
@@ -5014,7 +5023,8 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
             "finished",
         ],
         "util" => &["debuglog", "default", "format", "inherits"],
-        "url" => &["URL", "default"],
+        "querystring" => &["decode", "default", "parse"],
+        "url" => &["URL", "default", "parse"],
         _ => return None,
     })
 }
@@ -5041,6 +5051,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             "perf_hooks" => Native::NodePerfHooks,
             "os" => Native::NodeOs,
             "stream" => Native::NodeStream,
+            "querystring" => Native::NodeQueryString,
             "util" => Native::NodeUtil,
             "url" => Native::NodeUrl,
             _ => return None,
@@ -13989,6 +14000,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let base = arguments.get(1).map(Value::to_display_string);
                 Ok(url_object(parse_url(&input, base.as_deref())?))
             }
+            Native::NodeUrlParse => Ok(node_legacy_url_parse(
+                &arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default(),
+            )),
+            Native::NodeQueryStringParse => Ok(node_querystring_parse(
+                &arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default(),
+            )),
             Native::UrlSearchParamsGet => {
                 let Value::Object(object) = receiver else {
                     return Err(ExecutionError::TypeErrorMessage {
@@ -28487,6 +28510,58 @@ fn decode_form_component(input: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
+fn node_legacy_url_parse(input: &str) -> Value {
+    let fragment_at = input.find('#');
+    let query_at = input
+        .find('?')
+        .filter(|query| fragment_at.is_none_or(|fragment| *query < fragment));
+    let pathname_end = query_at.or(fragment_at).unwrap_or(input.len());
+    let pathname = &input[..pathname_end];
+    let query_end = fragment_at.unwrap_or(input.len());
+    let query = query_at.map_or("", |query| &input[query + 1..query_end]);
+    let search = query_at.map_or("", |query| &input[query..query_end]);
+    let hash = fragment_at.map_or("", |fragment| &input[fragment..]);
+    let mut object = ObjectData::default();
+    object.set("href", Value::String(input.into()));
+    object.set("pathname", Value::String(pathname.into()));
+    object.set("path", Value::String(format!("{pathname}{search}")));
+    object.set(
+        "search",
+        if query_at.is_some() {
+            Value::String(search.into())
+        } else {
+            Value::Null
+        },
+    );
+    object.set("query", Value::String(query.into()));
+    object.set(
+        "hash",
+        if fragment_at.is_some() {
+            Value::String(hash.into())
+        } else {
+            Value::Null
+        },
+    );
+    Value::Object(Rc::new(RefCell::new(object)))
+}
+
+fn node_querystring_parse(input: &str) -> Value {
+    let mut object = ObjectData::default();
+    for part in input.split('&').filter(|part| !part.is_empty()) {
+        let (name, value) = part.split_once('=').unwrap_or((part, ""));
+        let name = decode_form_component(name);
+        let value = Value::String(decode_form_component(value));
+        match object.get_own(&name).cloned() {
+            None => object.set(&name, value),
+            Some(Value::Array(values)) => values.borrow_mut().push(value),
+            Some(previous) => {
+                object.set(&name, Value::Array(ArrayData::new(vec![previous, value])))
+            }
+        }
+    }
+    Value::Object(Rc::new(RefCell::new(object)))
+}
+
 fn node_listeners(object: &Rc<RefCell<ObjectData>>, event: &str) -> Vec<NodeEventListener> {
     object
         .borrow()
@@ -31560,7 +31635,10 @@ fn call_native(
         | Native::NodePathIsAbsolute
         | Native::NodeWorkerThreads
         | Native::NodeWorkerConstructor
+        | Native::NodeQueryString
+        | Native::NodeQueryStringParse
         | Native::NodeUrl
+        | Native::NodeUrlParse
         | Native::NodeNet
         | Native::NodeNetCreateServer
         | Native::NodeNetConnect

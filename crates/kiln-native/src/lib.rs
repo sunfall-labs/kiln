@@ -3726,6 +3726,11 @@ mod tests {
                 .to_string(),
             "native Node execution does not yet materialize the `node:https` builtin"
         );
+        assert!(native_builtin_body(NodeBuiltin::QueryString).is_none());
+        assert!(!native_builtin_supports_export(
+            NodeBuiltin::QueryString,
+            "parse"
+        ));
     }
 
     #[test]

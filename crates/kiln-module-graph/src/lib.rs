@@ -2291,6 +2291,49 @@ mod tests {
     }
 
     #[test]
+    fn node_url_and_querystring_legacy_parsers_work_in_esm_and_commonjs() {
+        let project = TempProject::new();
+        project.write(
+            "bridge.cjs",
+            concat!(
+                "const url = require('url');",
+                "const qs = require('querystring');",
+                "const parsed = url.parse('/hello?hello=world&foo=b%3D%3Dar');",
+                "const query = qs.parse(parsed.query);",
+                "module.exports = parsed.pathname + ' ' + query.hello + ' ' + query.foo;",
+            ),
+        );
+        let entry = project.write(
+            "main.mjs",
+            concat!(
+                "import { parse as parseUrl } from 'node:url';",
+                "import { parse as parseQuery } from 'node:querystring';",
+                "import legacy from './bridge.cjs';",
+                "const parsed = parseUrl('/route?a=1&a=2#hash');",
+                "const query = parseQuery(parsed.query);",
+                "console.log(legacy);",
+                "console.log(parsed.pathname, parsed.search, parsed.hash, query.a.join(','));",
+            ),
+        );
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.root).expect("Node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build legacy URL/querystring graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute legacy URL/querystring graph");
+        assert_eq!(
+            host.into_stdout(),
+            "/hello world b==ar\n/route ?a=1&a=2 #hash 1,2\n"
+        );
+    }
+
+    #[test]
     fn node_reads_accessor_backed_module_exports_through_commonjs_semantics() {
         let project = TempProject::new();
         project.write(
