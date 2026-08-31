@@ -54,14 +54,19 @@ pub struct ResolvedModule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum NodeBuiltin {
     Assert,
+    Buffer,
     AsyncHooks,
     DiagnosticsChannel,
     Crypto,
     Dns,
     Events,
     FsPromises,
+    Fs,
     Net,
     Http,
+    Module,
+    Path,
+    WorkerThreads,
     Http2,
     Https,
     PerfHooks,
@@ -75,14 +80,19 @@ impl NodeBuiltin {
     pub fn parse(specifier: &str) -> Option<Self> {
         Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "assert" | "assert/strict" => Self::Assert,
+            "buffer" => Self::Buffer,
             "async_hooks" => Self::AsyncHooks,
             "diagnostics_channel" => Self::DiagnosticsChannel,
             "crypto" => Self::Crypto,
             "dns" => Self::Dns,
             "events" => Self::Events,
             "fs/promises" => Self::FsPromises,
+            "fs" => Self::Fs,
             "net" => Self::Net,
             "http" => Self::Http,
+            "module" => Self::Module,
+            "path" => Self::Path,
+            "worker_threads" => Self::WorkerThreads,
             "http2" => Self::Http2,
             "https" => Self::Https,
             "perf_hooks" => Self::PerfHooks,
@@ -97,14 +107,19 @@ impl NodeBuiltin {
     pub const fn specifier(self) -> &'static str {
         match self {
             Self::Assert => "node:assert",
+            Self::Buffer => "node:buffer",
             Self::AsyncHooks => "node:async_hooks",
             Self::DiagnosticsChannel => "node:diagnostics_channel",
             Self::Crypto => "node:crypto",
             Self::Dns => "node:dns",
             Self::Events => "node:events",
             Self::FsPromises => "node:fs/promises",
+            Self::Fs => "node:fs",
             Self::Net => "node:net",
             Self::Http => "node:http",
+            Self::Module => "node:module",
+            Self::Path => "node:path",
+            Self::WorkerThreads => "node:worker_threads",
             Self::Http2 => "node:http2",
             Self::Https => "node:https",
             Self::PerfHooks => "node:perf_hooks",
@@ -1890,8 +1905,13 @@ mod tests {
         for (specifier, builtin) in [
             ("node:events", NodeBuiltin::Events),
             ("node:fs/promises", NodeBuiltin::FsPromises),
+            ("node:buffer", NodeBuiltin::Buffer),
+            ("node:fs", NodeBuiltin::Fs),
             ("node:net", NodeBuiltin::Net),
             ("node:http", NodeBuiltin::Http),
+            ("node:module", NodeBuiltin::Module),
+            ("node:path", NodeBuiltin::Path),
+            ("node:worker_threads", NodeBuiltin::WorkerThreads),
         ] {
             let resolved = resolver
                 .resolve(specifier, &importer)
@@ -1918,12 +1938,39 @@ mod tests {
         let project = TempProject::new();
         let importer = project.write("main.js", "");
         let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
-        for name in ["events", "fs/promises", "net", "http"] {
+        for name in [
+            "events",
+            "fs/promises",
+            "buffer",
+            "fs",
+            "net",
+            "http",
+            "module",
+            "path",
+            "worker_threads",
+        ] {
             assert_eq!(
                 resolver.resolve(name, &importer).unwrap(),
                 resolver
                     .resolve(&format!("node:{name}"), &importer)
                     .unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn bounded_node_builtin_parse_and_specifier_round_trip() {
+        for builtin in [
+            NodeBuiltin::Buffer,
+            NodeBuiltin::Fs,
+            NodeBuiltin::Module,
+            NodeBuiltin::Path,
+            NodeBuiltin::WorkerThreads,
+        ] {
+            assert_eq!(NodeBuiltin::parse(builtin.specifier()), Some(builtin));
+            assert_eq!(
+                NodeBuiltin::parse(builtin.specifier().trim_start_matches("node:")),
+                Some(builtin)
             );
         }
     }
