@@ -730,6 +730,8 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
+static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);
+static int kiln_c99_install_event_emitter_methods(kiln_value target);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
@@ -1017,6 +1019,7 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
 static size_t kiln_c99_string_length(kiln_value value) {
 static double kiln_c99_array_index(kiln_value key) {
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
+static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
 static int kiln_c99_proxy_get(kiln_host *host, kiln_value proxy, kiln_value key,
@@ -1060,6 +1063,7 @@ static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fal
 static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_install_event_emitter_methods(kiln_value target) {
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
 static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len) {

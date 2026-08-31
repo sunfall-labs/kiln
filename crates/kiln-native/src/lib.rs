@@ -2006,10 +2006,6 @@ fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'s
     match builtin {
         NodeBuiltin::Events => Some(
             r#"kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);
-int status = kiln_c99_define_method(constructor, "EventEmitter", 12, constructor);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_define_method(constructor, "default", 7, constructor);
-if (status != KILN_C99_OK) return status;
 exports[0] = constructor;
 exports[1] = constructor;"#,
         ),
@@ -2815,6 +2811,34 @@ typedef struct kiln_value {
     size_t len;
 } kiln_value;
 
+static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
+    kiln_value value = { KILN_VALUE_STRING, 0, 0, phase, 0 };
+    static char text[2048];
+    size_t phase_len = strlen(phase);
+    size_t module_len = strlen(module);
+    const char prefix[] = "phase=";
+    const char middle[] = " module=";
+    size_t total = sizeof(prefix) - 1 + phase_len + sizeof(middle) - 1 + module_len;
+    if (total >= sizeof(text)) total = sizeof(text) - 1;
+    value.len = 0;
+    memcpy(text + value.len, prefix, sizeof(prefix) - 1); value.len += sizeof(prefix) - 1;
+    if (value.len + phase_len > total) phase_len = total - value.len;
+    memcpy(text + value.len, phase, phase_len); value.len += phase_len;
+    if (value.len < total) {
+        size_t take = sizeof(middle) - 1;
+        if (take > total - value.len) take = total - value.len;
+        memcpy(text + value.len, middle, take); value.len += take;
+    }
+    if (value.len < total) {
+        size_t take = module_len;
+        if (take > total - value.len) take = total - value.len;
+        memcpy(text + value.len, module, take); value.len += take;
+    }
+    text[value.len] = '\0';
+    value.ptr = text;
+    return value;
+}
+
 typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t argc,
                                  const kiln_value *arguments, kiln_value *result);
 typedef struct kiln_host {
@@ -3021,12 +3045,13 @@ int main(void) {
                 .to_string_lossy();
             writeln!(
                 output,
-                "    status = {}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+                "    status = {}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
                 module.symbol,
                 native_c_string(&filename),
                 filename.len(),
                 native_c_string(&dirname),
                 dirname.len(),
+                native_c_string(&filename),
                 module.symbol,
             )
             .unwrap();
@@ -3066,7 +3091,8 @@ int main(void) {
         if node.source == ModuleSource::CommonJs {
             writeln!(
                 output,
-                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &result, &result);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}"
+                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &result, &result);\n    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                native_c_string(&node.path.to_string_lossy())
             )
             .unwrap();
             if node.path == graph.entry() {
@@ -3095,9 +3121,12 @@ int main(void) {
         // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
         // reference cannot cross the boundary and printing it is the only thing left to do with
         // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
-        output.push_str(
-            "    if (status != 0) { kiln_cli_report_failure(status, result); goto cleanup; }\n",
-        );
+        writeln!(
+            output,
+            "    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"module-enter\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+            native_c_string(&node.path.to_string_lossy())
+        )
+        .unwrap();
         if node.path == graph.entry() {
             output.push_str("    entry_result = result;\n");
         }

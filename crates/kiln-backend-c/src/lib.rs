@@ -2825,6 +2825,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                  size_t key_len, kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
+static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);
+static int kiln_c99_install_event_emitter_methods(kiln_value target);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
@@ -3540,9 +3542,9 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
         if (!kiln_c99_is_callable(constructor) || !kiln_c99_is_callable(parent))
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         "The constructor and super constructor must be functions");
-        status = kiln_c99_prototype_object(constructor, &constructor_prototype);
+        status = kiln_c99_callable_prototype(constructor, &constructor_prototype);
         if (status == KILN_C99_OK)
-            status = kiln_c99_prototype_object(parent, &parent_prototype);
+            status = kiln_c99_callable_prototype(parent, &parent_prototype);
         if (status == KILN_C99_OK)
             status = kiln_c99_set_prototype(constructor_prototype, parent_prototype);
         *out = kiln_c99_undefined();
@@ -7541,6 +7543,32 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
     return KILN_C99_OK;
 }
 
+/* A prototype belongs to the JavaScript callable, not to its backend representation. Generated
+ * functions keep theirs in the closure; Rust-backed constructors use stable realm-owned
+ * objects. Keeping that distinction behind this helper prevents a METHOD id from ever being
+ * mistaken for a kiln_closure pointer by reflection, `util.inherits`, or `instanceof`. */
+static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
+    static kiln_value event_emitter_prototype;
+    int status;
+    if (callable.tag == KILN_VALUE_FUNCTION) {
+        return kiln_c99_prototype_object(callable, out);
+    }
+    if (callable.tag != KILN_VALUE_METHOD ||
+        callable.bits != KILN_C99_METHOD_NODE_EVENT_EMITTER) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    if (event_emitter_prototype.tag == KILN_VALUE_UNDEFINED) {
+        status = kiln_c99_new_object(&event_emitter_prototype);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_define_method(event_emitter_prototype, "constructor", 11, callable);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_install_event_emitter_methods(event_emitter_prototype);
+        if (status != KILN_C99_OK) return status;
+    }
+    *out = event_emitter_prototype;
+    return KILN_C99_OK;
+}
+
 /* The store `f.x = 1` writes into. Separate from the prototype object: a static belongs to the
  * function and an instance method belongs to what it constructs. */
 static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
@@ -8706,6 +8734,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             kiln_c99_same_name(key, key_len, "bigint")) {
             *out = kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT);
             return KILN_C99_OK;
+        }
+        if (target.tag == KILN_VALUE_METHOD &&
+            target.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER &&
+            (kiln_c99_same_name(key, key_len, "EventEmitter") ||
+             kiln_c99_same_name(key, key_len, "default"))) {
+            *out = target;
+            return KILN_C99_OK;
+        }
+        if (target.tag == KILN_VALUE_METHOD &&
+            target.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER &&
+            kiln_c99_same_name(key, key_len, "prototype")) {
+            return kiln_c99_callable_prototype(target, out);
         }
         /* `parseInt.name`. A method has no other property worth answering, and a wrong answer
          * here reads as a missing function three frames later. */
@@ -10651,6 +10691,27 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
  * backend values makes emit synchronous, preserves registration order, and lets every future
  * I/O facade use the same callback semantics without exposing backend object layout across the
  * generated-module boundary. */
+static int kiln_c99_install_event_emitter_methods(kiln_value target) {
+    static const struct { const char *name; size_t length; uint64_t code; } methods[] = {
+        {"on", 2, KILN_C99_METHOD_NODE_EVENT_ON},
+        {"addListener", 11, KILN_C99_METHOD_NODE_EVENT_ON},
+        {"once", 4, KILN_C99_METHOD_NODE_EVENT_ONCE},
+        {"emit", 4, KILN_C99_METHOD_NODE_EVENT_EMIT},
+        {"listeners", 9, KILN_C99_METHOD_NODE_EVENT_LISTENERS},
+        {"removeListener", 14, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER},
+        {"off", 3, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER},
+        {"removeAllListeners", 18, KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS},
+        {"setMaxListeners", 15, KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS},
+    };
+    size_t index;
+    int status = KILN_C99_OK;
+    for (index = 0; status == KILN_C99_OK && index < sizeof methods / sizeof *methods; ++index) {
+        status = kiln_c99_define_method(target, methods[index].name, methods[index].length,
+                                        kiln_c99_method(methods[index].code));
+    }
+    return status;
+}
+
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
                                kiln_value receiver, const kiln_value *args, size_t argc,
                                int depth, kiln_value *thrown) {
@@ -10667,36 +10728,7 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
             status = kiln_c99_new_object(result);
             if (status != KILN_C99_OK) return status;
         }
-        status = kiln_c99_define_method(*result, "on", 2,
-                                        kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_ON));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(*result, "addListener", 11,
-                                            kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_ON));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(*result, "once", 4,
-                                            kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_ONCE));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(*result, "emit", 4,
-                                            kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMIT));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(
-                *result, "listeners", 9, kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_LISTENERS));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(
-                *result, "removeListener", 14,
-                kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(
-                *result, "off", 3, kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(
-                *result, "removeAllListeners", 18,
-                kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(
-                *result, "setMaxListeners", 15,
-                kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS));
-        return status;
+        return kiln_c99_install_event_emitter_methods(*result);
     }
     if (receiver.tag != KILN_VALUE_OBJECT) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
@@ -20609,9 +20641,16 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             return kiln_c99_node_http(host, result, callee.bits, kiln_c99_undefined(), args, argc,
                                       depth, thrown);
         }
-        if (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER)
-            return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
-                                       depth, thrown);
+        if (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER) {
+            kiln_value prototype;
+            status = kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args,
+                                         argc, depth, thrown);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_callable_prototype(callee, &prototype);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_set_prototype(*result, prototype);
+            return status;
+        }
         return kiln_c99_node_stream(host, result, callee.bits, kiln_c99_undefined(), args, argc,
                                     depth, thrown);
     }
@@ -25031,11 +25070,23 @@ static int listener(kiln_host *host, kiln_value *result, kiln_value *upvalues,
     *result = kiln_c99_undefined();
     return KILN_C99_OK;
 }}
+static int child_constructor(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+                             kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                             kiln_value *thrown, kiln_generator *frame) {{
+    (void)host; (void)upvalues; (void)args; (void)argc; (void)depth; (void)thrown; (void)frame;
+    *result = receiver;
+    return KILN_C99_OK;
+}}
 int main(void) {{
     kiln_value exports[1];
     kiln_value result;
     kiln_value emitter;
     kiln_value callback;
+    kiln_value child;
+    kiln_value child_instance;
+    kiln_value child_prototype;
+    kiln_value parent_prototype;
+    kiln_value inherited;
     kiln_value args[2];
     kiln_value thrown = kiln_c99_undefined();
     if (kiln_c99_make_closure(&callback, listener, "listener", 8, 0, 1, 0, 0, 0, 0,
@@ -25049,6 +25100,21 @@ int main(void) {{
        if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
+    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, 0, 0, 0, 0, 0, 0,
+                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK) return 34;
+    args[0] = child; args[1] = exports[0];
+    if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_INHERITS, args, 2, 0,
+                           &thrown) != KILN_C99_OK) return 35;
+    if (kiln_c99_construct(NULL, &child_instance, child, NULL, 0, 0,
+                           &thrown) != KILN_C99_OK) return 36;
+    if (kiln_c99_get(NULL, child_instance, "on", 2, &inherited, 0,
+                     &thrown) != KILN_C99_OK ||
+        inherited.tag != KILN_VALUE_METHOD ||
+        inherited.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 37;
+    if (kiln_c99_callable_prototype(child, &child_prototype) != KILN_C99_OK ||
+        kiln_c99_callable_prototype(exports[0], &parent_prototype) != KILN_C99_OK ||
+        kiln_c99_object_of(child_prototype)->prototype.bits != parent_prototype.bits) return 38;
     args[0] = kiln_c99_copy_text("tick", 4); args[1] = callback;
     if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_ON, emitter, args, 2,
                                0, &thrown) != KILN_C99_OK) return 4;
