@@ -61,9 +61,9 @@
       "features": ["buffer", "typed-arrays"]
     },
     "parallel/test-event-emitter-add-listeners.js": {
-      "expectation": "expected-failure",
+      "expectation": "pass",
       "sha256": "03746da964b9490e004015a55d0692c51161fe11058273053ad9dcd8a86c42a3",
-      "reason": "partial: newListener ordering, listener identity, emit arguments, and setMaxListeners pass; the upstream test's re-entrant newListener ordering still needs a complete adapted case",
+      "adapted_complete": true,
       "adapted": ["upstream-adapted/event-emitter-add-listeners.mjs"],
       "features": ["node:events", "event-emitter"]
     },
