@@ -10,9 +10,9 @@
 //! logged an array. So the two paths are pinned against each other byte for byte.
 //!
 //! The second is the convention `tests/structured_ir.rs` already set: **a finding is pinned as a
-//! test that fails when it is fixed.** The three at the bottom are wrong answers as this is
-//! written, they are each one line, node's answer for each was observed and not transcribed, and
-//! when somebody fixes them these tests are the notification.
+//! test that fails when it is fixed.** Two of the three original wrong answers are now fixed and
+//! remain as regression tests; the remaining finding is still pinned below. Node's answer for
+//! each was observed and not transcribed.
 
 use kiln_fuzz::engines::{self, Interpreted};
 use kiln_fuzz::js::JsProgram;
@@ -186,13 +186,9 @@ fn the_builtin_call_path_converts_an_object_with_a_user_value_of() {
     assert_eq!(class, Class::Agrees);
 }
 
-/// `Symbol.toPrimitive` is not consulted at all. **A wrong answer as this is written.**
-///
-/// Both engines skip it and fall through to `valueOf`/`toString`, so both are wrong in the same
-/// way and the two-engine comparison sees agreement. The number hint gets `NaN` where node gets
-/// `5`; the string hint gets `[object Object]` where node gets `S`.
+/// `Symbol.toPrimitive` is consulted before the ordinary conversion methods.
 #[test]
-fn symbol_to_primitive_is_not_consulted() {
+fn symbol_to_primitive_is_consulted() {
     let node = node_or_skip!();
     let (class, reference, kiln) = against_node(
         &node,
@@ -201,15 +197,14 @@ fn symbol_to_primitive_is_not_consulted() {
         "toprimitive",
     );
     assert_eq!(reference, "5\nS\n");
-    assert_eq!(kiln, "NaN\n[object Object]\n");
-    assert_eq!(class, Class::InterpreterDiffersFromNode);
+    assert_eq!(kiln, reference);
+    assert_eq!(class, Class::Agrees);
 }
 
-/// A conversion with no primitive available must raise a TypeError. **A wrong answer as this is
-/// written**, and worse than a different answer: kiln prints a value where the specification says
-/// the program has none, so a program that should have stopped keeps running.
+/// A conversion with no primitive available raises a TypeError before printing anything. The
+/// interpreter reports that unsupported throw path as a refusal, after matching node's output.
 #[test]
-fn a_conversion_with_no_primitive_available_does_not_raise() {
+fn a_conversion_with_no_primitive_available_raises() {
     let node = node_or_skip!();
     let (class, reference, kiln) = against_node(
         &node,
@@ -217,8 +212,8 @@ fn a_conversion_with_no_primitive_available_does_not_raise() {
         "noprimitive",
     );
     assert_eq!(reference, "", "node threw before printing anything");
-    assert_eq!(kiln, "[object Object]1\n");
-    assert_eq!(class, Class::InterpreterDiffersFromNode);
+    assert_eq!(kiln, reference);
+    assert_eq!(class, Class::Refused);
 }
 
 /// A lone surrogate escape in a string literal is one code unit. **A wrong answer as this is
