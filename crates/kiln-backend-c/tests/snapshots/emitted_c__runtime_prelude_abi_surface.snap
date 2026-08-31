@@ -1026,6 +1026,7 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
 static kiln_value kiln_c99_control_diagnostic(void) {
 #define KILN_DIAGNOSTIC_DECIMAL(subject) do { \
 #undef KILN_DIAGNOSTIC_DECIMAL
+static void kiln_c99_note_refusal(const char *site, size_t instruction,
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
 static kiln_value kiln_c99_copy_utf8_lossy(const uint8_t *bytes, size_t length) {
