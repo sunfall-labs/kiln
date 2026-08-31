@@ -30,6 +30,12 @@ pub const HOST_CAPABILITY_MARKER: &str = "kiln: host capability not provided:";
 /// interpreter: it is the runner's statement about what this embedding can do.  `global` is real;
 /// every facility Kiln cannot yet provide throws a marked error so the case is classified as
 /// unsupported rather than failing with `$262 is not defined`, which says nothing about why.
+///
+/// `detachArrayBuffer` is spelled as a `transfer` whose result is dropped rather than as a hook
+/// of its own, because that *is* detaching: `transfer` is the operation the language defines for
+/// giving a buffer's bytes away, and it leaves the receiver detached as its whole purpose.  A
+/// second, host-only path to the same state would be a second thing to keep correct, and the
+/// engine would then have a way to detach a buffer that no program could reach.
 /// The harness file Test262 requires for every `async` test, per INTERPRETING.md.
 pub const ASYNC_INCLUDE: &str = "doneprintHandle.js";
 
