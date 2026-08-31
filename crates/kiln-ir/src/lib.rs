@@ -509,6 +509,8 @@ pub enum Builtin {
     /// The asynchronous half of the same pair. Appended for the reason above: the discriminant
     /// is part of the artifact cache key, so a new name goes at the end.
     AsyncDisposableStack,
+    /// The error kind nothing throws any more. Appended for the same reason.
+    EvalError,
 }
 
 impl Builtin {
@@ -579,6 +581,7 @@ impl Builtin {
             "DisposableStack" => Some(Self::DisposableStack),
             "SuppressedError" => Some(Self::SuppressedError),
             "AsyncDisposableStack" => Some(Self::AsyncDisposableStack),
+            "EvalError" => Some(Self::EvalError),
 
             _ => None,
         }
@@ -647,6 +650,7 @@ impl Builtin {
             Self::DisposableStack => "DisposableStack",
             Self::SuppressedError => "SuppressedError",
             Self::AsyncDisposableStack => "AsyncDisposableStack",
+            Self::EvalError => "EvalError",
         }
     }
 }
