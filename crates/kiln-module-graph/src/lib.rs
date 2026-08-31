@@ -2041,6 +2041,78 @@ mod tests {
     }
 
     #[test]
+    fn node_executes_top_level_await_before_finishing_module() {
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.mjs",
+            "await Promise.resolve(41); console.log('module-ready');",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build top-level await graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute top-level await graph");
+        assert_eq!(host.into_stdout(), "module-ready\n");
+    }
+
+    #[test]
+    fn node_reports_rejected_top_level_await_as_module_failure() {
+        let project = TempProject::new();
+        let entry = project.write("main.mjs", "await Promise.reject('module failed');");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build rejecting top-level await graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        let error = graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect_err("rejected top-level await must fail module evaluation");
+        assert!(matches!(
+            error,
+            ModuleGraphError::Execution {
+                error: ExecutionError::Uncaught { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn node_executes_top_level_for_await() {
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.mjs",
+            "for await (const value of [Promise.resolve(7)]) console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build top-level for-await graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute top-level for-await graph");
+        assert_eq!(host.into_stdout(), "7\n");
+    }
+
+    #[test]
     fn node_commonjs_builtin_projection_preserves_namespace_named_exports() {
         let project = TempProject::new();
         project.write(
