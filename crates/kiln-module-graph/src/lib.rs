@@ -13,8 +13,9 @@ use std::path::{Path, PathBuf};
 use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
-    ExecutionError, ExecutionLimits, ExecutionResult, Value, execute_module_in_runtime,
-    execute_node_module_in_runtime, node_builtin_export_names, node_builtin_exports,
+    ExecutionError, ExecutionLimits, ExecutionResult, ModuleRealmSession, Value,
+    execute_module_in_runtime, execute_node_module_in_session, node_builtin_export_names,
+    node_builtin_exports,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -595,6 +596,7 @@ impl ModuleGraph {
                 message: error.to_string(),
             },
         })?;
+        let mut node_session = node.then(ModuleRealmSession::default);
 
         for path in &self.order {
             let module_node = self
@@ -658,12 +660,14 @@ impl ModuleGraph {
                 ..limits
             };
             let result = if node {
-                execute_node_module_in_runtime(
+                execute_node_module_in_session(
                     &module_node.program,
                     &imports,
                     host,
                     remaining_limits,
                     &mut runtime,
+                    node_session.as_mut().expect("Node mode owns a session"),
+                    path == &self.entry,
                 )
             } else {
                 execute_module_in_runtime(
@@ -1132,6 +1136,31 @@ mod tests {
         }
     }
 
+    struct ServerHostForPort {
+        sender: Option<std::sync::mpsc::Sender<u16>>,
+        output: Vec<String>,
+    }
+
+    impl HostOps for ServerHostForPort {
+        fn call(
+            &mut self,
+            operation: HostOp,
+            arguments: &[HostValue],
+        ) -> Result<HostValue, HostError> {
+            assert_eq!(operation, HostOp::WriteStdout);
+            let text = arguments
+                .first()
+                .map_or_else(String::new, HostValue::to_js_string);
+            if let Ok(port) = text.parse::<u16>()
+                && let Some(sender) = self.sender.take()
+            {
+                sender.send(port).expect("publish server port");
+            }
+            self.output.push(text);
+            Ok(HostValue::Undefined)
+        }
+    }
+
     #[test]
     fn named_import_alias_links_and_executes() {
         let project = TempProject::new();
@@ -1511,6 +1540,139 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
         assert!(response.contains("Content-Type: text/plain\r\n"));
         assert!(response.ends_with("POST 12"));
+    }
+
+    #[test]
+    fn node_http_request_pause_and_resume_control_tokio_reads() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { createServer } from 'node:http';",
+                "let server;",
+                "server = createServer((request, response) => {",
+                "  request.pause();",
+                "  let chunks = 0;",
+                "  request.on('data', chunk => { chunks += 1; });",
+                "  request.on('end', () => { response.end(String(chunks)); server.close(); });",
+                "  setTimeout(() => request.resume(), 1);",
+                "});",
+                "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build paused HTTP graph");
+
+        let (port_sender, port_receiver) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let port = port_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("server publishes its port");
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+            stream
+                .write_all(
+                    b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                )
+                .expect("write request");
+            stream.shutdown(Shutdown::Write).expect("finish request");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).expect("read response");
+            response
+        });
+        let mut host = ServerHostForPort {
+            sender: Some(port_sender),
+            output: Vec::new(),
+        };
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("serve paused request");
+        let response = client.join().expect("client completes");
+        assert!(response.ends_with('1'), "{response:?}");
+    }
+
+    #[test]
+    fn node_http_response_write_streams_chunked_body_and_reports_pressure() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { createServer } from 'node:http';",
+                "let server;",
+                "server = createServer((request, response) => {",
+                "  const ready = response.write('hello ');",
+                "  response.end('tokio');",
+                "  console.log(ready);",
+                "  server.close();",
+                "});",
+                "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build streaming HTTP graph");
+
+        let (port_sender, port_receiver) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let port = port_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("server publishes its port");
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+            stream
+                .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                .expect("write request");
+            stream.shutdown(Shutdown::Write).expect("finish request");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).expect("read response");
+            response
+        });
+        let mut host = ServerHostForPort {
+            sender: Some(port_sender),
+            output: Vec::new(),
+        };
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("serve streaming response");
+        let response = client.join().expect("client completes");
+        assert!(
+            response.contains("Transfer-Encoding: chunked\r\n"),
+            "{response:?}"
+        );
+        assert!(
+            response.ends_with("6\r\nhello \r\n5\r\ntokio\r\n0\r\n\r\n"),
+            "{response:?}"
+        );
+        assert_eq!(host.output.last().map(String::as_str), Some("true"));
     }
 
     #[test]

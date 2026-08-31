@@ -258,6 +258,8 @@ pub enum Native {
     NodeSocketWrite,
     NodeSocketEnd,
     NodeSocketDestroy,
+    NodeReadablePause,
+    NodeReadableResume,
     NodeHttp,
     NodeHttpCreateServer,
     NodeServerListen,
@@ -1384,6 +1386,7 @@ pub struct ObjectData {
 enum NodeObject {
     NodeServer(Rc<RefCell<NodeServerState>>),
     NetSocket(Rc<RefCell<NetSocketState>>),
+    HttpIncoming(Rc<RefCell<HttpIncomingState>>),
     HttpResponse(Rc<RefCell<HttpResponseState>>),
 }
 
@@ -1414,6 +1417,7 @@ struct NodeConnection {
     driver: StreamDriver,
     decoder: Http1Decoder,
     request: Option<Value>,
+    response: Option<Value>,
     close_after_finish: bool,
     closed: bool,
 }
@@ -1425,7 +1429,15 @@ struct HttpResponseState {
     status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
+    streaming: bool,
+    chunked: bool,
     ended: bool,
+    object: Option<Weak<RefCell<ObjectData>>>,
+}
+
+#[derive(Debug)]
+struct HttpIncomingState {
+    stream: kiln_host_abi::ResourceId,
 }
 
 #[derive(Clone, Debug)]
@@ -3752,6 +3764,34 @@ pub struct ModuleExecutionResult {
     pub exports: Vec<ModuleExportValue>,
 }
 
+/// Realm-owned state shared by every module body in one graph execution.
+///
+/// Module frames remain short-lived, but Node resources and language jobs do not: a dependency
+/// can create a server whose callback runs while the entry module is active. This session is the
+/// explicit ownership seam that prevents those resources from becoming ambient globals or being
+/// stranded in the VM that happened to evaluate their declaring module.
+pub struct ModuleRealmSession {
+    shared: Rc<RefCell<ModuleRealmShared>>,
+}
+
+struct ModuleRealmShared {
+    pending_host: Vec<PendingHostRequest>,
+    pending_node: Vec<PendingNodeRequest>,
+    node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+}
+
+impl Default for ModuleRealmSession {
+    fn default() -> Self {
+        Self {
+            shared: Rc::new(RefCell::new(ModuleRealmShared {
+                pending_host: Vec::new(),
+                pending_node: Vec::new(),
+                node_servers: Vec::new(),
+            })),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExecutionError {
     ImportCountMismatch {
@@ -4605,7 +4645,36 @@ pub fn execute_node_module_in_runtime<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
-    execute_module_in_runtime_mode(module, import_values, host, limits, runtime, true)
+    let mut session = ModuleRealmSession::default();
+    execute_node_module_in_session(
+        module,
+        import_values,
+        host,
+        limits,
+        runtime,
+        &mut session,
+        true,
+    )
+}
+
+/// Execute one Node module while preserving realm resources and jobs for subsequent modules.
+pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+    session: &mut ModuleRealmSession,
+    drain: bool,
+) -> Result<ModuleExecutionResult, ExecutionError> {
+    execute_module_in_runtime_mode_with_session(
+        module,
+        import_values,
+        host,
+        limits,
+        runtime,
+        Some((session, drain)),
+    )
 }
 
 fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
@@ -4615,6 +4684,36 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
     node: bool,
+) -> Result<ModuleExecutionResult, ExecutionError> {
+    if node {
+        let mut session = ModuleRealmSession::default();
+        execute_module_in_runtime_mode_with_session(
+            module,
+            import_values,
+            host,
+            limits,
+            runtime,
+            Some((&mut session, true)),
+        )
+    } else {
+        execute_module_in_runtime_mode_with_session(
+            module,
+            import_values,
+            host,
+            limits,
+            runtime,
+            None,
+        )
+    }
+}
+
+fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
+    module: &ModuleProgram,
+    import_values: &[Value],
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+    session: Option<(&mut ModuleRealmSession, bool)>,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     if import_values.len() != module.imports.len() {
         return Err(ExecutionError::ImportCountMismatch {
@@ -4645,15 +4744,19 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
     // made it: the importer calls it against *this* table, and holding it by reference would tie
     // every exported function to one module execution.
     let mut vm = Vm::new(Rc::new(module.program.clone()), host, locals, limits);
-    if node {
+    if session.is_some() {
         vm.node_host = Some(runtime as *mut RealmRuntime as *mut dyn NodeHostOps);
+    }
+    let drain = session.as_ref().is_some_and(|(_, drain)| *drain);
+    if let Some((session, _)) = session.as_ref() {
+        vm.module_realm = Some(Rc::clone(&session.shared));
     }
     let execution = runtime.enter(|| vm.run())?;
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
-    if node {
+    if drain {
         vm.run_node_event_loop(runtime)?;
-    } else {
+    } else if vm.node_host.is_none() {
         vm.run_event_loop(runtime)?;
     }
     let execution = ExecutionResult {
@@ -4931,6 +5034,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Live HTTP servers in this realm. A separate registry makes response-to-stream lookup
     /// independent of which host operations happen to be pending at that moment.
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
+    /// Stable graph-realm ownership for resources referenced by callbacks created in another VM.
+    module_realm: Option<Rc<RefCell<ModuleRealmShared>>>,
     /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
     node_host: Option<*mut dyn NodeHostOps>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
@@ -5036,6 +5141,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
+            module_realm: None,
             node_host: None,
             caught: None,
             unhandled: None,
@@ -5089,6 +5195,30 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn push_pending_node(&mut self, pending: PendingNodeRequest) {
+        if let Some(realm) = &self.module_realm {
+            realm.borrow_mut().pending_node.push(pending);
+        } else {
+            self.pending_node.push(pending);
+        }
+    }
+
+    fn push_pending_host(&mut self, pending: PendingHostRequest) {
+        if let Some(realm) = &self.module_realm {
+            realm.borrow_mut().pending_host.push(pending);
+        } else {
+            self.pending_host.push(pending);
+        }
+    }
+
+    fn register_node_server(&mut self, state: &Rc<RefCell<NodeServerState>>) {
+        if let Some(realm) = &self.module_realm {
+            realm.borrow_mut().node_servers.push(Rc::clone(state));
+        } else {
+            self.node_servers.push(Rc::clone(state));
+        }
+    }
+
     fn dispatch_node_net(
         &mut self,
         native: Native,
@@ -5112,7 +5242,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     object: None,
                 }));
                 let object = node_server_object(&state);
-                self.node_servers.push(Rc::clone(&state));
+                self.register_node_server(&state);
                 Ok(object)
             }
             Native::NodeNetConnect => {
@@ -5138,8 +5268,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let request = unsafe {
                     (&mut *host_ops).start_node_op(AsyncHostOp::TcpConnect { host, port }, true)
                 };
-                self.pending_node
-                    .push(PendingNodeRequest::Connect { request, state });
+                self.push_pending_node(PendingNodeRequest::Connect { request, state });
                 Ok(socket)
             }
             Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy => {
@@ -5208,6 +5337,45 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(result)
     }
 
+    fn dispatch_node_readable(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let state = node_http_incoming(receiver)?;
+        let resource = state.borrow().stream;
+        let owner = self
+            .http_server_for_stream(resource)
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "node:http request lost its connection".into(),
+            })?;
+        let actions = {
+            let mut owner = owner.borrow_mut();
+            let connection = owner
+                .streams
+                .iter_mut()
+                .find(|stream| stream.driver.resource() == resource)
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http request lost its stream".into(),
+                })?;
+            match native {
+                Native::NodeReadablePause => {
+                    connection.driver.pause_reading();
+                    Vec::new()
+                }
+                Native::NodeReadableResume => connection.driver.resume_reading(),
+                _ => unreachable!("only readable flow-control natives dispatch here"),
+            }
+        };
+        for action in actions {
+            self.start_http_stream_action(&owner, resource, action, instruction)?;
+        }
+        Ok(receiver.clone())
+    }
+
     fn dispatch_node_http(
         &mut self,
         native: Native,
@@ -5231,7 +5399,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     object: None,
                 }));
                 let object = node_server_object(&state);
-                self.node_servers.push(Rc::clone(&state));
+                self.register_node_server(&state);
                 Ok(object)
             }
             Native::NodeServerListen => {
@@ -5323,7 +5491,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "node:http server rejected its own host operation".into(),
             });
         }
-        self.pending_node.push(PendingNodeRequest::Server {
+        self.push_pending_node(PendingNodeRequest::Server {
             request,
             state: Rc::clone(state),
         });
@@ -5343,8 +5511,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
                 unsafe { (&mut *host).cancel_node_op(request) };
-                self.pending_node
-                    .retain(|pending| pending.request() != request);
+                if let Some(realm) = &self.module_realm {
+                    realm
+                        .borrow_mut()
+                        .pending_node
+                        .retain(|pending| pending.request() != request);
+                } else {
+                    self.pending_node
+                        .retain(|pending| pending.request() != request);
+                }
                 Ok(())
             }
             ServerAction::Start(operation) => {
@@ -5360,6 +5535,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     decoder: Http1Decoder::default(),
                     request: None,
+                    response: None,
                     close_after_finish: false,
                     closed: false,
                 };
@@ -5424,7 +5600,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &self,
         resource: kiln_host_abi::ResourceId,
     ) -> Option<Rc<RefCell<NodeServerState>>> {
-        self.node_servers
+        let shared = self.module_realm.as_ref().map(|realm| realm.borrow());
+        let servers = shared
+            .as_ref()
+            .map_or(self.node_servers.as_slice(), |realm| {
+                realm.node_servers.as_slice()
+            });
+        servers
             .iter()
             .find(|server| {
                 server
@@ -5462,7 +5644,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "node:http stream rejected its own host operation".into(),
                     });
                 }
-                self.pending_node.push(PendingNodeRequest::Stream {
+                self.push_pending_node(PendingNodeRequest::Stream {
                     request,
                     server: Rc::clone(server),
                     resource,
@@ -5576,6 +5758,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
+                if matches!(action, StreamAction::Event(StreamEvent::Drain))
+                    && server.borrow().protocol == ServerProtocol::Http
+                {
+                    let response = server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.driver.resource() == resource)
+                        .and_then(|stream| stream.response.clone());
+                    if let Some(response) = response {
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            &response,
+                            &[Value::String("drain".into())],
+                            instruction,
+                        )?;
+                    }
+                }
                 Ok(())
             }
             StreamAction::Event(StreamEvent::Error) => Ok(()),
@@ -5675,17 +5875,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         let mut incoming = ObjectData::default();
         incoming.node_events = Some(Vec::new());
+        incoming.node_object = Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
+            HttpIncomingState { stream: resource },
+        ))));
         incoming.set("method", Value::String(request.method.clone()));
         incoming.set("url", Value::String(request.target.clone()));
         incoming.set("on", Value::Native(Native::NodeEventOn));
         incoming.set("once", Value::Native(Native::NodeEventOnce));
         incoming.set("emit", Value::Native(Native::NodeEventEmit));
+        incoming.set("pause", Value::Native(Native::NodeReadablePause));
+        incoming.set("resume", Value::Native(Native::NodeReadableResume));
         let mut headers = ObjectData::default();
         for (name, value) in request.headers_object() {
             headers.set(&name, Value::String(value));
         }
         incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
         let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
+        if let Some(connection) = server
+            .borrow_mut()
+            .streams
+            .iter_mut()
+            .find(|stream| stream.driver.resource() == resource)
+        {
+            connection.request = Some(incoming.clone());
+        }
 
         let response_state = Rc::new(RefCell::new(HttpResponseState {
             stream: resource,
@@ -5693,15 +5906,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             status: 200,
             headers: Vec::new(),
             body: Vec::new(),
+            streaming: false,
+            chunked: false,
             ended: false,
+            object: None,
         }));
         let mut response = ObjectData::default();
-        response.node_object = Some(NodeObject::HttpResponse(response_state));
+        response.node_events = Some(Vec::new());
+        response.node_object = Some(NodeObject::HttpResponse(Rc::clone(&response_state)));
         response.set("setHeader", Value::Native(Native::NodeResponseSetHeader));
         response.set("writeHead", Value::Native(Native::NodeResponseWriteHead));
         response.set("write", Value::Native(Native::NodeResponseWrite));
         response.set("end", Value::Native(Native::NodeResponseEnd));
-        let response = Value::Object(Rc::new(RefCell::new(response)));
+        response.set("on", Value::Native(Native::NodeEventOn));
+        response.set("once", Value::Native(Native::NodeEventOnce));
+        response.set("emit", Value::Native(Native::NodeEventEmit));
+        let response_object = Rc::new(RefCell::new(response));
+        response_state.borrow_mut().object = Some(Rc::downgrade(&response_object));
+        let response = Value::Object(response_object);
+        if let Some(connection) = server
+            .borrow_mut()
+            .streams
+            .iter_mut()
+            .find(|stream| stream.driver.resource() == resource)
+        {
+            connection.response = Some(response.clone());
+        }
 
         let handler = {
             let state = server.borrow();
@@ -5780,8 +6010,56 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::NodeResponseWrite => {
                 let bytes = node_body_bytes(arguments.first())?;
-                state.borrow_mut().body.extend(bytes);
-                Ok(Value::Boolean(true))
+                let resource = state.borrow().stream;
+                let server =
+                    self.http_server_for_stream(resource)
+                        .ok_or_else(|| ExecutionError::Host {
+                            instruction,
+                            message: "HTTP response lost its stream".into(),
+                        })?;
+                let (disposition, actions) = {
+                    let mut state = state.borrow_mut();
+                    if state.ended {
+                        return Ok(Value::Boolean(false));
+                    }
+                    let prefix = if !state.streaming {
+                        state.streaming = true;
+                        state.chunked = !state
+                            .headers
+                            .iter()
+                            .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                            && !matches!(state.status, 100..=199 | 204 | 304);
+                        let response = HttpResponse {
+                            status: state.status,
+                            reason: None,
+                            headers: std::mem::take(&mut state.headers),
+                            body: Vec::new(),
+                        };
+                        let encoded = response.encode_stream_head(state.keep_alive);
+                        encoded
+                    } else {
+                        Vec::new()
+                    };
+                    let mut bytes_with_head = prefix;
+                    if state.chunked && !bytes.is_empty() {
+                        bytes_with_head.extend(format!("{:X}\r\n", bytes.len()).as_bytes());
+                        bytes_with_head.extend(bytes);
+                        bytes_with_head.extend_from_slice(b"\r\n");
+                    } else {
+                        bytes_with_head.extend(bytes);
+                    }
+                    let mut owner = server.borrow_mut();
+                    let connection = owner
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.driver.resource() == resource)
+                        .expect("server lookup found this stream");
+                    connection.driver.write(bytes_with_head)
+                };
+                for action in actions {
+                    self.start_http_stream_action(&server, resource, action, instruction)?;
+                }
+                Ok(Value::Boolean(disposition.ready))
             }
             Native::NodeResponseEnd => {
                 let bytes = arguments
@@ -5790,20 +6068,40 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map(|value| node_body_bytes(Some(value)))
                     .transpose()?
                     .unwrap_or_default();
-                let (resource, encoded) = {
+                let (resource, encoded, streaming) = {
                     let mut state = state.borrow_mut();
                     if state.ended {
                         return Ok(receiver.clone());
                     }
-                    state.body.extend(bytes);
+                    if state.streaming {
+                        if state.chunked && !bytes.is_empty() {
+                            state
+                                .body
+                                .extend(format!("{:X}\r\n", bytes.len()).as_bytes());
+                            state.body.extend(bytes);
+                            state.body.extend_from_slice(b"\r\n");
+                        } else {
+                            state.body.extend(bytes);
+                        }
+                        if state.chunked {
+                            state.body.extend_from_slice(b"0\r\n\r\n");
+                        }
+                    } else {
+                        state.body.extend(bytes);
+                    }
                     state.ended = true;
-                    let response = HttpResponse {
-                        status: state.status,
-                        reason: None,
-                        headers: std::mem::take(&mut state.headers),
-                        body: std::mem::take(&mut state.body),
+                    let encoded = if state.streaming {
+                        std::mem::take(&mut state.body)
+                    } else {
+                        HttpResponse {
+                            status: state.status,
+                            reason: None,
+                            headers: std::mem::take(&mut state.headers),
+                            body: std::mem::take(&mut state.body),
+                        }
+                        .encode(state.keep_alive)
                     };
-                    (state.stream, response.encode(state.keep_alive))
+                    (state.stream, encoded, state.streaming)
                 };
                 let server =
                     self.http_server_for_stream(resource)
@@ -5819,7 +6117,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .find(|stream| stream.driver.resource() == resource)
                         .expect("server lookup found this stream");
                     connection.close_after_finish = !state.borrow().keep_alive;
-                    let (_, actions) = connection.driver.end(Some(encoded));
+                    let (_, actions) = if streaming {
+                        let (disposition, mut actions) = connection.driver.write(encoded);
+                        let (_, end_actions) = connection.driver.end(None);
+                        actions.extend(end_actions);
+                        (disposition, actions)
+                    } else {
+                        connection.driver.end(Some(encoded))
+                    };
                     actions
                 };
                 for action in actions {
@@ -5993,7 +6298,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             _ => HostResultConversion::Direct,
         };
-        self.pending_host.push(PendingHostRequest {
+        self.push_pending_host(PendingHostRequest {
             request,
             promise: Rc::clone(&promise),
             conversion,
@@ -6002,12 +6307,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn settle_host_completion(&mut self, completion: Completion) -> Result<(), ExecutionError> {
-        if let Some(position) = self
-            .pending_node
-            .iter()
-            .position(|pending| pending.request() == completion.request)
-        {
-            let pending = self.pending_node.swap_remove(position);
+        let pending_node = if let Some(realm) = &self.module_realm {
+            let mut realm = realm.borrow_mut();
+            realm
+                .pending_node
+                .iter()
+                .position(|pending| pending.request() == completion.request)
+                .map(|position| realm.pending_node.swap_remove(position))
+        } else {
+            self.pending_node
+                .iter()
+                .position(|pending| pending.request() == completion.request)
+                .map(|position| self.pending_node.swap_remove(position))
+        };
+        if let Some(pending) = pending_node {
             return match pending {
                 PendingNodeRequest::Server { state, .. } => {
                     let actions = {
@@ -6040,18 +6353,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     for action in actions {
                         self.start_http_stream_action(&server, resource, action, self.instruction)?;
                     }
-                    let still_pending = self.pending_node.iter().any(|pending| {
-                        matches!(
-                            pending,
-                            PendingNodeRequest::Stream {
-                                resource: pending_resource,
-                                ..
-                            } if *pending_resource == resource
-                        )
-                    });
+                    let still_pending = if let Some(realm) = &self.module_realm {
+                        realm.borrow().pending_node.iter().any(|pending| {
+                            matches!(
+                                pending,
+                                PendingNodeRequest::Stream {
+                                    resource: pending_resource,
+                                    ..
+                                } if *pending_resource == resource
+                            )
+                        })
+                    } else {
+                        self.pending_node.iter().any(|pending| {
+                            matches!(
+                                pending,
+                                PendingNodeRequest::Stream {
+                                    resource: pending_resource,
+                                    ..
+                                } if *pending_resource == resource
+                            )
+                        })
+                    };
                     if !still_pending {
                         server.borrow_mut().streams.retain(|stream| {
-                            stream.driver.resource() != resource || !stream.closed
+                            stream.driver.resource() != resource
+                                || !stream.closed
+                                || stream.request.is_some()
+                                || stream.response.is_some()
                         });
                     }
                     Ok(())
@@ -6071,6 +6399,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
                                 decoder: Http1Decoder::default(),
                                 request: Some(socket.clone()),
+                                response: None,
                                 close_after_finish: false,
                                 closed: false,
                             };
@@ -6087,7 +6416,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 state.owner = Some(Rc::downgrade(&owner));
                                 state.resource = Some(resource);
                             }
-                            self.node_servers.push(Rc::clone(&owner));
+                            self.register_node_server(&owner);
                             self.dispatch_node_event(
                                 Native::NodeEventEmit,
                                 &socket,
@@ -6128,11 +6457,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             };
         }
-        let Some(position) = self
-            .pending_host
-            .iter()
-            .position(|pending| pending.request == completion.request)
-        else {
+        let pending = if let Some(realm) = &self.module_realm {
+            let mut realm = realm.borrow_mut();
+            realm
+                .pending_host
+                .iter()
+                .position(|pending| pending.request == completion.request)
+                .map(|position| realm.pending_host.swap_remove(position))
+        } else {
+            self.pending_host
+                .iter()
+                .position(|pending| pending.request == completion.request)
+                .map(|position| self.pending_host.swap_remove(position))
+        };
+        let Some(pending) = pending else {
             return Err(ExecutionError::Host {
                 instruction: self.instruction,
                 message: format!(
@@ -6141,7 +6479,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ),
             });
         };
-        let pending = self.pending_host.swap_remove(position);
         let outcome = match completion.result {
             Ok(AsyncHostValue::Bytes(bytes))
                 if matches!(pending.conversion, HostResultConversion::Utf8) =>
@@ -6159,7 +6496,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         loop {
             self.drain_microtasks(runtime)?;
             runtime.enter(|| self.check_unhandled_rejection())?;
-            if !self.pending_host.is_empty() || !self.pending_node.is_empty() {
+            let has_pending = self.module_realm.as_ref().map_or_else(
+                || !self.pending_host.is_empty() || !self.pending_node.is_empty(),
+                |realm| {
+                    let realm = realm.borrow();
+                    !realm.pending_host.is_empty() || !realm.pending_node.is_empty()
+                },
+            );
+            if has_pending {
                 let completion =
                     runtime
                         .next_host_completion()
@@ -7978,6 +8322,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeSocketDestroy
         ) {
             return self.dispatch_node_net(native, receiver, arguments, instruction);
+        }
+        if matches!(
+            native,
+            Native::NodeReadablePause | Native::NodeReadableResume
+        ) {
+            return self.dispatch_node_readable(native, receiver, instruction);
         }
         if matches!(
             native,
@@ -14796,6 +15146,20 @@ fn node_http_response(receiver: &Value) -> Result<Rc<RefCell<HttpResponseState>>
     }
 }
 
+fn node_http_incoming(receiver: &Value) -> Result<Rc<RefCell<HttpIncomingState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "IncomingMessage method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::HttpIncoming(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "IncomingMessage method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
 fn node_listen_arguments(
     arguments: &[Value],
 ) -> Result<(u16, String, Option<Value>), ExecutionError> {
@@ -17439,6 +17803,8 @@ fn call_native(
         | Native::NodeSocketWrite
         | Native::NodeSocketEnd
         | Native::NodeSocketDestroy
+        | Native::NodeReadablePause
+        | Native::NodeReadableResume
         | Native::NodeHttp
         | Native::NodeHttpCreateServer
         | Native::NodeServerListen
