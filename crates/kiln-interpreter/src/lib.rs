@@ -263,11 +263,15 @@ pub enum ErrorKind {
     /// of its own because that is exactly what it is: an `Error` with two extra fields naming
     /// the two throws, and a prototype chaining to `Error.prototype` like every other.
     Suppressed,
+    /// `AggregateError`, which reports several failures as one. `Promise.any` raises it when
+    /// every input rejected, and it is the same shape as `SuppressedError`: an `Error` with one
+    /// extra field -- `errors` -- and a prototype chaining to `Error.prototype`.
+    Aggregate,
 }
 
 impl ErrorKind {
     /// Every kind, in declaration order, so the realm can build all their prototypes.
-    const ALL: [Self; 8] = [
+    const ALL: [Self; 9] = [
         Self::Error,
         Self::Type,
         Self::Range,
@@ -276,6 +280,7 @@ impl ErrorKind {
         Self::Uri,
         Self::Eval,
         Self::Suppressed,
+        Self::Aggregate,
     ];
 
     pub fn name(self) -> &'static str {
@@ -288,6 +293,34 @@ impl ErrorKind {
             Self::Uri => "URIError",
             Self::Eval => "EvalError",
             Self::Suppressed => "SuppressedError",
+            Self::Aggregate => "AggregateError",
+        }
+    }
+
+    /// Which argument is the message.
+    ///
+    /// Not the first for every kind. `SuppressedError(error, suppressed, message)` puts it third
+    /// and `AggregateError(errors, message)` puts it second, both for the same reason: the
+    /// failures the type is reporting are what it is *for*, and the sentence is an afterthought.
+    const fn message_index(self) -> usize {
+        match self {
+            Self::Suppressed => 2,
+            Self::Aggregate => 1,
+            _ => 0,
+        }
+    }
+
+    /// The own properties this kind carries beside `stack` and `message`, in argument order.
+    ///
+    /// Each is taken from the argument at its own position and installed whatever was passed,
+    /// `undefined` included: a program that catches one of these reads the field without
+    /// checking first, and an absent property would make that read a silent `undefined` from a
+    /// prototype rather than the value the constructor was handed.
+    const fn carried_fields(self) -> &'static [&'static str] {
+        match self {
+            Self::Suppressed => &["error", "suppressed"],
+            Self::Aggregate => &["errors"],
+            _ => &[],
         }
     }
 
@@ -3151,6 +3184,28 @@ fn indexed_definition(
         Some(_) => IndexedDefinition::Stores(at),
         None => IndexedDefinition::Accepted,
     })
+}
+
+/// The built-in a callable's prototype chain ends at, if it ends at one.
+///
+/// `class P extends Promise {}` links the two prototypes *and* the two constructors, and the
+/// second link is what makes `P.resolve` mean `Promise.resolve`. It is an ordinary prototype
+/// pointer, but the value it points at is an intrinsic rather than an object with a store, so
+/// the walk over property stores has nowhere left to go and has to ask the built-in instead.
+///
+/// Bounded like every other prototype walk here: the chain is the program's business, running
+/// out of Rust stack is not.
+fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
+    let mut current = closure.properties.borrow().prototype().cloned();
+    for _ in 0..MAX_PROTOTYPE_DEPTH {
+        current = match current {
+            Some(Value::Native(native)) => return Some(native),
+            Some(Value::Function(parent)) => parent.properties.borrow().prototype().cloned(),
+            Some(Value::Object(object)) => object.borrow().prototype().cloned(),
+            _ => return None,
+        };
+    }
+    None
 }
 
 fn define_own_property(
@@ -12491,6 +12546,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             Native::AsyncDisposableStackConstructor
                         }
                         kiln_ir::Builtin::SuppressedError => Native::Error(ErrorKind::Suppressed),
+                        kiln_ir::Builtin::AggregateError => Native::Error(ErrorKind::Aggregate),
                         kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
                         kiln_ir::Builtin::Int8Array => {
                             Native::TypedArrayConstructor(TypedKind::Int8)
@@ -15322,21 +15378,46 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Undefined)
             }
             Native::PromiseResolve => {
-                // Already a promise? Hand it straight back; wrapping would add a tick for
-                // nothing and break `Promise.resolve(p) === p`.
+                // Already a promise *of this constructor*? Hand it straight back; wrapping would
+                // add a tick for nothing and break `Promise.resolve(p) === p`. A promise of a
+                // different constructor is wrapped, which is what makes `P.resolve(plain)` a `P`.
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
-                if matches!(value, Value::Promise(_)) {
+                let derived = self.promise_subclass_prototype(receiver);
+                if matches!(value, Value::Promise(_))
+                    && derived
+                        .as_ref()
+                        .is_none_or(|wanted| same_value(&prototype_of(&value), wanted))
+                {
                     return Ok(value);
                 }
                 let promise = PromiseState::pending();
                 self.resolve_promise(&promise, value);
-                Ok(Value::Promise(promise))
+                Ok(Self::as_promise_of(Value::Promise(promise), derived))
             }
             Native::PromiseReject => {
                 let promise = PromiseState::pending();
                 let reason = arguments.first().cloned().unwrap_or(Value::Undefined);
                 self.settle(&promise, &Settled::Rejected(reason));
-                Ok(Value::Promise(promise))
+                let derived = self.promise_subclass_prototype(receiver);
+                Ok(Self::as_promise_of(Value::Promise(promise), derived))
+            }
+            // The pure spelling builds the pair; the constructor it was reached through decides
+            // what kind of promise is in it, and only the machine can see the receiver's chain.
+            Native::PromiseWithResolvers => {
+                let derived = self.promise_subclass_prototype(receiver);
+                let pair = call_native(
+                    &self.intrinsics,
+                    Native::PromiseWithResolvers,
+                    receiver,
+                    arguments,
+                )?;
+                if let Some(prototype) = derived
+                    && let Value::Object(object) = &pair
+                    && let Some(promise) = object.borrow().get_own("promise")
+                {
+                    record_prototype(promise, prototype);
+                }
+                Ok(pair)
             }
             Native::PromiseThen => {
                 let Value::Promise(promise) = receiver else {
@@ -15345,15 +15426,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: receiver.type_name(),
                     });
                 };
+                let promise = Rc::clone(promise);
+                let species = self.promise_species_prototype(receiver, instruction)?;
                 let derived = PromiseState::pending();
                 self.react(
-                    &Rc::clone(promise),
+                    &promise,
                     arguments.first().cloned().unwrap_or(Value::Undefined),
                     arguments.get(1).cloned().unwrap_or(Value::Undefined),
                     Sink::Promise(Rc::clone(&derived)),
                     false,
                 );
-                Ok(Value::Promise(derived))
+                Ok(Self::as_promise_of(Value::Promise(derived), species))
             }
             // `catch(r)` is `then(undefined, r)`, and saying so keeps one implementation.
             Native::PromiseCatch => self.dispatch_native(
@@ -15374,16 +15457,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: receiver.type_name(),
                     });
                 };
+                let promise = Rc::clone(promise);
                 let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let species = self.promise_species_prototype(receiver, instruction)?;
                 let derived = PromiseState::pending();
                 self.react(
-                    &Rc::clone(promise),
+                    &promise,
                     handler.clone(),
                     handler,
                     Sink::Promise(Rc::clone(&derived)),
                     true,
                 );
-                Ok(Value::Promise(derived))
+                Ok(Self::as_promise_of(Value::Promise(derived), species))
             }
             // `all`, `allSettled`, `race` and `any` differ only in when they settle and what
             // they collect, so they share one walk over the inputs.
@@ -15400,12 +15485,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
                 // way the specification says it may be written saw an exception where it had
                 // been promised a rejection.
+                let derived = self.promise_subclass_prototype(receiver);
                 let combined = match self.drain_iterable(&source, instruction) {
                     Ok(items) => self.combine(native, items),
                     Err(error) => Err(error),
                 };
                 match combined {
-                    Ok(promise) => Ok(promise),
+                    Ok(promise) => Ok(Self::as_promise_of(promise, derived)),
                     // A failure the machine cannot express as a value -- a step limit, a
                     // bytecode defect -- is not a rejection and `thrown_value` hands it back.
                     Err(error) => {
@@ -15416,6 +15502,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
             }
+            // `Error("x")` is `new Error("x")`: every error constructor answers the same way
+            // called or constructed, which is why `throw Error(m)` is as common in real code as
+            // `throw new Error(m)`. Reaching the pure table instead answered `undefined`, and
+            // the `TypeError` a program then got was about reading `.message` of nothing.
+            Native::Error(kind) => self.construct_error_reached(kind, arguments, instruction),
             // `Error.prototype.toString` reads `name` and `message` off the receiver, and a
             // read is a *call* when either is an accessor -- `class G extends Error { get
             // name() { return "G"; } }` is the ordinary way a library names its error kind
@@ -21355,23 +21446,81 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
+    /// The prototype a promise built by one of `Promise`'s statics should carry, or `None` when
+    /// the static was reached through `Promise` itself.
+    ///
+    /// `Promise.resolve` and its siblings build "a promise of the constructor they were called
+    /// on". That is what makes `class P extends Promise {}`'s `P.resolve(1) instanceof P` true,
+    /// and it is the whole reason a cancellable-promise or bluebird-interop layer subclasses
+    /// `Promise` at all: without it the layer's own methods are missing from everything its
+    /// factories hand back.
+    ///
+    /// `None` for the intrinsic and for anything that is not a `Promise` subclass, because those
+    /// want the prototype the new promise already has.
+    fn promise_subclass_prototype(&mut self, receiver: &Value) -> Option<Value> {
+        let Value::Function(closure) = receiver else {
+            return None;
+        };
+        (inherited_builtin(closure) == Some(Native::PromiseConstructor))
+            .then(|| prototype_object(closure))
+    }
+
+    /// `SpeciesConstructor(promise, %Promise%)`, reduced to the prototype the promise `then`
+    /// hands back should carry.
+    ///
+    /// `p.then(f)` on a subclass instance answers a promise of the subclass, which is what keeps
+    /// a cancellable-promise layer's own methods reachable down a chain rather than only on the
+    /// first link. Every step is observable and every step is taken: `constructor` off the
+    /// promise, then `@@species` off that. A library that writes `static get [Symbol.species]()
+    /// { return Promise; }` -- the standard way to opt a subclass *out* of this -- gets the
+    /// intrinsic back, and that is `None`.
+    fn promise_species_prototype(
+        &mut self,
+        promise: &Value,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let constructor = self.read_property(promise, "constructor", instruction)?;
+        if !is_an_object(&constructor) {
+            return Ok(None);
+        }
+        let named = self.read_computed(
+            &constructor,
+            &Value::Symbol(Symbol::WellKnown(WellKnown::Species)),
+            instruction,
+        )?;
+        let species = if matches!(named, Value::Null | Value::Undefined) {
+            constructor
+        } else {
+            named
+        };
+        Ok(self.promise_subclass_prototype(&species))
+    }
+
+    /// Give a freshly built promise the subclass prototype its constructor asked for.
+    fn as_promise_of(promise: Value, prototype: Option<Value>) -> Value {
+        if let Some(prototype) = prototype {
+            record_prototype(&promise, prototype);
+        }
+        promise
+    }
+
     /// What `Promise.any` rejects with when nothing succeeded: the reasons, and a sentence.
     ///
-    /// `errors` is not enumerated, for the same reason an error's `message` is not -- it is the
-    /// error saying what happened rather than a property of an object -- and an empty `any`
-    /// carries an empty one rather than none, so a handler can read `error.errors.length`
-    /// without knowing how the list it was given was empty.
+    /// An `AggregateError`, so `e.constructor.name` answers what a program's `if (e instanceof
+    /// AggregateError)` is testing for. It used to be a plain `Error` carrying an `errors`
+    /// array, which is a *plausible* wrong answer -- everything a handler reads off it is right
+    /// except what it is.
+    ///
+    /// The reasons are already a list here, so this reaches the constructor beneath the
+    /// iteration: `Promise.any` has nothing to iterate and no program code to run.
     fn aggregate_error(&mut self, reasons: Vec<Value>) -> Value {
-        let error = self.construct_error(
-            ErrorKind::Error,
-            &[Value::String("All promises were rejected".to_owned())],
-        );
-        if let Value::Object(object) = &error {
-            object
-                .borrow_mut()
-                .set_non_enumerable("errors", Value::Array(ArrayData::new(reasons)));
-        }
-        error
+        self.construct_error(
+            ErrorKind::Aggregate,
+            &[
+                Value::Array(ArrayData::new(reasons)),
+                Value::String("All promises were rejected".to_owned()),
+            ],
+        )
     }
 
     /// Run every queued job, moving the virtual clock forward to reach each timer.
@@ -23666,7 +23815,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         current: usize,
     ) -> Result<Option<Value>, ExecutionError> {
         Ok(Some(match parent {
-            Native::Error(kind) => self.construct_error(kind, arguments),
+            Native::Error(kind) => self.construct_error_reached(kind, arguments, current)?,
             Native::NodeEventEmitter => node_event_emitter(),
             Native::NodeStringDecoderConstructor => node_string_decoder(),
             Native::NodeReadable => node_readable(arguments, None),
@@ -23840,7 +23989,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
             }
             Value::Native(Native::Error(kind)) => {
-                let error = self.construct_error(kind, &arguments);
+                let error = self.construct_error_reached(kind, &arguments, current)?;
                 self.stack.push(error);
             }
             Value::Native(Native::ArrayConstructor) => {
@@ -24690,6 +24839,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             !same_value(&recorded, &token)
         });
         Ok(Value::Boolean(held.len() != before))
+    }
+
+    /// The error constructor a *program* reached, as opposed to one the machine raised itself.
+    ///
+    /// They differ in exactly one place. `new AggregateError(errors, message)` iterates its
+    /// first argument -- it is `IterableToList`, not an array-like read -- so it can run the
+    /// program's own `Symbol.iterator` and can fail. Every other kind takes its arguments as
+    /// they are, which is why [`Vm::construct_error`] stays infallible and every internal
+    /// `TypeError` the machine raises can keep using it.
+    fn construct_error_reached(
+        &mut self,
+        kind: ErrorKind,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if !matches!(kind, ErrorKind::Aggregate) {
+            return Ok(self.construct_error(kind, arguments));
+        }
+        let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let errors = Value::Array(ArrayData::new(self.drain_iterable(&source, instruction)?));
+        let mut listed = arguments.to_vec();
+        match listed.first_mut() {
+            Some(slot) => *slot = errors,
+            None => listed.push(errors),
+        }
+        Ok(self.construct_error(kind, &listed))
     }
 
     /// Build an error instance whose prototype is this run's prototype for that kind.
@@ -26932,6 +27107,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .properties
                     .borrow()
                     .get(name)
+                    // A subclass of a built-in inherits that built-in's statics, which is the
+                    // whole of what `class P extends Promise {}` does to the two *constructors*.
+                    // The link is an ordinary prototype pointer, but what it points at is an
+                    // intrinsic with no property store -- so the store walk above runs out and
+                    // `P.resolve`, `P.all` and `A.from` all read as `undefined`. Asked of the
+                    // built-in rather than of a table, so a program that replaced
+                    // `Promise.resolve` is seen from the subclass too.
+                    .or_else(|| {
+                        inherited_builtin(closure)
+                            .map(|native| self.property(&Value::Native(native), name))
+                            .filter(|found| !matches!(found, Value::Undefined))
+                    })
                     // No fallback for `name` or `length`: both are stored on the closure, and
                     // answering them from the proto as well would resurrect one a program had
                     // just deleted -- which is precisely the observation `configurable: true`
@@ -30762,10 +30949,7 @@ fn binary(
 /// `message` is own only when one was passed, which is the other half of the same rule: the
 /// empty default belongs to the prototype too.
 fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
-    // `new SuppressedError(error, suppressed, message)`: the message comes *third*, because the
-    // two throws it is reporting are what the type is for and the sentence is an afterthought.
-    let suppressed = matches!(kind, ErrorKind::Suppressed);
-    let message_at = usize::from(suppressed) * 2;
+    let message_at = kind.message_index();
     let given = match arguments.get(message_at) {
         None | Some(Value::Undefined) => None,
         Some(value) => Some(value.to_display_string()),
@@ -30795,16 +30979,10 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     if let Some(message) = given {
         data.set_non_enumerable("message", Value::String(message));
     }
-    if suppressed {
-        // Both are own properties whatever was passed, `undefined` included: a program that
-        // catches one of these reads `.error` and `.suppressed` without checking first.
+    for (index, field) in kind.carried_fields().iter().enumerate() {
         data.set_non_enumerable(
-            "error",
-            arguments.first().cloned().unwrap_or(Value::Undefined),
-        );
-        data.set_non_enumerable(
-            "suppressed",
-            arguments.get(1).cloned().unwrap_or(Value::Undefined),
+            field,
+            arguments.get(index).cloned().unwrap_or(Value::Undefined),
         );
     }
     if let Some(Value::Object(options)) = arguments.get(message_at + 1)

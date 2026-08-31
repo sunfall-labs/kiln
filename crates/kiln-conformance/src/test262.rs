@@ -1477,9 +1477,13 @@ mod tests {
 
         // An absent intrinsic is surfaced as a ReferenceError by the language, but remains an
         // implementation gap rather than a conformance success.
+        //
+        // The name has to be one this realm really does not have, so it moves as the realm
+        // grows: it was `AggregateError` until that arrived. `%AsyncIterator%` is the iterator
+        // helpers' asynchronous half, which is a whole proposal away rather than a name.
         assert_eq!(
             run_case(
-                &runtime_negative("throw AggregateError;", "ReferenceError"),
+                &runtime_negative("throw AsyncIterator;", "ReferenceError"),
                 RunMode::Interpreter,
             )
             .outcome,

@@ -577,6 +577,10 @@ pub enum Builtin {
     /// Node's check-phase task primitives. Appended to preserve existing artifact discriminants.
     SetImmediate,
     ClearImmediate,
+    /// The error kind that reports several failures as one, and what `Promise.any` rejects with.
+    /// Appended for the reason every name after `Json` is: the discriminant is hashed into the
+    /// artifact cache key, so inserting one in the middle would invalidate every cached build.
+    AggregateError,
 }
 
 impl Builtin {
@@ -648,6 +652,7 @@ impl Builtin {
             "eval" => Some(Self::Eval),
             "DisposableStack" => Some(Self::DisposableStack),
             "SuppressedError" => Some(Self::SuppressedError),
+            "AggregateError" => Some(Self::AggregateError),
             "AsyncDisposableStack" => Some(Self::AsyncDisposableStack),
             "EvalError" => Some(Self::EvalError),
             "Atomics" => Some(Self::Atomics),
@@ -721,6 +726,7 @@ impl Builtin {
             Self::Eval => "eval",
             Self::DisposableStack => "DisposableStack",
             Self::SuppressedError => "SuppressedError",
+            Self::AggregateError => "AggregateError",
             Self::AsyncDisposableStack => "AsyncDisposableStack",
             Self::EvalError => "EvalError",
             Self::Atomics => "Atomics",
