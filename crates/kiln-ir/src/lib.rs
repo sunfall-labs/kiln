@@ -1440,6 +1440,52 @@ enum Resolution {
     Unresolved,
 }
 
+/// The private methods and instance fields a class installs on every instance it builds.
+///
+/// Carried rather than emitted in place because *when* they are installed is part of the
+/// language: a base class installs them on entry to its constructor, and a derived class
+/// installs them the moment `super()` returns -- which is the moment `this` first exists, and,
+/// when the parent is an exotic builtin, the moment it stops being the object the derived class
+/// allocated.
+#[derive(Debug, Clone)]
+struct InstanceElements {
+    private: Vec<(String, PrivateKind, Function)>,
+    fields: Vec<ClassField>,
+}
+
+/// What makes a constructor a *class* constructor rather than an ordinary function.
+///
+/// A constructor is a function plus the instance elements it owes and the place it owes them, so
+/// this is the whole of the difference: `compile_constructor` takes `None` for a plain function
+/// and one of these for a class body.
+struct ClassBody<'a> {
+    /// The class extends something, so `this` does not exist until `super()` has run.
+    derived: bool,
+    /// A derived class with no constructor of its own, whose synthesized body is
+    /// `super(...arguments)` and nothing else.
+    forwards_to_super: bool,
+    private_elements: &'a [(String, PrivateKind, Function)],
+    fields: &'a [&'a ClassField],
+}
+
+impl ClassBody<'_> {
+    /// Whether the elements have to wait for a `super()` the body writes for itself.
+    ///
+    /// A base class has no `super()` to wait for, and a synthesized forward has already made
+    /// the call by the time the prologue ends -- so only a derived class with a constructor of
+    /// its own defers.
+    fn installs_elements_at_super(&self) -> bool {
+        self.derived && !self.forwards_to_super
+    }
+
+    fn elements(&self) -> InstanceElements {
+        InstanceElements {
+            private: self.private_elements.to_vec(),
+            fields: self.fields.iter().map(|field| (*field).clone()).collect(),
+        }
+    }
+}
+
 struct Compiler {
     constants: Vec<Constant>,
     functions: Vec<FunctionProto>,
@@ -1563,6 +1609,15 @@ struct Compiler {
     /// The hidden `super` bindings of the derived classes currently being compiled, innermost
     /// last. A stack rather than a field because class bodies nest.
     super_bindings: Vec<String>,
+    /// The instance elements each constructor currently being compiled still owes its instance,
+    /// innermost last, and `None` for a constructor that has already emitted them.
+    ///
+    /// A *derived* class initialises its fields when `super()` returns, not when the constructor
+    /// is entered, and the difference is visible whenever the parent hands back a different
+    /// object than the one allocated up front -- `class E extends Error { name = "E" }` with an
+    /// explicit constructor wrote its field onto the abandoned instance and read `"Error"` back.
+    /// So the elements are carried here and emitted at each `super()` site instead.
+    pending_elements: Vec<Option<InstanceElements>>,
     /// Monotonic, so two derived classes in one scope never share a binding. The stack depth
     /// cannot serve: it returns to zero after each class, and the bindings are siblings in the
     /// same scope rather than nested.
@@ -1654,6 +1709,7 @@ impl Compiler {
             pending_label: None,
             chains: Vec::new(),
             super_bindings: Vec::new(),
+            pending_elements: Vec::new(),
             super_binding_count: 0,
             home_bindings: Vec::new(),
             home_binding_count: 0,
@@ -4212,6 +4268,7 @@ impl Compiler {
                     self.load_super();
                     self.array_literal(arguments, expression.span);
                     self.code.push(Instruction::SuperApply);
+                    self.emit_elements_after_super(expression.span);
                     return;
                 }
                 if arguments.len() > u16::MAX as usize {
@@ -4230,6 +4287,7 @@ impl Compiler {
                 self.code.push(Instruction::SuperCall {
                     argc: arguments.len() as u16,
                 });
+                self.emit_elements_after_super(expression.span);
             }
             // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
             // program can write, so asking whether the key is there *is* the brand check.
@@ -5075,12 +5133,15 @@ impl Compiler {
         let compiled = self.compile_constructor(
             &constructor,
             class.span,
-            // A *derived* class with no constructor is not empty: it forwards its arguments to
-            // the parent. Without that, `class F extends Error {}` would construct an error with
-            // no message.
-            synthesized_derived,
-            &private_elements,
-            &instance_fields,
+            Some(ClassBody {
+                derived: class.superclass.is_some(),
+                // A *derived* class with no constructor is not empty: it forwards its arguments
+                // to the parent. Without that, `class F extends Error {}` would construct an
+                // error with no message.
+                forwards_to_super: synthesized_derived,
+                private_elements: &private_elements,
+                fields: &instance_fields,
+            }),
         );
         self.home_bindings.pop();
         let Some(index) = compiled else {
@@ -5373,17 +5434,65 @@ impl Compiler {
     /// starting at the parameters, and its own scope stack. Module scope stays reachable through
     /// `enclosing[0]`; anything between is a capture and is refused by `resolve`.
     fn compile_function(&mut self, function: &Function, span: Span) -> Option<u32> {
-        self.compile_function_with(function, span, false)
+        self.compile_constructor(function, span, None)
     }
 
-    /// As [`Compiler::compile_function`], optionally prefixing a `super(...arguments)` forward.
-    fn compile_function_with(
+    /// Install a class's private methods and instance fields on `this`.
+    ///
+    /// Methods and accessors first, then fields: a field initialiser may call `this.#m()`, and
+    /// the language installs the elements that make that call possible before it runs any
+    /// initialiser.
+    fn emit_instance_elements(
         &mut self,
-        function: &Function,
+        private_elements: &[(String, PrivateKind, Function)],
+        fields: &[&ClassField],
         span: Span,
-        forwards_to_super: bool,
-    ) -> Option<u32> {
-        self.compile_constructor(function, span, forwards_to_super, &[], &[])
+    ) -> Option<()> {
+        for (name, kind, function) in private_elements {
+            let key = self.private_key(name);
+            let name = self.constant_index(Constant::String(key));
+            let body = self.compile_function(function, span)?;
+            self.code.push(Instruction::LoadThis);
+            self.code.push(Instruction::MakeFunction(body));
+            self.code
+                .push(Instruction::DefinePrivate { name, kind: *kind });
+            self.code.push(Instruction::Pop);
+        }
+        for field in fields {
+            self.code.push(Instruction::LoadThis);
+            match &field.key {
+                ObjectKey::Private(name) => {
+                    let name = self.constant_index(Constant::String(self.private_key(name)));
+                    self.emit_field_value(field);
+                    self.code.push(self.set_property_instruction(name));
+                }
+                ObjectKey::Static(key) => {
+                    let name = self.constant_index(Constant::String(key.clone()));
+                    self.emit_field_value(field);
+                    self.code.push(self.set_property_instruction(name));
+                }
+                ObjectKey::Computed(key) => {
+                    self.expression(key);
+                    self.emit_field_value(field);
+                    self.code.push(self.set_computed_instruction());
+                }
+            }
+            self.code.push(Instruction::Pop);
+        }
+        Some(())
+    }
+
+    /// The elements a derived constructor owes its instance, emitted where `super()` just
+    /// returned.
+    ///
+    /// The `super()` expression has left the parent's answer on the stack and every sequence
+    /// below is stack-balanced, so the expression's own value survives being followed by this.
+    fn emit_elements_after_super(&mut self, span: Span) {
+        let Some(Some(elements)) = self.pending_elements.last().cloned() else {
+            return;
+        };
+        let fields: Vec<&ClassField> = elements.fields.iter().collect();
+        self.emit_instance_elements(&elements.private, &fields, span);
     }
 
     /// Compile a constructor, whose prologue initialises the class's instance fields.
@@ -5395,9 +5504,7 @@ impl Compiler {
         &mut self,
         function: &Function,
         span: Span,
-        forwards_to_super: bool,
-        private_elements: &[(String, PrivateKind, Function)],
-        fields: &[&ClassField],
+        class: Option<ClassBody<'_>>,
     ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
             self.error(Some(span), "too many parameters");
@@ -5585,46 +5692,35 @@ impl Compiler {
         // implicit in the instruction stream.
         let prologue_end = self.code.len() as u32;
 
-        if forwards_to_super {
-            self.load_super();
-            self.code.push(Instruction::SuperForward);
-            self.code.push(Instruction::Pop);
-        }
-        // Methods and accessors first, then fields: a field initialiser may call `this.#m()`, and
-        // the language installs the elements that make that call possible before it runs any
-        // initialiser.
-        for (name, kind, function) in private_elements {
-            let key = self.private_key(name);
-            let name = self.constant_index(Constant::String(key));
-            let body = self.compile_function(function, span)?;
-            self.code.push(Instruction::LoadThis);
-            self.code.push(Instruction::MakeFunction(body));
-            self.code
-                .push(Instruction::DefinePrivate { name, kind: *kind });
-            self.code.push(Instruction::Pop);
-        }
-        for field in fields {
-            self.code.push(Instruction::LoadThis);
-            match &field.key {
-                ObjectKey::Private(name) => {
-                    let name = self.constant_index(Constant::String(self.private_key(name)));
-                    self.emit_field_value(field);
-                    self.code.push(self.set_property_instruction(name));
-                }
-                ObjectKey::Static(key) => {
-                    let name = self.constant_index(Constant::String(key.clone()));
-                    self.emit_field_value(field);
-                    self.code.push(self.set_property_instruction(name));
-                }
-                ObjectKey::Computed(key) => {
-                    self.expression(key);
-                    self.emit_field_value(field);
-                    self.code.push(self.set_computed_instruction());
-                }
+        if let Some(class) = &class {
+            if class.forwards_to_super {
+                // `super(...arguments)`, and nothing else can run before it -- so by the line
+                // after, the instance is already the parent's and the elements go in there.
+                self.load_super();
+                self.code.push(Instruction::SuperForward);
+                self.code.push(Instruction::Pop);
             }
-            self.code.push(Instruction::Pop);
+            // A derived class with a constructor of its own installs its elements when *that*
+            // constructor's `super()` returns, which is a place only the body knows. Anywhere
+            // else -- a base class, or the forward just emitted -- `this` is already the
+            // instance, so here is the place.
+            if class.installs_elements_at_super() {
+                self.pending_elements.push(Some(class.elements()));
+            } else {
+                self.emit_instance_elements(class.private_elements, class.fields, span)?;
+                // Pushed even with nothing owed: that is what stops a `super()` in a *nested*
+                // class's constructor from reaching past it to this one's elements.
+                self.pending_elements.push(None);
+            }
         }
         self.statements(&function.body);
+        // An ordinary function never took an entry, because an arrow is where a derived
+        // constructor's `super()` is allowed to be written -- `constructor() { const go = () =>
+        // super(); go(); }` is legal -- and an entry there would hide the constructor's own
+        // elements from it.
+        if class.is_some() {
+            self.pending_elements.pop();
+        }
         // Falling off the end of a function returns undefined. Emitted unconditionally rather
         // than only when the body cannot fall through: proving that needs flow analysis, and an
         // unreachable epilogue costs two instructions.

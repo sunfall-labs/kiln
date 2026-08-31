@@ -7935,6 +7935,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 *out = kiln_c99_method(KILN_C99_METHOD_ERROR_TO_STRING);
                 return KILN_C99_OK;
             }
+            /* `name` and `message` live on the error prototypes, not on the instance, so an own
+             * `name = "TimeoutError"` class field and a `get name()` on a subclass prototype are
+             * both found by the walk above and only the default reaches here. */
+            if (kiln_c99_same_name(key, key_len, "name") ||
+                kiln_c99_same_name(key, key_len, "message")) {
+                uint64_t kind = kiln_c99_error_kind(target);
+                const char *named = kind == 0 ? NULL : kiln_c99_error_name(kind);
+                if (named != NULL) {
+                    *out = key_len == 4 ? kiln_c99_copy_text(named, strlen(named))
+                                        : kiln_c99_from_units(NULL, 0);
+                    return KILN_C99_OK;
+                }
+            }
             inherited = kiln_c99_same_name(key, key_len, "isPrototypeOf")
                                      ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                                  : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
@@ -19434,10 +19447,17 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
     return KILN_C99_OK;
 }
 
-/* An error is an ordinary object carrying `message`, `name` and `stack`, none of them
+/* An error is an ordinary object carrying `stack` and, when one was passed, `message` -- neither
  * enumerated: `err.message` reads and `Object.keys(err)` is empty, which is why
  * `JSON.stringify(err)` is `{}`. The kind is remembered in a reserved property rather than
- * inferred from `name`, so a program that overwrites `name` does not change what it *is*. */
+ * inferred from `name`, so a program that overwrites `name` does not change what it *is*.
+ *
+ * `name` is deliberately *not* one of them. It belongs to `Error.prototype`, and an own one here
+ * would shadow whatever a subclass says about itself -- a `name = "TimeoutError"` class field, or
+ * a `get name()` on the subclass prototype -- so `e.name` answered "Error" for an error the
+ * program had explicitly named. It is answered from the kind when the chain misses instead,
+ * beside the `toString` and `constructor` that already work that way. `message` has the same
+ * shape: own only when one was passed, and "" from the kind otherwise. */
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message) {
     const char *name = kiln_c99_error_name(kind);
     kiln_value error;
@@ -19458,15 +19478,12 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
         free(stack.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, error, "name", 4, kiln_c99_copy_text(name, strlen(name)), 0,
-                              NULL);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, error, "stack", 5,
-                              kiln_c99_value(KILN_VALUE_STRING, 0, stack.bytes, stack.len), 0,
-                              NULL);
+    /* `stack` first, because that is the order the own keys come out in: the header is attached
+     * by the constructor before the message is. */
+    status = kiln_c99_put(NULL, error, "stack", 5,
+                          kiln_c99_value(KILN_VALUE_STRING, 0, stack.bytes, stack.len), 0, NULL);
+    if (status == KILN_C99_OK && message.tag != KILN_VALUE_UNDEFINED) {
+        status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_put(NULL, error, "@@error", 7, kiln_c99_number((double)kind), 0, NULL);
@@ -19475,8 +19492,8 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
         return status;
     }
     {
-        /* None of the four is enumerated. The reserved one is hidden by its prefix anyway; the
-         * other three have to be marked. */
+        /* None of them is enumerated. The reserved one is hidden by its prefix anyway; the
+         * others have to be marked. */
         kiln_object *object = kiln_c99_object_of(error);
         size_t index;
         for (index = 0; index < object->count; ++index) {
