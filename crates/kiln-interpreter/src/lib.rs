@@ -15399,6 +15399,39 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                 }
             }
+            // `Error.prototype.toString` reads `name` and `message` off the receiver, and a
+            // read is a *call* when either is an accessor -- `class G extends Error { get
+            // name() { return "G"; } }` is the ordinary way a library names its error kind
+            // without an own property. The pure spelling walks the store data-only and answered
+            // "Error" for exactly that class.
+            Native::ErrorToString => {
+                if !is_an_object(receiver) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Error.prototype.toString called on non-object".to_owned(),
+                    });
+                }
+                let read = |vm: &mut Self, key: &str| -> Result<String, ExecutionError> {
+                    Ok(match vm.read_property(receiver, key, instruction)? {
+                        Value::Undefined => String::new(),
+                        other => other.to_display_string(),
+                    })
+                };
+                let named = self.read_property(receiver, "name", instruction)?;
+                let name = match named {
+                    Value::Undefined => "Error".to_owned(),
+                    other => other.to_display_string(),
+                };
+                let message = read(self, "message")?;
+                // Either half being empty drops the separator with it, so a message-less error
+                // is "Error" rather than "Error: ".
+                Ok(Value::String(if name.is_empty() {
+                    message
+                } else if message.is_empty() {
+                    name
+                } else {
+                    format!("{name}: {message}")
+                }))
+            }
             Native::StringConstructor => {
                 let Some(value) = arguments.first() else {
                     return Ok(Value::String(String::new()));
@@ -30700,15 +30733,27 @@ fn binary(
 /// `cause` follows InstallErrorCause: the property exists when the options object *has* a
 /// `cause` key, including when its value is `undefined`. Testing presence rather than value is
 /// the whole point of that step in the specification.
+///
+/// `name` is deliberately **not** an own property. It lives on `Error.prototype` and on each
+/// kind's prototype, exactly as the specification puts it, and an own one here would shadow
+/// anything a subclass says about itself: a `name = "TimeoutError"` class field is installed on
+/// the instance during construction, and an own `name` written afterwards overwrote it with
+/// `"Error"`. `catch (e) { if (e.name === "TimeoutError") }` -- how a server tells a timeout
+/// from a real failure -- then took the wrong branch, and so did a `get name()` accessor on the
+/// subclass prototype, which an own property on the instance shadows outright.
+///
+/// `message` is own only when one was passed, which is the other half of the same rule: the
+/// empty default belongs to the prototype too.
 fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     // `new SuppressedError(error, suppressed, message)`: the message comes *third*, because the
     // two throws it is reporting are what the type is for and the sentence is an afterthought.
     let suppressed = matches!(kind, ErrorKind::Suppressed);
     let message_at = usize::from(suppressed) * 2;
-    let message = match arguments.get(message_at) {
-        None | Some(Value::Undefined) => String::new(),
-        Some(value) => value.to_display_string(),
+    let given = match arguments.get(message_at) {
+        None | Some(Value::Undefined) => None,
+        Some(value) => Some(value.to_display_string()),
     };
+    let message = given.clone().unwrap_or_default();
 
     let name = kind.name();
     let mut data = ObjectData {
@@ -30718,8 +30763,10 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     // Every own property of an error is non-enumerable, which is why `JSON.stringify(err)` is
     // `{}` and `Object.keys(err)` is empty -- an error is meant to be *read*, not walked, and a
     // program that serialises one is asking for the fields it names rather than all of them.
-    data.set_non_enumerable("message", Value::String(message.clone()));
-    data.set_non_enumerable("name", Value::String(name.to_owned()));
+    //
+    // `stack` is installed first, because that is the order the own keys come out in: the
+    // header is attached by the constructor before the message is, and a program that copies an
+    // error by walking `Object.getOwnPropertyNames` reproduces the order it saw.
     data.set_non_enumerable(
         "stack",
         Value::String(if message.is_empty() {
@@ -30728,6 +30775,9 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
             format!("{name}: {message}")
         }),
     );
+    if let Some(message) = given {
+        data.set_non_enumerable("message", Value::String(message));
+    }
     if suppressed {
         // Both are own properties whatever was passed, `undefined` included: a program that
         // catches one of these reads `.error` and `.suppressed` without checking first.
@@ -42077,7 +42127,8 @@ mod tests {
         assert!(own_property_keys(&intrinsics, &constructor).contains(&"escape".to_owned()));
     }
 
-    /// An error with no message gets a bare header, not one with a trailing colon.
+    /// An error with no message gets a bare header, not one with a trailing colon -- and no own
+    /// `message` at all, because an absent message is the prototype's empty one.
     #[test]
     fn an_empty_message_produces_a_bare_stack_header() {
         for arguments in [Vec::new(), vec![Value::Undefined]] {
@@ -42088,11 +42139,28 @@ mod tests {
                 data.borrow().get("stack"),
                 Some(Value::String("Error".to_owned()))
             );
-            assert_eq!(
-                data.borrow().get("message"),
-                Some(Value::String(String::new()))
-            );
+            assert_eq!(data.borrow().get_own("message"), None);
         }
+    }
+
+    /// `name` is the prototype's, never the instance's.
+    ///
+    /// An own one would shadow a subclass's `name` class field, which is installed on the
+    /// instance while the constructor runs -- so `e.name` answered "Error" for an error the
+    /// program had explicitly named, and `if (e.name === "TimeoutError")` took the wrong branch.
+    #[test]
+    fn an_error_instance_has_no_own_name() {
+        let Value::Object(data) = build_error(ErrorKind::Type, &[Value::String("m".to_owned())])
+        else {
+            panic!("construct_error returns an object");
+        };
+        let data = data.borrow();
+        assert_eq!(data.get_own("name"), None);
+        assert_eq!(
+            data.get_own("message"),
+            Some(&Value::String("m".to_owned())),
+            "a message that was passed is still the instance's own"
+        );
     }
 
     /// A `DataView` reads *big*-endian unless told otherwise -- the opposite of the platform and
