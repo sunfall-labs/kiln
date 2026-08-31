@@ -1080,6 +1080,12 @@ impl TokioHost {
     }
 
     fn promote_completion(&mut self, completion: HostCompletion) {
+        // Cancellation removes the request before aborting its task. A completion can already
+        // be buffered in the provider channel at that boundary; it is stale and must not mutate
+        // resource lifecycle state or become visible to the realm.
+        if !self.pending.contains_key(&completion.request) {
+            return;
+        }
         if completion.result.is_ok() {
             match completion.lifecycle {
                 Some(ResourceLifecycleUpdate::ReadClosed(resource)) => {
@@ -1545,7 +1551,11 @@ where
     C: FnMut(&mut Realm<M, T>) -> Result<(), E>,
 {
     loop {
-        while let Some(work) = realm.microtasks.pop_front() {
+        while let Some(work) = realm
+            .next_ticks
+            .pop_front()
+            .or_else(|| realm.microtasks.pop_front())
+        {
             execute(realm, WorkItem::Microtask(work))?;
         }
         checkpoint(realm)?;
@@ -1864,6 +1874,32 @@ mod tests {
         assert!(!AsyncHostOps::cancel(runtime.host(), request));
         assert!(!runtime.host().has_referenced_work());
         assert!(runtime.next_host_completion().is_none());
+    }
+
+    #[test]
+    fn stale_completion_queued_after_cancellation_is_rejected() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
+            AsyncHostOp::ReadFile {
+                path: "canceled.txt".into(),
+            },
+            false,
+        );
+        assert!(runtime.cancel_host_op(request));
+        runtime
+            .host_mut()
+            .sender
+            .send(HostCompletion {
+                request,
+                sequence: 0,
+                lifecycle: None,
+                result: Ok(HostCompletionValue::Public(AsyncHostValue::Bytes(
+                    b"stale".to_vec(),
+                ))),
+            })
+            .expect("test channel remains open");
+
+        assert!(AsyncHostOps::next_completion(runtime.host_mut()).is_none());
     }
 
     #[test]
@@ -2821,6 +2857,31 @@ mod tests {
     }
 
     #[test]
+    fn generic_drive_drains_next_ticks_before_microtasks() {
+        let mut realm: Realm = Realm::new();
+        realm.queue_next_tick(WorkId::new(1));
+        realm.queue_microtask(WorkId::new(2));
+        let mut events = Vec::new();
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+
+        runtime
+            .drive(
+                &mut realm,
+                |_realm, work| {
+                    if let WorkItem::Microtask(work) = work {
+                        events.push(work.get());
+                    }
+                    Ok::<_, ()>(())
+                },
+                |_| Ok::<_, ()>(()),
+            )
+            .expect("realm drive succeeds");
+
+        assert_eq!(events, [1, 2]);
+        assert!(!realm.has_pending_work());
+    }
+
+    #[test]
     fn timer_callback_microtasks_run_before_the_next_timer() {
         let mut realm: Realm = Realm::new();
         let events = Rc::new(RefCell::new(Vec::new()));
@@ -3024,6 +3085,37 @@ mod tests {
         ));
         assert_eq!(realm.now(), Duration::from_secs(60 * 60));
         assert!(runtime.cancel_host_op(pending_read));
+    }
+
+    #[test]
+    fn an_already_ready_host_completion_beats_a_due_timer() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let request = runtime.start_host_op(
+            AsyncHostOp::ResourceState {
+                resource: ResourceId::new(999),
+            },
+            false,
+        );
+        let mut realm: Realm = Realm::new();
+        realm.set_timeout(Duration::ZERO, WorkId::new(92));
+
+        let turn = runtime
+            .next_turn(&mut realm)
+            .expect("ready host completion is selected");
+        match turn {
+            RuntimeTurn::Completion(completion) => {
+                assert_eq!(completion.request, request);
+                assert_eq!(
+                    completion
+                        .result
+                        .expect_err("unknown resource is rejected")
+                        .code,
+                    "EBADF"
+                );
+            }
+            RuntimeTurn::Timer(_) => panic!("a due timer ran before a ready completion"),
+        }
+        assert!(realm.has_pending_work());
     }
 
     #[test]
