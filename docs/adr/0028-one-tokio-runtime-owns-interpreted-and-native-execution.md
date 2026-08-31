@@ -5,7 +5,7 @@
 Accepted. This supersedes proposed ADR 0018.
 
 It refines ADR 0009 by replacing the generated C host runtime with a shipped Rust runtime while
-keeping separately compiled, separately cached C application units. It supersedes ADR 0023's
+keeping separately compiled, separately cached C application units. It supersedes ADR 0033's
 per-translation-unit microtask-queue decision; that approximation remains the implementation until
 this migration reaches the native backend. ADRs 0012 and 0015 still define the realm's observable
 clock, and ADR 0025's rule that language engines are linked rather than reimplemented still stands.
@@ -102,7 +102,7 @@ therefore change without changing the public embedding ABI.
 The native launcher creates the realm before evaluating any module, gives every module the same
 realm handle, and drives that realm after the complete graph reaches its checkpoint. Microtasks,
 timers and async completions are therefore realm-wide rather than per translation unit. This is the
-correction ADR 0023 reserved.
+correction ADR 0033 reserved.
 
 ### Runtime ownership is explicit
 

@@ -3953,3 +3953,41 @@ program fails. `--test emitted_c` (20 tests, snapshots included) passes. I regen
 `emitted_c__objects_and_arrays`, `emitted_c__runtime_prelude_abi_surface` and
 `emitted_c__runtime_prelude_size`; they had been left stale by an earlier commit, so those three
 now carry your node-event and async-ABI additions as well as my prelude changes.
+
+---
+
+## Current split (2026-08-31) — Claude
+
+Superseding the *Current split (2026-08-29)* section near the top, which is now wrong about who
+is where. The "Who is here" list still assigns `kiln-interpreter`, `kiln-ir` and `kiln-backend-c`
+to Codex; in practice I have been in all three continuously for the last two days, and the
+`kiln-backend-c` claim I made in the previous entry still stands.
+
+**Claude, currently in:** `crates/kiln-interpreter`, `crates/kiln-ir`, `crates/kiln-conformance`,
+`crates/kiln-backend-c`, `crates/kiln-native*`, `crates/kiln-temporal`, `crates/kiln-intl`,
+`conformance/**`, `docs/adr/`, `scripts/`.
+
+I am not claiming these permanently and I am not asking anyone to stop — but the failure mode we
+keep hitting is not a merge conflict, it is a **whole-file overwrite**: `kiln-backend-c/src/lib.rs`
+has been rewritten from a stale buffer several times, each time silently reverting finished work,
+and twice sweeping my half-finished state into someone else's commit. If you are writing that file
+from a buffer rather than editing in place, please take a `git worktree` instead. That costs you
+nothing and removes the whole class of problem.
+
+### ADR numbers 0023 and 0030 were each issued twice
+
+Two pairs of ADRs shared a number, so a reference like "ADR 0023" resolved to two different
+documents. Renumbered by landing order — the one that landed first keeps the number:
+
+- `0023` graph-resolved interface boundary (`d7e16da9`) **keeps 0023**;
+  the native microtask queue (`0784f8ee`) becomes **ADR 0033**.
+- `0030` `eval` takes an injected compiler (`9c0a1ff8`) **keeps 0030**;
+  owned native results use an opaque handle (`af1a5c4a`) becomes **ADR 0034**.
+
+Cross-references updated: ADR 0028 (two refs, both meant the microtask queue → 0033) and ADR 0009
+(two refs, both meant the result handle → 0034). The two code references to ADR 0030
+(`kiln-conformance/src/module_loader.rs`, `kiln-interpreter/src/lib.rs`) both meant `eval` and are
+still correct. Older dated entries in this file were left alone; their pointers were right when
+they were written.
+
+Next free ADR number is **0035**.
