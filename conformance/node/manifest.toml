@@ -158,3 +158,24 @@ source = "../server/s01-http-hello.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "http-client", "http-server", "streams", "set-encoding", "resource-lifecycle", "module-graph"]
 expected_stdout = "200 text/plain kiln\n"
+
+[[test]]
+id = "node-v24.7.0/http/request-end"
+source = "upstream-adapted/http-request-end.mjs"
+status = "runnable"
+features = ["node:http", "tokio-net", "http-client", "request-stream", "set-encoding", "resource-lifecycle"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/buffer/concat-core"
+source = "upstream-adapted/buffer-concat-core.mjs"
+status = "runnable"
+features = ["buffer", "typed-arrays", "utf8", "concat"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "server/s03-request-body-streams"
+source = "../server/s03-request-body-streams.mjs"
+status = "runnable"
+features = ["node:http", "tokio-net", "buffer", "request-stream", "response-stream", "module-graph"]
+expected_stdout = "200 {\"method\":\"POST\",\"bytes\":12,\"text\":\"kiln streams\"}\n"

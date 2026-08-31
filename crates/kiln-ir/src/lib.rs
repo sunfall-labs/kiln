@@ -439,6 +439,9 @@ pub enum Builtin {
     BigInt,
     /// `process`, in the minimal shape a bundle actually reads.
     Process,
+    /// Node's global byte container. The interpreter installs the Node-compatible surface only;
+    /// native Node execution remains unadvertised until it shares that runtime adapter.
+    Buffer,
     /// `Function`, reached for its `prototype` and its `toString` rather than to construct.
     Function,
     Proxy,
@@ -505,6 +508,7 @@ impl Builtin {
             "Reflect" => Some(Self::Reflect),
             "BigInt" => Some(Self::BigInt),
             "process" => Some(Self::Process),
+            "Buffer" => Some(Self::Buffer),
             // node's alias for the global object. `globalThis` exists to unify it with the
             // browser's `self`, and code written before that still tests for this one.
             "global" => Some(Self::GlobalThis),
@@ -570,6 +574,7 @@ impl Builtin {
             Self::Reflect => "Reflect",
             Self::BigInt => "BigInt",
             Self::Process => "process",
+            Self::Buffer => "Buffer",
             Self::Function => "Function",
             Self::Proxy => "Proxy",
             Self::Escape => "escape",

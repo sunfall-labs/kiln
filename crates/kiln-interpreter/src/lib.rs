@@ -269,6 +269,11 @@ pub enum Native {
     NodeHttpGet,
     NodeClientRequestWrite,
     NodeClientRequestEnd,
+    NodeBuffer,
+    NodeBufferFrom,
+    NodeBufferAlloc,
+    NodeBufferConcat,
+    NodeBufferToString,
     NodeServerListen,
     NodeServerClose,
     NodeServerAddress,
@@ -977,6 +982,9 @@ impl Native {
             (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
             (Self::NodeHttp, "request") => Some(Value::Native(Self::NodeHttpRequest)),
             (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet)),
+            (Self::NodeBuffer, "from") => Some(Value::Native(Self::NodeBufferFrom)),
+            (Self::NodeBuffer, "alloc") => Some(Value::Native(Self::NodeBufferAlloc)),
+            (Self::NodeBuffer, "concat") => Some(Value::Native(Self::NodeBufferConcat)),
             (Self::NodeEventEmitter, "prototype") => Some(Value::Native(Self::PrototypeOf(
                 PrototypeTable::EventEmitter,
             ))),
@@ -3524,7 +3532,9 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
                 (
                     (*name).to_owned(),
                     if *name == "default" {
-                        Value::Native(namespace)
+                        namespace
+                            .property("default")
+                            .unwrap_or(Value::Native(namespace))
                     } else {
                         namespace
                             .property(name)
@@ -6222,7 +6232,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             HttpRequestEvent::Data(bytes) => {
                 let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
-                let body = node_bytes_value(bytes);
+                let body = match node_http_incoming(&incoming)?.borrow().encoding.as_deref() {
+                    Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                    _ => node_bytes_value(bytes),
+                };
                 self.dispatch_node_event(
                     Native::NodeEventEmit,
                     &incoming,
@@ -7772,6 +7785,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             self.stack.push(process);
                             continue;
                         }
+                        kiln_ir::Builtin::Buffer => Native::NodeBuffer,
                         kiln_ir::Builtin::Array => Native::ArrayConstructor,
                         kiln_ir::Builtin::Object => Native::ObjectConstructor,
                         kiln_ir::Builtin::Json => Native::Json,
@@ -8345,12 +8359,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.global_base = frame.global_base;
                     self.instruction = frame.instruction;
                     if let Some(instance) = frame.constructing
-                        && !matches!(value, Value::Object(_) | Value::Array(_))
+                        && !is_reflect_target(&value)
                     {
                         // A constructor yields its instance unless the body returned an object,
                         // which wins. That override is what makes a factory constructor work,
                         // and it is why an accidental `return 1` is harmless rather than
                         // producing a number where an instance was expected.
+                        //
+                        // *Any* object wins, not only a plain one: a factory that returns a
+                        // proxy, a map or a promise is the whole reason the override exists, and
+                        // listing two shapes here made every one of those silently discarded.
                         value = instance;
                     }
                     self.stack.push(value);
@@ -9359,6 +9377,78 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .get_own(key)
                     .cloned()
                     .unwrap_or(Value::Boolean(false)))
+            }
+            Native::NodeBufferFrom => {
+                let bytes = match arguments.first().unwrap_or(&Value::Undefined) {
+                    Value::String(text) => text.as_bytes().to_vec(),
+                    Value::TypedArray(view) => view.bytes(),
+                    Value::Array(items) => items
+                        .borrow()
+                        .iter()
+                        .map(|value| value.as_number() as u8)
+                        .collect(),
+                    value => {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "The first argument must be a string, Buffer, Uint8Array, or Array; received {}",
+                                value.type_name()
+                            ),
+                        });
+                    }
+                };
+                Ok(node_bytes_value(bytes))
+            }
+            Native::NodeBufferAlloc => {
+                let length = bounded_buffer(
+                    arguments.first().map(Value::as_number).unwrap_or(f64::NAN),
+                    1,
+                )?;
+                let fill = arguments.get(1).map(Value::as_number).unwrap_or(0.0) as u8;
+                Ok(node_bytes_value(vec![fill; length]))
+            }
+            Native::NodeBufferConcat => {
+                let Some(Value::Array(items)) = arguments.first() else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The \"list\" argument must be an instance of Array".into(),
+                    });
+                };
+                let mut bytes = Vec::new();
+                for (index, item) in items.borrow().iter().enumerate() {
+                    let Value::TypedArray(view) = item else {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "The \"list[{index}]\" argument must be an instance of Buffer or Uint8Array"
+                            ),
+                        });
+                    };
+                    bytes.extend(view.bytes());
+                }
+                if let Some(length) = arguments.get(1) {
+                    let length = bounded_buffer(length.as_number(), 1)?;
+                    bytes.resize(length, 0);
+                    bytes.truncate(length);
+                }
+                Ok(node_bytes_value(bytes))
+            }
+            Native::NodeBufferToString => {
+                let Value::TypedArray(view) = receiver else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Buffer.toString called on an incompatible receiver".into(),
+                    });
+                };
+                let encoding = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_else(|| "utf8".into())
+                    .to_ascii_lowercase();
+                if !matches!(encoding.as_str(), "utf8" | "utf-8") {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!("unsupported Buffer encoding: {encoding}"),
+                    });
+                }
+                Ok(Value::String(
+                    String::from_utf8_lossy(&view.bytes()).into_owned(),
+                ))
             }
             Native::ArrayFrom => self.array_from(arguments, instruction),
             Native::ArrayFromAsync => self.array_from_async(receiver, arguments, instruction),
@@ -12947,7 +13037,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `Array.fromAsync({length: 2, 0: p, 1: q})` works and why a number produces an
             // empty array rather than a failure.
             let length = self.read_property(&items, "length", instruction)?;
-            let length = bounded_length(self.as_number_argument(Some(&length), instruction)?)?;
+            let length = to_length(self.as_number_argument(Some(&length), instruction)?);
+            // Checked here rather than left to the allocation bound below: a length no array can
+            // have is a `RangeError` the language defines, and the bound this implementation
+            // imposes is a refusal no program can catch.
+            if !is_constructor(receiver) && length > u32::MAX as usize {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
             FromAsyncSource::ArrayLike {
                 source: items,
                 length,
@@ -13146,23 +13242,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<(), ExecutionError> {
         let index = state.index.get();
-        let key = index.to_string();
-        // `CreateDataPropertyOrThrow`, not an assignment: a collection that refuses the element
-        // has to stop the walk. An assignment would be silently discarded in sloppy code, and
-        // over an endless iterator that is not a wrong answer but a program that never ends.
-        let descriptor = Descriptor {
-            value: Some(value),
-            get: None,
-            set: None,
-            writable: Some(true),
-            enumerable: Some(true),
-            configurable: Some(true),
-        };
-        if !define_own_property(&self.intrinsics, &state.target, &key, &descriptor)? {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: refusal(&self.intrinsics, &state.target, &key),
-            });
-        }
+        // `CreateDataPropertyOrThrow`, not an assignment. Two things follow from that and both
+        // are tested: a collection that *refuses* the element stops the walk, where an
+        // assignment would be silently discarded and an endless iterator would never end; and
+        // the definition goes through a proxy's `defineProperty` trap rather than its `set`.
+        let mut descriptor = ObjectData::default();
+        descriptor.set("value", value);
+        descriptor.set("writable", Value::Boolean(true));
+        descriptor.set("enumerable", Value::Boolean(true));
+        descriptor.set("configurable", Value::Boolean(true));
+        self.dispatch_native(
+            Native::ObjectDefineProperty,
+            &Value::Undefined,
+            &[
+                state.target.clone(),
+                Value::String(index.to_string()),
+                Value::Object(Rc::new(RefCell::new(descriptor))),
+            ],
+            instruction,
+        )?;
         state.index.set(index + 1);
         self.from_async_advance(state, instruction)
     }
@@ -13173,6 +13271,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         state: &Rc<FromAsync>,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
+        // `Set(A, "length", k, true)`: the `true` is throw-on-failure, so a collection whose
+        // `length` cannot be written refuses the whole operation rather than quietly reporting
+        // a length that is not the one it holds.
+        if own_attributes(&self.intrinsics, &state.target, "length")
+            .is_some_and(|attributes| !attributes.writable)
+        {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: refusal(&self.intrinsics, &state.target, "length"),
+            });
+        }
         self.set_computed(
             &state.target,
             &Value::String("length".to_owned()),
@@ -14948,6 +15056,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         globals.set_non_enumerable("Proxy", Value::Native(Native::ProxyConstructor));
         globals.set_non_enumerable("ArrayBuffer", Value::Native(Native::ArrayBufferConstructor));
+        globals.set_non_enumerable("Buffer", Value::Native(Native::NodeBuffer));
         globals.set_non_enumerable(
             "SharedArrayBuffer",
             Value::Native(Native::SharedArrayBufferConstructor),
@@ -17107,6 +17216,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "constructor" => Value::Native(Native::TypedArrayConstructor(view.kind)),
                 key if key == WellKnown::ToStringTag.property_key() => {
                     Value::String(view.kind.name().to_owned())
+                }
+                "toString" if view.kind == TypedKind::Uint8 => {
+                    Value::Native(Native::NodeBufferToString)
                 }
                 // Everything else comes from the same table `%TypedArray%.prototype` answers
                 // from, so an instance and the prototype can never resolve a name differently.
@@ -21086,6 +21198,11 @@ fn call_native(
         | Native::NodeHttpGet
         | Native::NodeClientRequestWrite
         | Native::NodeClientRequestEnd
+        | Native::NodeBuffer
+        | Native::NodeBufferFrom
+        | Native::NodeBufferAlloc
+        | Native::NodeBufferConcat
+        | Native::NodeBufferToString
         | Native::NodeServerListen
         | Native::NodeServerClose
         | Native::NodeServerAddress

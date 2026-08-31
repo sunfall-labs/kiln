@@ -37,15 +37,21 @@
       "features": ["node:http", "events", "streams", "tokio-net"]
     },
     "parallel/test-http-request-end.js": {
-      "expectation": "expected-failure",
+      "expectation": "pass",
       "sha256": "e1d116dcde1119994cbe2c13e452526150821c199f73c4c763aeaaa4d370df44",
-      "reason": "HTTP client requests and writable stream shutdown are not implemented yet",
+      "adapted_complete": true,
+      "adapted": [
+        "upstream-adapted/http-request-end.mjs"
+      ],
       "features": ["node:http", "streams", "tokio-net"]
     },
     "parallel/test-buffer-concat.js": {
       "expectation": "expected-failure",
       "sha256": "d320b87463a06e6d65691118f26e96bcd93c771ffdf3287afe84974a9204e169",
-      "reason": "Buffer is currently represented only by Uint8Array results; the Node Buffer surface is not installed",
+      "reason": "partial: Buffer.from/alloc/concat, Uint8Array inputs, copy identity, truncation, zero-filled tails, and UTF-8 toString pass; the remaining upstream assertions need Node error codes/messages, crypto.randomBytes, and deep Buffer identity assertions",
+      "adapted": [
+        "upstream-adapted/buffer-concat-core.mjs"
+      ],
       "features": ["buffer", "typed-arrays"]
     },
     "parallel/test-event-emitter-add-listeners.js": {
