@@ -2633,6 +2633,9 @@ mod tests {
                                 || reader.started(&operation, request)
                         );
                     }
+                    StreamAction::Cancel(request) => {
+                        panic!("unexpected cancellation of live stream request {request:?}");
+                    }
                     StreamAction::Data(data) => bytes.extend(data),
                     StreamAction::Event(event) => {
                         if owner_is_writer {

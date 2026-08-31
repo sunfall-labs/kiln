@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 152
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -383,8 +382,10 @@ typedef struct kiln_symbol {
 typedef struct kiln_bound {
 typedef struct kiln_microtask {
 typedef struct kiln_timer {
-typedef struct kiln_node_server {
-typedef struct kiln_node_socket {
+typedef struct kiln_node_server kiln_node_server;
+typedef struct kiln_node_socket kiln_node_socket;
+struct kiln_node_server {
+struct kiln_node_socket {
 typedef struct kiln_node_response {
 typedef struct kiln_node_completion {
 typedef struct kiln_json_reader {
@@ -775,6 +776,8 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t argument,
+static void kiln_c99_node_cancel_request(uint64_t *request) {
+static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
 static int kiln_c99_node_http_request(kiln_node_socket *socket, const uint8_t *bytes,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,

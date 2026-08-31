@@ -6506,7 +6506,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let (_, actions) = connection.driver.end(data);
                     (receiver.clone(), actions)
                 }
-                Native::NodeSocketDestroy => (receiver.clone(), vec![connection.driver.close()]),
+                Native::NodeSocketDestroy => (receiver.clone(), connection.driver.close_actions()),
                 _ => unreachable!("only socket natives dispatch here"),
             }
         };
@@ -7024,6 +7024,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for action in actions {
                     self.start_http_server_action(&state, action, instruction)?;
                 }
+                let streams = if state.borrow().protocol == ServerProtocol::Net {
+                    let mut state = state.borrow_mut();
+                    state
+                        .streams
+                        .iter_mut()
+                        .map(|stream| (stream.driver.resource(), stream.driver.close_actions()))
+                        .collect::<Vec<_>>()
+                } else {
+                    Vec::new()
+                };
+                for (resource, actions) in streams {
+                    for action in actions {
+                        self.start_http_stream_action(&state, resource, action, instruction)?;
+                    }
+                }
                 Ok(receiver.clone())
             }
             Native::NodeResponseSetHeader
@@ -7210,7 +7225,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<(), ExecutionError> {
         match action {
+            StreamAction::Cancel(request) => {
+                let host = self.async_host.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http requires the Node execution Adapter".into(),
+                })?;
+                unsafe { ActiveAsyncHostOps::cancel(&mut *host, request) };
+                if let Some(realm) = &self.module_realm {
+                    realm
+                        .borrow_mut()
+                        .pending_node
+                        .retain(|pending| pending.request() != request);
+                } else {
+                    self.pending_node
+                        .retain(|pending| pending.request() != request);
+                }
+                Ok(())
+            }
             StreamAction::Start(operation) => {
+                if matches!(operation, AsyncHostOp::TcpRead { .. })
+                    && server
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.driver.resource() == resource)
+                        .is_some_and(|stream| stream.driver.is_closing())
+                {
+                    return Ok(());
+                }
                 if matches!(operation, AsyncHostOp::TcpRead { .. })
                     && server
                         .borrow()

@@ -3991,6 +3991,88 @@ server.listen(0, () => {
     }
 
     #[test]
+    fn native_node_net_destroy_and_server_close_settle_without_peer_bytes() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::{BufRead, Read};
+        use std::net::TcpStream;
+        use std::process::{Command, Stdio};
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:net cancellation integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-node-net-cancel");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { createServer } from "node:net";
+let server;
+server = createServer((socket) => {
+  socket.destroy();
+  server.close();
+});
+server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+"#,
+        )
+        .expect("write node:net cancellation fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let builder = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain);
+        let report = builder
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native node:net graph builds");
+
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start native node:net cancellation server");
+        let stdout = child.stdout.take().expect("capture server stdout");
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut listening = String::new();
+        stdout
+            .read_line(&mut listening)
+            .expect("read ephemeral listening port");
+        let port: u16 = listening
+            .trim()
+            .parse()
+            .expect("server prints numeric port");
+        let _client = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback client");
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll native cancellation server") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("native node:net destroy/server.close left realm drive pending");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture stderr")
+            .read_to_string(&mut stderr)
+            .expect("read stderr");
+        assert!(status.success(), "server failed: {stderr}");
+    }
+
+    #[test]
     fn compiler_environment_identity_is_allowlisted_and_unambiguously_framed() {
         let clang_baseline = environment_digest(CompilerKind::Clang, &[]);
         for name in C_COMPILER_ENVIRONMENT {
