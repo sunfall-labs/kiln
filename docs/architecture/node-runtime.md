@@ -219,7 +219,12 @@ No Node API is advertised on native merely because its synchronous facade compil
 only when its continuations, resources, cancellation, and liveness enter the shared realm protocol.
 The canonical standalone acceptance case builds `conformance/server/s01-http-hello.mjs` through
 the public `kiln build --node` command, executes the emitted artifact, and requires the same output
-as interpreted Node mode. `bench/results/server-baseline.json` measures that artifact alongside
+as interpreted Node mode. `s02-routing-json.mjs` and `s03-request-body-streams.mjs` are maintained
+standalone acceptance cases too. They add async routing, WHATWG URL/query parsing, JSON response
+bodies, sequential requests, request-body streaming, and Buffer reassembly without changing the
+scheduler or transport seam. Native Buffer views reuse the typed-array byte store; Node identity
+is a property of the view, not a second container or a native ABI type.
+`bench/results/server-baseline.json` measures the first artifact alongside
 Node, Deno, and Bun without making the comparison a CI gate.
 
 ## Migration sequence
