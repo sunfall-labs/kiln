@@ -28663,12 +28663,25 @@ fn call_native(
                     .collect(),
                 // `Object.keys([1,2])` is ["0","1"]: array indices are string keys too, and a
                 // hole has no key at all.
+                // The elements, and then whatever the program hung on the array by name --
+                // `length` is not among them, because it is not enumerable. Stopping at the
+                // elements made `Object.keys` disagree with the `for-in` beside it about the
+                // same array.
                 Some(Value::Array(items)) => items
                     .borrow()
                     .iter()
                     .enumerate()
                     .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
                     .map(|(index, _)| Value::String(index.to_string()))
+                    .chain(
+                        items
+                            .properties
+                            .borrow()
+                            .entries()
+                            .map(|(key, _)| key)
+                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .map(|key| Value::String(key.to_owned())),
+                    )
                     .collect(),
                 // The elements, and then whatever the program hung on the view by name: an
                 // exotic object enumerates both, in the order its own-key walk lists them.
@@ -32325,22 +32338,28 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
             if items.properties.borrow().is_frozen() {
                 return false;
             }
-            if let Some(index) = array_index(key) {
-                // An element a program locked down will not go, and `delete` reports that
-                // rather than leaving `length` describing an array that no longer matches it.
-                if let Some(entry) = array_exotic_element(items, index) {
-                    if !entry.attributes.configurable {
-                        return false;
-                    }
-                    items
-                        .elements
-                        .borrow_mut()
-                        .retain(|other| other.index != index);
+            let Some(index) = array_index(key) else {
+                // Not an index, so it is an ordinary named property of the array and it lives in
+                // the store beside the elements. Reporting `true` without reaching that store
+                // said the property was gone while it was still there -- which every
+                // descriptor test in the corpus notices, because `verifyProperty` deletes a
+                // property and restores it and had been restoring one that never left.
+                return remove_exotic_property(&items.properties, &key.property_key());
+            };
+            // An element a program locked down will not go, and `delete` reports that
+            // rather than leaving `length` describing an array that no longer matches it.
+            if let Some(entry) = array_exotic_element(items, index) {
+                if !entry.attributes.configurable {
+                    return false;
                 }
-                if let Some(slot) = items.borrow_mut().get_mut(index) {
-                    items.sparse.set(true);
-                    *slot = Value::Native(Native::Hole);
-                }
+                items
+                    .elements
+                    .borrow_mut()
+                    .retain(|other| other.index != index);
+            }
+            if let Some(slot) = items.borrow_mut().get_mut(index) {
+                items.sparse.set(true);
+                *slot = Value::Native(Native::Hole);
             }
             true
         }
