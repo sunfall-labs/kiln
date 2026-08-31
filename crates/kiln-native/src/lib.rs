@@ -259,6 +259,10 @@ pub enum NativeError {
     UnsupportedNodeBuiltin {
         specifier: &'static str,
     },
+    UnsupportedNodeBuiltinExport {
+        specifier: &'static str,
+        export_name: String,
+    },
 }
 
 impl fmt::Display for NativeError {
@@ -312,6 +316,13 @@ impl fmt::Display for NativeError {
                 formatter,
                 "native Node execution does not yet materialize the `{specifier}` builtin"
             ),
+            Self::UnsupportedNodeBuiltinExport {
+                specifier,
+                export_name,
+            } => write!(
+                formatter,
+                "native Node execution does not yet materialize the `{specifier}` export `{export_name}`"
+            ),
         }
     }
 }
@@ -331,7 +342,8 @@ impl std::error::Error for NativeError {
             | Self::ImmutableArtifactCollision { .. }
             | Self::NumberProvider { .. }
             | Self::RunResult { .. }
-            | Self::UnsupportedNodeBuiltin { .. } => None,
+            | Self::UnsupportedNodeBuiltin { .. }
+            | Self::UnsupportedNodeBuiltinExport { .. } => None,
         }
     }
 }
@@ -1593,20 +1605,60 @@ impl NativeBuilder {
 ///
 /// A builtin node's bytecode is intentionally empty: its exports are supplied by the execution
 /// adapter. Treating it as an ordinary generated module therefore succeeds while leaving every
-/// export `undefined`, which is worse than refusing the surface. Keep this gate beside native
-/// graph construction until each accepted builtin has an explicit native materializer.
+/// export `undefined`, which is worse than refusing the surface. A typed builtin can expose a
+/// broader interface than its native materializer, so named imports are checked against the
+/// materialized subset here as well. Keep this gate beside native graph construction until each
+/// accepted builtin has an explicit native materializer.
 fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError> {
-    if let Some(builtin) = graph.modules().find_map(|node| match node.source {
-        ModuleSource::NodeBuiltin(builtin) if native_builtin_body(builtin).is_none() => {
-            Some(builtin)
+    for node in graph.modules() {
+        let ModuleSource::NodeBuiltin(builtin) = node.source else {
+            continue;
+        };
+        if native_builtin_body(builtin).is_none() {
+            return Err(NativeError::UnsupportedNodeBuiltin {
+                specifier: builtin.specifier(),
+            });
         }
-        _ => None,
-    }) {
-        return Err(NativeError::UnsupportedNodeBuiltin {
-            specifier: builtin.specifier(),
-        });
+    }
+    for importer in graph.modules() {
+        for import in &importer.program.imports {
+            let Some(dependency) = importer
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.specifier == import.source)
+            else {
+                continue;
+            };
+            let Some(provider) = graph.module(&dependency.target) else {
+                continue;
+            };
+            let ModuleSource::NodeBuiltin(builtin) = provider.source else {
+                continue;
+            };
+            if import.imported != kiln_ir::NAMESPACE_IMPORT
+                && !native_builtin_supports_export(builtin, &import.imported)
+            {
+                return Err(NativeError::UnsupportedNodeBuiltinExport {
+                    specifier: builtin.specifier(),
+                    export_name: import.imported.clone(),
+                });
+            }
+        }
     }
     Ok(())
+}
+
+fn native_builtin_supports_export(
+    builtin: kiln_module_resolver::NodeBuiltin,
+    export_name: &str,
+) -> bool {
+    use kiln_module_resolver::NodeBuiltin;
+    match builtin {
+        NodeBuiltin::Events => matches!(export_name, "EventEmitter" | "default"),
+        NodeBuiltin::Net => export_name == "createServer",
+        NodeBuiltin::Http => matches!(export_name, "createServer" | "default"),
+        _ => false,
+    }
 }
 
 fn emit_native_graph_module(
@@ -3616,6 +3668,47 @@ mod tests {
     }
 
     #[test]
+    fn node_net_native_build_refuses_unsupported_exports() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        for export_name in ["connect", "createConnection"] {
+            let expected_export = export_name;
+            let project = TestDirectory::new("native-node-net-unsupported-export");
+            let entry = project.path.join("main.mjs");
+            fs::write(
+                &entry,
+                format!(
+                    "import {{ {export_name} }} from \"node:net\"; console.log(typeof {export_name});\n"
+                ),
+            )
+            .expect("write node:net fixture");
+            let graph = ModuleGraph::build_node(
+                &entry,
+                NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+                |path: &Path| fs::read_to_string(path),
+                OxcFrontend,
+            )
+            .expect("source graph compiles");
+
+            let error = validate_native_node_builtins(&graph)
+                .expect_err("native build must refuse unsupported node:net exports");
+            assert!(matches!(
+                &error,
+                NativeError::UnsupportedNodeBuiltinExport {
+                    specifier: "node:net",
+                    export_name: actual_export,
+                } if actual_export == expected_export
+            ));
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "native Node execution does not yet materialize the `node:net` export `{export_name}`"
+                )
+            );
+        }
+    }
+
+    #[test]
     fn native_node_net_source_graph_builds_through_the_production_frontend() {
         use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -3818,6 +3911,83 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .expect("read stderr");
         assert!(status.success(), "server failed: {stderr}");
         assert_eq!(rest, "GET /health 1.1\n");
+    }
+
+    #[test]
+    fn native_node_net_listen_accepts_callback_as_second_argument() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:net callback integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-node-net-listen-callback");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { createServer } from "node:net";
+const server = createServer(() => {});
+server.listen(0, () => {
+  console.log(server.address().port);
+  server.close();
+});
+"#,
+        )
+        .expect("write node:net callback fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let builder = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain);
+        let report = builder
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native node:net callback graph builds");
+
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start native node:net callback server");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll callback server") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("server.listen(0, callback) did not invoke its callback");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("capture callback stdout")
+            .read_to_string(&mut stdout)
+            .expect("read callback stdout");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture callback stderr")
+            .read_to_string(&mut stderr)
+            .expect("read callback stderr");
+        assert!(status.success(), "callback server failed: {stderr}");
+        let port: u16 = stdout.trim().parse().expect("callback prints port");
+        assert_ne!(port, 0);
     }
 
     #[test]
