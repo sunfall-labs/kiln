@@ -1274,15 +1274,19 @@ impl Native {
                 WellKnown::NodeInspectCustom,
             ))),
             (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
+            // `default` binds to the module namespace unless an arm below overrides it, and an
+            // override is only correct where node's own default is callable. Measured against
+            // node v25.9.0, exactly four are: `assert`, `events`, `module` and `stream`.
+            // `async_hooks`, `string_decoder` and `perf_hooks` used to override too, which bound
+            // their defaults to `AsyncResource`, `StringDecoder` and `performance` and made
+            // `typeof` answer "function" where node answers "object".
             (Self::NodeAssert, "default" | "ok" | "strict") => {
                 Some(Value::Native(Self::NodeAssertOk))
             }
-            (Self::NodeAsyncHooks, "AsyncResource" | "default") => {
-                Some(Value::Native(Self::NodeAsyncResource))
-            }
+            (Self::NodeAsyncHooks, "AsyncResource") => Some(Value::Native(Self::NodeAsyncResource)),
             (Self::NodeCrypto, "randomUUID") => Some(Value::Native(Self::NodeCryptoRandomUuid)),
             (Self::NodeCrypto, "createHash") => Some(Value::Native(Self::NodeCryptoCreateHash)),
-            (Self::NodeStringDecoder, "StringDecoder" | "default") => {
+            (Self::NodeStringDecoder, "StringDecoder") => {
                 Some(Value::Native(Self::NodeStringDecoderConstructor))
             }
             (Self::NodeStream, "Readable") => Some(Value::Native(Self::NodeReadable)),
@@ -1309,9 +1313,7 @@ impl Native {
             (Self::NodeZlib, "createInflate" | "createGunzip" | "createBrotliDecompress") => {
                 Some(Value::Native(Self::NodeZlibCreateDecompress))
             }
-            (Self::NodePerfHooks, "performance" | "default") => {
-                Some(Value::Native(Self::Performance))
-            }
+            (Self::NodePerfHooks, "performance") => Some(Value::Native(Self::Performance)),
             (Self::NodeHttps, "createServer") => Some(Value::Native(Self::NodeHttpsCreateServer)),
             (Self::NodeHttp2, "createServer") => Some(Value::Native(Self::NodeHttp2CreateServer)),
             (Self::NodeHttp2, "createSecureServer") => {
@@ -5212,7 +5214,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
         "fs" => &["default", "existsSync", "promises"],
-        "net" => &["connect", "createConnection", "createServer"],
+        "net" => &["connect", "createConnection", "createServer", "default"],
         "http" => &[
             "IncomingMessage",
             "METHODS",
@@ -5381,6 +5383,38 @@ impl Value {
             Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics)
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
+            // A Node builtin's default export is the same shape of thing, and the same
+            // feature-detection depends on it: `typeof http === "object"` is how a library
+            // decides it is on Node at all. Which of these is an object and which is callable is
+            // not a judgement call - it was measured against node v25.9.0, one probe per
+            // specifier, and only these answered "object". The four that answered "function" are
+            // deliberately absent and must stay absent: node's `assert`, `events`, `module` and
+            // `stream` defaults really are callable (`assert(cond)`, the `EventEmitter`
+            // constructor, and the `Stream` constructor), so listing them here would trade one
+            // wrong answer for another.
+            Self::Native(
+                Native::NodeAsyncHooks
+                | Native::NodeBuffer
+                | Native::NodeCrypto
+                | Native::NodeDiagnosticsChannel
+                | Native::NodeDns
+                | Native::NodeFs
+                | Native::NodeFsPromises
+                | Native::NodeHttp
+                | Native::NodeHttp2
+                | Native::NodeHttps
+                | Native::NodeNet
+                | Native::NodeOs
+                | Native::NodePath
+                | Native::NodePerfHooks
+                | Native::NodeQueryString
+                | Native::NodeStringDecoder
+                | Native::NodeTty
+                | Native::NodeUrl
+                | Native::NodeUtil
+                | Native::NodeWorkerThreads
+                | Native::NodeZlib,
+            ) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
@@ -5419,6 +5453,38 @@ impl Value {
             Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics)
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
+            // A Node builtin's default export is the same shape of thing, and the same
+            // feature-detection depends on it: `typeof http === "object"` is how a library
+            // decides it is on Node at all. Which of these is an object and which is callable is
+            // not a judgement call - it was measured against node v25.9.0, one probe per
+            // specifier, and only these answered "object". The four that answered "function" are
+            // deliberately absent and must stay absent: node's `assert`, `events`, `module` and
+            // `stream` defaults really are callable (`assert(cond)`, the `EventEmitter`
+            // constructor, and the `Stream` constructor), so listing them here would trade one
+            // wrong answer for another.
+            Self::Native(
+                Native::NodeAsyncHooks
+                | Native::NodeBuffer
+                | Native::NodeCrypto
+                | Native::NodeDiagnosticsChannel
+                | Native::NodeDns
+                | Native::NodeFs
+                | Native::NodeFsPromises
+                | Native::NodeHttp
+                | Native::NodeHttp2
+                | Native::NodeHttps
+                | Native::NodeNet
+                | Native::NodeOs
+                | Native::NodePath
+                | Native::NodePerfHooks
+                | Native::NodeQueryString
+                | Native::NodeStringDecoder
+                | Native::NodeTty
+                | Native::NodeUrl
+                | Native::NodeUtil
+                | Native::NodeWorkerThreads
+                | Native::NodeZlib,
+            ) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
             Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
@@ -40789,6 +40855,37 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn node_builtin_defaults_preserve_namespace_or_callable_shape() {
+        for specifier in [
+            "async_hooks",
+            "buffer",
+            "crypto",
+            "fs",
+            "http",
+            "net",
+            "perf_hooks",
+            "string_decoder",
+            "util",
+        ] {
+            let default = node_builtin_exports(specifier)
+                .expect("builtin exists")
+                .into_iter()
+                .find_map(|(name, value)| (name == "default").then_some(value))
+                .expect("builtin advertises a default export");
+            assert_eq!(default.type_name(), "object", "node:{specifier}");
+        }
+
+        for specifier in ["assert", "events", "module", "stream"] {
+            let default = node_builtin_exports(specifier)
+                .expect("builtin exists")
+                .into_iter()
+                .find_map(|(name, value)| (name == "default").then_some(value))
+                .expect("builtin advertises a default export");
+            assert_eq!(default.type_name(), "function", "node:{specifier}");
+        }
     }
 
     #[test]

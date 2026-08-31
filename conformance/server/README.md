@@ -1,7 +1,8 @@
 # The Node-server probes
 
 Five vertical server programs. All five now run under explicit interpreted Node mode when the
-reproducible package fixtures are installed; native standalone remains a separate gate.
+reproducible package fixtures are installed. `s01` through `s03` also run as native standalone
+artifacts; the framework probes remain the next native gates.
 
 `docs/design.md` §14 puts the Node compatibility graft at step 10 and the async event loop at
 step 11. `docs/language-coverage.md` turns everything before that into a ten-step ladder, and

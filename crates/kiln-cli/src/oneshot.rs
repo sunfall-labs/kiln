@@ -319,6 +319,7 @@ server.listen(0, "127.0.0.1", () => {
 
     #[test]
     fn one_shot_native_node_streams_request_bodies_through_hyper() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let fixture = std::env::temp_dir().join(format!(
             "kiln-cli-native-http-stream-fixture-{}",
             std::process::id()
@@ -326,44 +327,11 @@ server.listen(0, "127.0.0.1", () => {
         let _ = std::fs::remove_dir_all(&fixture);
         std::fs::create_dir_all(&fixture).expect("create native HTTP stream fixture");
         let source = fixture.join("request-body-streams.mjs");
-        std::fs::write(
+        std::fs::copy(
+            root.join("conformance/server/s03-request-body-streams.mjs"),
             &source,
-            r#"import http from "node:http";
-const server = http.createServer((request, response) => {
-  let body = "";
-  request.setEncoding("utf8");
-  request.on("data", chunk => body += chunk);
-  request.on("end", () => {
-    response.writeHead(200, { "content-type": "text/plain" });
-    response.write(request.method + " " + request.headers["content-type"] + " ");
-    response.end(body);
-  });
-});
-server.listen(0, "127.0.0.1", () => {
-  const options = {
-    host: "127.0.0.1",
-    port: server.address().port,
-    method: "POST",
-    path: "/upload",
-    headers: { "content-type": "text/plain" },
-  };
-  const onResponse = response => {
-    let body = "";
-    response.setEncoding("utf8");
-    response.on("data", chunk => body += chunk);
-    response.on("end", () => {
-      console.log(response.statusCode, body);
-      server.close();
-    });
-  };
-  const request = http.request(options, onResponse);
-  request.write("kiln ");
-  request.write("streams");
-  request.end();
-});
-"#,
         )
-        .expect("write native HTTP stream fixture");
+        .expect("copy canonical native HTTP stream fixture");
         let output = {
             let mut session = OneShot::start().expect("start an in-process engine");
             commands::native_run(
@@ -377,11 +345,56 @@ server.listen(0, "127.0.0.1", () => {
         };
 
         assert_eq!(
-            output.text, "200 POST text/plain kiln streams\n",
+            output.text, "200 {\"method\":\"POST\",\"bytes\":12,\"text\":\"kiln streams\"}\n",
             "exit={} notes={:?}",
             output.exit_code, output.notes
         );
         assert_eq!(output.exit_code, 0);
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn one_shot_builds_the_request_body_stream_server_as_a_standalone_artifact() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture = std::env::temp_dir().join(format!(
+            "kiln-cli-native-http-stream-build-fixture-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&fixture);
+        std::fs::create_dir_all(&fixture).expect("create native HTTP stream build fixture");
+        let source = fixture.join("request-body-streams.mjs");
+        let artifact = fixture.join("request-body-streams");
+        std::fs::copy(
+            root.join("conformance/server/s03-request-body-streams.mjs"),
+            &source,
+        )
+        .expect("copy canonical native HTTP stream fixture");
+        let built = {
+            let mut session = OneShot::start().expect("start an in-process engine");
+            commands::build(
+                &mut session,
+                &source,
+                &fixture,
+                Some(&artifact),
+                kiln_proto::NativeProfile::Dev,
+                false,
+                true,
+            )
+            .expect("build standalone native request-body server")
+        };
+        assert_eq!(built.exit_code, 0);
+        let output = std::process::Command::new(&artifact)
+            .output()
+            .expect("run standalone native request-body server");
+        assert!(
+            output.status.success(),
+            "stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            output.stdout,
+            b"200 {\"method\":\"POST\",\"bytes\":12,\"text\":\"kiln streams\"}\n"
+        );
         let _ = std::fs::remove_dir_all(&fixture);
     }
 

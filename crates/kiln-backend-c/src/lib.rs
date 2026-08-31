@@ -427,6 +427,10 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_TEMPORAL_INSTANT 60
 #define KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME 61
 #define KILN_C99_BUILTIN_TEMPORAL_NOW 62
+/* WHATWG URL. The object it constructs is ordinary; only construction and query lookup need
+ * runtime code, so no URL-specific value tag or ABI representation crosses the boundary. */
+#define KILN_C99_BUILTIN_URL 63
+#define KILN_C99_BUILTIN_BUFFER 64
 
 /* Array methods, part two.
  *
@@ -827,6 +831,45 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
 #define KILN_C99_METHOD_NODE_NET_CONNECT 336
+#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 337
+#define KILN_C99_METHOD_BUFFER_FROM 338
+#define KILN_C99_METHOD_BUFFER_ALLOC 339
+#define KILN_C99_METHOD_BUFFER_IS_BUFFER 340
+#define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 341
+#define KILN_C99_METHOD_BUFFER_CONCAT 342
+#define KILN_C99_METHOD_BUFFER_TO_STRING 343
+#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 344
+#define KILN_C99_METHOD_NODE_UTIL_NOOP 345
+#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 346
+#define KILN_C99_METHOD_NODE_UTIL_INSPECT 347
+#define KILN_C99_METHOD_NODE_UTIL_INHERITS 348
+#define KILN_C99_METHOD_NODE_UTIL_FORMAT 349
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 350
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 351
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 352
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 353
+#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 354
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 355
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 356
+#define KILN_C99_METHOD_NODE_DNS_LOOKUP 357
+#define KILN_C99_METHOD_NODE_OS_HOSTNAME 358
+#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 359
+#define KILN_C99_METHOD_NODE_STREAM 360
+#define KILN_C99_METHOD_NODE_READABLE 361
+#define KILN_C99_METHOD_NODE_WRITABLE 362
+#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 363
+#define KILN_C99_METHOD_NODE_STREAM_FINISHED 364
+#define KILN_C99_METHOD_NODE_READABLE_PUSH 365
+#define KILN_C99_METHOD_NODE_READABLE_READ 366
+#define KILN_C99_METHOD_NODE_READABLE_DESTROY 367
+#define KILN_C99_METHOD_NODE_READABLE_PAUSE 368
+#define KILN_C99_METHOD_NODE_READABLE_RESUME 369
+#define KILN_C99_METHOD_NODE_READABLE_PIPE 370
+#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 371
+#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 372
+#define KILN_C99_METHOD_NODE_WRITABLE_END 373
+#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 374
+#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 375
 
 /* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
@@ -898,6 +941,10 @@ typedef struct kiln_typed_array {
     size_t byte_offset;
     size_t length;
     kiln_typed_kind kind;
+    /* Node's Buffer is a Uint8Array with a different prototype surface, not another byte
+     * container. Keep that distinction on the view so slices can share storage and every
+     * numeric typed-array operation continues to use the battle-tested path above it. */
+    int is_buffer;
 } kiln_typed_array;
 
 
@@ -1815,6 +1862,30 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places);
 static int kiln_c99_hex_digit(char character);
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width);
 static int kiln_c99_valid_utf8(const char *bytes, size_t len);
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown);
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
+                                          const kiln_value *args, size_t argc,
+                                          kiln_value *thrown);
+static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
+                                    kiln_value source, size_t byte_offset, size_t length,
+                                    int has_length, kiln_value *thrown);
+static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
+static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+                                  const kiln_value *args, size_t argc, kiln_value *thrown);
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+                              const kiln_value *args, size_t argc, int depth,
+                              kiln_value *thrown);
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown);
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+                                    const kiln_value *args, size_t argc, int depth,
+                                    kiln_value *thrown);
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
+                                kiln_value receiver, const kiln_value *args, size_t argc,
+                                int depth, kiln_value *thrown);
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -1963,6 +2034,148 @@ static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, s
     return value;
 }
 
+/* Realm stream semantics. The transport adapters only feed data and lifecycle events into these
+ * ordinary objects; no socket, reactor, clock, or scheduler state is duplicated here. */
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
+                                kiln_value receiver, const kiln_value *args, size_t argc,
+                                int depth, kiln_value *thrown) {
+    kiln_value object = receiver;
+    kiln_value ignored;
+    kiln_property *buffer;
+    int status;
+    if (code == KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL) {
+        *result = argc > 1 ? args[1] : kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_STREAM_FINISHED) {
+        kiln_value stream = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value callback = argc > 1 ? args[argc - 1] : kiln_c99_undefined();
+        kiln_value ended = kiln_c99_undefined();
+        kiln_value event;
+        kiln_value once_args[2];
+        if (!kiln_c99_is_callable(callback)) return kiln_c99_throw_not_a(thrown, callback, "function");
+        if (stream.tag != KILN_VALUE_OBJECT) return kiln_c99_throw_not_a(thrown, stream, "stream");
+        status = kiln_c99_get(host, stream, "writableEnded", 13, &ended, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (!kiln_c99_truthy(ended)) {
+            status = kiln_c99_get(host, stream, "readableEnded", 13, &ended, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            event = kiln_c99_copy_text(kiln_c99_truthy(ended) ? "end" : "finish",
+                                       kiln_c99_truthy(ended) ? 3 : 6);
+            once_args[0] = event;
+            once_args[1] = callback;
+            status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ONCE,
+                                         stream, once_args, 2, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            status = kiln_c99_call(host, &ignored, callback, kiln_c99_undefined(), NULL, 0,
+                                   depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        *result = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_STREAM || code == KILN_C99_METHOD_NODE_READABLE ||
+        code == KILN_C99_METHOD_NODE_WRITABLE) {
+        if (object.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&object);
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                     object, NULL, 0, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (code == KILN_C99_METHOD_NODE_READABLE) {
+            kiln_value queue;
+            status = kiln_c99_new_array(&queue);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "@@node:readable", 15, queue, 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "readableEnded", 13, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "destroyed", 9, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "push", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PUSH));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "read", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_READ));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "destroy", 7, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_DESTROY));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "pause", 5, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PAUSE));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "resume", 6, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_RESUME));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "setEncoding", 11, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "pipe", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PIPE));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "unpipe", 6, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_UNPIPE));
+        } else if (code == KILN_C99_METHOD_NODE_WRITABLE) {
+            status = kiln_c99_put(NULL, object, "writableEnded", 13, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "writableFinished", 16, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "destroyed", 9, kiln_c99_boolean(0), 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "write", 5, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_WRITE));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "end", 3, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_END));
+            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "destroy", 7, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_DESTROY));
+        }
+        *result = object;
+        return status;
+    }
+    if (receiver.tag != KILN_VALUE_OBJECT) return kiln_c99_throw_not_a(thrown, receiver, "stream");
+    buffer = kiln_c99_own_private(receiver, "@@node:readable", 15);
+    if (code == KILN_C99_METHOD_NODE_READABLE_PUSH) {
+        kiln_value chunk = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value emit_args[2];
+        if (buffer == NULL || buffer->value.tag != KILN_VALUE_ARRAY) return kiln_c99_throw_not_a(thrown, receiver, "Readable");
+        if (chunk.tag == KILN_VALUE_NULL) {
+            status = kiln_c99_put(NULL, receiver, "readableEnded", 13, kiln_c99_boolean(1), 0, NULL);
+            emit_args[0] = kiln_c99_copy_text("end", 3);
+            status = status == KILN_C99_OK ? kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown) : status;
+            *result = kiln_c99_boolean(0);
+            return status;
+        }
+        status = kiln_c99_array_push(buffer->value, chunk);
+        emit_args[0] = kiln_c99_copy_text("readable", 8);
+        emit_args[1] = chunk;
+        if (status == KILN_C99_OK) status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown);
+        *result = kiln_c99_boolean(1);
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_READ) {
+        kiln_array *queue;
+        size_t index;
+        if (buffer == NULL || buffer->value.tag != KILN_VALUE_ARRAY) return kiln_c99_throw_not_a(thrown, receiver, "Readable");
+        queue = kiln_c99_array_of(buffer->value);
+        if (queue->count == 0) { *result = kiln_c99_null(); return KILN_C99_OK; }
+        *result = queue->elements[0];
+        for (index = 1; index < queue->count; ++index) queue->elements[index - 1] = queue->elements[index];
+        queue->count -= 1;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_PAUSE || code == KILN_C99_METHOD_NODE_READABLE_RESUME ||
+        code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING || code == KILN_C99_METHOD_NODE_READABLE_UNPIPE) {
+        *result = receiver; return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_PIPE) { *result = argc > 0 ? args[0] : kiln_c99_undefined(); return KILN_C99_OK; }
+    if (code == KILN_C99_METHOD_NODE_WRITABLE_WRITE) {
+        kiln_value hook;
+        status = kiln_c99_get(host, receiver, "_write", 6, &hook, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (kiln_c99_is_callable(hook)) {
+            kiln_value callback = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+            kiln_value write_args[3] = { argc > 0 ? args[0] : kiln_c99_undefined(), kiln_c99_copy_text("buffer", 6), callback };
+            status = kiln_c99_call(host, &ignored, hook, receiver, write_args, 3, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        *result = kiln_c99_boolean(1); return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_WRITABLE_END) {
+        if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED) {
+            status = kiln_c99_node_stream(host, &ignored, KILN_C99_METHOD_NODE_WRITABLE_WRITE, receiver, args, 1, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_put(NULL, receiver, "writableEnded", 13, kiln_c99_boolean(1), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_put(NULL, receiver, "writableFinished", 16, kiln_c99_boolean(1), 0, NULL);
+        if (status == KILN_C99_OK) { kiln_value emit_args[1] = { kiln_c99_copy_text("finish", 6) }; status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown); }
+        *result = receiver; return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_DESTROY || code == KILN_C99_METHOD_NODE_WRITABLE_DESTROY) {
+        kiln_value emit_args[1] = { kiln_c99_copy_text("close", 5) };
+        status = kiln_c99_put(NULL, receiver, "destroyed", 9, kiln_c99_boolean(1), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown);
+        *result = receiver; return status;
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
 static kiln_value kiln_c99_undefined(void) {
     return kiln_c99_value(KILN_VALUE_UNDEFINED, 0, NULL, 0);
 }
@@ -1995,6 +2208,328 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->frozen = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
+}
+
+static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
+    kiln_value built;
+    size_t index;
+    int status;
+    if (source.tag == KILN_VALUE_STRING) {
+        status = kiln_c99_typed_alloc(&built, KILN_TYPED_UINT8, source.len);
+        if (status != KILN_C99_OK) return status;
+        for (index = 0; index < source.len; ++index) {
+            kiln_c99_typed_set(kiln_c99_typed_array_of(built), index,
+                               (double)(unsigned char)source.ptr[index]);
+        }
+    } else if (source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_ARRAY) {
+        status = kiln_c99_new_typed_array(&built, KILN_TYPED_UINT8, source, 0, 0, 0, thrown);
+        if (status != KILN_C99_OK) return status;
+    } else {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Buffer.from needs a string, array, or typed array");
+    }
+    kiln_c99_typed_array_of(built)->is_buffer = 1;
+    *out = built;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+                                  const kiln_value *args, size_t argc, kiln_value *thrown) {
+    kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+    if (code == KILN_C99_METHOD_BUFFER_FROM) return kiln_c99_buffer_from(out, first, thrown);
+    if (code == KILN_C99_METHOD_BUFFER_ALLOC) {
+        size_t length;
+        int status = kiln_c99_to_index(first, &length, thrown);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, length);
+        if (status == KILN_C99_OK) kiln_c99_typed_array_of(*out)->is_buffer = 1;
+        return status;
+    }
+    if (code == KILN_C99_METHOD_BUFFER_IS_BUFFER) {
+        *out = kiln_c99_boolean(first.tag == KILN_VALUE_TYPED_ARRAY &&
+                                kiln_c99_typed_array_of(first)->is_buffer);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_BUFFER_BYTE_LENGTH) {
+        *out = kiln_c99_number(first.tag == KILN_VALUE_STRING ? (double)first.len :
+            first.tag == KILN_VALUE_TYPED_ARRAY ?
+                (double)(kiln_c99_typed_array_of(first)->length *
+                         kiln_c99_typed_width(kiln_c99_typed_array_of(first)->kind)) :
+                (double)kiln_c99_text(first).len);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_BUFFER_CONCAT) {
+        kiln_array *items;
+        size_t total = 0;
+        size_t at;
+        size_t written = 0;
+        int status;
+        if (first.tag != KILN_VALUE_ARRAY)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Buffer.concat needs an array");
+        items = kiln_c99_array_of(first);
+        for (at = 0; at < items->count; ++at) {
+            if (items->elements[at].tag != KILN_VALUE_TYPED_ARRAY)
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Buffer.concat entries must be typed arrays");
+            total += kiln_c99_typed_array_of(items->elements[at])->length;
+        }
+        status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, total);
+        if (status != KILN_C99_OK) return status;
+        for (at = 0; at < items->count; ++at) {
+            kiln_typed_array *view = kiln_c99_typed_array_of(items->elements[at]);
+            size_t index;
+            for (index = 0; index < view->length; ++index)
+                kiln_c99_typed_set(kiln_c99_typed_array_of(*out), written++,
+                                   kiln_c99_typed_get(view, index));
+        }
+        kiln_c99_typed_array_of(*out)->is_buffer = 1;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_BUFFER_TO_STRING) {
+        kiln_typed_array *view;
+        kiln_value encoding = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_copy_text("utf8", 4);
+        if (receiver.tag != KILN_VALUE_TYPED_ARRAY ||
+            !(encoding.len == 4 && memcmp(encoding.ptr, "utf8", 4) == 0) )
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "unsupported Buffer encoding");
+        view = kiln_c99_typed_array_of(receiver);
+        *out = kiln_c99_copy_text((const char *)view->buffer->bytes + view->byte_offset,
+                                  view->length);
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+                                    const kiln_value *args, size_t argc, int depth,
+                                    kiln_value *thrown) {
+    kiln_value name = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_copy_text("localhost", 9);
+    kiln_value callback = kiln_c99_undefined();
+    kiln_value options = argc > 1 ? args[1] : kiln_c99_undefined();
+    kiln_value addresses;
+    kiln_value callback_args[3];
+    size_t at;
+    int all = 0;
+    int status;
+    for (at = argc; at > 0; --at) {
+        if (kiln_c99_is_callable(args[at - 1])) {
+            callback = args[at - 1];
+            break;
+        }
+    }
+    if (!kiln_c99_is_callable(callback))
+        return kiln_c99_throw_not_a(thrown, callback, "function");
+    if (name.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    if (options.tag == KILN_VALUE_OBJECT) {
+        kiln_value read;
+        status = kiln_c99_get(host, options, "all", 3, &read, depth, thrown);
+        if (status != KILN_C99_OK) return status;
+        all = kiln_c99_truthy(read);
+    }
+    status = kiln_c99_new_array(&addresses);
+    if (status != KILN_C99_OK) return status;
+    if ((name.len == 9 && memcmp(name.ptr, "localhost", 9) == 0) ||
+        (name.len == 9 && memcmp(name.ptr, "127.0.0.1", 9) == 0)) {
+        kiln_value address;
+        status = kiln_c99_new_object(&address);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, address, "address", 7,
+                                  kiln_c99_copy_text("127.0.0.1", 9), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, address, "family", 6, kiln_c99_number(4.0), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(addresses, address);
+    }
+    if ((name.len == 9 && memcmp(name.ptr, "localhost", 9) == 0) ||
+        (name.len == 3 && memcmp(name.ptr, "::1", 3) == 0)) {
+        kiln_value address;
+        status = kiln_c99_new_object(&address);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, address, "address", 7,
+                                  kiln_c99_copy_text("::1", 3), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, address, "family", 6, kiln_c99_number(6.0), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(addresses, address);
+    }
+    if (status != KILN_C99_OK) return status;
+    if (kiln_c99_array_of(addresses)->count == 0) {
+        callback_args[0] = kiln_c99_copy_text("ENOTFOUND", 9);
+        callback_args[1] = addresses;
+        status = kiln_c99_call(host, out, callback, kiln_c99_undefined(), callback_args, 2,
+                               depth, thrown);
+    } else if (all) {
+        callback_args[0] = kiln_c99_null();
+        callback_args[1] = addresses;
+        status = kiln_c99_call(host, out, callback, kiln_c99_undefined(), callback_args, 2,
+                               depth, thrown);
+    } else {
+        kiln_value first = kiln_c99_array_of(addresses)->elements[0];
+        callback_args[0] = kiln_c99_null();
+        status = kiln_c99_get(host, first, "address", 7, &callback_args[1], depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_get(host, first, "family", 6, &callback_args[2], depth, thrown);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_call(host, out, callback, kiln_c99_undefined(), callback_args, 3,
+                                   depth, thrown);
+    }
+    if (status == KILN_C99_OK) *out = kiln_c99_undefined();
+    return status;
+}
+
+static int kiln_c99_node_channel(kiln_value *out) {
+    int status = kiln_c99_new_object(out);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_put(NULL, *out, "hasSubscribers", 14, kiln_c99_boolean(0), 0, NULL);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(
+            *out, "publish", 7, kiln_c99_method(KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(
+            *out, "runStores", 9, kiln_c99_method(KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES));
+    return status;
+}
+
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+                                     const kiln_value *args, size_t argc, int depth,
+                                     kiln_value *thrown) {
+    if (code == KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL)
+        return kiln_c99_node_channel(out);
+    if (code == KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL) {
+        static const char *const names[] = {"start", "end", "asyncStart", "asyncEnd", "error"};
+        size_t index;
+        int status = kiln_c99_new_object(out);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, *out, "hasSubscribers", 14,
+                                  kiln_c99_boolean(0), 0, NULL);
+        for (index = 0; status == KILN_C99_OK && index < sizeof names / sizeof *names; ++index) {
+            kiln_value channel;
+            status = kiln_c99_node_channel(&channel);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, *out, names[index], strlen(names[index]), channel,
+                                      0, NULL);
+        }
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH) {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES) {
+        kiln_value callback = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value receiver = argc > 2 ? args[2] : kiln_c99_undefined();
+        if (!kiln_c99_is_callable(callback))
+            return kiln_c99_throw_not_a(thrown, callback, "function");
+        return kiln_c99_call(host, out, callback, receiver, argc > 3 ? args + 3 : NULL,
+                             argc > 3 ? argc - 3 : 0, depth, thrown);
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+                              const kiln_value *args, size_t argc, int depth,
+                              kiln_value *thrown) {
+    size_t index;
+    if (code == KILN_C99_METHOD_NODE_UTIL_DEBUGLOG) {
+        *out = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_UTIL_NOOP) {
+        *out = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_UTIL_DEPRECATE) {
+        *out = argc > 0 ? args[0] : kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_UTIL_INSPECT) {
+        *out = kiln_c99_inspect(argc > 0 ? args[0] : kiln_c99_undefined());
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    if (code == KILN_C99_METHOD_NODE_UTIL_INHERITS) {
+        kiln_value constructor = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value parent = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value constructor_prototype;
+        kiln_value parent_prototype;
+        int status;
+        if (!kiln_c99_is_callable(constructor) || !kiln_c99_is_callable(parent))
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "The constructor and super constructor must be functions");
+        status = kiln_c99_prototype_object(constructor, &constructor_prototype);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_prototype_object(parent, &parent_prototype);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_set_prototype(constructor_prototype, parent_prototype);
+        *out = kiln_c99_undefined();
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_UTIL_FORMAT) {
+        kiln_text built = {NULL, 0, 0};
+        size_t next = 1;
+        if (argc == 0) {
+            *out = kiln_c99_copy_text("", 0);
+            return KILN_C99_OK;
+        }
+        if (args[0].tag != KILN_VALUE_STRING) {
+            for (index = 0; index < argc; ++index) {
+                kiln_value shown = kiln_c99_inspect(args[index]);
+                if ((index != 0 && kiln_c99_text_append_c(&built, " ") != KILN_C99_OK) ||
+                    shown.tag != KILN_VALUE_STRING ||
+                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                    free(built.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+        } else {
+            for (index = 0; index < args[0].len; ++index) {
+                char character = args[0].ptr[index];
+                if (character != '%' || index + 1 >= args[0].len) {
+                    if (kiln_c99_text_append(&built, &character, 1) != KILN_C99_OK) goto format_oom;
+                    continue;
+                }
+                character = args[0].ptr[++index];
+                if (character == '%') {
+                    if (kiln_c99_text_append_c(&built, "%") != KILN_C99_OK) goto format_oom;
+                    continue;
+                }
+                if (next >= argc) {
+                    if (kiln_c99_text_append_c(&built, "%") != KILN_C99_OK ||
+                        kiln_c99_text_append(&built, &character, 1) != KILN_C99_OK) goto format_oom;
+                    continue;
+                }
+                {
+                    kiln_value value = args[next++];
+                    kiln_value shown = character == 's' ? kiln_c99_text(value) :
+                                       (character == 'd' || character == 'i' || character == 'f') ?
+                                           kiln_c99_text(kiln_c99_number(kiln_c99_as_number(value))) :
+                                       (character == 'j' || character == 'o' || character == 'O') ?
+                                           kiln_c99_inspect(value) : kiln_c99_undefined();
+                    if (shown.tag == KILN_VALUE_UNDEFINED) {
+                        if (kiln_c99_text_append_c(&built, "%") != KILN_C99_OK ||
+                            kiln_c99_text_append(&built, &character, 1) != KILN_C99_OK) goto format_oom;
+                        next -= 1;
+                    } else if (shown.tag != KILN_VALUE_STRING ||
+                               kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK) {
+                        goto format_oom;
+                    }
+                }
+            }
+            while (next < argc) {
+                kiln_value shown = kiln_c99_inspect(args[next++]);
+                if (kiln_c99_text_append_c(&built, " ") != KILN_C99_OK ||
+                    shown.tag != KILN_VALUE_STRING ||
+                    kiln_c99_text_append(&built, shown.ptr, shown.len) != KILN_C99_OK)
+                    goto format_oom;
+            }
+        }
+        *out = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+        return KILN_C99_OK;
+format_oom:
+        free(built.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    (void)host;
+    (void)depth;
+    return KILN_C99_CONTROL_ERROR;
 }
 
 static int kiln_c99_new_array(kiln_value *out) {
@@ -2309,6 +2844,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
         view->byte_offset = byte_offset;
         view->length = count;
         view->kind = kind;
+        view->is_buffer = 0;
         *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);
         return KILN_C99_OK;
     }
@@ -2337,6 +2873,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;
+    view->is_buffer = 0;
     for (index = 0; index < count; ++index) {
         double item = source.tag == KILN_VALUE_ARRAY
                           ? kiln_c99_as_number(kiln_c99_array_of(source)->elements[index])
@@ -2374,6 +2911,7 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
     view->byte_offset = 0;
     view->length = count;
     view->kind = kind;
+    view->is_buffer = 0;
     *out = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)view, NULL, 0);
     return KILN_C99_OK;
 }
@@ -3226,6 +3764,116 @@ static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
     return 1;
 }
 
+/* The URL subset shared with the interpreter today: absolute HTTP-like input, or a path against
+ * an absolute base; pathname and query lookup are the public state. Keeping that advertised
+ * subset identical is better than a broader native parser that disagrees in corners. */
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+                                  kiln_value *thrown) {
+    kiln_value input = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+    kiln_value base = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
+    const char *start;
+    const char *end;
+    const char *query;
+    const char *fragment;
+    const char *scheme;
+    kiln_value params;
+    int status;
+    if (input.tag != KILN_VALUE_STRING || base.tag != KILN_VALUE_STRING) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    scheme = NULL;
+    {
+        size_t index;
+        for (index = 0; index + 2 < input.len; ++index) {
+            if (input.ptr[index] == ':' && input.ptr[index + 1] == '/' &&
+                input.ptr[index + 2] == '/') {
+                scheme = input.ptr + index;
+                break;
+            }
+        }
+    }
+    if (scheme != NULL) {
+        start = scheme + 3;
+        end = input.ptr + input.len;
+        while (start < end && *start != '/' && *start != '?' && *start != '#') ++start;
+        if (start == end || *start != '/') start = "/";
+    } else {
+        int valid_base = 0;
+        size_t index;
+        for (index = 0; index + 2 < base.len; ++index) {
+            if (base.ptr[index] == ':' && base.ptr[index + 1] == '/' &&
+                base.ptr[index + 2] == '/') {
+                valid_base = 1;
+                break;
+            }
+        }
+        if (!valid_base) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "Invalid base URL");
+        }
+        start = input.len == 0 ? "/" : input.ptr;
+        end = input.ptr + input.len;
+    }
+    if (start == input.ptr || (start >= input.ptr && start <= input.ptr + input.len)) {
+        end = input.ptr + input.len;
+    } else {
+        end = start + 1;
+    }
+    query = memchr(start, '?', (size_t)(end - start));
+    fragment = memchr(start, '#', (size_t)(end - start));
+    if (fragment != NULL && (query == NULL || fragment < query)) query = NULL;
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, *out, "pathname", 8,
+                          kiln_c99_copy_text(start, (size_t)((query != NULL ? query :
+                              (fragment != NULL ? fragment : end)) - start)), 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_object(&params);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, params, "@@url:query", 11,
+                          query == NULL ? kiln_c99_copy_text("", 0) :
+                          kiln_c99_copy_text(query + 1, (size_t)((fragment != NULL ? fragment : end) - query - 1)),
+                          0, NULL);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, params, "get", 3,
+                          kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    return kiln_c99_put(NULL, *out, "searchParams", 12, params, 0, NULL);
+}
+
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
+                                          const kiln_value *args, size_t argc,
+                                          kiln_value *thrown) {
+    kiln_value query;
+    kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+    size_t at = 0;
+    int status;
+    if (receiver.tag != KILN_VALUE_OBJECT || name.tag != KILN_VALUE_STRING) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "URLSearchParams.get called on an incompatible receiver");
+    }
+    status = kiln_c99_get(NULL, receiver, "@@url:query", 11, &query, 0, NULL);
+    if (status != KILN_C99_OK || query.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR;
+    while (at <= query.len) {
+        size_t pair_end = at;
+        size_t equal;
+        while (pair_end < query.len && query.ptr[pair_end] != '&') ++pair_end;
+        equal = at;
+        while (equal < pair_end && query.ptr[equal] != '=') ++equal;
+        if (equal - at == name.len && memcmp(query.ptr + at, name.ptr, name.len) == 0) {
+            kiln_value encoded = kiln_c99_copy_text(
+                equal < pair_end ? query.ptr + equal + 1 : "",
+                equal < pair_end ? pair_end - equal - 1 : 0);
+            const kiln_value decode_args[1] = {encoded};
+            return kiln_c99_invoke_method(NULL, out, KILN_C99_METHOD_DECODE_URI_COMPONENT,
+                                          kiln_c99_undefined(), decode_args, 1, 0, thrown);
+        }
+        if (pair_end == query.len) break;
+        at = pair_end + 1;
+    }
+    *out = kiln_c99_null();
+    return KILN_C99_OK;
+}
+
 /* `Number.prototype.toFixed`, rounded on the value's *exact* decimal expansion.
  *
  * Not the printf `%.*f` conversion: it reads the process locale's decimal point, and an embedded
@@ -3447,6 +4095,8 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_BOOLEAN: return "Boolean";
     case KILN_C99_BUILTIN_REFLECT: return "Reflect";
     case KILN_C99_BUILTIN_PROXY: return "Proxy";
+    case KILN_C99_BUILTIN_URL: return "URL";
+    case KILN_C99_BUILTIN_BUFFER: return "Buffer";
     case KILN_C99_BUILTIN_TEMPORAL: return "Temporal";
     case KILN_C99_BUILTIN_TEMPORAL_NOW: return "Now";
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE: return "PlainDate";
@@ -4395,6 +5045,18 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         }
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_ARRAY,
                                       KILN_C99_METHOD_ARRAY_OF);
+    case KILN_C99_BUILTIN_BUFFER:
+        if (kiln_c99_same_name(key, key_len, "from")) return KILN_C99_METHOD_BUFFER_FROM;
+        if (kiln_c99_same_name(key, key_len, "alloc") ||
+            kiln_c99_same_name(key, key_len, "allocUnsafe") ||
+            kiln_c99_same_name(key, key_len, "allocUnsafeSlow"))
+            return KILN_C99_METHOD_BUFFER_ALLOC;
+        if (kiln_c99_same_name(key, key_len, "isBuffer"))
+            return KILN_C99_METHOD_BUFFER_IS_BUFFER;
+        if (kiln_c99_same_name(key, key_len, "byteLength"))
+            return KILN_C99_METHOD_BUFFER_BYTE_LENGTH;
+        if (kiln_c99_same_name(key, key_len, "concat")) return KILN_C99_METHOD_BUFFER_CONCAT;
+        return 0;
     case KILN_C99_BUILTIN_STRING:
         /* The only static `String` carries that this backend answers. */
         if (kiln_c99_same_name(key, key_len, "raw")) {
@@ -6411,7 +7073,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     case KILN_VALUE_TYPED_ARRAY: {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
-            const char *name = kiln_c99_typed_name(view->kind);
+            const char *name = view->is_buffer ? "Uint8Array" : kiln_c99_typed_name(view->kind);
             *out = kiln_c99_copy_text(name, strlen(name));
             return KILN_C99_OK;
         }
@@ -6437,7 +7099,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         if (kiln_c99_same_name(key, key_len, "constructor")) {
-            *out = kiln_c99_builtin(kiln_c99_typed_constructor(view->kind));
+            *out = kiln_c99_builtin(view->is_buffer ? KILN_C99_BUILTIN_BUFFER
+                                                    : kiln_c99_typed_constructor(view->kind));
+            return KILN_C99_OK;
+        }
+        if (view->is_buffer && kiln_c99_same_name(key, key_len, "toString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_BUFFER_TO_STRING);
             return KILN_C99_OK;
         }
         {
@@ -9133,8 +9800,11 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         for (response = socket->responses; response != NULL; response = response->next) {
             if (response->request_id == event->id) {
                 if (event->kind == 2) {
-                    kiln_value data = kiln_c99_copy_text((const char *)event->data,
-                                                         (size_t)event->data_len);
+                    kiln_value bytes = kiln_c99_copy_text((const char *)event->data,
+                                                          (size_t)event->data_len);
+                    kiln_value data;
+                    status = kiln_c99_buffer_from(&data, bytes, exception);
+                    if (status != KILN_C99_OK) return status;
                     return kiln_c99_node_emit(socket->host, response->request, "data", data, 1,
                                               0, exception);
                 }
@@ -10829,6 +11499,69 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_NODE_NET_CONNECT) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_URL_SEARCH_PARAMS_GET) {
+        return kiln_c99_url_search_params_get(result, receiver, args, argc, thrown);
+    }
+    if (code >= KILN_C99_METHOD_BUFFER_FROM && code <= KILN_C99_METHOD_BUFFER_TO_STRING) {
+        return kiln_c99_buffer_method(result, code, receiver, args, argc, thrown);
+    }
+    if (code >= KILN_C99_METHOD_NODE_UTIL_DEBUGLOG &&
+        code <= KILN_C99_METHOD_NODE_UTIL_FORMAT) {
+        return kiln_c99_node_util(host, result, code, args, argc, depth, thrown);
+    }
+    if (code >= KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL &&
+        code <= KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES) {
+        return kiln_c99_node_diagnostics(host, result, code, args, argc, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER) {
+        return kiln_c99_throw_error(
+            thrown, KILN_C99_BUILTIN_ERROR,
+            "node:https requires a TLS host capability that this realm does not provide");
+    }
+    if (code == KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER ||
+        code == KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER) {
+        return kiln_c99_throw_error(
+            thrown, KILN_C99_BUILTIN_ERROR,
+            "node:http2 requires an HTTP/2 host capability that this realm does not provide");
+    }
+    if (code == KILN_C99_METHOD_NODE_DNS_LOOKUP) {
+        return kiln_c99_node_dns_lookup(host, result, args, argc, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_OS_HOSTNAME) {
+        *result = kiln_c99_copy_text("kiln", 4);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES) {
+        kiln_value interfaces;
+        kiln_value loopback;
+        kiln_value entry;
+        status = kiln_c99_new_object(&interfaces);
+        if (status == KILN_C99_OK) status = kiln_c99_new_array(&loopback);
+        if (status == KILN_C99_OK) status = kiln_c99_new_object(&entry);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, entry, "address", 7,
+                                  kiln_c99_copy_text("127.0.0.1", 9), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, entry, "family", 6,
+                                  kiln_c99_copy_text("IPv4", 4), 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, entry, "internal", 8, kiln_c99_boolean(1), 0, NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(loopback, entry);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, interfaces, "loopback", 8, loopback, 0, NULL);
+        if (status == KILN_C99_OK) *result = interfaces;
+        return status;
+    }
+    if (code >= KILN_C99_METHOD_NODE_STREAM &&
+        code <= KILN_C99_METHOD_NODE_WRITABLE_DESTROY) {
+        return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_PERFORMANCE_NOW) {
+        double milliseconds;
+        status = kiln_realm_now(&milliseconds);
+        if (status == KILN_C99_OK) *result = kiln_c99_number(milliseconds);
+        return status;
     }
     /* Claimed here because the string range further down is open-ended at its top. */
     if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_LAST) {
@@ -17984,6 +18717,13 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_new_proxy(result, argc > 0 ? args[0] : kiln_c99_undefined(),
                                   argc > 1 ? args[1] : kiln_c99_undefined());
     }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_URL) {
+        return kiln_c99_url_construct(result, args, argc, thrown);
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_BUFFER) {
+        return kiln_c99_buffer_from(result,
+                                    argc > 0 ? args[0] : kiln_c99_number(0.0), thrown);
+    }
     if (callee.tag == KILN_VALUE_PROXY) {
         kiln_value trap;
         kiln_value inner = kiln_c99_proxy_of(callee)->target;
@@ -18020,7 +18760,10 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     }
     if (callee.tag == KILN_VALUE_METHOD &&
         (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER ||
-         callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER)) {
+         callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
+         callee.bits == KILN_C99_METHOD_NODE_STREAM ||
+         callee.bits == KILN_C99_METHOD_NODE_READABLE ||
+         callee.bits == KILN_C99_METHOD_NODE_WRITABLE)) {
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
          * and its ordinary-call and `new` forms deliberately share one initializer. */
@@ -18033,8 +18776,11 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             return kiln_c99_node_http(host, result, callee.bits, kiln_c99_undefined(), args, argc,
                                       depth, thrown);
         }
-        return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
-                                   depth, thrown);
+        if (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER)
+            return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
+                                       depth, thrown);
+        return kiln_c99_node_stream(host, result, callee.bits, kiln_c99_undefined(), args, argc,
+                                    depth, thrown);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||
@@ -19301,7 +20047,9 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::Int32Array
             | kiln_ir::Builtin::Uint32Array
             | kiln_ir::Builtin::Float32Array
-            | kiln_ir::Builtin::Float64Array,
+            | kiln_ir::Builtin::Float64Array
+            | kiln_ir::Builtin::Url
+            | kiln_ir::Builtin::Buffer,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
@@ -21395,6 +22143,8 @@ fn emit_instruction(
                 kiln_ir::Builtin::Uint32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_UINT32_ARRAY)",
                 kiln_ir::Builtin::Float32Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT32_ARRAY)",
                 kiln_ir::Builtin::Float64Array => "kiln_c99_builtin(KILN_C99_BUILTIN_FLOAT64_ARRAY)",
+                kiln_ir::Builtin::Url => "kiln_c99_builtin(KILN_C99_BUILTIN_URL)",
+                kiln_ir::Builtin::Buffer => "kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER)",
                 kiln_ir::Builtin::NotANumber => "kiln_c99_number(0.0 / 0.0)",
                 kiln_ir::Builtin::Infinity => "kiln_c99_number(1.0 / 0.0)",
                 _ => unreachable!("verification rejects every other builtin before emission"),
@@ -24457,6 +25207,187 @@ int main(void) {{
         assert!(
             run.status.success(),
             "symbol-only properties must not leave malformed inspection separators"
+        );
+    }
+
+    #[test]
+    fn executable_url_constructs_path_and_decodes_query_values() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("/echo?q=one%20two".into()),
+                Constant::String("http://127.0.0.1".into()),
+                Constant::String("pathname".into()),
+                Constant::String("/echo".into()),
+                Constant::String("searchParams".into()),
+                Constant::String("get".into()),
+                Constant::String("q".into()),
+                Constant::String("one two".into()),
+                Constant::Boolean(false),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Url),
+                Instruction::Const(0),
+                Instruction::Const(1),
+                Instruction::New { argc: 2 },
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(2),
+                Instruction::Const(3),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::JumpIfFalse(20),
+                Instruction::LoadLocal(0),
+                Instruction::GetProperty(4),
+                Instruction::Const(6),
+                Instruction::CallMethod { name: 5, argc: 1 },
+                Instruction::Const(7),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::Return,
+                Instruction::Const(8),
+                Instruction::Return,
+                Instruction::Const(8),
+                Instruction::Return,
+            ],
+            1,
+        ))
+        .expect("URL probe emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 3; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "url-routing");
+        assert!(
+            run.status.success(),
+            "native URL path/query behavior failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_buffer_reuses_uint8_storage_with_node_semantics() {
+        let generated = emit(&program(
+            vec![
+                Constant::String("kiln ".into()),
+                Constant::String("streams".into()),
+                Constant::String("from".into()),
+                Constant::String("concat".into()),
+                Constant::String("toString".into()),
+                Constant::String("kiln streams".into()),
+                Constant::String("isBuffer".into()),
+                Constant::Boolean(false),
+            ],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Buffer),
+                Instruction::StoreLocal(0),
+                Instruction::LoadLocal(0),
+                Instruction::Const(0),
+                Instruction::CallMethod { name: 2, argc: 1 },
+                Instruction::LoadLocal(0),
+                Instruction::Const(1),
+                Instruction::CallMethod { name: 2, argc: 1 },
+                Instruction::NewArray { count: 2 },
+                Instruction::StoreLocal(2),
+                Instruction::LoadLocal(0),
+                Instruction::LoadLocal(2),
+                Instruction::CallMethod { name: 3, argc: 1 },
+                Instruction::StoreLocal(1),
+                Instruction::LoadLocal(1),
+                Instruction::CallMethod { name: 4, argc: 0 },
+                Instruction::Const(5),
+                Instruction::Binary(BinaryOp::StrictEqual),
+                Instruction::JumpIfFalse(26),
+                Instruction::LoadLocal(0),
+                Instruction::LoadLocal(1),
+                Instruction::CallMethod { name: 6, argc: 1 },
+                Instruction::Return,
+                Instruction::Const(7),
+                Instruction::Return,
+                Instruction::Const(7),
+                Instruction::Return,
+                Instruction::Const(7),
+                Instruction::Return,
+            ],
+            3,
+        ))
+        .expect("Buffer probe emits");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; if ({}(NULL, &result) != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 3; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "buffer-facade");
+        assert!(
+            run.status.success(),
+            "native Buffer facade failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_node_support_facades_are_deterministic_and_callback_driven() {
+        let generated = emit(&program(
+            vec![Constant::Undefined],
+            vec![Instruction::Const(0), Instruction::Return],
+            0,
+        ))
+        .expect("support facade probe emits");
+        let wrapper = r#"
+static int callback(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+                    kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                    kiln_value *thrown, kiln_generator *frame) {
+    (void)host; (void)upvalues; (void)receiver; (void)depth; (void)thrown; (void)frame;
+    if (argc == 2 && args[0].tag == KILN_VALUE_NULL && args[1].tag == KILN_VALUE_ARRAY &&
+        kiln_c99_array_of(args[1])->count == 2) {
+        *result = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
+    if (argc == 1 && args[0].tag == KILN_VALUE_STRING && args[0].len == 7 &&
+        memcmp(args[0].ptr, "forward", 7) == 0) {
+        *result = kiln_c99_boolean(1);
+        return KILN_C99_OK;
+    }
+    *result = kiln_c99_boolean(0);
+    return KILN_C99_OK;
+}
+int main(void) {
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value result;
+    kiln_value args[4];
+    kiln_value callable;
+    if (kiln_c99_make_closure(&callable, callback, "callback", 8, 0, 0, 0, 0, 0, 0,
+                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK)
+        return 1;
+    args[0] = kiln_c99_copy_text("%s:%d", 5);
+    args[1] = kiln_c99_copy_text("port", 4);
+    args[2] = kiln_c99_number(7.0);
+    if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_FORMAT,
+                           args, 3, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_STRING || result.len != 6 ||
+        memcmp(result.ptr, "port:7", 6) != 0) return 2;
+    args[0] = kiln_c99_undefined();
+    args[1] = callable;
+    args[2] = kiln_c99_undefined();
+    args[3] = kiln_c99_copy_text("forward", 7);
+    if (kiln_c99_node_diagnostics(NULL, &result,
+            KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES, args, 4, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_BOOLEAN || !result.bits) return 3;
+    args[0] = kiln_c99_copy_text("localhost", 9);
+    if (kiln_c99_new_object(&args[1]) != KILN_C99_OK ||
+        kiln_c99_put(NULL, args[1], "all", 3, kiln_c99_boolean(1), 0, NULL) != KILN_C99_OK)
+        return 4;
+    args[2] = callable;
+    if (kiln_c99_node_dns_lookup(NULL, &result, args, 3, 0, &thrown) != KILN_C99_OK)
+        return 5;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "node-support-facades");
+        assert!(
+            run.status.success(),
+            "native Node support facades failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
         );
     }
 }
