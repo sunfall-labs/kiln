@@ -22,8 +22,9 @@ use std::thread::{self, JoinHandle};
 
 use crate::dispatch::{
     Next, dispatch, dispatch_source, execute_prepared_run, native_build_graph, native_build_output,
-    native_build_program, native_build_shared_graph, native_build_shared_program, native_graph,
-    native_program, native_run_graph, native_run_program, prepare_run_with_cache,
+    native_build_program, native_build_shared_graph, native_build_shared_program,
+    native_graph_with_cache, native_program, native_run_graph, native_run_program,
+    prepare_run_with_cache,
 };
 use crate::framing::{MAX_MESSAGE_BYTES, read_frame, write_frame};
 use crate::graph_cache::GraphCache;
@@ -946,15 +947,21 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         }
         let resolutions = guard.resolutions.clone();
         let prepared = match panic::catch_unwind(AssertUnwindSafe(|| {
-            let graph = native_graph(
-                &mut guard.engine,
+            let DaemonState {
+                engine,
+                graph_cache,
+                ..
+            } = &mut *guard;
+            let graph = native_graph_with_cache(
+                engine,
+                Some(graph_cache),
                 resolutions.as_ref(),
                 &path,
                 &project_root,
                 false,
             )?;
             match graph {
-                Some(graph) => Ok(PreparedNative::Graph(graph.into())),
+                Some(graph) => Ok(PreparedNative::Graph(graph)),
                 None => native_program(&mut guard.engine, &path).map(PreparedNative::Program),
             }
         })) {
@@ -1094,8 +1101,14 @@ fn prepare_native_snapshot<E: QueryEngine>(
     let revision = guard.engine.revision().0;
     let resolutions = guard.resolutions.clone();
     match panic::catch_unwind(AssertUnwindSafe(|| {
-        let graph = native_graph(
-            &mut guard.engine,
+        let DaemonState {
+            engine,
+            graph_cache,
+            ..
+        } = &mut *guard;
+        let graph = native_graph_with_cache(
+            engine,
+            Some(graph_cache),
             resolutions.as_ref(),
             path,
             project_root,
@@ -1103,7 +1116,7 @@ fn prepare_native_snapshot<E: QueryEngine>(
         )?;
         match graph {
             Some(graph) if !prefer_program_for_small_graph || graph.module_count() > 1 => {
-                Ok(PreparedNative::Graph(graph.into()))
+                Ok(PreparedNative::Graph(graph))
             }
             Some(graph) => {
                 // Graph construction canonicalized this entry already. Reuse that spelling for
@@ -1161,6 +1174,7 @@ fn daemon_stats<E: QueryEngine>(state: &DaemonState<E>) -> Stats {
     let mut stats = crate::dispatch::stats(&state.engine);
     let cache = state.graph_cache.stats();
     stats.graph_cache_hits = cache.hits;
+    stats.graph_cache_partial_hits = cache.partial_hits;
     stats.graph_cache_misses = cache.misses;
     stats.graph_cache_evictions = cache.evictions;
     stats.graph_cache_invalidations = cache.invalidations;

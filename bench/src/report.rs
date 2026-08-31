@@ -295,7 +295,8 @@ notes
   \"warm unchanged daemon Run request\" and \"warm daemon SetSource + Run body edit\" keep one
   daemon and one protocol client alive for the whole loop. Source installation, graph priming,
   and shutdown are outside the timed region. The first row requires one graph-cache hit per
-  request; the second requires one miss and replacement after changing a reachable dependency.
+  request; the second requires one partial hit and replacement after changing a reachable
+  dependency while preserving its link shape.
   Graph-cache counters come from the daemon's protocol `Stats`, not from the in-process query
   engine counters used by the other rows.
 
@@ -386,6 +387,7 @@ fn render_standalone(out: &mut String, report: &Report, workload: &str, label: &
 fn render_graph_cache_stats(out: &mut String, measurement: &Measurement) {
     let stats = &measurement.stats;
     if stats.graph_cache_hits == 0
+        && stats.graph_cache_partial_hits == 0
         && stats.graph_cache_misses == 0
         && stats.graph_cache_evictions == 0
         && stats.graph_cache_invalidations == 0
@@ -396,13 +398,14 @@ fn render_graph_cache_stats(out: &mut String, measurement: &Measurement) {
     }
     let _ = writeln!(
         out,
-        "    graph cache: hits {}, misses {}, evictions {}, invalidations {}, entries {}, modules {}",
+        "    graph cache: hits {}, misses {}, evictions {}, invalidations {}, entries {}, modules {}, partial hits {}",
         stats.graph_cache_hits,
         stats.graph_cache_misses,
         stats.graph_cache_evictions,
         stats.graph_cache_invalidations,
         stats.graph_cache_entries,
         stats.graph_cache_modules,
+        stats.graph_cache_partial_hits,
     );
 }
 
@@ -922,6 +925,7 @@ mod tests {
         warm.workload = "daemon".to_string();
         warm.operation = "warm unchanged daemon Run request".to_string();
         warm.stats.graph_cache_hits = 1;
+        warm.stats.graph_cache_partial_hits = 1;
         warm.stats.graph_cache_entries = 1;
         warm.stats.graph_cache_modules = 2;
         r.measurements.push(warm);
@@ -931,6 +935,7 @@ mod tests {
             text.contains("graph cache: hits 1, misses 0, evictions 0"),
             "{text}"
         );
+        assert!(text.contains("partial hits 1"), "{text}");
         assert!(text.contains("entries 1, modules 2"), "{text}");
     }
 

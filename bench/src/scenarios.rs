@@ -113,7 +113,7 @@ pub fn daemon_startup(kiln: &Path, budget: Budget) -> Result<Measurement, String
 ///
 /// The unchanged row proves that a second `Run` over the same source snapshot hits the daemon's
 /// entry-rooted graph cache. The body-edit row proves that a reachable source edit advances the
-/// source view, misses the old graph snapshot, and still reuses the unchanged module's queries.
+/// source view, patches the old graph snapshot, and still reuses the unchanged module's queries.
 /// Neither startup, source setup, nor shutdown is inside either timed loop.
 pub fn daemon_warm(budget: Budget) -> Result<Vec<Measurement>, String> {
     let mut fixture = WarmDaemonFixture::new()?;
@@ -135,6 +135,7 @@ pub fn daemon_warm(budget: Budget) -> Result<Vec<Measurement>, String> {
             &stats,
             GraphExpectation {
                 hits: 1,
+                partial_hits: 0,
                 misses: 0,
                 evictions: 0,
                 invalidations: 0,
@@ -165,8 +166,9 @@ pub fn daemon_warm(budget: Budget) -> Result<Vec<Measurement>, String> {
         assert_graph_stats(
             &stats,
             GraphExpectation {
-                hits: 0,
-                misses: 1,
+                hits: 1,
+                partial_hits: 1,
+                misses: 0,
                 evictions: 1,
                 invalidations: 0,
                 entries: 1,
@@ -386,6 +388,7 @@ fn assert_run_stdout(summary: &RunSummary, expected: &str, label: &str) -> Resul
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GraphExpectation {
     hits: u64,
+    partial_hits: u64,
     misses: u64,
     evictions: u64,
     invalidations: u64,
@@ -400,6 +403,7 @@ fn assert_graph_stats(
 ) -> Result<(), String> {
     let actual = GraphExpectation {
         hits: stats.graph_cache_hits,
+        partial_hits: stats.graph_cache_partial_hits,
         misses: stats.graph_cache_misses,
         evictions: stats.graph_cache_evictions,
         invalidations: stats.graph_cache_invalidations,
@@ -464,7 +468,7 @@ impl DaemonAccumulator {
     }
 }
 
-fn daemon_recompute_counters(stats: &Stats) -> [u64; 12] {
+fn daemon_recompute_counters(stats: &Stats) -> [u64; 13] {
     [
         stats.parse_computed,
         stats.ir_computed,
@@ -473,6 +477,7 @@ fn daemon_recompute_counters(stats: &Stats) -> [u64; 12] {
         stats.validated,
         stats.early_cutoff,
         stats.graph_cache_hits,
+        stats.graph_cache_partial_hits,
         stats.graph_cache_misses,
         stats.graph_cache_evictions,
         stats.graph_cache_invalidations,
@@ -1533,14 +1538,16 @@ esac
 
         let unchanged = &rows[0];
         assert_eq!(unchanged.stats.graph_cache_hits, 1);
+        assert_eq!(unchanged.stats.graph_cache_partial_hits, 0);
         assert_eq!(unchanged.stats.graph_cache_misses, 0);
         assert_eq!(unchanged.stats.graph_cache_entries, 1);
         assert_eq!(unchanged.stats.graph_cache_modules, 2);
         assert!(unchanged.steady_state);
 
         let edited = &rows[1];
-        assert_eq!(edited.stats.graph_cache_hits, 0);
-        assert_eq!(edited.stats.graph_cache_misses, 1);
+        assert_eq!(edited.stats.graph_cache_hits, 1);
+        assert_eq!(edited.stats.graph_cache_partial_hits, 1);
+        assert_eq!(edited.stats.graph_cache_misses, 0);
         assert_eq!(edited.stats.graph_cache_evictions, 1);
         assert_eq!(edited.stats.graph_cache_entries, 1);
         assert_eq!(edited.stats.graph_cache_modules, 2);

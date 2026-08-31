@@ -3,7 +3,7 @@
 //! Deliberately free of I/O on the socket and of any knowledge of threads. Query preparation runs
 //! while the engine lock is held; owned interpreter/native work can then execute without it.
 
-use crate::graph_cache::{GraphCache, GraphCacheKey, GraphSourceRevision};
+use crate::graph_cache::{GraphCache, GraphCacheKey, GraphCacheLookup, GraphSourceRevision};
 use kiln_db::QueryEngine;
 use kiln_module_graph::ModuleGraph;
 use kiln_proto::{
@@ -592,45 +592,7 @@ fn build_graph<E: QueryEngine>(
         })
         .collect::<Vec<_>>();
     let provider = |module_path: &Path, source_kind: kiln_module_graph::ModuleSource| {
-        let module_path_string = module_path.to_str().ok_or_else(|| {
-            kiln_module_graph::ModuleGraphError::FrontendPath {
-                path: module_path.to_path_buf(),
-            }
-        })?;
-        let module_file = engine.intern(module_path_string);
-        if engine.source(module_file).is_none() {
-            return Err(kiln_module_graph::ModuleGraphError::Source {
-                path: module_path.to_path_buf(),
-                message: "source is not synchronized".to_owned(),
-            });
-        }
-        if source_kind == kiln_module_graph::ModuleSource::Json {
-            return Ok(kiln_module_graph::ModulePayload::JsonText(
-                engine
-                    .source(module_file)
-                    .expect("source checked above")
-                    .to_owned(),
-            ));
-        }
-        if source_kind == kiln_module_graph::ModuleSource::CommonJs {
-            let source = engine.source(module_file).expect("source checked above");
-            let hir = frontend_oxc::parse_commonjs(module_path_string, source);
-            let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
-                kiln_module_graph::ModuleGraphError::Compile {
-                    path: module_path.to_path_buf(),
-                    diagnostics,
-                }
-            })?;
-            program.dependencies = kiln_hir::commonjs_literal_requires(&hir);
-            return Ok(kiln_module_graph::ModulePayload::Program(program));
-        }
-        engine
-            .module_ir(module_file)
-            .map(kiln_module_graph::ModulePayload::Program)
-            .map_err(|diagnostics| kiln_module_graph::ModuleGraphError::Compile {
-                path: module_path.to_path_buf(),
-                diagnostics,
-            })
+        module_payload(engine, module_path, source_kind)
     };
     let resolver = if node {
         kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins_requests_and_formats(
@@ -651,6 +613,71 @@ fn build_graph<E: QueryEngine>(
         error,
     })?;
     ModuleGraph::build_with_typed_policy(entry, resolver, provider)
+}
+
+fn module_payload<E: QueryEngine>(
+    engine: &mut E,
+    module_path: &Path,
+    source_kind: kiln_module_graph::ModuleSource,
+) -> Result<kiln_module_graph::ModulePayload, kiln_module_graph::ModuleGraphError> {
+    let module_path_string =
+        module_path
+            .to_str()
+            .ok_or_else(|| kiln_module_graph::ModuleGraphError::FrontendPath {
+                path: module_path.to_path_buf(),
+            })?;
+    let module_file = engine.intern(module_path_string);
+    if engine.source(module_file).is_none() {
+        return Err(kiln_module_graph::ModuleGraphError::Source {
+            path: module_path.to_path_buf(),
+            message: "source is not synchronized".to_owned(),
+        });
+    }
+    if source_kind == kiln_module_graph::ModuleSource::Json {
+        return Ok(kiln_module_graph::ModulePayload::JsonText(
+            engine
+                .source(module_file)
+                .expect("source checked above")
+                .to_owned(),
+        ));
+    }
+    if source_kind == kiln_module_graph::ModuleSource::CommonJs {
+        let source = engine.source(module_file).expect("source checked above");
+        let hir = frontend_oxc::parse_commonjs(module_path_string, source);
+        let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
+            kiln_module_graph::ModuleGraphError::Compile {
+                path: module_path.to_path_buf(),
+                diagnostics,
+            }
+        })?;
+        program.dependencies = kiln_hir::commonjs_literal_requires(&hir);
+        return Ok(kiln_module_graph::ModulePayload::Program(program));
+    }
+    engine
+        .module_ir(module_file)
+        .map(kiln_module_graph::ModulePayload::Program)
+        .map_err(|diagnostics| kiln_module_graph::ModuleGraphError::Compile {
+            path: module_path.to_path_buf(),
+            diagnostics,
+        })
+}
+
+fn graph_sources<E: QueryEngine>(
+    engine: &mut E,
+    graph: &ModuleGraph,
+) -> Option<Vec<GraphSourceRevision>> {
+    graph
+        .module_order()
+        .iter()
+        .map(|path| {
+            let path = path.to_str()?;
+            let file = engine.intern(path);
+            Some(GraphSourceRevision {
+                file,
+                revision: engine.source_revision(file)?,
+            })
+        })
+        .collect()
 }
 
 /// Return one immutable graph snapshot for the exact committed daemon state.  The caller holds
@@ -689,35 +716,61 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
         }
     })?;
     let key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions, node);
-    match cache {
-        Some(cache) => {
-            if let Some(graph) = cache.get(&key, |file| engine.source_revision(file)) {
-                return Ok(graph);
-            }
-            let graph = build_graph(engine, resolutions, &canonical_entry, project_root, node)?;
-            let sources = graph
-                .module_order()
-                .iter()
-                .map(|path| {
-                    let path = path.to_str()?;
-                    let file = engine.intern(path);
-                    Some(GraphSourceRevision {
-                        file,
-                        revision: engine.source_revision(file)?,
+    if let Some(cache) = cache {
+        match cache.lookup(&key, |file| engine.source_revision(file)) {
+            GraphCacheLookup::Hit(graph) => return Ok(graph),
+            GraphCacheLookup::Stale { graph, changed } if changed.len() == 1 => {
+                let changed = changed[0];
+                let path = engine
+                    .source_files()
+                    .into_iter()
+                    .find_map(|(file, path)| (file == changed.file).then_some(path))
+                    .and_then(|path| std::fs::canonicalize(path).ok());
+                // Partial reuse is intentionally limited to ordinary ESM source modules.
+                // CommonJS, JSON, and Node-builtin snapshots take the full rebuild path below;
+                // their materialisation/link semantics are not represented by ModuleProgram.
+                if let Some(path) = path
+                    && graph.module(&path).is_some_and(|module| {
+                        module.source == kiln_module_graph::ModuleSource::Source
                     })
-                })
-                .collect::<Option<Vec<_>>>();
-            Ok(match sources {
-                Some(sources) => cache.insert(key, sources, graph),
-                // Graph construction rejects non-UTF-8 and unsynchronized modules, so this is a
-                // defensive fallback for an external QueryEngine that violates that contract.
-                None => Arc::new(graph),
-            })
+                {
+                    let payload = match module_payload(
+                        engine,
+                        &path,
+                        kiln_module_graph::ModuleSource::Source,
+                    ) {
+                        Ok(payload) => payload,
+                        Err(error) => {
+                            // The old snapshot is still retained, but this request did not
+                            // reuse it: expose the failed patch attempt as a cache miss.
+                            cache.record_miss();
+                            return Err(error);
+                        }
+                    };
+                    let kiln_module_graph::ModulePayload::Program(program) = payload else {
+                        unreachable!("source module provider returns a program");
+                    };
+                    if let Some(patched) = graph.patch_module(&path, program)
+                        && let Some(sources) = graph_sources(engine, &patched)
+                    {
+                        cache.record_partial_hit();
+                        return Ok(cache.insert(key, sources, patched));
+                    }
+                }
+                cache.record_miss();
+            }
+            GraphCacheLookup::Stale { .. } => cache.record_miss(),
+            GraphCacheLookup::Miss => {}
         }
-        None => {
-            build_graph(engine, resolutions, &canonical_entry, project_root, node).map(Arc::new)
-        }
+        let graph = build_graph(engine, resolutions, &canonical_entry, project_root, node)?;
+        return Ok(match graph_sources(engine, &graph) {
+            Some(sources) => cache.insert(key, sources, graph),
+            // Graph construction rejects non-UTF-8 and unsynchronized modules, so this is a
+            // defensive fallback for an external QueryEngine that violates that contract.
+            None => Arc::new(graph),
+        });
     }
+    build_graph(engine, resolutions, &canonical_entry, project_root, node).map(Arc::new)
 }
 
 fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<Diagnostic> {
@@ -768,13 +821,28 @@ pub(crate) fn native_graph<E: QueryEngine>(
     path: &str,
     project_root: &str,
     node: bool,
-) -> Result<Option<ModuleGraph>, String> {
+) -> Result<Option<Arc<ModuleGraph>>, String> {
+    native_graph_with_cache(engine, None, resolutions, path, project_root, node)
+}
+
+/// Prepare an entry-rooted native graph through the daemon cache when one is available.
+/// One-shot/direct dispatch passes `None`; persistent daemon requests pass their shared cache so
+/// native graph preparation has the same immutable snapshot and partial-body-patch semantics as
+/// interpreted runs.
+pub(crate) fn native_graph_with_cache<E: QueryEngine>(
+    engine: &mut E,
+    cache: Option<&mut GraphCache>,
+    resolutions: Option<&ResolutionMap>,
+    path: &str,
+    project_root: &str,
+    node: bool,
+) -> Result<Option<Arc<ModuleGraph>>, String> {
     let Some(entry) = resolve_source_path(path, project_root) else {
         ensure_source(engine, path)?;
         return Ok(None);
     };
     ensure_canonical_source(engine, path, &entry, project_root)?;
-    build_graph(engine, resolutions, &entry, project_root, node)
+    graph_snapshot(engine, cache, &entry, project_root, resolutions, node)
         .map(Some)
         .map_err(|error| error.to_string())
 }
