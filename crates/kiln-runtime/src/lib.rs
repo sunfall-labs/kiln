@@ -757,6 +757,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 responses: Some(response_sender),
                 response_bodies: BTreeMap::new(),
                 body_events: BTreeMap::new(),
+                close_when_responses_finish: false,
+                protocol_closed: false,
                 close_after_response: HashSet::new(),
                 client_requests: None,
                 client_events: None,
@@ -790,6 +792,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 responses: None,
                 response_bodies: BTreeMap::new(),
                 body_events: BTreeMap::new(),
+                close_when_responses_finish: false,
+                protocol_closed: false,
                 close_after_response: HashSet::new(),
                 client_requests: Some(request_sender),
                 client_events: Some(event_receiver),
@@ -871,9 +875,18 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
     ) -> Option<Vec<node_stream::StreamAction>> {
-        self.http_connections
-            .get_mut(&resource)
-            .map(|connection| connection.transport.close())
+        let connection = self.http_connections.get_mut(&resource)?;
+        // `server.close()` may run in the same JavaScript turn as `response.end()`. The response
+        // command has only been sent to Hyper at that point; its task has not necessarily polled
+        // yet, so the transport can have no queued write even though a body is active. Keep the
+        // close request as a marker and let the normal checkpoint drain Hyper's writes. Idle
+        // connections have no response body to drain and can be retired immediately.
+        if connection.response_bodies.is_empty() || connection.protocol_closed {
+            Some(connection.transport.close())
+        } else {
+            connection.close_when_responses_finish = true;
+            Some(Vec::new())
+        }
     }
 
     /// Drain protocol events already selected at this realm checkpoint.
@@ -905,10 +918,17 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             connection.response_bodies.remove(&id);
             connection.body_events.remove(&id);
         }
+        if connection.close_when_responses_finish && connection.response_bodies.is_empty() {
+            connection.close_when_responses_finish = false;
+            connection.transport.close_requested();
+        }
         let Some(receiver) = connection.events.as_mut() else {
             return events;
         };
         while let Ok(event) = receiver.try_recv() {
+            if matches!(event, hyper_http::EngineEvent::Closed) {
+                connection.protocol_closed = true;
+            }
             events.push(match event {
                 hyper_http::EngineEvent::RequestHead { id, request } => {
                     if !request.keep_alive {
@@ -1191,6 +1211,8 @@ struct RuntimeHttpConnection {
     responses: Option<mpsc::UnboundedSender<hyper_http::ResponseCommand>>,
     response_bodies: BTreeMap<u64, ResponseBodyDriver>,
     body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
+    close_when_responses_finish: bool,
+    protocol_closed: bool,
     close_after_response: HashSet<u64>,
     client_requests: Option<mpsc::UnboundedSender<hyper_http::ClientRequestCommand>>,
     client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
