@@ -121,9 +121,10 @@ module-only syntax be silently accepted in programs never run that way. The firs
 four was `.js`, so all four refused with `Cannot use import statement outside a module` — an
 answer that named the runner's default rather than kiln's server gap.
 
-The runner now takes the goal from the extension: `.mjs` is a Module, `.js` stays a Script, and
-the guarantee that comment was protecting is intact. What it deliberately does **not** do is
-read the nearest `package.json` `type` field, which is how Node decides the same question —
-`packages/package.json` says `"type": "module"` and has no effect. Real Node applications are
-overwhelmingly `.js`-plus-`type`, so that is itself an item for step 10. These four sidestep it
-on purpose, so that they measure the thing they were written to measure.
+The runner now makes that distinction at the Node seam rather than globally. Ordinary
+conformance programs keep their explicit extension/Script behavior. Node-mode entries use the
+production format policy: `.mjs` is ESM, `.cjs` is CommonJS, and `.js` follows the nearest
+`package.json` `type`. Deleting that manifest reclassifies the next run, so the harness does not
+retain a stale module decision. The four probes remain `.mjs` because their format is part of the
+fixture itself, but `.js`-plus-`type` applications now exercise the same rule Node does instead of
+sidestepping it.
