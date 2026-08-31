@@ -924,8 +924,36 @@ fn parse_error_type_matches(
 
 /// Runtime errors currently have no JavaScript constructor identity.  Keep this helper separate
 /// so a future interpreter Error value can add a real matcher without changing classification.
-fn runtime_error_type_matches(_expected: &str, _error: &ExecutionError) -> bool {
-    false
+/// Whether the exception that reached the top of the program is the one a runtime-negative case
+/// promised.
+///
+/// Test262 asks only for the *type*: a case declaring `negative: {phase: runtime, type:
+/// ReferenceError}` is satisfied by a `ReferenceError` reaching the top, whatever it says. The
+/// type is read back off the thrown object's own `name` -- which is exactly what an uncaught
+/// exception is described by -- so a host refusal, a step-budget exhaustion or an unsupported
+/// construct can never satisfy one: none of them is a JavaScript throw, and none of them arrives
+/// as [`ExecutionError::Uncaught`].
+///
+/// One shape does arrive as a throw and is still not a language answer. ADR 0017 makes every
+/// unresolved identifier a `ReferenceError`, so a case promising one would otherwise be satisfied
+/// by `DataView is not defined` -- a built-in this engine has not implemented, reported as a
+/// conformance pass. That is refused here as it is everywhere else.
+fn runtime_error_type_matches(expected: &str, error: &ExecutionError) -> bool {
+    let ExecutionError::Uncaught { message, .. } = error else {
+        return false;
+    };
+    // `(in promise)` records where the exception surfaced, not what it was.
+    let described = message
+        .strip_prefix("(in promise) ")
+        .unwrap_or(message.as_str());
+    if unresolved_intrinsic(described).is_some() {
+        return false;
+    }
+    // `Error.prototype.toString`: `name`, then `": "` and the message when there is one.
+    let name = described
+        .split_once(": ")
+        .map_or(described, |(name, _)| name);
+    name == expected
 }
 
 /// The intrinsic a runtime error says is missing, when that is what it says.
@@ -941,8 +969,17 @@ fn runtime_error_type_matches(_expected: &str, _error: &ExecutionError) -> bool 
 /// the other way buries twelve thousand missing-feature reports among the real failures, which is
 /// what it did before this existed.
 fn missing_intrinsic(message: &str) -> Option<&str> {
-    let rest = message.strip_prefix("uncaught ReferenceError: ")?;
+    unresolved_intrinsic(message.strip_prefix("uncaught ")?)
+}
+
+/// The same question asked of an uncaught exception's *description* rather than of the rendered
+/// diagnostic, which is the form [`runtime_error_type_matches`] has.
+fn unresolved_intrinsic(described: &str) -> Option<&str> {
+    let rest = described.strip_prefix("ReferenceError: ")?;
     let name = rest.split(" is not defined").next()?;
+    if name == rest {
+        return None;
+    }
     let mut characters = name.chars();
     let first = characters.next()?;
     let intrinsic_shaped = first.is_ascii_uppercase()
