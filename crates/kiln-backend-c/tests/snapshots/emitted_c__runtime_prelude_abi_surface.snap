@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 152
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -323,6 +324,14 @@ KILN_VALUE_PROXY = 24
 #define KILN_C99_METHOD_TYPED_FROM 234
 #define KILN_C99_METHOD_ARRAY_GENERIC_MAP 235
 #define KILN_C99_METHOD_ARRAY_GENERIC_FILTER 236
+#define KILN_C99_METHOD_NODE_EVENT_ON 260
+#define KILN_C99_METHOD_NODE_EVENT_ONCE 261
+#define KILN_C99_METHOD_NODE_EVENT_EMIT 262
+#define KILN_C99_METHOD_NODE_EVENT_LISTENERS 263
+#define KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER 264
+#define KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS 265
+#define KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS 266
+#define KILN_C99_METHOD_NODE_EVENT_EMITTER 267
 #define KILN_C99_METHOD_SET_TIME 177
 #define KILN_C99_METHOD_SET_FULL_YEAR 178
 #define KILN_C99_METHOD_SET_MONTH 179
@@ -368,11 +377,17 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 1
+#define KILN_REALM_ASYNC_ABI_VERSION 2
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
+#define KILN_REALM_ASYNC_UNDEFINED 0
 #define KILN_REALM_ASYNC_BYTES 1
+#define KILN_REALM_ASYNC_FILE_STAT 2
+#define KILN_REALM_ASYNC_RESOURCE 3
+#define KILN_REALM_ASYNC_RESOURCE_STATE 4
+#define KILN_REALM_ASYNC_ACCEPTED_STREAM 5
+typedef struct kiln_async_host_op {
 typedef struct kiln_async_completion {
 typedef int (*kiln_realm_completion_fn)(void *work, const kiln_async_completion *completion,
 int kiln_realm_create(uint64_t *out_realm);
@@ -386,7 +401,10 @@ int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_d
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
 int kiln_realm_clear_timer(uint64_t id);
 int kiln_realm_read_file(uint64_t realm, const uint8_t *path, uint64_t path_len,
+int kiln_realm_start_host_op(uint64_t realm, const kiln_async_host_op *operation,
+int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
 int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
+int kiln_realm_cancel_active_request(uint64_t request);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
 void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
@@ -566,6 +584,7 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
@@ -718,6 +737,7 @@ static size_t kiln_c99_unit_position(kiln_value value, size_t length, size_t fal
 static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln_value receiver,
 static int kiln_c99_match_result(kiln_host *host, kiln_value *out, const uint16_t *units,
 static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,
