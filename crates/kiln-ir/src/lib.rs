@@ -581,6 +581,12 @@ pub enum Builtin {
     /// Appended for the reason every name after `Json` is: the discriminant is hashed into the
     /// artifact cache key, so inserting one in the middle would invalidate every cached build.
     AggregateError,
+    /// Cancellation, which every modern asynchronous API takes as an argument. Appended for the
+    /// reason above.
+    AbortController,
+    AbortSignal,
+    /// The UTF-8 encoder half of the pair whose decoder is already here.
+    TextEncoder,
 }
 
 impl Builtin {
@@ -653,6 +659,9 @@ impl Builtin {
             "DisposableStack" => Some(Self::DisposableStack),
             "SuppressedError" => Some(Self::SuppressedError),
             "AggregateError" => Some(Self::AggregateError),
+            "AbortController" => Some(Self::AbortController),
+            "AbortSignal" => Some(Self::AbortSignal),
+            "TextEncoder" => Some(Self::TextEncoder),
             "AsyncDisposableStack" => Some(Self::AsyncDisposableStack),
             "EvalError" => Some(Self::EvalError),
             "Atomics" => Some(Self::Atomics),
@@ -727,6 +736,9 @@ impl Builtin {
             Self::DisposableStack => "DisposableStack",
             Self::SuppressedError => "SuppressedError",
             Self::AggregateError => "AggregateError",
+            Self::AbortController => "AbortController",
+            Self::AbortSignal => "AbortSignal",
+            Self::TextEncoder => "TextEncoder",
             Self::AsyncDisposableStack => "AsyncDisposableStack",
             Self::EvalError => "EvalError",
             Self::Atomics => "Atomics",
