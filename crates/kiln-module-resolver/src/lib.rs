@@ -13,7 +13,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Source extensions understood by the initial filesystem resolver.
-pub const SUPPORTED_EXTENSIONS: &[&str] = &["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"];
+pub const SUPPORTED_EXTENSIONS: &[&str] =
+    &["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "json"];
 
 /// Whether a resolved request was written as an explicit relative or absolute specifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1372,7 +1373,8 @@ mod tests {
         symlink(&outside, project.root.join("node_modules/escape/escape.js"))
             .expect("write escaping package target");
         write_package(&project, "escape", r#"{"exports":{".":"./escape.js"}}"#);
-        write_package(&project, "data", r#"{"exports":{".":"./package.json"}}"#);
+        project.write("node_modules/data/payload.txt", "");
+        write_package(&project, "data", r#"{"exports":{".":"./payload.txt"}}"#);
         let resolver = NodePackageResolver::new(&project.root).expect("valid project root");
         assert!(matches!(
             resolver.resolve("escape", &importer),
@@ -1436,10 +1438,10 @@ mod tests {
     fn rejects_unsupported_extension_and_directories() {
         let project = TempProject::new();
         let importer = project.write("main.js", "");
-        project.write("data.json", "{}");
+        project.write("data.txt", "{}");
         fs::create_dir(project.root.join("folder.ts")).expect("create directory with extension");
         assert!(matches!(
-            resolver(&project).resolve("./data.json", &importer),
+            resolver(&project).resolve("./data.txt", &importer),
             Err(ResolveError::UnsupportedExtension { .. })
         ));
         assert!(matches!(

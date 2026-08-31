@@ -5058,6 +5058,22 @@ pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
     object.borrow().get_own(name).cloned()
 }
 
+/// Parse a JSON module into the same JavaScript value graph used by `JSON.parse`.
+///
+/// Module loaders use this instead of translating through a second JSON representation, keeping
+/// number semantics, insertion order, duplicate-key behavior, and object identity identical to
+/// language-level parsing.
+pub fn parse_json_module(source: &str) -> Result<Value, ExecutionError> {
+    let mut reader = JsonReader { rest: source };
+    reader.skip_whitespace();
+    let value = reader.value()?;
+    reader.skip_whitespace();
+    if !reader.rest.is_empty() {
+        return Err(ExecutionError::InvalidJson);
+    }
+    Ok(value)
+}
+
 fn diagnostics_channel() -> Value {
     ordinary_object([
         ("hasSubscribers".to_owned(), Value::Boolean(false)),

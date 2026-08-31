@@ -14,9 +14,8 @@ use kiln_hir::{Module, commonjs_literal_requires};
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     Cell, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult, ModuleRealmSession,
-    Value,
-    execute_module_in_runtime, execute_node_module_in_session, node_builtin_export_names,
-    node_builtin_exports, ordinary_object, own_data_property, read_through_cell,
+    Value, execute_module_in_runtime, execute_node_module_in_session, node_builtin_export_names,
+    node_builtin_exports, ordinary_object, own_data_property, parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -92,6 +91,9 @@ pub struct ModuleNode {
     /// only a stable graph key; it is never handed to a source loader or inferred from a suffix.
     pub source: ModuleSource,
     pub program: ModuleProgram,
+    /// Authoritative source text for a data module. It is captured by the same provider as code
+    /// modules and parsed once when the realm materializes the cached default export.
+    pub data: Option<String>,
     pub dependencies: Vec<Dependency>,
 }
 
@@ -100,7 +102,15 @@ pub struct ModuleNode {
 pub enum ModuleSource {
     Source,
     CommonJs,
+    Json,
     NodeBuiltin(NodeBuiltin),
+}
+
+/// The typed result supplied by a module provider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModulePayload {
+    Program(ModuleProgram),
+    JsonText(String),
 }
 
 /// An entry-rooted module graph. ESM cycles are rejected during construction; CommonJS `require`
@@ -419,7 +429,7 @@ impl ModuleGraph {
         provider: P,
     ) -> Result<Self, ModuleGraphError>
     where
-        P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
         R: ResolutionPolicy,
     {
         Self::build_with_typed_policy_provider(entry, resolver, provider)
@@ -454,6 +464,9 @@ impl ModuleGraph {
                 .ok_or_else(|| ModuleGraphError::FrontendPath {
                     path: path.to_path_buf(),
                 })?;
+            if source_kind == ModuleSource::Json {
+                return Ok(ModulePayload::JsonText(source));
+            }
             let hir = if source_kind == ModuleSource::CommonJs {
                 frontend.parse_commonjs(path_string, &source)
             } else {
@@ -471,7 +484,7 @@ impl ModuleGraph {
             if source_kind == ModuleSource::CommonJs {
                 program.dependencies = commonjs_literal_requires(&hir);
             }
-            Ok(program)
+            Ok(ModulePayload::Program(program))
         })
     }
 
@@ -505,7 +518,7 @@ impl ModuleGraph {
         Self::build_with_policy_provider_mode(
             entry,
             resolver,
-            move |path, _source| provider(path),
+            move |path, _source| provider(path).map(ModulePayload::Program),
             false,
         )
     }
@@ -516,7 +529,7 @@ impl ModuleGraph {
         provider: P,
     ) -> Result<Self, ModuleGraphError>
     where
-        P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
         R: ResolutionPolicy,
     {
         Self::build_with_policy_provider_mode(entry, resolver, provider, true)
@@ -529,7 +542,7 @@ impl ModuleGraph {
         typed_sources: bool,
     ) -> Result<Self, ModuleGraphError>
     where
-        P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
+        P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
         R: ResolutionPolicy,
     {
         if !entry.as_ref().is_absolute() {
@@ -735,6 +748,23 @@ impl ModuleGraph {
                 values.insert(path.clone(), exports.into_iter().collect());
                 continue;
             }
+            if module_node.source == ModuleSource::Json {
+                let source =
+                    module_node
+                        .data
+                        .as_deref()
+                        .ok_or_else(|| ModuleGraphError::Source {
+                            path: path.clone(),
+                            message: "JSON module has no captured source text".to_owned(),
+                        })?;
+                let value =
+                    parse_json_module(&source).map_err(|error| ModuleGraphError::Execution {
+                        module: path.clone(),
+                        error,
+                    })?;
+                values.insert(path.clone(), HashMap::from([("default".to_owned(), value)]));
+                continue;
+            }
             if module_node.source == ModuleSource::CommonJs {
                 let exports_cell = commonjs_cache.get(path).ok_or_else(|| {
                     ModuleGraphError::InternalMissingModule { path: path.clone() }
@@ -745,12 +775,25 @@ impl ModuleGraph {
                     let value = if let Some(cell) = commonjs_cache.get(&dependency.target) {
                         std::rc::Rc::clone(cell)
                     } else if let Some(provider) = values.get(&dependency.target) {
-                        let mut entries: Vec<_> = provider
-                            .iter()
-                            .map(|(name, value)| (name.clone(), read_through_cell(value)))
-                            .collect();
-                        entries.sort_by(|left, right| left.0.cmp(&right.0));
-                        std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
+                        if self
+                            .modules
+                            .get(&dependency.target)
+                            .is_some_and(|node| node.source == ModuleSource::Json)
+                        {
+                            let value = provider.get("default").cloned().ok_or_else(|| {
+                                ModuleGraphError::InternalMissingModule {
+                                    path: dependency.target.clone(),
+                                }
+                            })?;
+                            std::rc::Rc::new(std::cell::RefCell::new(value))
+                        } else {
+                            let mut entries: Vec<_> = provider
+                                .iter()
+                                .map(|(name, value)| (name.clone(), read_through_cell(value)))
+                                .collect();
+                            entries.sort_by(|left, right| left.0.cmp(&right.0));
+                            std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
+                        }
                     } else {
                         return Err(ModuleGraphError::InternalMissingModule {
                             path: dependency.target.clone(),
@@ -758,7 +801,8 @@ impl ModuleGraph {
                     };
                     targets.push((dependency.specifier.clone(), value));
                 }
-                let module_object = ordinary_object([("exports".to_owned(), initial_exports.clone())]);
+                let module_object =
+                    ordinary_object([("exports".to_owned(), initial_exports.clone())]);
                 let imports = vec![
                     initial_exports,
                     Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::new(targets))),
@@ -810,8 +854,8 @@ impl ModuleGraph {
                 total_steps = total_steps
                     .checked_add(result.execution.steps)
                     .ok_or(ModuleGraphError::StepOverflow)?;
-                let final_exports = own_data_property(&module_object, "exports")
-                    .unwrap_or(Value::Undefined);
+                let final_exports =
+                    own_data_property(&module_object, "exports").unwrap_or(Value::Undefined);
                 *exports_cell.borrow_mut() = final_exports.clone();
                 values.insert(
                     path.clone(),
@@ -973,6 +1017,7 @@ enum WorkItem {
         path: PathBuf,
         source: ModuleSource,
         program: ModuleProgram,
+        data: Option<String>,
         dependencies: Vec<Dependency>,
     },
 }
@@ -985,7 +1030,7 @@ enum VisitState {
 
 impl<P, R> Builder<P, R>
 where
-    P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
+    P: FnMut(&Path, ModuleSource) -> Result<ModulePayload, ModuleGraphError>,
     R: ResolutionPolicy,
 {
     fn visit(&mut self, path: PathBuf) -> Result<(), ModuleGraphError> {
@@ -1021,19 +1066,25 @@ where
                         let source = match source {
                             ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
                             ModuleSource::Source => {
-                                match self
-                                    .resolver
-                                    .node_format(&ResolvedModule {
-                                        path: path.clone(),
-                                        kind: ResolutionKind::Relative,
-                                    })
-                                    .map_err(|error| ModuleGraphError::Resolve {
-                                        importer: path.clone(),
-                                        specifier: String::new(),
-                                        error,
-                                    })? {
-                                    Some(NodeModuleFormat::CommonJs) => ModuleSource::CommonJs,
-                                    _ => ModuleSource::Source,
+                                if path.extension().and_then(|extension| extension.to_str())
+                                    == Some("json")
+                                {
+                                    ModuleSource::Json
+                                } else {
+                                    match self
+                                        .resolver
+                                        .node_format(&ResolvedModule {
+                                            path: path.clone(),
+                                            kind: ResolutionKind::Relative,
+                                        })
+                                        .map_err(|error| ModuleGraphError::Resolve {
+                                            importer: path.clone(),
+                                            specifier: String::new(),
+                                            error,
+                                        })? {
+                                        Some(NodeModuleFormat::CommonJs) => ModuleSource::CommonJs,
+                                        _ => ModuleSource::Source,
+                                    }
                                 }
                             }
                             source => source,
@@ -1041,11 +1092,33 @@ where
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
                         self.stack_sources.push(source);
-                        let program = match source {
+                        let (program, data) = match source {
                             ModuleSource::Source | ModuleSource::CommonJs => {
-                                (self.provider)(&path, source)?
+                                let ModulePayload::Program(program) =
+                                    (self.provider)(&path, source)?
+                                else {
+                                    return Err(ModuleGraphError::Source {
+                                        path: path.clone(),
+                                        message: "code module provider returned JSON text"
+                                            .to_owned(),
+                                    });
+                                };
+                                (program, None)
                             }
-                            ModuleSource::NodeBuiltin(builtin) => builtin_module_program(builtin),
+                            ModuleSource::Json => {
+                                let ModulePayload::JsonText(text) = (self.provider)(&path, source)?
+                                else {
+                                    return Err(ModuleGraphError::Source {
+                                        path: path.clone(),
+                                        message: "JSON module provider returned a program"
+                                            .to_owned(),
+                                    });
+                                };
+                                (json_module_program(), Some(text))
+                            }
+                            ModuleSource::NodeBuiltin(builtin) => {
+                                (builtin_module_program(builtin), None)
+                            }
                         };
                         validate_exports(&path, &program)?;
                         let mut dependencies = Vec::with_capacity(program.dependencies.len());
@@ -1063,6 +1136,13 @@ where
                                 ModuleSource::NodeBuiltin(builtin)
                             } else if !self.typed_sources {
                                 ModuleSource::Source
+                            } else if resolved
+                                .path
+                                .extension()
+                                .and_then(|extension| extension.to_str())
+                                == Some("json")
+                            {
+                                ModuleSource::Json
                             } else if self.resolver.node_format(&resolved).map_err(|error| {
                                 ModuleGraphError::Resolve {
                                     importer: path.clone(),
@@ -1088,6 +1168,7 @@ where
                             path,
                             source,
                             program,
+                            data,
                             dependencies: dependencies.clone(),
                         });
                         for (dependency, source) in
@@ -1104,6 +1185,7 @@ where
                     path,
                     source,
                     program,
+                    data,
                     dependencies,
                 } => {
                     self.stack.pop();
@@ -1116,6 +1198,7 @@ where
                             path,
                             source,
                             program,
+                            data,
                             dependencies,
                         },
                     );
@@ -1154,6 +1237,27 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
     }
 }
 
+/// A JSON node has one immutable module binding whose value is materialized directly by the
+/// loader. The value itself remains an ordinary mutable JavaScript object, matching Node's
+/// cached `require()` result and ESM default export behavior.
+fn json_module_program() -> ModuleProgram {
+    ModuleProgram {
+        program: Program {
+            version: BYTECODE_VERSION,
+            constants: vec![],
+            code: vec![Instruction::Return],
+            local_count: 1,
+            functions: vec![],
+        },
+        dependencies: vec![],
+        imports: vec![],
+        exports: vec![ExportBinding {
+            exported: "default".to_owned(),
+            local_slot: 0,
+        }],
+    }
+}
+
 fn validate_exports(path: &Path, program: &ModuleProgram) -> Result<(), ModuleGraphError> {
     let mut names = HashSet::new();
     for export in &program.exports {
@@ -1180,8 +1284,7 @@ fn validate_links(
                     path: importer_path.clone(),
                 })?;
         for import in &importer.program.imports {
-            if importer.source == ModuleSource::CommonJs
-                && import.source == COMMONJS_WRAPPER_SOURCE
+            if importer.source == ModuleSource::CommonJs && import.source == COMMONJS_WRAPPER_SOURCE
             {
                 continue;
             }
@@ -1404,7 +1507,9 @@ mod tests {
                 message: error.to_string(),
             })?;
             let hir = match source_kind {
-                ModuleSource::CommonJs => frontend_oxc::parse_commonjs(path.to_str().unwrap(), &source),
+                ModuleSource::CommonJs => {
+                    frontend_oxc::parse_commonjs(path.to_str().unwrap(), &source)
+                }
                 _ => frontend_oxc::parse(path.to_str().unwrap(), &source),
             };
             let mut program = match source_kind {
@@ -1421,7 +1526,7 @@ mod tests {
                     local_slot: 0,
                 });
             }
-            Ok(program)
+            Ok(ModulePayload::Program(program))
         })
         .expect("build package graph");
         assert_eq!(
