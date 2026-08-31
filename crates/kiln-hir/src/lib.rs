@@ -905,11 +905,7 @@ fn collect_statement_requires(statement: &Statement, found: &mut Vec<String>) {
                 collect_statement_requires(statement, found);
             }
         }
-        StatementKind::Return(value) => {
-            if let Some(value) = value {
-                push_require(value, found);
-            }
-        }
+        StatementKind::Return(Some(value)) => push_require(value, found),
         _ => {}
     }
 }
