@@ -388,6 +388,170 @@ pub struct HttpResponse {
     pub body: Vec<u8>,
 }
 
+/// One protocol-level transition while decoding an HTTP/1 client response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpResponseEvent {
+    Head(HttpResponseHead),
+    Data(Vec<u8>),
+    End,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpResponseHead {
+    pub status: u16,
+    pub reason: String,
+    pub headers: Vec<(String, String)>,
+    pub keep_alive: bool,
+}
+
+impl HttpResponseHead {
+    pub fn headers_object(&self) -> BTreeMap<String, String> {
+        let mut headers = BTreeMap::new();
+        for (name, value) in &self.headers {
+            headers
+                .entry(name.to_ascii_lowercase())
+                .and_modify(|existing: &mut String| {
+                    existing.push_str(", ");
+                    existing.push_str(value);
+                })
+                .or_insert_with(|| value.clone());
+        }
+        headers
+    }
+}
+
+/// Incremental response decoder used by `node:http` clients.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Http1ResponseDecoder {
+    bytes: Vec<u8>,
+    body: Option<BodyKind>,
+}
+
+impl Http1ResponseDecoder {
+    pub fn push_events(&mut self, bytes: &[u8]) -> Result<Vec<HttpResponseEvent>, HttpParseError> {
+        self.bytes.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        if self.body.is_none() {
+            let Some(head_end) = find_bytes(&self.bytes, b"\r\n\r\n") else {
+                if self.bytes.len() > MAX_HEAD_BYTES {
+                    return Err(HttpParseError::HeadTooLarge);
+                }
+                return Ok(events);
+            };
+            let (head, body) = parse_response_head(&self.bytes[..head_end])?;
+            self.bytes.drain(..head_end + 4);
+            events.push(HttpResponseEvent::Head(head));
+            match body {
+                BodyKind::None | BodyKind::Length(0) => {
+                    events.push(HttpResponseEvent::End);
+                    return Ok(events);
+                }
+                body => self.body = Some(body),
+            }
+        }
+        let Some(body) = self.body.as_mut() else {
+            return Ok(events);
+        };
+        match body {
+            BodyKind::Length(remaining) => {
+                let length = (*remaining).min(self.bytes.len());
+                if length != 0 {
+                    events.push(HttpResponseEvent::Data(
+                        self.bytes.drain(..length).collect(),
+                    ));
+                    *remaining -= length;
+                }
+                if *remaining == 0 {
+                    self.body = None;
+                    events.push(HttpResponseEvent::End);
+                }
+            }
+            BodyKind::Chunked => {
+                if let Some((body, consumed)) = decode_chunked(&self.bytes)? {
+                    self.bytes.drain(..consumed);
+                    self.body = None;
+                    if !body.is_empty() {
+                        events.push(HttpResponseEvent::Data(body));
+                    }
+                    events.push(HttpResponseEvent::End);
+                }
+            }
+            BodyKind::None => unreachable!("bodyless response finishes with its head"),
+        }
+        Ok(events)
+    }
+}
+
+fn parse_response_head(bytes: &[u8]) -> Result<(HttpResponseHead, BodyKind), HttpParseError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| HttpParseError::InvalidHeader)?;
+    let mut lines = text.split("\r\n");
+    let status_line = lines.next().ok_or(HttpParseError::InvalidRequestLine)?;
+    let mut parts = status_line.splitn(3, ' ');
+    let version = match parts.next() {
+        Some("HTTP/1.0") => HttpVersion::Http10,
+        Some("HTTP/1.1") => HttpVersion::Http11,
+        _ => return Err(HttpParseError::UnsupportedVersion),
+    };
+    let status = parts
+        .next()
+        .and_then(|status| status.parse::<u16>().ok())
+        .filter(|status| (100..=999).contains(status))
+        .ok_or(HttpParseError::InvalidRequestLine)?;
+    let reason = parts.next().unwrap_or_default().to_owned();
+    let mut headers = Vec::new();
+    let mut content_length = None;
+    let mut chunked = false;
+    let mut connection = None;
+    for line in lines {
+        let (name, value) = line.split_once(':').ok_or(HttpParseError::InvalidHeader)?;
+        if !valid_token(name) {
+            return Err(HttpParseError::InvalidHeader);
+        }
+        let value = value.trim_matches([' ', '\t']).to_owned();
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = Some(
+                value
+                    .parse::<usize>()
+                    .map_err(|_| HttpParseError::InvalidContentLength)?,
+            );
+        } else if name.eq_ignore_ascii_case("transfer-encoding") {
+            chunked = value
+                .split(',')
+                .next_back()
+                .is_some_and(|coding| coding.trim().eq_ignore_ascii_case("chunked"));
+        } else if name.eq_ignore_ascii_case("connection") {
+            connection = Some(value.to_ascii_lowercase());
+        }
+        headers.push((name.to_ascii_lowercase(), value));
+    }
+    if chunked && content_length.is_some() {
+        return Err(HttpParseError::ConflictingBodyFraming);
+    }
+    let no_body = matches!(status, 100..=199 | 204 | 304);
+    let body = if no_body {
+        BodyKind::None
+    } else if chunked {
+        BodyKind::Chunked
+    } else if let Some(length) = content_length {
+        BodyKind::Length(length)
+    } else {
+        BodyKind::None
+    };
+    let keep_alive = match version {
+        HttpVersion::Http11 => connection.as_deref() != Some("close"),
+        HttpVersion::Http10 => connection.as_deref() == Some("keep-alive"),
+    };
+    Ok((
+        HttpResponseHead {
+            status,
+            reason,
+            headers,
+            keep_alive,
+        },
+        body,
+    ))
+}
+
 impl HttpResponse {
     /// Encode a response whose body will be written incrementally.
     ///
@@ -596,6 +760,37 @@ mod tests {
         }
         .encode(true);
         assert_eq!(bytes, b"HTTP/1.1 204 No Content\r\n\r\n");
+    }
+
+    #[test]
+    fn decodes_client_response_across_transport_chunks() {
+        let mut decoder = Http1ResponseDecoder::default();
+        assert_eq!(
+            decoder
+                .push_events(b"HTTP/1.1 201 Created\r\nContent-Type: text/plain\r\nContent-L")
+                .unwrap(),
+            []
+        );
+        let events = decoder
+            .push_events(b"ength: 5\r\nConnection: close\r\n\r\nhe")
+            .unwrap();
+        assert!(matches!(
+            &events[0],
+            HttpResponseEvent::Head(head)
+                if head.status == 201
+                    && head.reason == "Created"
+                    && head.headers_object().get("content-type").map(String::as_str)
+                        == Some("text/plain")
+                    && !head.keep_alive
+        ));
+        assert_eq!(events[1], HttpResponseEvent::Data(b"he".to_vec()));
+        assert_eq!(
+            decoder.push_events(b"llo").unwrap(),
+            [
+                HttpResponseEvent::Data(b"llo".to_vec()),
+                HttpResponseEvent::End
+            ]
+        );
     }
 
     #[test]

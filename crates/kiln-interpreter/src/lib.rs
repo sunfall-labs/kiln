@@ -11,7 +11,9 @@ use kiln_ir::{
 };
 use kiln_runtime::{
     NodeHostOps, Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds,
-    node_http::{Http1Decoder, HttpRequestEvent, HttpResponse},
+    node_http::{
+        Http1Decoder, Http1ResponseDecoder, HttpRequestEvent, HttpResponse, HttpResponseEvent,
+    },
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
@@ -260,8 +262,13 @@ pub enum Native {
     NodeSocketDestroy,
     NodeReadablePause,
     NodeReadableResume,
+    NodeReadableSetEncoding,
     NodeHttp,
     NodeHttpCreateServer,
+    NodeHttpRequest,
+    NodeHttpGet,
+    NodeClientRequestWrite,
+    NodeClientRequestEnd,
     NodeServerListen,
     NodeServerClose,
     NodeServerAddress,
@@ -277,6 +284,8 @@ pub enum Native {
     Json,
     ArrayIsArray,
     ArrayFrom,
+    /// `Array.fromAsync`: `Array.from` with an await at every element.
+    ArrayFromAsync,
     ObjectKeys,
     ObjectSetPrototypeOf,
     ObjectGetPrototypeOf,
@@ -416,6 +425,31 @@ pub enum Native {
     IteratorWrapNext,
     WeakMapConstructor,
     WeakSetConstructor,
+    /// `JSON.rawJSON(text)` and `JSON.isRawJSON(value)`.
+    ///
+    /// A raw JSON object is a hole punched in the serialiser: it carries JSON *text* that
+    /// `stringify` emits verbatim instead of re-encoding. Its whole reason to exist is the value
+    /// JavaScript cannot hold -- a big integer, a decimal with more digits than a double keeps --
+    /// which a program can now put into a document without the round trip through `Number`
+    /// silently rewriting it.
+    JsonRawJson,
+    JsonIsRawJson,
+    /// `WeakRef`, and the one method it has.
+    ///
+    /// This realm never collects, so a reference held here is never cleared and `deref` always
+    /// answers the target. That is not a stub: the specification requires only that a target be
+    /// *kept* until it is unreachable, and leaves when -- or whether -- to clear entirely to the
+    /// implementation. An engine that never clears is a conforming one, and a program cannot
+    /// tell it apart from one that has simply not collected yet.
+    WeakRefConstructor,
+    WeakRefDeref,
+    /// `FinalizationRegistry` and its two methods, for the same reason: nothing is ever
+    /// collected, so no cleanup callback ever becomes due. What the registry still has to get
+    /// right is everything a program can observe synchronously -- which targets it accepts, what
+    /// `unregister` answers, and that `register` returns nothing.
+    FinalizationRegistryConstructor,
+    FinalizationRegistryRegister,
+    FinalizationRegistryUnregister,
     /// `performance`, whose `now` reads the same virtual clock `Date.now` does.
     Performance,
     PerformanceNow,
@@ -524,7 +558,12 @@ pub enum Native {
     ArrayBufferGrow,
     ArrayBufferSlice,
     /// `transfer` and `transferToFixedLength`: move the bytes into a new buffer and detach this
-    /// one. The flag controls whether a resizable ceiling is preserved.
+    /// one.
+    ///
+    /// One marker with a flag rather than two, because the pair differ in exactly one decision
+    /// -- whether the buffer that comes out may still be resized -- and everything else about
+    /// them, down to the byte copy and the detach, is the same operation. `preserve` carries
+    /// the receiver's ceiling across, which is what makes `rab.transfer()` still resizable.
     ArrayBufferTransfer {
         preserve_resizability: bool,
     },
@@ -564,6 +603,29 @@ pub enum Native {
     /// One of the methods that consumes an iterator and answers a value.
     IteratorTerminal(TerminalKind),
     /// `next` and `return` on a helper this realm made.
+    /// `%IteratorPrototype%[@@dispose]`: close the iterator, if it has a way to be closed.
+    ///
+    /// Deliberately not brand-checked and not even receiver-checked: the specification goes
+    /// straight to `GetMethod(this, "return")`, so anything with a `return` is disposable and
+    /// anything without one disposes to nothing. That is what lets `using` work over an object
+    /// that only ever implemented the iterator protocol.
+    IteratorDispose,
+    /// `next` on the iterator `RegExp.prototype[@@matchAll]` produced.
+    RegExpStringIteratorNext,
+    /// `Iterator.concat` and the two methods of the helper it builds.
+    IteratorConcat,
+    IteratorConcatNext,
+    IteratorConcatReturn,
+    /// `Iterator.zip` and `Iterator.zipKeyed`, and the two methods of the helper they build.
+    ///
+    /// One marker with a flag rather than two, because the pair differ only in where the sources
+    /// come from and what a step is shaped like -- positional and an array, or keyed and an
+    /// object. The modes, the padding and the closing rules are one algorithm.
+    IteratorZip {
+        keyed: bool,
+    },
+    IteratorZipNext,
+    IteratorZipReturn,
     IteratorHelperNext(HelperKind),
     IteratorHelperReturn,
     ProxyRevocable,
@@ -913,6 +975,8 @@ impl Native {
                 Some(Value::Native(Self::NodeNetConnect))
             }
             (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
+            (Self::NodeHttp, "request") => Some(Value::Native(Self::NodeHttpRequest)),
+            (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet)),
             (Self::NodeEventEmitter, "prototype") => Some(Value::Native(Self::PrototypeOf(
                 PrototypeTable::EventEmitter,
             ))),
@@ -951,6 +1015,7 @@ impl Native {
             (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned())),
             (Self::ArrayConstructor, "isArray") => Some(Value::Native(Self::ArrayIsArray)),
             (Self::ArrayConstructor, "from") => Some(Value::Native(Self::ArrayFrom)),
+            (Self::ArrayConstructor, "fromAsync") => Some(Value::Native(Self::ArrayFromAsync)),
             (Self::ObjectConstructor, "keys") => Some(Value::Native(Self::ObjectKeys)),
             // Not `Object.keys`: this reports every own property and that one reports only
             // the enumerated ones. They were the same function until an error object gave them
@@ -1039,6 +1104,13 @@ impl Native {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::Iterator)))
             }
             (Self::IteratorConstructor, "from") => Some(Value::Native(Self::IteratorFrom)),
+            (Self::IteratorConstructor, "concat") => Some(Value::Native(Self::IteratorConcat)),
+            (Self::IteratorConstructor, "zip") => {
+                Some(Value::Native(Self::IteratorZip { keyed: false }))
+            }
+            (Self::IteratorConstructor, "zipKeyed") => {
+                Some(Value::Native(Self::IteratorZip { keyed: true }))
+            }
             (Self::BooleanConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::Boolean)))
             }
@@ -1065,6 +1137,12 @@ impl Native {
             (Self::WeakSetConstructor, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::WeakSet)))
             }
+            (Self::WeakRefConstructor, "prototype") => {
+                Some(Value::Native(Self::PrototypeOf(PrototypeTable::WeakRef)))
+            }
+            (Self::FinalizationRegistryConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::FinalizationRegistry),
+            )),
             (Self::TypedArrayIntrinsic, "prototype") => {
                 Some(Value::Native(Self::PrototypeOf(PrototypeTable::TypedArray)))
             }
@@ -1114,6 +1192,8 @@ impl Native {
                 PrototypeTable::Set => Self::SetConstructor,
                 PrototypeTable::WeakMap => Self::WeakMapConstructor,
                 PrototypeTable::WeakSet => Self::WeakSetConstructor,
+                PrototypeTable::WeakRef => Self::WeakRefConstructor,
+                PrototypeTable::FinalizationRegistry => Self::FinalizationRegistryConstructor,
                 PrototypeTable::EventEmitter => Self::NodeEventEmitter,
             })),
             (Self::PrototypeOf(table), _) => Some(inherit_from_object(
@@ -1146,6 +1226,8 @@ impl Native {
                     PrototypeTable::Set => collection_property(false, false, name),
                     PrototypeTable::WeakMap => collection_property(true, true, name),
                     PrototypeTable::WeakSet => collection_property(false, true, name),
+                    PrototypeTable::WeakRef => weak_ref_method(name),
+                    PrototypeTable::FinalizationRegistry => finalization_registry_method(name),
                     PrototypeTable::EventEmitter => Value::Undefined,
                 },
                 name,
@@ -1260,6 +1342,22 @@ impl Native {
             (Self::PromiseConstructor, "race") => Some(Value::Native(Self::PromiseRace)),
             (Self::PromiseConstructor, "any") => Some(Value::Native(Self::PromiseAny)),
             (Self::Json, "parse") => Some(Value::Native(Self::JsonParse)),
+            (Self::Json, "rawJSON") => Some(Value::Native(Self::JsonRawJson)),
+            // The tag `Object.prototype.toString` reads. A namespace has no prototype to hang it
+            // on, so it is the object's own -- which is exactly how the specification defines it.
+            (Self::Math | Self::Json | Self::Reflect, key)
+                if key == WellKnown::ToStringTag.property_key() =>
+            {
+                Some(Value::String(
+                    match self {
+                        Self::Math => "Math",
+                        Self::Reflect => "Reflect",
+                        _ => "JSON",
+                    }
+                    .to_owned(),
+                ))
+            }
+            (Self::Json, "isRawJSON") => Some(Value::Native(Self::JsonIsRawJson)),
             (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
             (Self::SymbolConstructor, "for") => Some(Value::Native(Self::SymbolFor)),
             (Self::SymbolConstructor, "keyFor") => Some(Value::Native(Self::SymbolKeyFor)),
@@ -1388,6 +1486,7 @@ enum NodeObject {
     NetSocket(Rc<RefCell<NetSocketState>>),
     HttpIncoming(Rc<RefCell<HttpIncomingState>>),
     HttpResponse(Rc<RefCell<HttpResponseState>>),
+    HttpClientRequest(Rc<RefCell<HttpClientRequestState>>),
 }
 
 #[derive(Debug)]
@@ -1410,16 +1509,32 @@ struct NodeServerState {
 enum ServerProtocol {
     Net,
     Http,
+    HttpClient,
 }
 
 #[derive(Debug)]
 struct NodeConnection {
     driver: StreamDriver,
     decoder: Http1Decoder,
+    response_decoder: Http1ResponseDecoder,
     request: Option<Value>,
     response: Option<Value>,
     close_after_finish: bool,
     closed: bool,
+}
+
+#[derive(Debug)]
+struct HttpClientRequestState {
+    host: String,
+    port: u16,
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+    callback: Value,
+    socket: Option<Rc<RefCell<NetSocketState>>>,
+    object: Option<Rc<RefCell<ObjectData>>>,
+    ended: bool,
 }
 
 #[derive(Debug)]
@@ -1438,6 +1553,7 @@ struct HttpResponseState {
 #[derive(Debug)]
 struct HttpIncomingState {
     stream: kiln_host_abi::ResourceId,
+    encoding: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -2227,6 +2343,11 @@ pub enum PrototypeTable {
     Set,
     WeakMap,
     WeakSet,
+    /// The two tables for holding something weakly *without* being a collection of it. Neither
+    /// is a `WeakSet` with one member: a `WeakRef` hands its target back, which a weak set
+    /// deliberately cannot, and a registry holds a value it is *not* weak about at all.
+    WeakRef,
+    FinalizationRegistry,
     EventEmitter,
 }
 
@@ -2242,6 +2363,29 @@ pub enum HelperKind {
     Take,
     Drop,
     FlatMap,
+    /// `chunks(n)`: consecutive groups of `n`, the last one short if the source ran out mid-way.
+    Chunks,
+    /// `windows(n)`: every run of `n` consecutive elements, one element apart.
+    ///
+    /// Its buffer is a sliding window rather than a bucket that empties: after a group is handed
+    /// on, the oldest element leaves and the next one joins, which is the whole difference
+    /// between this and `chunks` and the reason both are one buffer with two eviction rules.
+    Windows,
+}
+
+impl HelperKind {
+    /// The name the method is bound under, which is also the `name` its function reports.
+    const fn property_key(self) -> &'static str {
+        match self {
+            Self::Map => "map",
+            Self::Filter => "filter",
+            Self::Take => "take",
+            Self::Drop => "drop",
+            Self::FlatMap => "flatMap",
+            Self::Chunks => "chunks",
+            Self::Windows => "windows",
+        }
+    }
 }
 
 /// Which of the iterator methods that *consume* an iterator is running.
@@ -2257,6 +2401,26 @@ pub enum TerminalKind {
     Some,
     Every,
     Find,
+    /// `includes(x)`: whether the source ever produces `x`, by `SameValueZero`.
+    Includes,
+    /// `join(sep)`: every element as text, separated.
+    Join,
+}
+
+impl TerminalKind {
+    /// The name the method is bound under, which is also the `name` its function reports.
+    const fn property_key(self) -> &'static str {
+        match self {
+            Self::Reduce => "reduce",
+            Self::ToArray => "toArray",
+            Self::ForEach => "forEach",
+            Self::Some => "some",
+            Self::Every => "every",
+            Self::Find => "find",
+            Self::Includes => "includes",
+            Self::Join => "join",
+        }
+    }
 }
 
 /// The iterator a helper pulls from. Its presence is also what marks an object as one of this
@@ -2275,10 +2439,80 @@ const HELPER_COUNTER: &str = "@@helper-counter";
 /// back into a source that is exhausted or broken.
 const HELPER_DONE: &str = "@@helper-done";
 /// `flatMap`'s current inner iterator, and the `next` it was captured with.
+/// The regexp `@@matchAll`'s iterator walks with -- a clone of the receiver, so the program's
+/// own regexp keeps its cursor.
+/// The state a zip helper keeps. `iters` is indexed by source position and never shrinks --
+/// a retired source becomes `null` there so its slot can still be padded -- while `open` is the
+/// list a close sweep walks, and a source leaves it the moment it ends or fails.
+const ZIP_ITERS: &str = "@@zip-iters";
+const ZIP_OPEN: &str = "@@zip-open";
+const ZIP_PADDING: &str = "@@zip-padding";
+const ZIP_KEYS: &str = "@@zip-keys";
+const ZIP_KEYED: &str = "@@zip-keyed";
+const ZIP_MODE: &str = "@@zip-mode";
+
+/// What a zip does when its sources are not all the same length.
+///
+/// Three answers to one question, and the specification makes the program choose rather than
+/// picking one: truncating silently loses elements, padding invents them, and refusing is the
+/// only one that can tell the program its assumption was wrong.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZipMode {
+    /// Stop at the first source that ends.
+    Shortest,
+    /// Carry on to the last, padding the ones that have ended.
+    Longest,
+    /// Require every source to end on the same step, and throw when they do not.
+    Strict,
+}
+
+impl ZipMode {
+    /// Read back from the number the helper's slot holds.
+    fn from_number(number: f64) -> Self {
+        match number as u8 {
+            1 => Self::Longest,
+            2 => Self::Strict,
+            _ => Self::Shortest,
+        }
+    }
+}
+
+/// Drop one iterator from the list a close sweep will walk.
+///
+/// By identity, and only the first match: two sources may be the *same* iterator, and retiring
+/// one of them must not silently retire the other.
+fn remove_open(open: &Rc<ArrayData>, iterator: &Value) {
+    let mut open = open.borrow_mut();
+    if let Some(at) = open.iter().position(|held| strict_equal(held, iterator)) {
+        open.remove(at);
+    }
+}
+
+/// The `[method, iterable]` pairs `Iterator.concat` was given, and how far the walk has read.
+const CONCAT_SOURCES: &str = "@@concat-sources";
+const CONCAT_INDEX: &str = "@@concat-index";
+
+const MATCH_ALL_REGEXP: &str = "@@matchall-regexp";
+const MATCH_ALL_SUBJECT: &str = "@@matchall-subject";
+const MATCH_ALL_GLOBAL: &str = "@@matchall-global";
+const MATCH_ALL_UNICODE: &str = "@@matchall-unicode";
+
+/// The elements a chunking helper has taken from its source and not yet handed on.
+///
+/// An array rather than a count, because these two helpers are the only ones that hold more than
+/// one element at a time: everything else in the family passes each element straight through.
+const HELPER_BUFFER: &str = "@@helper-buffer";
+/// Whether `windows` hands on a final short window. `chunks` always does and has no flag.
+const HELPER_PARTIAL: &str = "@@helper-partial";
 const HELPER_INNER: &str = "@@helper-inner";
 const HELPER_INNER_NEXT: &str = "@@helper-inner-next";
 
 /// One reserved slot of a helper.
+/// Whether a `windows` helper was asked for a final short window.
+fn allow_partial(state: &Rc<RefCell<ObjectData>>) -> bool {
+    helper_slot(state, HELPER_PARTIAL).is_truthy()
+}
+
 fn helper_slot(state: &Rc<RefCell<ObjectData>>, key: &str) -> Value {
     state
         .borrow()
@@ -2501,7 +2735,14 @@ pub struct BufferData {
     /// last part is the whole reason the language has a second buffer type, and it is exactly
     /// what a single type with a `grow` alias would lose.
     shared: bool,
-    /// Whether the bytes have been handed to another buffer by `transfer`.
+    /// Whether the bytes have been handed to somebody else and this buffer no longer owns them.
+    ///
+    /// A flag rather than emptying `bytes`, because "detached" and "zero-length" are different
+    /// states that the language distinguishes everywhere: a zero-length buffer can still be
+    /// resized and sliced, and a detached one throws. `Cell`, because detaching is something a
+    /// program does to a buffer it only holds a shared reference to -- `transfer` is called on
+    /// a buffer that any number of views are already pointing at, and every one of them has to
+    /// see it happen.
     detached: std::cell::Cell<bool>,
 }
 
@@ -2524,6 +2765,18 @@ impl BufferData {
         })
     }
 
+    /// `IsDetachedBuffer`. A shared buffer can never be one: nothing can take bytes away from a
+    /// holder that has no way to learn it happened, which is the same reason it has no `resize`.
+    fn detached(&self) -> bool {
+        self.detached.get()
+    }
+
+    /// The length the language reports, which is zero once the bytes are gone.
+    ///
+    /// Zero rather than the length the buffer had, because every accessor the specification
+    /// defines on a detached buffer answers zero and every view over one reports itself empty.
+    /// Reporting the old length here would make a stranded view claim to address bytes that no
+    /// longer exist -- and this is the one place that would have to be remembered in a dozen.
     fn byte_length(&self) -> usize {
         if self.detached.get() {
             return 0;
@@ -2531,10 +2784,11 @@ impl BufferData {
         self.bytes.borrow().len()
     }
 
-    fn detached(&self) -> bool {
-        self.detached.get()
-    }
-
+    /// `DetachArrayBuffer`: give up the bytes and hand them back.
+    ///
+    /// The bytes are *moved out* rather than copied, because that is what makes `transfer` a
+    /// transfer: a program moves a large buffer across an ownership boundary expecting the cost
+    /// to be a pointer, and a copy here would make it a memcpy of the whole block.
     fn detach(&self) -> Vec<u8> {
         self.detached.set(true);
         std::mem::take(&mut *self.bytes.borrow_mut())
@@ -2624,10 +2878,13 @@ impl TypedArrayData {
 
     /// Whether the window no longer fits in the buffer.
     ///
-    /// Only a resizable buffer can make this true, and only by shrinking under a view that was
-    /// already there. The specification does not truncate such a view to the bytes that survive
-    /// -- it treats it as empty -- because the surviving prefix is not what the program asked
-    /// for, and handing it back would be a stale read dressed up as a short one.
+    /// Two ways to become true. A resizable buffer can shrink under a view that was already
+    /// there; the specification does not truncate such a view to the bytes that survive -- it
+    /// treats it as empty -- because the surviving prefix is not what the program asked for,
+    /// and handing it back would be a stale read dressed up as a short one. And a buffer can be
+    /// detached, which strands *every* view over it however it was sized: a zero-length view
+    /// over a detached buffer is out of bounds too, which is why detachment is asked about
+    /// directly rather than inferred from the byte length having gone to zero.
     fn out_of_bounds(&self) -> bool {
         if self.buffer.detached() {
             return true;
@@ -2718,7 +2975,8 @@ impl PartialEq for DataViewData {
 }
 
 impl DataViewData {
-    /// Whether a shrink has left the window outside its buffer.
+    /// Whether a shrink -- or a detach, which strands every view at once -- has left the
+    /// window outside its buffer.
     fn out_of_bounds(&self) -> bool {
         if self.buffer.detached() {
             return true;
@@ -3236,7 +3494,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
         "net" => &["connect", "createConnection", "createServer"],
-        "http" => &["createServer"],
+        "http" => &["createServer", "default", "get", "request"],
         _ => return None,
     })
 }
@@ -3265,9 +3523,13 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
             .map(|name| {
                 (
                     (*name).to_owned(),
-                    namespace
-                        .property(name)
-                        .expect("every advertised builtin export has a native value"),
+                    if *name == "default" {
+                        Value::Native(namespace)
+                    } else {
+                        namespace
+                            .property(name)
+                            .expect("every advertised builtin export has a native value")
+                    },
                 )
             })
             .collect(),
@@ -3982,7 +4244,9 @@ pub enum ExecutionError {
     /// [`Self::BufferNotResizable`] exists: a fixed-length buffer is not a growable one that
     /// happens to refuse.
     BufferNotGrowable,
-    /// An operation on an ArrayBuffer whose bytes have been transferred away.
+    /// An operation on a buffer whose bytes have been transferred away, or through a view onto
+    /// one. A `TypeError` and not an empty read: a detached buffer has no bytes at all, and
+    /// handing back zeroes would let a program carry on believing it still holds its data.
     BufferDetached,
     /// A buffer length outside what the specification accepts -- negative, unrepresentable, or
     /// above the ceiling the buffer was created with.
@@ -4842,6 +5106,61 @@ enum Sink {
     /// The promise here belongs to one step rather than to the whole function, which is the
     /// whole difference between the two.
     AsyncGenerator(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
+    /// One `await` inside `Array.fromAsync`. Like `Combinator`, the bookkeeping *is* the
+    /// reaction: there is no JavaScript handler, only a walk to resume.
+    FromAsync(Rc<FromAsync>),
+    /// The value an async generator yielded, being awaited before it is handed to the consumer.
+    ///
+    /// `yield v` in an async generator is `Await(v)` and then the yield, which is why an async
+    /// generator that yields promises hands back their *values*. Without this the consumer got
+    /// the promise itself, and `for await (const x of gen())` bound `x` to a promise.
+    AsyncGeneratorYield(Rc<RefCell<GeneratorState>>, Rc<RefCell<PromiseState>>),
+}
+
+/// One `Array.fromAsync` in flight.
+///
+/// On the heap because the walk is suspended at every element: what a synchronous loop would
+/// keep on the Rust stack has to survive a return to the microtask queue, so it lives here and
+/// the reaction that resumes the walk carries a handle to it.
+#[derive(Debug, PartialEq)]
+struct FromAsync {
+    /// The promise the caller is holding.
+    result: Rc<RefCell<PromiseState>>,
+    /// What the elements are being collected into.
+    target: Value,
+    mapper: Value,
+    this_value: Value,
+    source: RefCell<FromAsyncSource>,
+    /// How many elements have been placed, which is also the index the mapper is told.
+    index: std::cell::Cell<usize>,
+    /// Which of the three awaits the walk is suspended at.
+    stage: std::cell::Cell<FromAsyncStage>,
+}
+
+/// Where an `Array.fromAsync` is drawing its elements from.
+#[derive(Clone, Debug, PartialEq)]
+enum FromAsyncSource {
+    /// An iterator and its `next`. `synchronous` is the whole difference between the two
+    /// protocols: an async iterator hands back a promise of each result object, where a
+    /// synchronous one hands back the object and it is each *value* that has to be awaited.
+    Iterator {
+        iterator: Value,
+        next: Value,
+        synchronous: bool,
+    },
+    /// A value with a `length` and indices, walked as `Array.from` walks one.
+    ArrayLike { source: Value, length: usize },
+}
+
+/// Which await an `Array.fromAsync` is suspended at, and so what the value it resumes with is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FromAsyncStage {
+    /// The result object an async iterator's `next` produced.
+    Step,
+    /// One element: a synchronous iterator's value, or an array-like's slot.
+    Element,
+    /// What the mapper returned.
+    Mapped,
 }
 
 /// The shared state of one `Promise.all`, `allSettled`, `race` or `any`.
@@ -4884,6 +5203,12 @@ enum Job {
     /// handler settles one turn later than returning a plain value. That is observable, and
     /// programs order themselves around it.
     Adopt(Rc<RefCell<PromiseState>>, Rc<RefCell<PromiseState>>),
+    /// Hand this realm's resolving functions to a foreign thenable's `then`.
+    ///
+    /// A job for the same reason `Adopt` is one: the specification *queues* the call, so a
+    /// thenable settles one tick later than a plain value. Programs order themselves around that
+    /// tick, and running the `then` straight away would move them.
+    Thenable(Rc<RefCell<PromiseState>>, Value, Value),
 }
 
 /// How a suspended generator is resumed.
@@ -5090,8 +5415,13 @@ enum PendingNodeRequest {
     },
     Connect {
         request: RequestId,
-        state: Rc<RefCell<NetSocketState>>,
+        target: PendingConnect,
     },
+}
+
+enum PendingConnect {
+    Net(Rc<RefCell<NetSocketState>>),
+    Http(Rc<RefCell<HttpClientRequestState>>),
 }
 
 impl PendingNodeRequest {
@@ -5268,7 +5598,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let request = unsafe {
                     (&mut *host_ops).start_node_op(AsyncHostOp::TcpConnect { host, port }, true)
                 };
-                self.push_pending_node(PendingNodeRequest::Connect { request, state });
+                self.push_pending_node(PendingNodeRequest::Connect {
+                    request,
+                    target: PendingConnect::Net(state),
+                });
                 Ok(socket)
             }
             Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy => {
@@ -5341,9 +5674,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         native: Native,
         receiver: &Value,
+        arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let state = node_http_incoming(receiver)?;
+        if matches!(native, Native::NodeReadableSetEncoding) {
+            let encoding = arguments
+                .first()
+                .map(Value::to_display_string)
+                .unwrap_or_else(|| "utf8".into())
+                .to_ascii_lowercase();
+            if !matches!(encoding.as_str(), "utf8" | "utf-8") {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!("unsupported Node stream encoding: {encoding}"),
+                });
+            }
+            state.borrow_mut().encoding = Some("utf8".into());
+            return Ok(receiver.clone());
+        }
         let resource = state.borrow().stream;
         let owner = self
             .http_server_for_stream(resource)
@@ -5384,6 +5732,41 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         match native {
+            Native::NodeHttpRequest | Native::NodeHttpGet => {
+                let (host, port, method, path, headers, callback) =
+                    node_http_request_arguments(arguments)?;
+                let state = Rc::new(RefCell::new(HttpClientRequestState {
+                    host: host.clone(),
+                    port,
+                    method,
+                    path,
+                    headers,
+                    body: Vec::new(),
+                    callback,
+                    socket: None,
+                    object: None,
+                    ended: false,
+                }));
+                let request_object = node_http_client_request_object(&state);
+                let host_ops = self.node_host.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http client requires the Node execution Adapter".into(),
+                })?;
+                let request = unsafe {
+                    (&mut *host_ops).start_node_op(AsyncHostOp::TcpConnect { host, port }, true)
+                };
+                self.push_pending_node(PendingNodeRequest::Connect {
+                    request,
+                    target: PendingConnect::Http(Rc::clone(&state)),
+                });
+                if matches!(native, Native::NodeHttpGet) {
+                    state.borrow_mut().ended = true;
+                }
+                Ok(request_object)
+            }
+            Native::NodeClientRequestWrite | Native::NodeClientRequestEnd => {
+                self.dispatch_node_client_request(native, receiver, arguments, instruction)
+            }
             Native::NodeHttpCreateServer => {
                 let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if !is_callable(&handler) {
@@ -5521,8 +5904,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 })?;
                 unsafe { (&mut *host).cancel_node_op(request) };
                 if let Some(realm) = &self.module_realm {
+                    // The caller is iterating actions produced by `driver.close()`. Retiring the
+                    // executor request here is safe; borrowing the realm only for this statement
+                    // is important because starting the following close action registers its own
+                    // request in the same shared session.
+                    let mut realm = realm.borrow_mut();
                     realm
-                        .borrow_mut()
                         .pending_node
                         .retain(|pending| pending.request() != request);
                 } else {
@@ -5543,6 +5930,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     decoder: Http1Decoder::default(),
+                    response_decoder: Http1ResponseDecoder::default(),
                     request: None,
                     response: None,
                     close_after_finish: false,
@@ -5676,6 +6064,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                     return Ok(());
                 }
+                if server.borrow().protocol == ServerProtocol::HttpClient {
+                    let events = {
+                        let mut owner = server.borrow_mut();
+                        let connection = owner
+                            .streams
+                            .iter_mut()
+                            .find(|stream| stream.driver.resource() == resource)
+                            .ok_or_else(|| ExecutionError::Host {
+                                instruction,
+                                message: "node:http client received data for an unknown stream"
+                                    .into(),
+                            })?;
+                        connection
+                            .response_decoder
+                            .push_events(&bytes)
+                            .map_err(|error| ExecutionError::Host {
+                                instruction,
+                                message: format!("HTTP response parse error: {error:?}"),
+                            })?
+                    };
+                    for event in events {
+                        self.dispatch_http_response_event(server, resource, event, instruction)?;
+                    }
+                    return Ok(());
+                }
                 let events = {
                     let mut server_state = server.borrow_mut();
                     let connection = server_state
@@ -5804,25 +6217,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(), ExecutionError> {
         match event {
             HttpRequestEvent::Head(request) => {
-                if !request.keep_alive {
-                    if let Some(connection) = server
-                        .borrow_mut()
-                        .streams
-                        .iter_mut()
-                        .find(|stream| stream.driver.resource() == resource)
-                    {
-                        connection.driver.pause_reading();
-                    }
-                }
-                let incoming =
-                    self.dispatch_http_request_head(server, resource, request, instruction)?;
-                let mut state = server.borrow_mut();
-                let connection = state
-                    .streams
-                    .iter_mut()
-                    .find(|stream| stream.driver.resource() == resource)
-                    .expect("request head belongs to its stream");
-                connection.request = Some(incoming);
+                self.dispatch_http_request_head(server, resource, request, instruction)?;
                 Ok(())
             }
             HttpRequestEvent::Data(bytes) => {
@@ -5857,6 +6252,126 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    fn dispatch_http_response_event(
+        &mut self,
+        owner: &Rc<RefCell<NodeServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        event: HttpResponseEvent,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match event {
+            HttpResponseEvent::Head(head) => {
+                let request = owner
+                    .borrow()
+                    .streams
+                    .iter()
+                    .find(|stream| stream.driver.resource() == resource)
+                    .and_then(|stream| stream.request.clone())
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "HTTP response lost its ClientRequest".into(),
+                    })?;
+                let state =
+                    node_http_client_request(&request).map_err(|_| ExecutionError::Host {
+                        instruction,
+                        message: format!(
+                            "HTTP response connection stored {} instead of ClientRequest",
+                            request.type_name()
+                        ),
+                    })?;
+                let mut incoming = ObjectData::default();
+                incoming.node_events = Some(Vec::new());
+                incoming.node_object = Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
+                    HttpIncomingState {
+                        stream: resource,
+                        encoding: None,
+                    },
+                ))));
+                incoming.set("statusCode", Value::Number(f64::from(head.status)));
+                incoming.set("statusMessage", Value::String(head.reason.clone()));
+                incoming.set("on", Value::Native(Native::NodeEventOn));
+                incoming.set("once", Value::Native(Native::NodeEventOnce));
+                incoming.set("emit", Value::Native(Native::NodeEventEmit));
+                incoming.set("pause", Value::Native(Native::NodeReadablePause));
+                incoming.set("resume", Value::Native(Native::NodeReadableResume));
+                incoming.set(
+                    "setEncoding",
+                    Value::Native(Native::NodeReadableSetEncoding),
+                );
+                let mut headers = ObjectData::default();
+                for (name, value) in head.headers_object() {
+                    headers.set(&name, Value::String(value));
+                }
+                incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
+                let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
+                if let Some(connection) = owner
+                    .borrow_mut()
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.driver.resource() == resource)
+                {
+                    connection.response = Some(incoming.clone());
+                }
+                let callback = state.borrow().callback.clone();
+                if is_callable(&callback) {
+                    self.call_value(&callback, Value::Undefined, vec![incoming], instruction)?;
+                }
+                Ok(())
+            }
+            HttpResponseEvent::Data(bytes) => {
+                let incoming = owner
+                    .borrow()
+                    .streams
+                    .iter()
+                    .find(|stream| stream.driver.resource() == resource)
+                    .and_then(|stream| stream.response.clone())
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "HTTP response body arrived before its head".into(),
+                    })?;
+                let body = match node_http_incoming(&incoming)?.borrow().encoding.as_deref() {
+                    Some("utf8") => Value::String(String::from_utf8_lossy(&bytes).into_owned()),
+                    _ => node_bytes_value(bytes),
+                };
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    &incoming,
+                    &[Value::String("data".into()), body],
+                    instruction,
+                )?;
+                Ok(())
+            }
+            HttpResponseEvent::End => {
+                let incoming = owner
+                    .borrow()
+                    .streams
+                    .iter()
+                    .find(|stream| stream.driver.resource() == resource)
+                    .and_then(|stream| stream.response.clone())
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "HTTP response ended before its head".into(),
+                    })?;
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    &incoming,
+                    &[Value::String("end".into())],
+                    instruction,
+                )?;
+                if let Some(connection) = owner
+                    .borrow_mut()
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.driver.resource() == resource)
+                {
+                    connection.request = None;
+                    connection.response = None;
+                }
+                Ok(())
+            }
+        }
+    }
+
     fn http_incoming_for_stream(
         &self,
         server: &Rc<RefCell<NodeServerState>>,
@@ -5885,7 +6400,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut incoming = ObjectData::default();
         incoming.node_events = Some(Vec::new());
         incoming.node_object = Some(NodeObject::HttpIncoming(Rc::new(RefCell::new(
-            HttpIncomingState { stream: resource },
+            HttpIncomingState {
+                stream: resource,
+                encoding: None,
+            },
         ))));
         incoming.set("method", Value::String(request.method.clone()));
         incoming.set("url", Value::String(request.target.clone()));
@@ -5894,6 +6412,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         incoming.set("emit", Value::Native(Native::NodeEventEmit));
         incoming.set("pause", Value::Native(Native::NodeReadablePause));
         incoming.set("resume", Value::Native(Native::NodeReadableResume));
+        incoming.set(
+            "setEncoding",
+            Value::Native(Native::NodeReadableSetEncoding),
+        );
         let mut headers = ObjectData::default();
         for (name, value) in request.headers_object() {
             headers.set(&name, Value::String(value));
@@ -6145,6 +6667,90 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    fn dispatch_node_client_request(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let state = node_http_client_request(receiver)?;
+        match native {
+            Native::NodeClientRequestWrite => {
+                let bytes = node_body_bytes(arguments.first())?;
+                let mut state = state.borrow_mut();
+                if state.ended {
+                    return Ok(Value::Boolean(false));
+                }
+                state.body.extend(bytes);
+                Ok(Value::Boolean(true))
+            }
+            Native::NodeClientRequestEnd => {
+                let socket = {
+                    let mut request = state.borrow_mut();
+                    if request.ended {
+                        return Ok(receiver.clone());
+                    }
+                    if let Some(value) = arguments
+                        .first()
+                        .filter(|value| !matches!(value, Value::Undefined))
+                    {
+                        request.body.extend(node_body_bytes(Some(value))?);
+                    }
+                    request.ended = true;
+                    request.socket.clone()
+                };
+                if let Some(socket) = socket {
+                    self.flush_http_client_request(&state, &socket, instruction)?;
+                }
+                Ok(receiver.clone())
+            }
+            _ => unreachable!("only ClientRequest natives dispatch here"),
+        }
+    }
+
+    fn flush_http_client_request(
+        &mut self,
+        state: &Rc<RefCell<HttpClientRequestState>>,
+        socket: &Rc<RefCell<NetSocketState>>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let (owner, resource) = {
+            let socket = socket.borrow();
+            (
+                socket
+                    .owner
+                    .as_ref()
+                    .and_then(Weak::upgrade)
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "HTTP client request lost its connection owner".into(),
+                    })?,
+                socket.resource.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "HTTP client request is not connected".into(),
+                })?,
+            )
+        };
+        let bytes = encode_http_client_request(&state.borrow());
+        let actions = {
+            let mut owner = owner.borrow_mut();
+            let connection = owner
+                .streams
+                .iter_mut()
+                .find(|stream| stream.driver.resource() == resource)
+                .expect("HTTP client connection owns its stream");
+            let (_, mut actions) = connection.driver.write(bytes);
+            let (_, end_actions) = connection.driver.end(None);
+            actions.extend(end_actions);
+            actions
+        };
+        for action in actions {
+            self.start_http_stream_action(&owner, resource, action, instruction)?;
+        }
+        Ok(())
+    }
+
     fn dispatch_node_event(
         &mut self,
         native: Native,
@@ -6393,77 +6999,117 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     Ok(())
                 }
-                PendingNodeRequest::Connect { state, .. } => {
-                    let socket = state
-                        .borrow()
-                        .object
-                        .as_ref()
-                        .and_then(Weak::upgrade)
-                        .map(Value::Object)
-                        .unwrap_or(Value::Undefined);
-                    match completion.result {
-                        Ok(AsyncHostValue::Resource(resource)) => {
-                            let resource = resource.id;
-                            let mut connection = NodeConnection {
-                                driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
-                                decoder: Http1Decoder::default(),
-                                request: Some(socket.clone()),
-                                response: None,
-                                close_after_finish: false,
-                                closed: false,
-                            };
-                            let actions = connection.driver.start_reading();
-                            let owner = Rc::new(RefCell::new(NodeServerState {
-                                driver: TcpServerDriver::default(),
-                                handler: Value::Undefined,
-                                protocol: ServerProtocol::Net,
-                                streams: vec![connection],
-                                object: None,
-                            }));
-                            {
-                                let mut state = state.borrow_mut();
-                                state.owner = Some(Rc::downgrade(&owner));
-                                state.resource = Some(resource);
+                PendingNodeRequest::Connect { target, .. } => match completion.result {
+                    Ok(AsyncHostValue::Resource(resource)) => {
+                        let resource = resource.id;
+                        let (socket_state, socket, protocol, request) = match &target {
+                            PendingConnect::Net(state) => {
+                                let socket = state
+                                    .borrow()
+                                    .object
+                                    .as_ref()
+                                    .and_then(Weak::upgrade)
+                                    .map(Value::Object)
+                                    .unwrap_or(Value::Undefined);
+                                (
+                                    Rc::clone(state),
+                                    socket.clone(),
+                                    ServerProtocol::Net,
+                                    socket,
+                                )
                             }
-                            self.register_node_server(&owner);
+                            PendingConnect::Http(state) => {
+                                let socket_state = Rc::new(RefCell::new(NetSocketState {
+                                    owner: None,
+                                    resource: None,
+                                    object: None,
+                                }));
+                                let socket = node_socket_object(&socket_state);
+                                let request = state
+                                    .borrow()
+                                    .object
+                                    .as_ref()
+                                    .map(|object| Value::Object(Rc::clone(object)))
+                                    .unwrap_or(Value::Undefined);
+                                state.borrow_mut().socket = Some(Rc::clone(&socket_state));
+                                (socket_state, socket, ServerProtocol::HttpClient, request)
+                            }
+                        };
+                        let mut connection = NodeConnection {
+                            driver: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
+                            decoder: Http1Decoder::default(),
+                            response_decoder: Http1ResponseDecoder::default(),
+                            request: Some(request),
+                            response: None,
+                            close_after_finish: false,
+                            closed: false,
+                        };
+                        let actions = connection.driver.start_reading();
+                        let owner = Rc::new(RefCell::new(NodeServerState {
+                            driver: TcpServerDriver::default(),
+                            handler: Value::Undefined,
+                            protocol,
+                            streams: vec![connection],
+                            object: None,
+                        }));
+                        {
+                            let mut socket_state = socket_state.borrow_mut();
+                            socket_state.owner = Some(Rc::downgrade(&owner));
+                            socket_state.resource = Some(resource);
+                        }
+                        self.register_node_server(&owner);
+                        if protocol == ServerProtocol::Net {
                             self.dispatch_node_event(
                                 Native::NodeEventEmit,
                                 &socket,
                                 &[Value::String("connect".into())],
                                 self.instruction,
                             )?;
-                            for action in actions {
-                                self.start_http_stream_action(
-                                    &owner,
-                                    resource,
-                                    action,
-                                    self.instruction,
-                                )?;
-                            }
-                            Ok(())
+                        } else if let PendingConnect::Http(state) = &target
+                            && state.borrow().ended
+                        {
+                            self.flush_http_client_request(state, &socket_state, self.instruction)?;
                         }
-                        Ok(_) => Err(ExecutionError::Host {
-                            instruction: self.instruction,
-                            message: "node:net connect returned a non-stream resource".into(),
-                        }),
-                        Err(error) => {
-                            let error = self.node_error_value(error);
-                            self.dispatch_node_event(
-                                Native::NodeEventEmit,
-                                &socket,
-                                &[Value::String("error".into()), error],
+                        for action in actions {
+                            self.start_http_stream_action(
+                                &owner,
+                                resource,
+                                action,
                                 self.instruction,
                             )?;
-                            self.dispatch_node_event(
-                                Native::NodeEventEmit,
-                                &socket,
-                                &[Value::String("close".into())],
-                                self.instruction,
-                            )?;
-                            Ok(())
                         }
+                        Ok(())
                     }
-                }
+                    Ok(_) => Err(ExecutionError::Host {
+                        instruction: self.instruction,
+                        message: "node:net connect returned a non-stream resource".into(),
+                    }),
+                    Err(error) => {
+                        let error = self.node_error_value(error);
+                        let object = match target {
+                            PendingConnect::Net(state) => state
+                                .borrow()
+                                .object
+                                .as_ref()
+                                .and_then(Weak::upgrade)
+                                .map(Value::Object)
+                                .unwrap_or(Value::Undefined),
+                            PendingConnect::Http(state) => state
+                                .borrow()
+                                .object
+                                .as_ref()
+                                .map(|object| Value::Object(Rc::clone(object)))
+                                .unwrap_or(Value::Undefined),
+                        };
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            &object,
+                            &[Value::String("error".into()), error],
+                            self.instruction,
+                        )?;
+                        Ok(())
+                    }
+                },
             };
         }
         let pending = if let Some(realm) = &self.module_realm {
@@ -8297,6 +8943,132 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::RegExpAccessor(accessor) => {
                 return self.regexp_accessor(accessor, receiver, instruction);
             }
+            // `Object.prototype.toString` is defined to *read* `@@toStringTag` off the receiver
+            // and use it when it is a string, falling back to the shape it worked out itself.
+            // The read can run a getter, so the answer cannot come from the pure table alone --
+            // and without it every value whose tag lives on a prototype, from a `Map` to `Math`,
+            // reports the bare `[object Object]` that the tag exists to replace.
+            Native::ObjectToStringTag if is_reflect_target(receiver) => {
+                let tag = self.read_property(
+                    receiver,
+                    WellKnown::ToStringTag.property_key(),
+                    instruction,
+                )?;
+                if let Value::String(tag) = tag {
+                    return Ok(Value::String(format!("[object {tag}]")));
+                }
+            }
+            // `ToString(text)` may run the program's own `toString`, so the validation cannot
+            // happen in the pure table.
+            Native::JsonRawJson => {
+                let text =
+                    self.as_text(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+                return build_raw_json(&text);
+            }
+            Native::JsonIsRawJson => {
+                return Ok(Value::Boolean(matches!(
+                    arguments.first(),
+                    Some(Value::Object(object)) if object.borrow().get_own(RAW_JSON_MARK).is_some()
+                )));
+            }
+            // Both of these need the machine for `CanBeHeldWeakly`, which asks the realm's
+            // symbol registry whether a symbol is one a program could look up again.
+            Native::WeakRefDeref => return self.weak_ref_deref(receiver, instruction),
+            Native::FinalizationRegistryRegister => {
+                return self.finalization_registry_register(receiver, arguments, instruction);
+            }
+            Native::FinalizationRegistryUnregister => {
+                return self.finalization_registry_unregister(receiver, arguments, instruction);
+            }
+            // Calling either constructor without `new` is a `TypeError`: each exists to build a
+            // value with reserved state, and there is nothing for a plain call to answer with.
+            Native::WeakRefConstructor | Native::FinalizationRegistryConstructor => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "Constructor {} requires 'new'",
+                        if matches!(native, Native::WeakRefConstructor) {
+                            "WeakRef"
+                        } else {
+                            "FinalizationRegistry"
+                        }
+                    ),
+                });
+            }
+            // Closing runs the program's `return`, so this needs the machine too.
+            Native::IteratorDispose => {
+                self.close_iterator(receiver, instruction)?;
+                return Ok(Value::Undefined);
+            }
+            // All five read `exec` off the receiver and call it, so none of them can be answered
+            // without a machine to run the program's own matcher on.
+            Native::RegExpSymbol(method) => {
+                return self.regexp_symbol(method, receiver, arguments, instruction);
+            }
+            Native::RegExpStringIteratorNext => {
+                return self.regexp_string_iterator_next(receiver, instruction);
+            }
+            Native::IteratorConcat => return self.iterator_concat(arguments, instruction),
+            Native::IteratorConcatNext => {
+                return self.iterator_concat_next(receiver, instruction);
+            }
+            Native::IteratorConcatReturn => {
+                return self.iterator_concat_return(receiver, instruction);
+            }
+            Native::IteratorZip { keyed } => {
+                return self.iterator_zip(keyed, arguments, instruction);
+            }
+            Native::IteratorZipNext => return self.iterator_zip_next(receiver, instruction),
+            Native::IteratorZipReturn => return self.iterator_zip_return(receiver, instruction),
+            // These four had an `unreachable!` arm in `call_native` and no route here, which is
+            // the pairing that fails silently: nothing refuses to compile, and the first program
+            // to call one aborts the process instead of answering. `Iterator.from`,
+            // `Object.groupBy`, `Map.groupBy` and `Promise.try` each did.
+            Native::IteratorFrom => {
+                return self.iterator_from(arguments.first(), instruction);
+            }
+            Native::IteratorWrapNext => {
+                let Value::Object(state) = receiver else {
+                    return Err(ExecutionError::NotAnIterator);
+                };
+                let state = Rc::clone(state);
+                let source = helper_slot(&state, HELPER_SOURCE);
+                let next = helper_slot(&state, HELPER_NEXT);
+                // The wrapped iterator's own result object, unchanged: a wrapper exists to add
+                // the helper methods, not to reshape what stepping produces.
+                return self.call_value(&next, source, Vec::new(), instruction);
+            }
+            Native::ObjectGroupBy => return self.group_by(false, arguments, instruction),
+            Native::MapGroupBy => return self.group_by(true, arguments, instruction),
+            // `Promise.try(f, ...args)` runs `f` *now* and wraps whatever happens: the value it
+            // returned, or the error it threw. That last half is the whole point -- a synchronous
+            // throw from a function that was meant to be asynchronous becomes a rejection rather
+            // than escaping past the promise chain that was waiting to handle it.
+            Native::PromiseTry => {
+                let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let rest = arguments.get(1..).unwrap_or_default().to_vec();
+                let promise = PromiseState::pending();
+                // A non-callable argument rejects rather than throwing, like every other failure
+                // here: the caller was handed a promise and is waiting on it, and a synchronous
+                // throw would arrive somewhere nothing is listening.
+                if !is_callable(&callback) {
+                    let thrown = self.construct_error(
+                        ErrorKind::Type,
+                        &[Value::String(format!(
+                            "{} is not a function",
+                            callback.to_display_string()
+                        ))],
+                    );
+                    self.settle(&promise, &Settled::Rejected(thrown));
+                    return Ok(Value::Promise(promise));
+                }
+                // Caught rather than propagated, which is the whole contract: the caller asked
+                // for a promise, so a throw has to arrive as a rejection on it.
+                match self.call_catching(&callback, Value::Undefined, rest, instruction)? {
+                    Ok(value) => self.resolve_promise(&promise, value),
+                    Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
+                }
+                return Ok(Value::Promise(promise));
+            }
             _ => {}
         }
         // And ahead of them for `Intl`, for a sharper reason: every constructor here reads an
@@ -8334,13 +9106,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if matches!(
             native,
-            Native::NodeReadablePause | Native::NodeReadableResume
+            Native::NodeReadablePause
+                | Native::NodeReadableResume
+                | Native::NodeReadableSetEncoding
         ) {
-            return self.dispatch_node_readable(native, receiver, instruction);
+            return self.dispatch_node_readable(native, receiver, arguments, instruction);
         }
         if matches!(
             native,
             Native::NodeHttpCreateServer
+                | Native::NodeHttpRequest
+                | Native::NodeHttpGet
+                | Native::NodeClientRequestWrite
+                | Native::NodeClientRequestEnd
                 | Native::NodeServerListen
                 | Native::NodeServerClose
                 | Native::NodeServerAddress
@@ -8447,6 +9225,85 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "PromiseCapability constructor is not a constructor".to_owned(),
             });
         }
+        // Five `String.prototype` methods hand the whole call to their argument when the
+        // argument knows how to answer it. That is not a shortcut -- it is how the specification
+        // defines them, and it is the entire reason `RegExp.prototype[@@split]` and its four
+        // siblings exist: a regexp performs the split, and the string method is the front door.
+        // A program that puts a `@@replace` on an object of its own gets the same treatment,
+        // which is what makes the protocol worth having.
+        //
+        // The lookup happens after `RequireObjectCoercible(this)` and *before* `ToString(this)`,
+        // an order a test can see through a `toString` that counts its calls.
+        // Held alive for the borrow below: the coerced receiver has to outlive the block that
+        // builds it, because the rest of this function reads through the reference.
+        let coerced_receiver;
+        let receiver = if let Some(symbol) = string_delegating_symbol(native) {
+            if receiver.is_nullish() {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "String.prototype method called on {}",
+                        receiver.to_display_string()
+                    ),
+                });
+            }
+            let searched = arguments.first().cloned().unwrap_or(Value::Undefined);
+            if !searched.is_nullish() {
+                // `replaceAll` and `matchAll` refuse a regexp that is not global, because both
+                // are defined to visit every match and a non-global regexp would visit the
+                // first one forever. The check is on the *flags property*, not on an internal
+                // slot, so an object pretending to be a regexp is held to it too.
+                if matches!(native, Native::StringReplaceAll | Native::StringMatchAll)
+                    && self.is_regexp(&searched, instruction)?
+                {
+                    let flags = self.read_property(&searched, "flags", instruction)?;
+                    if flags.is_nullish() {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "Cannot convert undefined or null to object".to_owned(),
+                        });
+                    }
+                    if !self.as_text(&flags, instruction)?.contains('g') {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "{} must be called with a global RegExp",
+                                if matches!(native, Native::StringMatchAll) {
+                                    "matchAll"
+                                } else {
+                                    "replaceAll"
+                                }
+                            ),
+                        });
+                    }
+                }
+                let method = self.read_property(&searched, symbol.property_key(), instruction)?;
+                if !method.is_nullish() {
+                    if !is_callable(&method) {
+                        return Err(ExecutionError::NotCallable {
+                            instruction,
+                            value: method.type_name(),
+                        });
+                    }
+                    let mut forwarded = vec![receiver.clone()];
+                    forwarded.extend(arguments.iter().skip(1).cloned());
+                    return self.call_value(&method, searched, forwarded, instruction);
+                }
+            }
+            // Nothing answered, so this method does the work itself -- and the receiver is
+            // coerced *here* rather than by the generic string preamble below, which would
+            // re-enter this function and consult the symbol a second time. A test that counts
+            // the getter's reads can see that.
+            if matches!(receiver, Value::String(_)) {
+                receiver
+            } else {
+                let primitive = self.as_primitive(receiver, true, instruction)?;
+                if matches!(primitive, Value::Symbol(_)) {
+                    return Err(ExecutionError::SymbolIsNotAString);
+                }
+                coerced_receiver = Value::String(primitive.to_display_string());
+                &coerced_receiver
+            }
+        } else {
+            receiver
+        };
         // `String.prototype.toUpperCase.call(1)` is `"1".toUpperCase()`, and
         // `.call(null)` is a `TypeError` -- both of which happen before the method looks at its
         // receiver at all. Reaching this with something that is not a string is the ordinary way
@@ -8504,6 +9361,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .unwrap_or(Value::Boolean(false)))
             }
             Native::ArrayFrom => self.array_from(arguments, instruction),
+            Native::ArrayFromAsync => self.array_from_async(receiver, arguments, instruction),
             Native::ArrayBufferConstructor => {
                 self.construct_array_buffer(false, arguments, instruction)
             }
@@ -10410,6 +11268,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(ExecutionError::NotABuffer);
         };
         let buffer = Rc::clone(buffer);
+        // After the offset is coerced, not before: the specification's order is observable
+        // through a `valueOf` that runs even though the view can never be built.
         let offset = self.as_index_argument(arguments.get(1), instruction)?;
         if buffer.detached() {
             return Err(ExecutionError::BufferDetached);
@@ -10636,7 +11496,57 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The argument is settled *before* `next` is so much as read, and a bad one closes the
         // iterator on the way out. Both halves are observable: a test watching the `next` getter
         // asserts it never ran, and one watching `return` asserts it did.
+        // Whether a final short window is handed on. Only `windows` asks, and only its second
+        // argument answers -- but it is settled here beside the size because the specification
+        // checks both before it reads `next`, and a program watching the getter can tell.
+        let mut allow_partial = false;
         let stored = match kind {
+            // Neither of these coerces: `chunks('2')` is a `TypeError`, not a chunk size of two.
+            // The contrast with `take` and `drop` two arms down is deliberate in the
+            // specification -- a size is a structural argument, not a quantity to be read out of
+            // whatever the program happened to pass.
+            HelperKind::Chunks | HelperKind::Windows => {
+                let Value::Number(size) = argument else {
+                    self.close_discarding(receiver, instruction);
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!("{} size must be a Number", kind.property_key()),
+                    });
+                };
+                // `NaN` and both infinities fail here rather than in the range check below:
+                // none of them is an integral Number, and the specification asks that question
+                // first. A program cannot tell `chunks(Infinity)` apart from `chunks('x')`.
+                if !size.is_finite() || size.fract() != 0.0 {
+                    self.close_discarding(receiver, instruction);
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!("{} size must be an integral Number", kind.property_key()),
+                    });
+                }
+                if !(1.0..=4_294_967_295.0).contains(&size) {
+                    self.close_discarding(receiver, instruction);
+                    return Err(ExecutionError::IteratorLimitOutOfRange);
+                }
+                if matches!(kind, HelperKind::Windows) {
+                    // Two spellings and nothing else -- not even a value that would stringify to
+                    // one of them. The argument names a mode, and a mode read out of an
+                    // arbitrary object would be a guess.
+                    match arguments.get(1) {
+                        None | Some(Value::Undefined) => {}
+                        Some(Value::String(mode)) if mode == "only-full" => {}
+                        Some(Value::String(mode)) if mode == "allow-partial" => {
+                            allow_partial = true;
+                        }
+                        _ => {
+                            self.close_discarding(receiver, instruction);
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message:
+                                    "windows undersized must be \"only-full\" or \"allow-partial\""
+                                        .to_owned(),
+                            });
+                        }
+                    }
+                }
+                Value::Number(size)
+            }
             HelperKind::Take | HelperKind::Drop => {
                 let number = match self.as_number_argument(Some(&argument), instruction) {
                     Ok(number) if !number.is_nan() && number >= 0.0 => number,
@@ -10665,6 +11575,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         helper.set_non_enumerable(HELPER_SOURCE, receiver.clone());
         helper.set_non_enumerable(HELPER_NEXT, next);
         helper.set_non_enumerable(HELPER_ARG, stored);
+        helper.set_non_enumerable(HELPER_BUFFER, Value::Array(ArrayData::new(Vec::new())));
+        helper.set_non_enumerable(HELPER_PARTIAL, Value::Boolean(allow_partial));
         helper.set_non_enumerable(HELPER_COUNTER, Value::Number(0.0));
         helper.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
         helper.set_non_enumerable("next", Value::Native(Native::IteratorHelperNext(kind)));
@@ -10844,6 +11756,69 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         None => iteration_result(Value::Undefined, true),
                     });
                 }
+                // The buffer is filled, handed on whole, and emptied. A source that runs out
+                // mid-bucket still hands on what it collected: a short last chunk is the
+                // remainder, and dropping it would silently lose elements the program produced.
+                HelperKind::Chunks => {
+                    let size = helper_slot(&state, HELPER_ARG).as_number() as usize;
+                    let Value::Array(buffer) = helper_slot(&state, HELPER_BUFFER) else {
+                        return Err(ExecutionError::NotAnIterator);
+                    };
+                    let Some(value) = self.helper_step(&state, instruction)? else {
+                        let collected = std::mem::take(&mut *buffer.borrow_mut());
+                        return Ok(if collected.is_empty() {
+                            iteration_result(Value::Undefined, true)
+                        } else {
+                            iteration_result(Value::Array(ArrayData::new(collected)), false)
+                        });
+                    };
+                    buffer.borrow_mut().push(value);
+                    if buffer.borrow().len() == size {
+                        let collected = std::mem::take(&mut *buffer.borrow_mut());
+                        return Ok(iteration_result(
+                            Value::Array(ArrayData::new(collected)),
+                            false,
+                        ));
+                    }
+                }
+                // The same buffer with the other eviction rule: the oldest element leaves as the
+                // newest joins, and the window is *copied* out rather than taken, because the
+                // elements in it are still needed by the window after this one.
+                HelperKind::Windows => {
+                    let size = helper_slot(&state, HELPER_ARG).as_number() as usize;
+                    let Value::Array(buffer) = helper_slot(&state, HELPER_BUFFER) else {
+                        return Err(ExecutionError::NotAnIterator);
+                    };
+                    let Some(value) = self.helper_step(&state, instruction)? else {
+                        let collected = std::mem::take(&mut *buffer.borrow_mut());
+                        // A short window is handed on only when the *whole source* was shorter
+                        // than one window. Anything longer has already filled the buffer, and a
+                        // full buffer is never drained -- so `allow-partial` cannot produce the
+                        // shrinking tail a reader might expect it to.
+                        if allow_partial(&state) && !collected.is_empty() && collected.len() < size
+                        {
+                            return Ok(iteration_result(
+                                Value::Array(ArrayData::new(collected)),
+                                false,
+                            ));
+                        }
+                        return Ok(iteration_result(Value::Undefined, true));
+                    };
+                    {
+                        let mut held = buffer.borrow_mut();
+                        if held.len() == size {
+                            held.remove(0);
+                        }
+                        held.push(value);
+                    }
+                    if buffer.borrow().len() == size {
+                        let window = buffer.borrow().clone();
+                        return Ok(iteration_result(
+                            Value::Array(ArrayData::new(window)),
+                            false,
+                        ));
+                    }
+                }
                 HelperKind::Map | HelperKind::Filter => {
                     let Some(value) = self.helper_step(&state, instruction)? else {
                         return Ok(iteration_result(Value::Undefined, true));
@@ -10970,7 +11945,835 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(iteration_result(Value::Undefined, true))
     }
 
-    /// `%IteratorPrototype%.reduce` and the five other methods that consume an iterator.
+    /// `IteratorCloseAll`: close every iterator, last opened first, keeping the first failure.
+    ///
+    /// Reverse order because the sources were opened left to right and closing is unwinding: the
+    /// one opened last is the one held for the shortest time. The *first* failure encountered on
+    /// that walk is the one that escapes and the rest are swallowed, which is the same rule a
+    /// single `IteratorClose` follows when a throw is already in flight -- otherwise a `return`
+    /// that objected would be able to hide the failure that started the unwind.
+    fn close_all(&mut self, iterators: &[Value], instruction: usize) -> Result<(), ExecutionError> {
+        let mut first = None;
+        for iterator in iterators.iter().rev() {
+            if let Err(error) = self.close_iterator(iterator, instruction)
+                && first.is_none()
+            {
+                first = Some(error);
+            }
+        }
+        match first {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// Close every iterator when a failure is already in flight, keeping that failure.
+    fn close_all_discarding(&mut self, iterators: &[Value], instruction: usize) {
+        let pending = self.caught.take();
+        let _ = self.close_all(iterators, instruction);
+        self.caught = pending;
+    }
+
+    /// `GetIteratorFlattenable(value, reject-strings)`: the iterator, and its `next`.
+    ///
+    /// Accepts an iterable *or* a bare iterator, which is what lets `Iterator.zip` be handed a
+    /// mix of arrays and half-consumed generators. A string primitive is refused where a String
+    /// object is not: accepting the primitive would silently zip a word against its characters.
+    fn iterator_flattenable_pair(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<(Value, Value), ExecutionError> {
+        if !is_reflect_target(value) {
+            return Err(ExecutionError::NotAnIterator);
+        }
+        let method = self.read_property(value, WellKnown::Iterator.property_key(), instruction)?;
+        let iterator = if method.is_nullish() {
+            value.clone()
+        } else if is_callable(&method) {
+            self.call_value(&method, value.clone(), Vec::new(), instruction)?
+        } else {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: method.type_name(),
+            });
+        };
+        if !is_reflect_target(&iterator) {
+            return Err(ExecutionError::NotAnIterator);
+        }
+        // Deliberately not checked for callability: `GetIteratorDirect` only *reads* `next`, and
+        // an object with neither `@@iterator` nor `next` is accepted here and fails later.
+        let next = self.read_property(&iterator, "next", instruction)?;
+        Ok((iterator, next))
+    }
+
+    /// `GetIterator(value, sync)`: the stricter opening, which requires a callable `@@iterator`.
+    fn iterator_opened(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<(Value, Value), ExecutionError> {
+        let method = self.read_property(value, WellKnown::Iterator.property_key(), instruction)?;
+        if !is_callable(&method) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: method.type_name(),
+            });
+        }
+        let iterator = self.call_value(&method, value.clone(), Vec::new(), instruction)?;
+        if !is_reflect_target(&iterator) {
+            return Err(ExecutionError::NotAnIterator);
+        }
+        let next = self.read_property(&iterator, "next", instruction)?;
+        Ok((iterator, next))
+    }
+
+    /// `Iterator.zip(iterables, options)` and `Iterator.zipKeyed(iterables, options)`.
+    ///
+    /// Wholly eager, which is the opposite of `concat` and is what the shape of the answer
+    /// demands: a zipped step needs one element from *every* source, so every source has to be
+    /// open before the first step can be taken. That is also why `return()` before the first
+    /// `next()` closes all of them -- they were opened by the call, and nothing else will
+    /// release them.
+    ///
+    /// The two spellings differ only in where the sources come from and what a step is shaped
+    /// like: positional and an array, or keyed and a null-prototype object. Everything between
+    /// -- the modes, the padding, the closing rules -- is one algorithm, which is why they are
+    /// one function.
+    fn iterator_zip(
+        &mut self,
+        keyed: bool,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let iterables = arguments.first().cloned().unwrap_or(Value::Undefined);
+        // Ahead of the options, and observably so: a test pairs a primitive `iterables` with an
+        // options bag whose getters throw, and asserts the `TypeError` rather than their error.
+        if !is_reflect_target(&iterables) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Iterator.zip: iterables must be an object".to_owned(),
+            });
+        }
+        let options = match arguments.get(1) {
+            None | Some(Value::Undefined) => Value::Undefined,
+            Some(value) if is_reflect_target(value) => value.clone(),
+            Some(_) => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Iterator.zip: options must be an object".to_owned(),
+                });
+            }
+        };
+        let mode = match &options {
+            Value::Undefined => Value::Undefined,
+            options => self.read_property(options, "mode", instruction)?,
+        };
+        // Three exact spellings and nothing else -- not even a value that would stringify to
+        // one. The argument names a mode, and a mode read out of an arbitrary object would be a
+        // guess about what the program meant.
+        let mode = match &mode {
+            Value::Undefined => ZipMode::Shortest,
+            Value::String(text) if text == "shortest" => ZipMode::Shortest,
+            Value::String(text) if text == "longest" => ZipMode::Longest,
+            Value::String(text) if text == "strict" => ZipMode::Strict,
+            _ => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Iterator.zip: mode must be \"shortest\", \"longest\" or \"strict\""
+                        .to_owned(),
+                });
+            }
+        };
+        // Read only in the one mode that can use it. In the other two there is nothing to pad --
+        // the walk stops at the first source that ends -- so a `padding` the program left in the
+        // bag is neither read nor validated.
+        let padding_option = if matches!(mode, ZipMode::Longest) {
+            let found = match &options {
+                Value::Undefined => Value::Undefined,
+                options => self.read_property(options, "padding", instruction)?,
+            };
+            if !matches!(found, Value::Undefined) && !is_reflect_target(&found) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Iterator.zip: padding must be an object".to_owned(),
+                });
+            }
+            found
+        } else {
+            Value::Undefined
+        };
+
+        let mut iterators = Vec::new();
+        let mut nexts = Vec::new();
+        let mut keys = Vec::new();
+        if keyed {
+            self.collect_keyed_sources(
+                &iterables,
+                &mut keys,
+                &mut iterators,
+                &mut nexts,
+                instruction,
+            )?;
+        } else {
+            self.collect_positional_sources(&iterables, &mut iterators, &mut nexts, instruction)?;
+        }
+
+        let count = iterators.len();
+        let padding = match self.collect_padding(keyed, &padding_option, &keys, count, instruction)
+        {
+            Ok(padding) => padding,
+            Err(error) => {
+                self.close_all_discarding(&iterators, instruction);
+                return Err(error);
+            }
+        };
+
+        let mut helper = ObjectData::default();
+        // Each entry is the pair `[iterator, next]`, or `null` once that source has ended and is
+        // being padded for. The two lists are kept apart on purpose: `iters` is indexed by
+        // position and never shrinks, while `open` is what a close sweep walks and does.
+        let entries: Vec<Value> = iterators
+            .iter()
+            .zip(&nexts)
+            .map(|(iterator, next)| {
+                Value::Array(ArrayData::new(vec![iterator.clone(), next.clone()]))
+            })
+            .collect();
+        helper.set_non_enumerable(ZIP_ITERS, Value::Array(ArrayData::new(entries)));
+        helper.set_non_enumerable(ZIP_OPEN, Value::Array(ArrayData::new(iterators)));
+        helper.set_non_enumerable(ZIP_PADDING, Value::Array(ArrayData::new(padding)));
+        helper.set_non_enumerable(ZIP_KEYS, Value::Array(ArrayData::new(keys)));
+        helper.set_non_enumerable(ZIP_KEYED, Value::Boolean(keyed));
+        helper.set_non_enumerable(ZIP_MODE, Value::Number(mode as u8 as f64));
+        helper.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
+        helper.set_non_enumerable("next", Value::Native(Native::IteratorZipNext));
+        helper.set_non_enumerable("return", Value::Native(Native::IteratorZipReturn));
+        helper.set_non_enumerable(
+            WellKnown::Iterator.property_key(),
+            Value::Native(Native::IteratorSelf),
+        );
+        Ok(Value::Object(Rc::new(RefCell::new(helper))))
+    }
+
+    /// `Iterator.zip`'s sources: walk the outer iterable and open each element.
+    fn collect_positional_sources(
+        &mut self,
+        iterables: &Value,
+        iterators: &mut Vec<Value>,
+        nexts: &mut Vec<Value>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let (outer, outer_next) = self.iterator_opened(iterables, instruction)?;
+        loop {
+            let stepped = match self.iterator_step(&outer, &outer_next, instruction) {
+                Ok(stepped) => stepped,
+                // The outer iterator failed on its own terms, so it is not closed -- only the
+                // sources this walk opened are, and this is the one place the two differ.
+                Err(error) => {
+                    self.close_all_discarding(iterators, instruction);
+                    return Err(error);
+                }
+            };
+            let Some(element) = stepped else {
+                return Ok(());
+            };
+            match self.iterator_flattenable_pair(&element, instruction) {
+                Ok((iterator, next)) => {
+                    iterators.push(iterator);
+                    nexts.push(next);
+                }
+                // A bad *element* is this walk's fault, so the outer iterator is closed too --
+                // and last, after everything it produced.
+                Err(error) => {
+                    let mut all = iterators.clone();
+                    all.insert(0, outer);
+                    self.close_all_discarding(&all, instruction);
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// `Iterator.zipKeyed`'s sources: the own enumerable properties, in own-key order.
+    fn collect_keyed_sources(
+        &mut self,
+        iterables: &Value,
+        keys: &mut Vec<Value>,
+        iterators: &mut Vec<Value>,
+        nexts: &mut Vec<Value>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        // The key list is taken once, up front, and everything after it is re-checked live: a
+        // getter that deletes a later key means that key is skipped, and one that *adds* a key
+        // has no effect, because the snapshot is what the walk reads from.
+        for key in own_property_keys(&self.intrinsics, iterables) {
+            let Some(attributes) = own_attributes(&self.intrinsics, iterables, &key) else {
+                continue;
+            };
+            if !attributes.enumerable {
+                continue;
+            }
+            let value = match self.read_property(iterables, &key, instruction) {
+                Ok(value) => value,
+                Err(error) => {
+                    self.close_all_discarding(iterators, instruction);
+                    return Err(error);
+                }
+            };
+            // The one value that is skipped rather than refused. Every other non-iterable --
+            // `null`, a number, a string -- is a `TypeError`, but `undefined` reads as "this key
+            // is not one of the sources", which is what makes a sparse options-shaped object work.
+            if matches!(value, Value::Undefined) {
+                continue;
+            }
+            match self.iterator_flattenable_pair(&value, instruction) {
+                Ok((iterator, next)) => {
+                    keys.push(Value::String(key));
+                    iterators.push(iterator);
+                    nexts.push(next);
+                }
+                Err(error) => {
+                    self.close_all_discarding(iterators, instruction);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The value each source is padded with once it has ended, one per source.
+    ///
+    /// The two spellings read it in the two ways their result shape implies: positional zip
+    /// *iterates* the padding, so `{}` is refused there, while keyed zip reads one property per
+    /// key, so `{}` is a padding of all-undefined. Both produce a flat list of exactly
+    /// `count` values, aligned with the sources.
+    fn collect_padding(
+        &mut self,
+        keyed: bool,
+        padding_option: &Value,
+        keys: &[Value],
+        count: usize,
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        if matches!(padding_option, Value::Undefined) {
+            return Ok(vec![Value::Undefined; count]);
+        }
+        if keyed {
+            let mut padding = Vec::with_capacity(count);
+            for key in keys {
+                padding.push(self.read_property(
+                    padding_option,
+                    &key.to_display_string(),
+                    instruction,
+                )?);
+            }
+            return Ok(padding);
+        }
+        let (iterator, next) = self.iterator_opened(padding_option, instruction)?;
+        let mut padding = Vec::with_capacity(count);
+        let mut alive = true;
+        for _ in 0..count {
+            if alive {
+                match self.iterator_step(&iterator, &next, instruction)? {
+                    Some(value) => {
+                        padding.push(value);
+                        continue;
+                    }
+                    None => alive = false,
+                }
+            }
+            padding.push(Value::Undefined);
+        }
+        // Closed only if it still had more to give: one that ran out closed itself, and calling
+        // `return` on it again would be a second close.
+        if alive {
+            self.close_iterator(&iterator, instruction)?;
+        }
+        Ok(padding)
+    }
+
+    /// One step of `Iterator.zip` or `Iterator.zipKeyed`.
+    fn iterator_zip_next(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Object(state) = receiver else {
+            return Err(ExecutionError::NotAnIterator);
+        };
+        let state = Rc::clone(state);
+        if state.borrow().get_own(ZIP_ITERS).is_none() {
+            return Err(ExecutionError::NotAnIterator);
+        }
+        if helper_slot(&state, HELPER_DONE).is_truthy() {
+            return Ok(iteration_result(Value::Undefined, true));
+        }
+        let (Value::Array(iters), Value::Array(open), Value::Array(padding), Value::Array(keys)) = (
+            helper_slot(&state, ZIP_ITERS),
+            helper_slot(&state, ZIP_OPEN),
+            helper_slot(&state, ZIP_PADDING),
+            helper_slot(&state, ZIP_KEYS),
+        ) else {
+            return Err(ExecutionError::NotAnIterator);
+        };
+        let keyed = helper_slot(&state, ZIP_KEYED).is_truthy();
+        let mode = ZipMode::from_number(helper_slot(&state, ZIP_MODE).as_number());
+        let count = iters.borrow().len();
+        // No sources at all is an empty sequence, not an endless one of empty results.
+        if count == 0 {
+            state
+                .borrow_mut()
+                .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+            return Ok(iteration_result(Value::Undefined, true));
+        }
+        let finish = |state: &Rc<RefCell<ObjectData>>| {
+            state
+                .borrow_mut()
+                .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+        };
+        let mut results = Vec::with_capacity(count);
+        for index in 0..count {
+            let entry = iters.borrow().get(index).cloned().unwrap_or(Value::Null);
+            // Already ended and being padded for: only `longest` ever gets here, because the
+            // other two modes stop the whole walk at the first source that ends.
+            let Value::Array(entry) = entry else {
+                results.push(
+                    padding
+                        .borrow()
+                        .get(index)
+                        .cloned()
+                        .unwrap_or(Value::Undefined),
+                );
+                continue;
+            };
+            let (iterator, next) = {
+                let entry = entry.borrow();
+                (
+                    entry.first().cloned().unwrap_or(Value::Undefined),
+                    entry.get(1).cloned().unwrap_or(Value::Undefined),
+                )
+            };
+            let stepped = match self.iterator_step(&iterator, &next, instruction) {
+                Ok(stepped) => stepped,
+                // The failing source is dropped from the sweep before it runs: it failed on its
+                // own terms and must not also be told to close.
+                Err(error) => {
+                    finish(&state);
+                    remove_open(&open, &iterator);
+                    let remaining = open.borrow().clone();
+                    self.close_all_discarding(&remaining, instruction);
+                    return Err(error);
+                }
+            };
+            let Some(value) = stepped else {
+                remove_open(&open, &iterator);
+                match mode {
+                    // The shortest sequence decides the length, so the first source to end ends
+                    // the walk -- and the sources after this index were not even asked this round.
+                    ZipMode::Shortest => {
+                        finish(&state);
+                        let remaining = open.borrow().clone();
+                        self.close_all(&remaining, instruction)?;
+                        return Ok(iteration_result(Value::Undefined, true));
+                    }
+                    // Every source must end on the same round. Ending anywhere but the first
+                    // position means an earlier one already produced a value this round, so the
+                    // mismatch is certain and nothing more needs checking.
+                    ZipMode::Strict => {
+                        finish(&state);
+                        if index != 0 {
+                            let remaining = open.borrow().clone();
+                            self.close_all_discarding(&remaining, instruction);
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "Iterator.zip: strict mode requires every iterator to have the same length"
+                                    .to_owned(),
+                            });
+                        }
+                        return self.strict_tail(&iters, &open, count, instruction);
+                    }
+                    // The longest sequence decides the length: this source is retired and its
+                    // slot answers from the padding from here on.
+                    ZipMode::Longest => {
+                        if open.borrow().is_empty() {
+                            finish(&state);
+                            return Ok(iteration_result(Value::Undefined, true));
+                        }
+                        iters.borrow_mut()[index] = Value::Null;
+                        results.push(
+                            padding
+                                .borrow()
+                                .get(index)
+                                .cloned()
+                                .unwrap_or(Value::Undefined),
+                        );
+                        continue;
+                    }
+                }
+            };
+            results.push(value);
+        }
+        let step = if keyed {
+            let mut object = ObjectData::default();
+            for (key, value) in keys.borrow().iter().zip(results) {
+                object.set(&key.to_display_string(), value);
+            }
+            // A null prototype, so a key named `toString` or `constructor` is the source's value
+            // and nothing else -- the object is a record of the step, not a participant.
+            object.set_prototype(Value::Null);
+            Value::Object(Rc::new(RefCell::new(object)))
+        } else {
+            Value::Array(ArrayData::new(results))
+        };
+        Ok(iteration_result(step, false))
+    }
+
+    /// Strict mode's check that every other source ended on this round too.
+    ///
+    /// `IteratorStep` rather than a step that reads the value: the question is only whether
+    /// there *is* another element, and reading one would run a `value` getter the specification
+    /// never runs.
+    fn strict_tail(
+        &mut self,
+        iters: &Rc<ArrayData>,
+        open: &Rc<ArrayData>,
+        count: usize,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        for index in 1..count {
+            let entry = iters.borrow().get(index).cloned().unwrap_or(Value::Null);
+            let Value::Array(entry) = entry else {
+                continue;
+            };
+            let (iterator, next) = {
+                let entry = entry.borrow();
+                (
+                    entry.first().cloned().unwrap_or(Value::Undefined),
+                    entry.get(1).cloned().unwrap_or(Value::Undefined),
+                )
+            };
+            match self.iterator_step(&iterator, &next, instruction) {
+                Ok(None) => {
+                    remove_open(open, &iterator);
+                }
+                Ok(Some(_)) => {
+                    let remaining = open.borrow().clone();
+                    self.close_all_discarding(&remaining, instruction);
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Iterator.zip: strict mode requires every iterator to have the same length"
+                            .to_owned(),
+                    });
+                }
+                Err(error) => {
+                    remove_open(open, &iterator);
+                    let remaining = open.borrow().clone();
+                    self.close_all_discarding(&remaining, instruction);
+                    return Err(error);
+                }
+            }
+        }
+        Ok(iteration_result(Value::Undefined, true))
+    }
+
+    /// `return` on a zip helper: close every source that is still open, last first.
+    fn iterator_zip_return(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Object(state) = receiver else {
+            return Err(ExecutionError::NotAnIterator);
+        };
+        let state = Rc::clone(state);
+        let already = helper_slot(&state, HELPER_DONE).is_truthy();
+        state
+            .borrow_mut()
+            .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+        if already {
+            return Ok(iteration_result(Value::Undefined, true));
+        }
+        let Value::Array(open) = helper_slot(&state, ZIP_OPEN) else {
+            return Ok(iteration_result(Value::Undefined, true));
+        };
+        let remaining = std::mem::take(&mut *open.borrow_mut());
+        self.close_all(&remaining, instruction)?;
+        Ok(iteration_result(Value::Undefined, true))
+    }
+
+    /// `Iterator.concat(...items)`: the sequences run end to end, as one sequence.
+    ///
+    /// Split between eager and lazy in a way that is observable and deliberate. Every argument is
+    /// *checked* now -- it must be an object with a callable `@@iterator`, and the method is read
+    /// once and kept -- while no source is *opened* until the walk reaches it. That is what lets
+    /// `Iterator.concat(finite, endless)` be built at all, and it is why a `return()` before the
+    /// first `next()` closes nothing: there is nothing open to close.
+    fn iterator_concat(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let mut sources = Vec::with_capacity(arguments.len());
+        for item in arguments {
+            // Checked one argument at a time, both halves before the next argument is touched:
+            // a test watching the second argument's getter asserts it never ran when the third
+            // is the bad one.
+            if !is_reflect_target(item) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Iterator.concat: every argument must be an object".to_owned(),
+                });
+            }
+            let method =
+                self.read_property(item, WellKnown::Iterator.property_key(), instruction)?;
+            if !is_callable(&method) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Iterator.concat: every argument must be iterable".to_owned(),
+                });
+            }
+            sources.push(Value::Array(ArrayData::new(vec![method, item.clone()])));
+        }
+        let mut helper = ObjectData::default();
+        helper.set_non_enumerable(CONCAT_SOURCES, Value::Array(ArrayData::new(sources)));
+        helper.set_non_enumerable(CONCAT_INDEX, Value::Number(0.0));
+        // Undefined until the walk opens one, and back to undefined when it runs out: this slot
+        // is both "what is open" and "is anything open", which is exactly what `return` asks.
+        helper.set_non_enumerable(HELPER_SOURCE, Value::Undefined);
+        helper.set_non_enumerable(HELPER_NEXT, Value::Undefined);
+        helper.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
+        helper.set_non_enumerable("next", Value::Native(Native::IteratorConcatNext));
+        helper.set_non_enumerable("return", Value::Native(Native::IteratorConcatReturn));
+        helper.set_non_enumerable(
+            WellKnown::Iterator.property_key(),
+            Value::Native(Native::IteratorSelf),
+        );
+        Ok(Value::Object(Rc::new(RefCell::new(helper))))
+    }
+
+    /// One step of `Iterator.concat`.
+    fn iterator_concat_next(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Object(state) = receiver else {
+            return Err(ExecutionError::NotAnIterator);
+        };
+        let state = Rc::clone(state);
+        if state.borrow().get_own(CONCAT_SOURCES).is_none() {
+            return Err(ExecutionError::NotAnIterator);
+        }
+        if helper_slot(&state, HELPER_DONE).is_truthy() {
+            return Ok(iteration_result(Value::Undefined, true));
+        }
+        let finish = |state: &Rc<RefCell<ObjectData>>| {
+            let mut state = state.borrow_mut();
+            state.set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+            state.set_non_enumerable(HELPER_SOURCE, Value::Undefined);
+            iteration_result(Value::Undefined, true)
+        };
+        loop {
+            let open = helper_slot(&state, HELPER_SOURCE);
+            if matches!(open, Value::Undefined) {
+                let Value::Array(sources) = helper_slot(&state, CONCAT_SOURCES) else {
+                    return Err(ExecutionError::NotAnIterator);
+                };
+                let index = helper_slot(&state, CONCAT_INDEX).as_number() as usize;
+                let Some(entry) = sources.borrow().get(index).cloned() else {
+                    return Ok(finish(&state));
+                };
+                state
+                    .borrow_mut()
+                    .set_non_enumerable(CONCAT_INDEX, Value::Number(index as f64 + 1.0));
+                let Value::Array(entry) = entry else {
+                    return Err(ExecutionError::NotAnIterator);
+                };
+                let (method, iterable) = {
+                    let entry = entry.borrow();
+                    (
+                        entry.first().cloned().unwrap_or(Value::Undefined),
+                        entry.get(1).cloned().unwrap_or(Value::Undefined),
+                    )
+                };
+                let opened = self.call_value(&method, iterable, Vec::new(), instruction)?;
+                // Only *now* is the result required to be an object -- which is why a bad
+                // `@@iterator` shows up as a throw from `next` rather than from the call.
+                if !is_reflect_target(&opened) {
+                    state
+                        .borrow_mut()
+                        .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+                    return Err(ExecutionError::NotAnIterator);
+                }
+                let next = self.read_property(&opened, "next", instruction)?;
+                let mut state = state.borrow_mut();
+                state.set_non_enumerable(HELPER_SOURCE, opened);
+                state.set_non_enumerable(HELPER_NEXT, next);
+                continue;
+            }
+            let next = helper_slot(&state, HELPER_NEXT);
+            // A failed step ends the walk without closing anything: the source failed on its own
+            // terms, and `concat` did not cause it.
+            let stepped = match self.iterator_step(&open, &next, instruction) {
+                Ok(stepped) => stepped,
+                Err(error) => {
+                    state
+                        .borrow_mut()
+                        .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+                    return Err(error);
+                }
+            };
+            match stepped {
+                Some(value) => return Ok(iteration_result(value, false)),
+                // Exhausted, so it closed itself: forget it and move to the next source without
+                // calling `return` on the one that just ended.
+                None => {
+                    state
+                        .borrow_mut()
+                        .set_non_enumerable(HELPER_SOURCE, Value::Undefined);
+                }
+            }
+        }
+    }
+
+    /// `return` on an `Iterator.concat` helper: close whichever source is open, if any.
+    fn iterator_concat_return(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Object(state) = receiver else {
+            return Err(ExecutionError::NotAnIterator);
+        };
+        let state = Rc::clone(state);
+        let open = helper_slot(&state, HELPER_SOURCE);
+        {
+            let mut state = state.borrow_mut();
+            state.set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+            state.set_non_enumerable(HELPER_SOURCE, Value::Undefined);
+        }
+        if !matches!(open, Value::Undefined) {
+            self.close_iterator(&open, instruction)?;
+        }
+        Ok(iteration_result(Value::Undefined, true))
+    }
+
+    /// `%IteratorPrototype%.includes(searchElement, skippedElements)`.
+    ///
+    /// The comparison is `SameValueZero`, so `NaN` finds itself and the two zeroes are one
+    /// element -- and neither side is ever coerced, which is why an object matches only the
+    /// reference it *is*. A match closes the source: the elements after the answer are being
+    /// told they will not be asked for, and a `return` that objects to that is the only thing
+    /// that went wrong, so it is propagated rather than swallowed.
+    fn iterator_includes(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        // Settled before `next` is read, and a bad one closes the source on the way out --
+        // the same order every argument in this family is checked in.
+        let to_skip = match arguments.get(1) {
+            None | Some(Value::Undefined) => 0.0,
+            // Both infinities are admitted here where `chunks` refuses them: "skip everything"
+            // is a coherent instruction, and the *negative* one is refused one step below as a
+            // count rather than as a type.
+            Some(Value::Number(number))
+                if number.is_infinite() || (number.fract() == 0.0 && !number.is_nan()) =>
+            {
+                *number
+            }
+            _ => {
+                self.close_discarding(receiver, instruction);
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "skippedElements must be an integral Number or an infinity".to_owned(),
+                });
+            }
+        };
+        if to_skip < 0.0 || (to_skip.is_finite() && to_skip > 9_007_199_254_740_991.0) {
+            self.close_discarding(receiver, instruction);
+            return Err(ExecutionError::IteratorLimitOutOfRange);
+        }
+        let next = self.iterator_direct(receiver, instruction)?;
+        let search = arguments.first().cloned().unwrap_or(Value::Undefined);
+        // Counted rather than looped `to_skip` times: the count may be `2**53` or an infinity,
+        // and the source running out is what actually ends the skip.
+        let mut skipped = 0.0;
+        while skipped < to_skip {
+            if self.iterator_step(receiver, &next, instruction)?.is_none() {
+                return Ok(Value::Boolean(false));
+            }
+            skipped += 1.0;
+        }
+        loop {
+            let Some(value) = self.iterator_step(receiver, &next, instruction)? else {
+                // Exhaustion is not an early exit, so there is nothing to close: the source
+                // ended on its own and `return` is not even looked up.
+                return Ok(Value::Boolean(false));
+            };
+            if same_value_zero(&value, &search) {
+                self.close_iterator(receiver, instruction)?;
+                return Ok(Value::Boolean(true));
+            }
+        }
+    }
+
+    /// `%IteratorPrototype%.join(separator)`.
+    ///
+    /// Closes the source for the errors it causes itself -- a `toString` that throws, on either
+    /// the separator or an element -- and for nothing else. An iterator that throws from `next`,
+    /// or hands back something that is not a result object, has already failed on its own terms;
+    /// closing it there would be this method disposing of a resource whose failure it did not
+    /// cause, and the tests watch the `return` getter to prove it is not even consulted.
+    fn iterator_join(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        // Coerced before `next` is read, which is observable: a `toString` that throws must
+        // close the source without the `next` getter ever having run.
+        let separator = match arguments.first() {
+            None | Some(Value::Undefined) => ",".to_owned(),
+            Some(value) => match self.as_text(value, instruction) {
+                Ok(text) => text,
+                Err(error) => {
+                    self.close_discarding(receiver, instruction);
+                    return Err(error);
+                }
+            },
+        };
+        let next = self.iterator_direct(receiver, instruction)?;
+        let mut joined = String::new();
+        let mut first = true;
+        loop {
+            let Some(value) = self.iterator_step(receiver, &next, instruction)? else {
+                return Ok(Value::String(joined));
+            };
+            if !first {
+                joined.push_str(&separator);
+            }
+            first = false;
+            // A nullish element contributes nothing but still gets its separator, which is what
+            // makes `["a", null].values().join()` end in a comma rather than losing the hole.
+            if value.is_nullish() {
+                continue;
+            }
+            match self.as_text(&value, instruction) {
+                Ok(text) => joined.push_str(&text),
+                Err(error) => {
+                    self.close_discarding(receiver, instruction);
+                    return Err(error);
+                }
+            }
+        }
+    }
+
+    /// `ToString`, running the program's own `toString` or `@@toPrimitive` where there is one.
+    fn as_text(&mut self, value: &Value, instruction: usize) -> Result<String, ExecutionError> {
+        let primitive = self.as_primitive(value, true, instruction)?;
+        // A symbol is the one primitive `ToString` refuses: it has a description, not a
+        // spelling, and reading one as text is the mistake `String(symbol)` exists for.
+        if matches!(primitive, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        Ok(primitive.to_display_string())
+    }
+
+    /// `%IteratorPrototype%.reduce` and the seven other methods that consume an iterator.
     fn iterator_terminal(
         &mut self,
         kind: TerminalKind,
@@ -10980,6 +12783,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         if !is_iterator_object(receiver) {
             return Err(ExecutionError::NotAnIterator);
+        }
+        // Neither of these takes a callback, and each has its own rule about when the source is
+        // closed, so neither fits the walk below. They are `TerminalKind`s all the same: what
+        // the enum names is "consumes the iterator and answers a value", which both do.
+        match kind {
+            TerminalKind::Includes => {
+                return self.iterator_includes(receiver, arguments, instruction);
+            }
+            TerminalKind::Join => return self.iterator_join(receiver, arguments, instruction),
+            _ => {}
         }
         let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
         if !matches!(kind, TerminalKind::ToArray) && !is_callable(&callback) {
@@ -11013,6 +12826,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     TerminalKind::Some => Value::Boolean(false),
                     TerminalKind::Every => Value::Boolean(true),
                     TerminalKind::Find | TerminalKind::ForEach => Value::Undefined,
+                    TerminalKind::Includes | TerminalKind::Join => {
+                        unreachable!("answered above, before the walk")
+                    }
                 });
             };
             if matches!(kind, TerminalKind::ToArray) {
@@ -11059,6 +12875,329 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Anything iterable is walked through the protocol. Anything else is treated as array-like
     /// and read by index up to its `length`, which is the other half of what the specification
     /// says and what makes `Array.from({ length: 2 })` two undefineds rather than an error.
+    /// `Array.fromAsync(asyncItems, mapfn, thisArg)`.
+    ///
+    /// The asynchronous sibling of `Array.from`, and the whole of the difference is where the
+    /// awaits go: the source may be an async iterator, every element is awaited, and so is
+    /// whatever the mapper returned. That makes it a state machine rather than a loop -- each
+    /// await hands control back to the microtask queue and the walk resumes from
+    /// [`Vm::from_async_resume`], which is why everything it needs between steps lives in
+    /// [`FromAsync`] rather than on the Rust stack.
+    ///
+    /// Nothing after the promise exists can throw to the caller: it is holding a promise and
+    /// nothing else, so every failure arrives as a rejection on it.
+    fn array_from_async(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let result = PromiseState::pending();
+        let handle = Value::Promise(Rc::clone(&result));
+        let receiver = receiver.clone();
+        let arguments = arguments.to_vec();
+        let started = self.catching(|vm| {
+            vm.from_async_begin(&receiver, &arguments, &Rc::clone(&result), instruction)
+        });
+        match started {
+            Ok(state) => self.from_async_pump(&state, instruction),
+            Err(reason) => self.settle(&result, &Settled::Rejected(reason)),
+        }
+        Ok(handle)
+    }
+
+    /// Settle what the walk will be before the first element is asked for.
+    fn from_async_begin(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        result: &Rc<RefCell<PromiseState>>,
+        instruction: usize,
+    ) -> Result<Rc<FromAsync>, ExecutionError> {
+        let items = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let mapper = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        // Checked before the source is touched, and `null` is not "no mapper": only `undefined`
+        // is, which is the same distinction `Array.from` draws.
+        if !matches!(mapper, Value::Undefined) && !is_callable(&mapper) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: mapper.type_name(),
+            });
+        }
+        let this_value = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+        if items.is_nullish() {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not async iterable", items.to_display_string()),
+            });
+        }
+        // The async protocol is preferred, and only when a value has none is the synchronous one
+        // used -- wrapped, which is what makes each of *its* values awaited as well.
+        let asynchronous =
+            self.read_property(&items, WellKnown::AsyncIterator.property_key(), instruction)?;
+        let (method, synchronous) = if asynchronous.is_nullish() {
+            (
+                self.read_property(&items, WellKnown::Iterator.property_key(), instruction)?,
+                true,
+            )
+        } else {
+            (asynchronous, false)
+        };
+        let source = if method.is_nullish() {
+            // Neither protocol, so the value is walked as an array-like -- which is how
+            // `Array.fromAsync({length: 2, 0: p, 1: q})` works and why a number produces an
+            // empty array rather than a failure.
+            let length = self.read_property(&items, "length", instruction)?;
+            let length = bounded_length(self.as_number_argument(Some(&length), instruction)?)?;
+            FromAsyncSource::ArrayLike {
+                source: items,
+                length,
+            }
+        } else {
+            if !is_callable(&method) {
+                return Err(ExecutionError::NotCallable {
+                    instruction,
+                    value: method.type_name(),
+                });
+            }
+            let iterator = self.call_value(&method, items, Vec::new(), instruction)?;
+            if !is_reflect_target(&iterator) {
+                return Err(ExecutionError::NotAnIterator);
+            }
+            let next = self.read_property(&iterator, "next", instruction)?;
+            FromAsyncSource::Iterator {
+                iterator,
+                next,
+                synchronous,
+            }
+        };
+        // `Array.fromAsync.call(C, …)` collects into a `C`, the same way `Array.from` does: the
+        // method is generic over the constructor it is reached through, which is what makes it
+        // inheritable by a subclass.
+        let length = match &source {
+            FromAsyncSource::ArrayLike { length, .. } => *length,
+            FromAsyncSource::Iterator { .. } => 0,
+        };
+        let target = if is_constructor(receiver) {
+            let arguments = match &source {
+                FromAsyncSource::ArrayLike { .. } => vec![Value::Number(length as f64)],
+                FromAsyncSource::Iterator { .. } => Vec::new(),
+            };
+            self.construct_value(receiver.clone(), arguments, receiver.clone(), instruction)?
+        } else {
+            Value::Array(ArrayData::new(Vec::new()))
+        };
+        Ok(Rc::new(FromAsync {
+            result: Rc::clone(result),
+            target,
+            mapper,
+            this_value,
+            source: RefCell::new(source),
+            index: std::cell::Cell::new(0),
+            stage: std::cell::Cell::new(FromAsyncStage::Element),
+        }))
+    }
+
+    /// Advance the walk, turning any failure into a rejection of the caller's promise.
+    fn from_async_pump(&mut self, state: &Rc<FromAsync>, instruction: usize) {
+        let state = Rc::clone(state);
+        if let Err(reason) = self.catching(|vm| vm.from_async_advance(&state, instruction)) {
+            self.from_async_fail(&state, reason, instruction);
+        }
+    }
+
+    /// Ask the source for its next element and await it.
+    fn from_async_advance(
+        &mut self,
+        state: &Rc<FromAsync>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let source = state.source.borrow().clone();
+        match source {
+            FromAsyncSource::Iterator {
+                iterator,
+                next,
+                synchronous,
+            } => {
+                let step = self.call_value(&next, iterator, Vec::new(), instruction)?;
+                // An async iterator hands back a promise *of* the result object, so the object
+                // itself is what has to be awaited; a synchronous one hands back the object and
+                // it is each value that has to be.
+                if !synchronous {
+                    state.stage.set(FromAsyncStage::Step);
+                    self.from_async_await(state, step);
+                    return Ok(());
+                }
+                if !is_reflect_target(&step) {
+                    return Err(ExecutionError::IteratorResultNotAnObject);
+                }
+                let done = self.read_property(&step, "done", instruction)?;
+                if done.is_truthy() {
+                    return self.from_async_finish(state, instruction);
+                }
+                let value = self.read_property(&step, "value", instruction)?;
+                state.stage.set(FromAsyncStage::Element);
+                self.from_async_await(state, value);
+                Ok(())
+            }
+            FromAsyncSource::ArrayLike { source, length } => {
+                let index = state.index.get();
+                if index >= length {
+                    return self.from_async_finish(state, instruction);
+                }
+                let value = self.read_property(&source, &index.to_string(), instruction)?;
+                state.stage.set(FromAsyncStage::Element);
+                self.from_async_await(state, value);
+                Ok(())
+            }
+        }
+    }
+
+    /// `Await(value)`: hand control back to the queue and resume when it settles.
+    fn from_async_await(&mut self, state: &Rc<FromAsync>, value: Value) {
+        // A promise is awaited as itself rather than wrapped, which is what keeps the count of
+        // ticks -- and so the count of `then` calls a test can observe -- the specification's.
+        let promise = match &value {
+            Value::Promise(existing) => Rc::clone(existing),
+            other => {
+                let promise = PromiseState::pending();
+                self.resolve_promise(&promise, other.clone());
+                promise
+            }
+        };
+        self.react(
+            &promise,
+            Value::Undefined,
+            Value::Undefined,
+            Sink::FromAsync(Rc::clone(state)),
+            false,
+        );
+    }
+
+    /// One `await` inside `Array.fromAsync` settling.
+    fn from_async_resume(&mut self, state: &Rc<FromAsync>, outcome: Settled, instruction: usize) {
+        let value = match outcome {
+            // A rejected element rejects the whole thing, and the iterator is released on the
+            // way out: the walk opened it and nothing else will.
+            Settled::Rejected(reason) => {
+                self.from_async_fail(state, reason, instruction);
+                return;
+            }
+            Settled::Fulfilled(value) => value,
+        };
+        let state = Rc::clone(state);
+        if let Err(reason) = self.catching(|vm| vm.from_async_deliver(&state, value, instruction)) {
+            self.from_async_fail(&state, reason, instruction);
+        }
+    }
+
+    /// What an awaited value means, which depends on which await it was.
+    fn from_async_deliver(
+        &mut self,
+        state: &Rc<FromAsync>,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match state.stage.get() {
+            FromAsyncStage::Step => {
+                if !is_reflect_target(&value) {
+                    return Err(ExecutionError::IteratorResultNotAnObject);
+                }
+                let done = self.read_property(&value, "done", instruction)?;
+                if done.is_truthy() {
+                    return self.from_async_finish(state, instruction);
+                }
+                // Not awaited a second time: an async iterator's protocol has already resolved
+                // the value, and awaiting it again would cost a tick a test can count.
+                let element = self.read_property(&value, "value", instruction)?;
+                self.from_async_element(state, element, instruction)
+            }
+            FromAsyncStage::Element => self.from_async_element(state, value, instruction),
+            FromAsyncStage::Mapped => self.from_async_place(state, value, instruction),
+        }
+    }
+
+    /// An element has arrived: map it, or place it as it is.
+    fn from_async_element(
+        &mut self,
+        state: &Rc<FromAsync>,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let mapper = state.mapper.clone();
+        if !is_callable(&mapper) {
+            return self.from_async_place(state, value, instruction);
+        }
+        let mapped = self.call_value(
+            &mapper,
+            state.this_value.clone(),
+            Vec::from([value, Value::Number(state.index.get() as f64)]),
+            instruction,
+        )?;
+        state.stage.set(FromAsyncStage::Mapped);
+        self.from_async_await(state, mapped);
+        Ok(())
+    }
+
+    /// Store one element and ask for the next.
+    fn from_async_place(
+        &mut self,
+        state: &Rc<FromAsync>,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let index = state.index.get();
+        let key = index.to_string();
+        // `CreateDataPropertyOrThrow`, not an assignment: a collection that refuses the element
+        // has to stop the walk. An assignment would be silently discarded in sloppy code, and
+        // over an endless iterator that is not a wrong answer but a program that never ends.
+        let descriptor = Descriptor {
+            value: Some(value),
+            get: None,
+            set: None,
+            writable: Some(true),
+            enumerable: Some(true),
+            configurable: Some(true),
+        };
+        if !define_own_property(&self.intrinsics, &state.target, &key, &descriptor)? {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: refusal(&self.intrinsics, &state.target, &key),
+            });
+        }
+        state.index.set(index + 1);
+        self.from_async_advance(state, instruction)
+    }
+
+    /// The source is spent: publish the length and hand the collection over.
+    fn from_async_finish(
+        &mut self,
+        state: &Rc<FromAsync>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        self.set_computed(
+            &state.target,
+            &Value::String("length".to_owned()),
+            Value::Number(state.index.get() as f64),
+            instruction,
+        )?;
+        let target = state.target.clone();
+        self.resolve_promise(&state.result, target);
+        Ok(())
+    }
+
+    /// Release the iterator, if there is one, and reject.
+    fn from_async_fail(&mut self, state: &Rc<FromAsync>, reason: Value, instruction: usize) {
+        let iterator = match &*state.source.borrow() {
+            FromAsyncSource::Iterator { iterator, .. } => Some(iterator.clone()),
+            FromAsyncSource::ArrayLike { .. } => None,
+        };
+        if let Some(iterator) = iterator {
+            // Discarded: what `return` complains about while being told the walk is over cannot
+            // be more interesting than the failure that ended it.
+            let _ = self.catching(|vm| vm.close_iterator(&iterator, instruction));
+        }
+        self.settle(&state.result, &Settled::Rejected(reason));
+    }
+
     fn array_from(
         &mut self,
         arguments: &[Value],
@@ -11630,6 +13769,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The outer `Result` is the machine failing; the inner one is the program's own outcome --
     /// `Err` holding whatever it threw. A promise reaction needs exactly this shape, because a
     /// rejection carries a value and an `ExecutionError` carries only a message.
+    /// Run `body`, turning anything a program could catch into the value it threw.
+    ///
+    /// The same handler `call_catching` installs, for the cases where what may throw is not a
+    /// call but a property read: a getter is ordinary code, and the machinery that has to
+    /// *record* its failure rather than propagate it needs the value, not the error.
+    fn catching<T>(
+        &mut self,
+        body: impl FnOnce(&mut Self) -> Result<T, ExecutionError>,
+    ) -> Result<T, Value> {
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        let outcome = body(self);
+        self.handlers.truncate(installed);
+        match outcome {
+            Ok(value) => Ok(value),
+            Err(ExecutionError::CaughtByHost) => {
+                Err(self.caught.take().unwrap_or(Value::Undefined))
+            }
+            Err(error) => match error.as_javascript_error() {
+                Some((kind, message)) => Err(self.construct_error(kind, &[Value::String(message)])),
+                // A limit this realm imposes rather than a language error. Nothing was written
+                // to receive it as a value, so it becomes the plain refusal it is.
+                None => Err(Value::String(error.to_string())),
+            },
+        }
+    }
+
     fn call_catching(
         &mut self,
         callee: &Value,
@@ -12063,8 +14234,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.resolve_promise(step, result);
             }
             Ok((value, false)) if !generator.borrow().awaiting => {
-                let result = iteration_result(value, false);
-                self.resolve_promise(step, result);
+                // Awaited before it is yielded, which is the specification's order and is
+                // observable twice over: a yielded promise arrives as its value, and one that
+                // rejects raises at the `yield` inside the body rather than at the consumer.
+                let target = match value {
+                    Value::Promise(inner) => inner,
+                    other => {
+                        let pending = PromiseState::pending();
+                        self.resolve_promise(&pending, other);
+                        pending
+                    }
+                };
+                self.react(
+                    &target,
+                    Value::Undefined,
+                    Value::Undefined,
+                    Sink::AsyncGeneratorYield(Rc::clone(generator), Rc::clone(step)),
+                    false,
+                );
             }
             Ok((awaited, false)) => {
                 // Waiting, not yielding: the same fast path `await` takes in an async function.
@@ -12147,6 +14334,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// handlers, which passes both outcomes through unchanged.
     fn resolve_promise(&mut self, promise: &Rc<RefCell<PromiseState>>, value: Value) {
         let Value::Promise(inner) = &value else {
+            // Anything with a callable `then` is adopted rather than stored. That is what makes a
+            // promise from another library -- or a hand-written object with a `then` -- usable
+            // wherever this realm's own promise is, and it is the whole of what "thenable" means.
+            // Without it `await someThenable` handed the object back untouched, which looks like
+            // a value and is a promise nobody is waiting on.
+            if is_reflect_target(&value) {
+                match self.catching(|vm| vm.read_property(&value, "then", vm.instruction)) {
+                    // Reading `then` may run a getter, and a getter that throws rejects: the
+                    // resolution has already been decided by the time anyone could catch it.
+                    Err(reason) => self.settle(promise, &Settled::Rejected(reason)),
+                    Ok(then) if is_callable(&then) => {
+                        self.realm
+                            .queue_microtask(Job::Thenable(Rc::clone(promise), value, then));
+                    }
+                    Ok(_) => self.settle(promise, &Settled::Fulfilled(value)),
+                }
+                return;
+            }
             self.settle(promise, &Settled::Fulfilled(value));
             return;
         };
@@ -12209,6 +14414,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match &reaction.sink {
             Sink::Combinator(native, index, state) => {
                 return self.combine_step(*native, *index, &Rc::clone(state), outcome);
+            }
+            Sink::FromAsync(state) => {
+                let state = Rc::clone(state);
+                self.from_async_resume(&state, outcome, self.instruction);
+                return Ok(());
+            }
+            Sink::AsyncGeneratorYield(generator, step) => {
+                let (generator, step) = (Rc::clone(generator), Rc::clone(step));
+                return match outcome {
+                    Settled::Fulfilled(value) => {
+                        let result = iteration_result(value, false);
+                        self.settle(&step, &Settled::Fulfilled(result));
+                        Ok(())
+                    }
+                    // The `?` on the specification's `Await` puts the failure back inside the
+                    // body, at the `yield` -- so the generator's own `try` blocks see it, which
+                    // settling the consumer's promise directly would deny them.
+                    Settled::Rejected(reason) => {
+                        self.drive_async_generator(&generator, &step, Resume::Throw(reason))
+                    }
+                };
             }
             Sink::Replay(promise, recorded) => {
                 let promise = Rc::clone(promise);
@@ -12515,6 +14741,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     );
                     Ok(())
                 }
+                Job::Thenable(promise, resolution, then) => {
+                    let resolve = Value::Settler(Rc::clone(&promise), false);
+                    let reject = Value::Settler(Rc::clone(&promise), true);
+                    match self.call_catching(
+                        &then,
+                        resolution,
+                        Vec::from([resolve, reject]),
+                        self.instruction,
+                    )? {
+                        Ok(_) => {}
+                        // A `then` that throws rejects -- unless it had already settled the
+                        // promise before throwing, which `settle` ignores. That ordering is the
+                        // whole of the specification's "already resolved" flag.
+                        Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
+                    }
+                    Ok(())
+                }
             })?;
         }
         Ok(())
@@ -12570,9 +14813,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let walks_an_array = match callee {
+            // The three generator methods are not walks: each resumes a body, and a receiver
+            // turned into a snapshot of its elements is not a generator any more. The async one
+            // was missing from this list, so reading `g.next` off an async generator and calling
+            // it as a value -- which is exactly what any code driving the protocol by hand does
+            // -- coerced the generator to an array and then complained the array was not callable.
             Value::Callback(method) => !matches!(
                 method,
-                CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn
+                CallbackMethod::GeneratorNext
+                    | CallbackMethod::GeneratorReturn
+                    | CallbackMethod::AsyncGeneratorNext
             ),
             Value::Native(native) => native.walks_an_array(),
             _ => false,
@@ -12581,7 +14831,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             callee,
             Value::Native(native) if native.creates_array_iterator()
         ) && matches!(receiver, Value::TypedArray(_));
-        if walks_an_array
+        // `ValidateTypedArray`, which every `%TypedArray%.prototype` method performs before it
+        // does anything else -- including before it coerces its arguments. This is the choke
+        // point for it, because this is where a typed array receiver is recognised: the methods
+        // themselves are `Array.prototype`'s, and each one growing its own guard would be a
+        // dozen chances to forget. It sits ahead of the early return so the iterator methods,
+        // which keep the live view rather than a snapshot, are checked too.
+        // `join`'s default spelling and `copyWithin` do not walk a snapshot -- they read the
+        // receiver directly -- so they are named here rather than inherited from the list above.
+        let validates_typed_array = walks_an_array
+            || matches!(
+                callee,
+                Value::Native(Native::ArrayJoinDefault | Native::ArrayCopyWithin)
+            );
+        if validates_typed_array
             && let Value::TypedArray(view) = &receiver
             && view.buffer.detached()
         {
@@ -12656,6 +14919,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("Date", Value::Native(Native::DateConstructor));
         globals.set_non_enumerable("WeakMap", Value::Native(Native::WeakMapConstructor));
         globals.set_non_enumerable("WeakSet", Value::Native(Native::WeakSetConstructor));
+        globals.set_non_enumerable("WeakRef", Value::Native(Native::WeakRefConstructor));
+        globals.set_non_enumerable(
+            "FinalizationRegistry",
+            Value::Native(Native::FinalizationRegistryConstructor),
+        );
         globals.set_non_enumerable("Set", Value::Native(Native::SetConstructor));
         globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor));
         globals.set_non_enumerable("performance", Value::Native(Native::Performance));
@@ -12915,6 +15183,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::WeakMapConstructor => {
                 self.construct_collection(parent, arguments, current)?
             }
+            Native::WeakRefConstructor => self.construct_weak_ref(arguments, current)?,
+            Native::FinalizationRegistryConstructor => {
+                self.construct_finalization_registry(arguments, current)?
+            }
             Native::DateConstructor | Native::RegExpConstructor => {
                 self.dispatch_native(parent, &Value::Undefined, arguments, current)?
             }
@@ -13129,6 +15401,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let collection = self.construct_collection(kind, &arguments, current)?;
                 self.stack.push(collection);
             }
+            Value::Native(Native::WeakRefConstructor) => {
+                let built = self.construct_weak_ref(&arguments, current)?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::FinalizationRegistryConstructor) => {
+                let built = self.construct_finalization_registry(&arguments, current)?;
+                self.stack.push(built);
+            }
             Value::Function(closure) => {
                 // `new` creates the instance, runs the body with it as `this`, and
                 // yields the instance -- unless the body returned an object, which
@@ -13156,6 +15436,168 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(())
+    }
+
+    /// `CanBeHeldWeakly(value)`.
+    ///
+    /// An object, or a symbol that is not in the global registry. The registry is the whole
+    /// reason symbols are not simply admitted: `Symbol.for("x")` is reachable from any code that
+    /// knows the key, so it can never become unreachable, and holding one weakly would be a
+    /// promise the engine could never keep.
+    fn can_be_held_weakly(&self, value: &Value) -> bool {
+        match value {
+            Value::Symbol(_) => !self
+                .symbol_registry
+                .iter()
+                .any(|(_, registered)| strict_equal(registered, value)),
+            other => is_reflect_target(other),
+        }
+    }
+
+    /// `new WeakRef(target)`.
+    fn construct_weak_ref(
+        &mut self,
+        arguments: &[Value],
+        _current: usize,
+    ) -> Result<Value, ExecutionError> {
+        let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if !self.can_be_held_weakly(&target) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "WeakRef: target must be an object or an unregistered symbol".to_owned(),
+            });
+        }
+        let mut data = ObjectData::default();
+        data.set_non_enumerable(WEAK_REF_TARGET, target);
+        data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::WeakRef)));
+        Ok(Value::Object(Rc::new(RefCell::new(data))))
+    }
+
+    /// `new FinalizationRegistry(cleanupCallback)`.
+    fn construct_finalization_registry(
+        &mut self,
+        arguments: &[Value],
+        current: usize,
+    ) -> Result<Value, ExecutionError> {
+        let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if !is_callable(&callback) {
+            return Err(ExecutionError::NotCallable {
+                instruction: current,
+                value: callback.type_name(),
+            });
+        }
+        let mut data = ObjectData::default();
+        data.set_non_enumerable(REGISTRY_CALLBACK, callback);
+        data.set_non_enumerable(REGISTRY_CELLS, Value::Array(ArrayData::new(Vec::new())));
+        data.set_prototype(Value::Native(Native::PrototypeOf(
+            PrototypeTable::FinalizationRegistry,
+        )));
+        Ok(Value::Object(Rc::new(RefCell::new(data))))
+    }
+
+    /// The reserved slot of a `WeakRef` or a registry, or a `TypeError` naming the receiver.
+    ///
+    /// The brand check is the slot: these two types are ordinary objects with a hidden property,
+    /// so "is this really one" and "where is its state" are the same question.
+    fn weak_slot(&self, receiver: &Value, slot: &str, what: &str) -> Result<Value, ExecutionError> {
+        if let Value::Object(object) = receiver
+            && let Some(found) = object.borrow().get_own(slot)
+        {
+            return Ok(found.clone());
+        }
+        Err(ExecutionError::TypeErrorMessage {
+            message: format!("{what} method called on an incompatible receiver"),
+        })
+    }
+
+    /// `WeakRef.prototype.deref()`.
+    fn weak_ref_deref(
+        &mut self,
+        receiver: &Value,
+        _instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        self.weak_slot(receiver, WEAK_REF_TARGET, "WeakRef.prototype.deref")
+    }
+
+    /// `FinalizationRegistry.prototype.register(target, heldValue, unregisterToken)`.
+    fn finalization_registry_register(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        _instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let cells = self.weak_slot(
+            receiver,
+            REGISTRY_CELLS,
+            "FinalizationRegistry.prototype.register",
+        )?;
+        let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if !self.can_be_held_weakly(&target) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "FinalizationRegistry.prototype.register: target must be an object or an unregistered symbol"
+                    .to_owned(),
+            });
+        }
+        let held = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        // A target that is also its own held value would keep itself alive through the registry
+        // for as long as the registry lived, which is exactly the leak the registry exists to
+        // avoid -- so the specification refuses the pair outright rather than leaking quietly.
+        if same_value(&target, &held) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "FinalizationRegistry.prototype.register: target and holdings must not be the same"
+                    .to_owned(),
+            });
+        }
+        let token = arguments.get(2).cloned().unwrap_or(Value::Undefined);
+        if !matches!(token, Value::Undefined) && !self.can_be_held_weakly(&token) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "FinalizationRegistry.prototype.register: unregisterToken must be an object or an unregistered symbol"
+                    .to_owned(),
+            });
+        }
+        if let Value::Array(cells) = cells {
+            cells
+                .borrow_mut()
+                .push(Value::Array(ArrayData::new(vec![target, held, token])));
+        }
+        Ok(Value::Undefined)
+    }
+
+    /// `FinalizationRegistry.prototype.unregister(unregisterToken)`.
+    ///
+    /// Answers only whether anything was removed, and matches on the *token* alone: a cell
+    /// registered without one can never be removed, which is why a program that means to
+    /// unregister has to supply a token it kept.
+    fn finalization_registry_unregister(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        _instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let cells = self.weak_slot(
+            receiver,
+            REGISTRY_CELLS,
+            "FinalizationRegistry.prototype.unregister",
+        )?;
+        let token = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if !self.can_be_held_weakly(&token) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "FinalizationRegistry.prototype.unregister: unregisterToken must be an object or an unregistered symbol"
+                    .to_owned(),
+            });
+        }
+        let Value::Array(cells) = cells else {
+            return Ok(Value::Boolean(false));
+        };
+        let mut held = cells.borrow_mut();
+        let before = held.len();
+        held.retain(|cell| {
+            let Value::Array(cell) = cell else {
+                return true;
+            };
+            let recorded = cell.borrow().get(2).cloned().unwrap_or(Value::Undefined);
+            !same_value(&recorded, &token)
+        });
+        Ok(Value::Boolean(held.len() != before))
     }
 
     /// Build an error instance whose prototype is this run's prototype for that kind.
@@ -13304,6 +15746,617 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// Both of those need the machine: one to run the engine, the other to call back into the
     /// program. The plain string-for-string form stays with the pure built-ins.
+    /// `IsRegExp(value)`.
+    ///
+    /// Asks the value, not the engine: an object whose `@@match` is truthy *is* a regexp for
+    /// every purpose the language cares about here, and one that has set it to `false` is not,
+    /// even if this realm built it. That is the escape hatch a library uses to pass a regexp to
+    /// `replaceAll` without being told it is not global.
+    fn is_regexp(&mut self, value: &Value, instruction: usize) -> Result<bool, ExecutionError> {
+        if !is_reflect_target(value) {
+            return Ok(false);
+        }
+        let matcher = self.read_property(value, WellKnown::Match.property_key(), instruction)?;
+        if !matches!(matcher, Value::Undefined) {
+            return Ok(matcher.is_truthy());
+        }
+        Ok(matches!(value, Value::RegExp(_)))
+    }
+
+    /// `RegExpExec(R, S)`: match `subject` through whatever `exec` the program can see.
+    ///
+    /// The lookup is the whole point. A program that puts its own `exec` on a regexp -- or on an
+    /// object that is not one at all -- has redefined what matching *means* for that value, and
+    /// all five of the symbol-keyed methods are written in terms of this so that one
+    /// redefinition reaches every one of them. That is also what makes them work on a receiver
+    /// this engine never built: none of them needs a `[[RegExpMatcher]]`, only an `exec`.
+    fn regexp_exec_abstract(
+        &mut self,
+        target: &Value,
+        subject: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let exec = self.read_property(target, "exec", instruction)?;
+        if is_callable(&exec) {
+            let result = self.call_value(
+                &exec,
+                target.clone(),
+                vec![Value::String(subject.to_owned())],
+                instruction,
+            )?;
+            // Null or an object and nothing else: a program whose `exec` answers a number has
+            // broken the protocol, and reading `"0"` off it would silently produce undefined.
+            if !matches!(result, Value::Null) && !is_reflect_target(&result) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "RegExp exec method returned something other than an Object or null"
+                        .to_owned(),
+                });
+            }
+            return Ok(result);
+        }
+        // No callable `exec` in the way, so the built-in matcher answers -- and it is the one
+        // step that does need a real regexp.
+        if !matches!(target, Value::RegExp(_)) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Method called on an incompatible receiver".to_owned(),
+            });
+        }
+        self.dispatch_native(
+            Native::RegExpExec,
+            target,
+            &[Value::String(subject.to_owned())],
+            instruction,
+        )
+    }
+
+    /// Read one property and coerce it to text, which several of the steps below need in a row.
+    fn read_text(
+        &mut self,
+        target: &Value,
+        name: &str,
+        instruction: usize,
+    ) -> Result<String, ExecutionError> {
+        let value = self.read_property(target, name, instruction)?;
+        self.as_text(&value, instruction)
+    }
+
+    /// `ToLength` of one property: the count a result object claims to have.
+    fn read_length(
+        &mut self,
+        target: &Value,
+        name: &str,
+        instruction: usize,
+    ) -> Result<usize, ExecutionError> {
+        let value = self.read_property(target, name, instruction)?;
+        let number = self.as_number_argument(Some(&value), instruction)?;
+        Ok(to_length(number))
+    }
+
+    fn set_last_index(
+        &mut self,
+        target: &Value,
+        index: f64,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        self.set_computed(
+            target,
+            &Value::String("lastIndex".to_owned()),
+            Value::Number(index),
+            instruction,
+        )
+    }
+
+    /// The five `RegExp.prototype` methods the language reaches through a well-known symbol.
+    ///
+    /// Every one of them is *generic*: the specification requires only that the receiver be an
+    /// object, and does all its matching through [`Vm::regexp_exec_abstract`]. That is what makes
+    /// `"abc".replace(fake, "x")` work when `fake` is a plain object with an `exec` and a
+    /// `@@replace` inherited from `RegExp.prototype` -- the idiom a library uses to intercept
+    /// string methods without subclassing.
+    fn regexp_symbol(
+        &mut self,
+        method: RegExpSymbol,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if !is_reflect_target(receiver) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "RegExp.prototype{} called on a value that is not an object",
+                    method.js_name()
+                ),
+            });
+        }
+        let subject = self.as_text(arguments.first().unwrap_or(&Value::Undefined), instruction)?;
+        let second = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        match method {
+            RegExpSymbol::Match => self.regexp_match_symbol(receiver, &subject, instruction),
+            RegExpSymbol::Search => self.regexp_search_symbol(receiver, &subject, instruction),
+            RegExpSymbol::MatchAll => self.regexp_match_all_symbol(receiver, &subject, instruction),
+            RegExpSymbol::Replace => {
+                self.regexp_replace_symbol(receiver, &subject, &second, instruction)
+            }
+            RegExpSymbol::Split => {
+                self.regexp_split_symbol(receiver, &subject, &second, instruction)
+            }
+        }
+    }
+
+    /// `RegExp.prototype[@@match]`.
+    fn regexp_match_symbol(
+        &mut self,
+        target: &Value,
+        subject: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let flags = self.read_text(target, "flags", instruction)?;
+        // Without `g` this *is* `exec`: one result, with its captures. The array of texts is
+        // what `g` means, and reading the flag off the receiver rather than off an internal slot
+        // is what lets a program turn one into the other.
+        if !flags.contains('g') {
+            return self.regexp_exec_abstract(target, subject, instruction);
+        }
+        let full_unicode = flags.contains('u') || flags.contains('v');
+        self.set_last_index(target, 0.0, instruction)?;
+        let units: Vec<u16> = subject.encode_utf16().collect();
+        let mut found = Vec::new();
+        loop {
+            let result = self.regexp_exec_abstract(target, subject, instruction)?;
+            if matches!(result, Value::Null) {
+                return Ok(if found.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Array(ArrayData::new(found))
+                });
+            }
+            let matched = self.read_text(&result, "0", instruction)?;
+            let empty = matched.is_empty();
+            found.push(Value::String(matched));
+            // An empty match would leave the cursor where it is and match again forever, so the
+            // walk moves it on by hand -- by a whole code point when the pattern is Unicode-aware.
+            if empty {
+                let index = self.read_length(target, "lastIndex", instruction)?;
+                let next = advance_string_index(&units, index, full_unicode);
+                self.set_last_index(target, next as f64, instruction)?;
+            }
+        }
+    }
+
+    /// `RegExp.prototype[@@search]`.
+    ///
+    /// The cursor is saved and put back, because `search` is defined not to move it: a program
+    /// that searches a `g` regexp in the middle of a `while (re.exec(s))` loop must not have the
+    /// loop's position taken away from it.
+    fn regexp_search_symbol(
+        &mut self,
+        target: &Value,
+        subject: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let previous = self.read_property(target, "lastIndex", instruction)?;
+        if !same_value(&previous, &Value::Number(0.0)) {
+            self.set_last_index(target, 0.0, instruction)?;
+        }
+        let result = self.regexp_exec_abstract(target, subject, instruction)?;
+        let current = self.read_property(target, "lastIndex", instruction)?;
+        // Written back only when it actually moved, so a receiver whose `lastIndex` is
+        // non-writable is not made to refuse a write that would have changed nothing.
+        if !same_value(&current, &previous) {
+            self.set_computed(
+                target,
+                &Value::String("lastIndex".to_owned()),
+                previous,
+                instruction,
+            )?;
+        }
+        if matches!(result, Value::Null) {
+            return Ok(Value::Number(-1.0));
+        }
+        self.read_property(&result, "index", instruction)
+    }
+
+    /// `RegExp.prototype[@@matchAll]`.
+    ///
+    /// The iterator walks a *clone* of the receiver, which is the whole reason the method is not
+    /// simply `@@match` with `g`: the program's regexp keeps its own `lastIndex`, so the same
+    /// regexp can drive two independent walks and neither disturbs the other.
+    fn regexp_match_all_symbol(
+        &mut self,
+        target: &Value,
+        subject: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let flags = self.read_text(target, "flags", instruction)?;
+        let matcher = self.regexp_species_construct(target, &flags, instruction)?;
+        let index = self.read_length(target, "lastIndex", instruction)?;
+        self.set_last_index(&matcher, index as f64, instruction)?;
+        let mut iterator = ObjectData::default();
+        iterator.set_non_enumerable(MATCH_ALL_REGEXP, matcher);
+        iterator.set_non_enumerable(MATCH_ALL_SUBJECT, Value::String(subject.to_owned()));
+        iterator.set_non_enumerable(MATCH_ALL_GLOBAL, Value::Boolean(flags.contains('g')));
+        iterator.set_non_enumerable(
+            MATCH_ALL_UNICODE,
+            Value::Boolean(flags.contains('u') || flags.contains('v')),
+        );
+        iterator.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
+        iterator.set_non_enumerable("next", Value::Native(Native::RegExpStringIteratorNext));
+        iterator.set_non_enumerable(
+            WellKnown::Iterator.property_key(),
+            Value::Native(Native::IteratorSelf),
+        );
+        Ok(Value::Object(Rc::new(RefCell::new(iterator))))
+    }
+
+    /// One step of the iterator `@@matchAll` produced.
+    fn regexp_string_iterator_next(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Object(state) = receiver else {
+            return Err(ExecutionError::NotAnIterator);
+        };
+        let state = Rc::clone(state);
+        if state.borrow().get_own(MATCH_ALL_REGEXP).is_none() {
+            return Err(ExecutionError::NotAnIterator);
+        }
+        if helper_slot(&state, HELPER_DONE).is_truthy() {
+            return Ok(iteration_result(Value::Undefined, true));
+        }
+        let matcher = helper_slot(&state, MATCH_ALL_REGEXP);
+        let subject = helper_slot(&state, MATCH_ALL_SUBJECT).to_display_string();
+        let finish = |state: &Rc<RefCell<ObjectData>>| {
+            state
+                .borrow_mut()
+                .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+            Ok(iteration_result(Value::Undefined, true))
+        };
+        let result = match self.regexp_exec_abstract(&matcher, &subject, instruction) {
+            Ok(result) => result,
+            // A failed step ends the walk as surely as a finished one: a second `next` must not
+            // reach back into a matcher that has already thrown.
+            Err(error) => {
+                state
+                    .borrow_mut()
+                    .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+                return Err(error);
+            }
+        };
+        if matches!(result, Value::Null) {
+            return finish(&state);
+        }
+        // Without `g` there is exactly one match, and the walk is over as soon as it is handed
+        // on -- which is what makes `matchAll` on a non-global regexp a one-element sequence
+        // rather than an endless repetition of the same match.
+        if !helper_slot(&state, MATCH_ALL_GLOBAL).is_truthy() {
+            state
+                .borrow_mut()
+                .set_non_enumerable(HELPER_DONE, Value::Boolean(true));
+            return Ok(iteration_result(result, false));
+        }
+        let matched = self.read_text(&result, "0", instruction)?;
+        if matched.is_empty() {
+            let units: Vec<u16> = subject.encode_utf16().collect();
+            let index = self.read_length(&matcher, "lastIndex", instruction)?;
+            let unicode = helper_slot(&state, MATCH_ALL_UNICODE).is_truthy();
+            let next = advance_string_index(&units, index, unicode);
+            self.set_last_index(&matcher, next as f64, instruction)?;
+        }
+        Ok(iteration_result(result, false))
+    }
+
+    /// `SpeciesConstructor(rx, %RegExp%)` applied to build a second regexp over the same pattern.
+    fn regexp_species_construct(
+        &mut self,
+        target: &Value,
+        flags: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let constructor = self.read_property(target, "constructor", instruction)?;
+        let species = if matches!(constructor, Value::Undefined) {
+            Value::Native(Native::RegExpConstructor)
+        } else if !is_reflect_target(&constructor) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "constructor is not an object".to_owned(),
+            });
+        } else {
+            let found =
+                self.read_property(&constructor, WellKnown::Species.property_key(), instruction)?;
+            if found.is_nullish() {
+                Value::Native(Native::RegExpConstructor)
+            } else {
+                found
+            }
+        };
+        if !is_callable(&species) {
+            return Err(ExecutionError::NotCallable {
+                instruction,
+                value: species.type_name(),
+            });
+        }
+        let arguments = vec![target.clone(), Value::String(flags.to_owned())];
+        self.construct_value(species.clone(), arguments, species, instruction)
+    }
+
+    /// `RegExp.prototype[@@replace]`.
+    fn regexp_replace_symbol(
+        &mut self,
+        target: &Value,
+        subject: &str,
+        replacement: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let units: Vec<u16> = subject.encode_utf16().collect();
+        let functional = is_callable(replacement);
+        // Coerced once, up front, and only when it is not a function: the template is read for
+        // every match, and a `toString` that ran per match would be observable.
+        let template = if functional {
+            String::new()
+        } else {
+            self.as_text(replacement, instruction)?
+        };
+        let flags = self.read_text(target, "flags", instruction)?;
+        let global = flags.contains('g');
+        let full_unicode = flags.contains('u') || flags.contains('v');
+        if global {
+            self.set_last_index(target, 0.0, instruction)?;
+        }
+        // Every match is collected *before* any replacement is built, because a replacer
+        // function is allowed to move `lastIndex` and the specification does not let it change
+        // which matches the replacement covers.
+        let mut results = Vec::new();
+        loop {
+            let result = self.regexp_exec_abstract(target, subject, instruction)?;
+            if matches!(result, Value::Null) {
+                break;
+            }
+            let matched = self.read_text(&result, "0", instruction)?;
+            results.push(result);
+            if !global {
+                break;
+            }
+            if matched.is_empty() {
+                let index = self.read_length(target, "lastIndex", instruction)?;
+                let next = advance_string_index(&units, index, full_unicode);
+                self.set_last_index(target, next as f64, instruction)?;
+            }
+        }
+        let mut built = String::new();
+        let mut copied = 0usize;
+        for result in results {
+            let count = self.read_length(&result, "length", instruction)?.max(1) - 1;
+            let matched = self.read_text(&result, "0", instruction)?;
+            let match_units = matched.encode_utf16().count();
+            let index = self.read_property(&result, "index", instruction)?;
+            let index = self.as_number_argument(Some(&index), instruction)?;
+            let position = if index.is_nan() {
+                0
+            } else {
+                index.trunc().clamp(0.0, units.len() as f64) as usize
+            };
+            let mut captures = Vec::with_capacity(count);
+            for slot in 1..=count {
+                let capture = self.read_property(&result, &slot.to_string(), instruction)?;
+                captures.push(match capture {
+                    Value::Undefined => Value::Undefined,
+                    other => Value::String(self.as_text(&other, instruction)?),
+                });
+            }
+            let named = self.read_property(&result, "groups", instruction)?;
+            let produced = if functional {
+                let mut call_arguments = Vec::with_capacity(count + 4);
+                call_arguments.push(Value::String(matched.clone()));
+                call_arguments.extend(captures.iter().cloned());
+                call_arguments.push(Value::Number(position as f64));
+                call_arguments.push(Value::String(subject.to_owned()));
+                // The groups object is passed only when there is one, which is what keeps the
+                // replacer's argument count stable for a pattern with no named groups.
+                if !matches!(named, Value::Undefined) {
+                    call_arguments.push(named.clone());
+                }
+                let value =
+                    self.call_value(replacement, Value::Undefined, call_arguments, instruction)?;
+                self.as_text(&value, instruction)?
+            } else {
+                self.substitute(
+                    &template,
+                    &matched,
+                    &units,
+                    position,
+                    &captures,
+                    &named,
+                    instruction,
+                )?
+            };
+            // A match that starts before what has already been copied is skipped outright: an
+            // `exec` of the program's own may hand back overlapping or backwards positions, and
+            // the specification refuses to rewind rather than producing text twice.
+            if position >= copied {
+                push_bounded(&mut built, &utf16_slice(&units, copied..position))?;
+                push_bounded(&mut built, &produced)?;
+                copied = (position + match_units).min(units.len());
+            }
+        }
+        push_bounded(&mut built, &utf16_slice(&units, copied..units.len()))?;
+        Ok(Value::String(built))
+    }
+
+    /// `GetSubstitution`: expand `$&`, `$1`, `` $` ``, `$'` and `$<name>` in a replacement.
+    ///
+    /// Separate from [`expand_replacement`], which works from the ranges the built-in matcher
+    /// produced. Here the captures came out of a result object the program may have built
+    /// itself, so there are no ranges -- only the strings it handed back.
+    #[allow(clippy::too_many_arguments)]
+    fn substitute(
+        &mut self,
+        template: &str,
+        matched: &str,
+        units: &[u16],
+        position: usize,
+        captures: &[Value],
+        named: &Value,
+        instruction: usize,
+    ) -> Result<String, ExecutionError> {
+        let tail = (position + matched.encode_utf16().count()).min(units.len());
+        let characters: Vec<char> = template.chars().collect();
+        let mut out = String::new();
+        let mut at = 0;
+        while at < characters.len() {
+            if characters[at] != '$' || at + 1 >= characters.len() {
+                out.push(characters[at]);
+                at += 1;
+                continue;
+            }
+            match characters[at + 1] {
+                '$' => {
+                    out.push('$');
+                    at += 2;
+                }
+                '&' => {
+                    out.push_str(matched);
+                    at += 2;
+                }
+                '`' => {
+                    out.push_str(&utf16_slice(units, 0..position));
+                    at += 2;
+                }
+                '\'' => {
+                    out.push_str(&utf16_slice(units, tail..units.len()));
+                    at += 2;
+                }
+                '<' => {
+                    // A pattern with no named groups leaves `$<` alone rather than treating it
+                    // as an unterminated group reference: the sequence is only special when
+                    // there is a groups object for it to name something in.
+                    let Some(end) = characters[at + 2..].iter().position(|found| *found == '>')
+                    else {
+                        out.push('$');
+                        at += 1;
+                        continue;
+                    };
+                    if matches!(named, Value::Undefined) {
+                        out.push('$');
+                        at += 1;
+                        continue;
+                    }
+                    let name: String = characters[at + 2..at + 2 + end].iter().collect();
+                    let value = self.read_property(named, &name, instruction)?;
+                    if !matches!(value, Value::Undefined) {
+                        out.push_str(&self.as_text(&value, instruction)?);
+                    }
+                    at += end + 3;
+                }
+                first @ '0'..='9' => {
+                    // Two digits are preferred to one, but only when the two-digit group
+                    // exists: `$12` in a pattern with three groups is group one followed by a
+                    // literal `2`.
+                    let second = characters.get(at + 2).copied().filter(char::is_ascii_digit);
+                    let single = first as usize - '0' as usize;
+                    let double = second.map(|digit| single * 10 + (digit as usize - '0' as usize));
+                    let (index, width) = match double {
+                        Some(both) if both >= 1 && both <= captures.len() => (both, 3),
+                        _ if single >= 1 && single <= captures.len() => (single, 2),
+                        _ => {
+                            out.push('$');
+                            at += 1;
+                            continue;
+                        }
+                    };
+                    if let Value::String(text) = &captures[index - 1] {
+                        out.push_str(text);
+                    }
+                    at += width;
+                }
+                _ => {
+                    out.push('$');
+                    at += 1;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// `RegExp.prototype[@@split]`.
+    fn regexp_split_symbol(
+        &mut self,
+        target: &Value,
+        subject: &str,
+        limit: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let flags = self.read_text(target, "flags", instruction)?;
+        let unicode_matching = flags.contains('u') || flags.contains('v');
+        // The splitter is sticky whatever the receiver was: `split` walks the subject position
+        // by position and needs each attempt to either match *here* or fail, where a
+        // non-sticky pattern would skip ahead and lose the piece in between.
+        let new_flags = if flags.contains('y') {
+            flags.clone()
+        } else {
+            format!("{flags}y")
+        };
+        let splitter = self.regexp_species_construct(target, &new_flags, instruction)?;
+        let cap = match limit {
+            Value::Undefined => u32::MAX as usize,
+            other => {
+                let number = self.as_number_argument(Some(other), instruction)?;
+                to_uint32(number) as usize
+            }
+        };
+        let units: Vec<u16> = subject.encode_utf16().collect();
+        let mut parts: Vec<Value> = Vec::new();
+        if cap == 0 {
+            return Ok(Value::Array(ArrayData::new(parts)));
+        }
+        // An empty subject has no interior to cut: either the separator matches it, and the
+        // result is nothing at all, or it does not, and the result is the subject whole.
+        if units.is_empty() {
+            let result = self.regexp_exec_abstract(&splitter, subject, instruction)?;
+            if !matches!(result, Value::Null) {
+                return Ok(Value::Array(ArrayData::new(parts)));
+            }
+            parts.push(Value::String(subject.to_owned()));
+            return Ok(Value::Array(ArrayData::new(parts)));
+        }
+        let mut piece_start = 0usize;
+        let mut at = 0usize;
+        while at < units.len() {
+            self.set_last_index(&splitter, at as f64, instruction)?;
+            let result = self.regexp_exec_abstract(&splitter, subject, instruction)?;
+            if matches!(result, Value::Null) {
+                at = advance_string_index(&units, at, unicode_matching);
+                continue;
+            }
+            let end = self
+                .read_length(&splitter, "lastIndex", instruction)?
+                .min(units.len());
+            // A separator that consumed nothing since the last piece began would cut the same
+            // place forever; the walk moves on instead of emitting an empty piece per position.
+            if end == piece_start {
+                at = advance_string_index(&units, at, unicode_matching);
+                continue;
+            }
+            parts.push(Value::String(utf16_slice(&units, piece_start..at)));
+            if parts.len() == cap {
+                return Ok(Value::Array(ArrayData::new(parts)));
+            }
+            piece_start = end;
+            // A capturing separator contributes its groups to the result, which is what makes
+            // `"a1b".split(/(\d)/)` three elements rather than two.
+            let count = self.read_length(&result, "length", instruction)?.max(1) - 1;
+            for slot in 1..=count {
+                let capture = self.read_property(&result, &slot.to_string(), instruction)?;
+                parts.push(capture);
+                if parts.len() == cap {
+                    return Ok(Value::Array(ArrayData::new(parts)));
+                }
+            }
+            at = piece_start;
+        }
+        parts.push(Value::String(utf16_slice(&units, piece_start..units.len())));
+        Ok(Value::Array(ArrayData::new(parts)))
+    }
+
     fn replace_with_pattern(
         &mut self,
         receiver: &Value,
@@ -13784,7 +16837,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     return object.borrow().get(name).unwrap_or(Value::Undefined);
                 }
-                match collection_property(is_map, weak, name) {
+                // Through the realm's store first, so that a program which replaced -- or
+                // removed -- a method on `Map.prototype` sees its change from an instance too.
+                // Without it the instance answered from the table the program had already
+                // edited, and the prototype and the instance disagreed.
+                let table = match (is_map, weak) {
+                    (true, false) => PrototypeTable::Map,
+                    (false, false) => PrototypeTable::Set,
+                    (true, true) => PrototypeTable::WeakMap,
+                    (false, true) => PrototypeTable::WeakSet,
+                };
+                match table_step(
+                    &self.intrinsics,
+                    table,
+                    name,
+                    collection_property(is_map, weak, name),
+                ) {
                     Value::Undefined => object
                         .borrow()
                         .get(name)
@@ -13970,11 +17038,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }),
             // A regexp's own properties. `lastIndex` is the mutable one, and the reason two
             // evaluations of one literal must not share an object.
-            Value::Boolean(_) => match boolean_method(name) {
+            // Through the realm's store first, like every other primitive: a program that puts
+            // a property on `Boolean.prototype` has to find it from `true`, which is the whole
+            // point of a wrapper prototype. Without the store these three answered only from
+            // their tables, so `BigInt.prototype.x = 1; (1n).x` was undefined.
+            Value::Boolean(_) => match table_step(
+                &self.intrinsics,
+                PrototypeTable::Boolean,
+                name,
+                boolean_method(name),
+            ) {
                 Value::Undefined => inherited_object_property(&self.intrinsics, name),
                 method => method,
             },
-            Value::BigInt(_) => match bigint_method(name) {
+            Value::BigInt(_) => match table_step(
+                &self.intrinsics,
+                PrototypeTable::BigInt,
+                name,
+                bigint_method(name),
+            ) {
                 Value::Undefined => inherited_object_property(&self.intrinsics, name),
                 method => method,
             },
@@ -13989,7 +17071,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     None => Value::Undefined,
                 },
             },
-            Value::Symbol(_) => match symbol_method(name) {
+            Value::Symbol(_) => match table_step(
+                &self.intrinsics,
+                PrototypeTable::Symbol,
+                name,
+                symbol_method(name),
+            ) {
                 Value::Undefined => inherited_object_property(&self.intrinsics, name),
                 method => method,
             },
@@ -14035,9 +17122,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // specification makes each accessor a `TypeError` on the other type, and
                 // answering `false` instead would tell a program that a growable buffer cannot
                 // grow.
-                "resizable" if !buffer.shared => {
-                    Value::Boolean(!buffer.detached() && buffer.max_byte_length.is_some())
-                }
+                "resizable" if !buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
                 "growable" if buffer.shared => Value::Boolean(buffer.max_byte_length.is_some()),
                 // A fixed-length buffer answers its own length rather than zero or `undefined`:
                 // the accessor is defined for every buffer, and "the most this can ever hold"
@@ -14048,6 +17133,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .max_byte_length
                         .unwrap_or_else(|| buffer.byte_length()) as f64,
                 ),
+                // A shared buffer has no `detached` at all -- nothing can take bytes away from
+                // a holder that has no way to learn it happened, which is the same reason it has
+                // no `resize`.
                 "detached" if !buffer.shared => Value::Boolean(buffer.detached()),
                 "constructor" if buffer.shared => {
                     Value::Native(Native::SharedArrayBufferConstructor)
@@ -14180,9 +17268,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Native(native) => {
                 // A typed array reached through one of the generic array methods walks as its
-                // elements, the same coercion `call_value` applies to a redirected one.
+                // elements, the same coercion `call_value` applies to a redirected one. The two
+                // named here do *not* walk a snapshot and are handed back untouched; they come
+                // through only so the detached-buffer check inside sees them, which is the one
+                // place every `%TypedArray%.prototype` method can be caught at once.
                 let original = receiver.clone();
-                let receiver = if native.walks_an_array() {
+                let receiver = if native.walks_an_array()
+                    || matches!(native, Native::ArrayJoinDefault | Native::ArrayCopyWithin)
+                {
                     self.as_array_like(&Value::Native(native), receiver, instruction)?
                 } else {
                     receiver
@@ -15169,6 +18262,118 @@ fn node_http_incoming(receiver: &Value) -> Result<Rc<RefCell<HttpIncomingState>>
     }
 }
 
+fn node_http_client_request(
+    receiver: &Value,
+) -> Result<Rc<RefCell<HttpClientRequestState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "ClientRequest method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::HttpClientRequest(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "ClientRequest method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
+fn node_http_client_request_object(state: &Rc<RefCell<HttpClientRequestState>>) -> Value {
+    let mut data = ObjectData::default();
+    data.node_events = Some(Vec::new());
+    data.node_object = Some(NodeObject::HttpClientRequest(Rc::clone(state)));
+    data.set("write", Value::Native(Native::NodeClientRequestWrite));
+    data.set("end", Value::Native(Native::NodeClientRequestEnd));
+    data.set("on", Value::Native(Native::NodeEventOn));
+    data.set("once", Value::Native(Native::NodeEventOnce));
+    data.set("emit", Value::Native(Native::NodeEventEmit));
+    let object = Rc::new(RefCell::new(data));
+    state.borrow_mut().object = Some(Rc::clone(&object));
+    Value::Object(object)
+}
+
+fn node_http_request_arguments(
+    arguments: &[Value],
+) -> Result<(String, u16, String, String, Vec<(String, String)>, Value), ExecutionError> {
+    let options = arguments
+        .first()
+        .ok_or_else(|| ExecutionError::TypeErrorMessage {
+            message: "HTTP request options must be an object".into(),
+        })?;
+    let Value::Object(options) = options else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "HTTP request options must be an object".into(),
+        });
+    };
+    let options = options.borrow();
+    let own = |name: &str| options.get_own(name);
+    let host = own("host")
+        .or_else(|| own("hostname"))
+        .map(|value| value.to_display_string())
+        .unwrap_or_else(|| "localhost".into());
+    let port = own("port").map(|value| value.as_number()).unwrap_or(80.0);
+    if !port.is_finite() || port.fract() != 0.0 || !(1.0..=65535.0).contains(&port) {
+        return Err(ExecutionError::InvalidPort);
+    }
+    let method = own("method")
+        .map(|value| value.to_display_string().to_ascii_uppercase())
+        .unwrap_or_else(|| "GET".into());
+    let path = own("path")
+        .map(|value| value.to_display_string())
+        .unwrap_or_else(|| "/".into());
+    let mut headers = Vec::new();
+    if let Some(Value::Object(header_object)) = own("headers") {
+        let header_object = header_object.borrow();
+        for property in header_object
+            .properties
+            .iter()
+            .filter(|property| property.attributes.enumerable)
+        {
+            if let Property::Value(value) = &property.property {
+                headers.push((property.key.clone(), value.to_display_string()));
+            }
+        }
+    }
+    let callback = arguments
+        .get(1)
+        .cloned()
+        .filter(is_callable)
+        .unwrap_or(Value::Undefined);
+    Ok((host, port as u16, method, path, headers, callback))
+}
+
+fn encode_http_client_request(state: &HttpClientRequestState) -> Vec<u8> {
+    let mut headers = state.headers.clone();
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+    {
+        headers.push(("Host".into(), format!("{}:{}", state.host, state.port)));
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+    {
+        headers.push(("Content-Length".into(), state.body.len().to_string()));
+    }
+    if !headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("connection"))
+    {
+        headers.push(("Connection".into(), "close".into()));
+    }
+    let mut bytes = format!("{} {} HTTP/1.1\r\n", state.method, state.path).into_bytes();
+    for (name, value) in headers {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.extend_from_slice(b": ");
+        bytes.extend_from_slice(value.as_bytes());
+        bytes.extend_from_slice(b"\r\n");
+    }
+    bytes.extend_from_slice(b"\r\n");
+    bytes.extend_from_slice(&state.body);
+    bytes
+}
+
 fn node_listen_arguments(
     arguments: &[Value],
 ) -> Result<(u16, String, Option<Value>), ExecutionError> {
@@ -15596,6 +18801,15 @@ fn json_stringify(
                 "[]".to_owned()
             } else {
                 format!("[{open}{}{close}]", parts.join(&separator))
+            })
+        }
+        // Emitted exactly as it was given, which is the entire point: the text went through
+        // `JSON.rawJSON`'s validation once, and re-encoding it here is the round trip the raw
+        // form exists to avoid.
+        Value::Object(object) if object.borrow().get_own(RAW_JSON_MARK).is_some() => {
+            Some(match object.borrow().get_own(RAW_JSON_TEXT) {
+                Some(Value::String(text)) => text.clone(),
+                _ => "null".to_owned(),
             })
         }
         Value::Object(object) => {
@@ -16237,12 +19451,26 @@ fn call_native(
             buffer.grow(bounded_buffer(length, 1)?)?;
             Value::Undefined
         }
+        // `slice` *copies*: the result is a fixed-length buffer of its own, so a later resize of
+        // the original -- or a write through a view onto it -- is not visible through the copy.
+        // A *view*, not a buffer: `isView` asks whether the value reads bytes through one, which
+        // the buffer itself does not.
+        Native::ArrayBufferIsView => Value::Boolean(matches!(
+            arguments.first(),
+            Some(Value::TypedArray(_) | Value::DataView(_))
+        )),
+        // `transfer` *moves* the bytes: the buffer that comes out holds what went in, and the
+        // one it came from holds nothing at all afterwards. The detach is the whole point --
+        // it is what lets a program hand a large buffer across an ownership boundary and know
+        // that nobody on this side can still write through it.
         Native::ArrayBufferTransfer {
             preserve_resizability,
         } => {
             let Value::ArrayBuffer(buffer) = receiver else {
                 return Err(ExecutionError::NotABuffer);
             };
+            // A shared buffer cannot be transferred at all: its other holders have no way to
+            // learn the bytes went away, which is the same reason it has no `resize`.
             if buffer.shared || buffer.detached() {
                 return Err(ExecutionError::BufferDetached);
             }
@@ -16250,7 +19478,14 @@ fn call_native(
                 None | Some(Value::Undefined) => buffer.byte_length(),
                 requested => bounded_buffer(to_index(requested)?, 1)?,
             };
-            let max_byte_length = preserve_resizability.then_some(buffer.max_byte_length).flatten();
+            // Only `transfer` carries the ceiling across. `transferToFixedLength` exists to
+            // *drop* it, so a program can turn a buffer it may still be resizing into one whose
+            // length nothing can move -- which is the only shape some consumers will accept.
+            let max_byte_length = if preserve_resizability {
+                buffer.max_byte_length
+            } else {
+                None
+            };
             if let Some(max) = max_byte_length
                 && length > max
             {
@@ -16267,18 +19502,13 @@ fn call_native(
                 detached: std::cell::Cell::new(false),
             }))
         }
-        // `slice` *copies*: the result is a fixed-length buffer of its own, so a later resize of
-        // the original -- or a write through a view onto it -- is not visible through the copy.
-        // A *view*, not a buffer: `isView` asks whether the value reads bytes through one, which
-        // the buffer itself does not.
-        Native::ArrayBufferIsView => Value::Boolean(matches!(
-            arguments.first(),
-            Some(Value::TypedArray(_) | Value::DataView(_))
-        )),
         Native::ArrayBufferSlice => {
             let Value::ArrayBuffer(buffer) = receiver else {
                 return Err(ExecutionError::NotABuffer);
             };
+            // There is nothing to copy *from*: a detached buffer has no bytes, and answering an
+            // empty slice would tell the program it sliced an empty buffer rather than one it
+            // no longer owns.
             if buffer.detached() {
                 return Err(ExecutionError::BufferDetached);
             }
@@ -16334,6 +19564,9 @@ fn call_native(
             let Value::TypedArray(view) = receiver else {
                 return Ok(Value::Undefined);
             };
+            // Not a check `subarray` performs itself -- it is the *constructor* it delegates to
+            // that refuses, because a view onto a buffer with no bytes is not a short view but
+            // an impossible one. The observable answer is the same TypeError either way.
             if view.buffer.detached() {
                 return Err(ExecutionError::BufferDetached);
             }
@@ -16570,6 +19803,22 @@ fn call_native(
             unreachable!("the copying array methods are dispatched by the interpreter")
         }
         Native::RegExpSymbol(_)
+        | Native::ArrayFromAsync
+        | Native::JsonRawJson
+        | Native::JsonIsRawJson
+        | Native::WeakRefConstructor
+        | Native::WeakRefDeref
+        | Native::FinalizationRegistryConstructor
+        | Native::FinalizationRegistryRegister
+        | Native::FinalizationRegistryUnregister
+        | Native::RegExpStringIteratorNext
+        | Native::IteratorConcat
+        | Native::IteratorConcatNext
+        | Native::IteratorConcatReturn
+        | Native::IteratorZip { .. }
+        | Native::IteratorZipNext
+        | Native::IteratorZipReturn
+        | Native::IteratorDispose
         | Native::IteratorFrom
         | Native::IteratorWrapNext
         | Native::LegacyAccessor { .. }
@@ -17248,14 +20497,30 @@ fn call_native(
                     }
                 }
                 Native::StringSplit => {
+                    // The limit is a count of *pieces*, not of separators, and it is read before
+                    // the separator is: a limit of zero answers the empty array without the
+                    // string ever being cut.
+                    let limit = match arguments.get(1) {
+                        None | Some(Value::Undefined) => u32::MAX as usize,
+                        Some(value) => to_uint32(value.as_number()) as usize,
+                    };
                     let separator = argument(0);
-                    let parts: Vec<Value> = if arguments.is_empty() {
+                    let parts: Vec<Value> = if limit == 0 {
+                        Vec::new()
+                    } else if matches!(arguments.first(), None | Some(Value::Undefined)) {
+                        // An absent separator does not cut at all: the whole string is the one
+                        // piece. `undefined` means absent here, which is why this asks the value
+                        // rather than the argument count -- `"a".split(undefined)` is `["a"]`.
                         vec![Value::String(text.clone())]
                     } else if separator.is_empty() {
                         // An empty separator splits into characters, not into nothing.
-                        text.chars().map(|c| Value::String(c.to_string())).collect()
+                        text.chars()
+                            .take(limit)
+                            .map(|c| Value::String(c.to_string()))
+                            .collect()
                     } else {
                         text.split(&separator)
+                            .take(limit)
                             .map(|part| Value::String(part.to_owned()))
                             .collect()
                     };
@@ -17814,8 +21079,13 @@ fn call_native(
         | Native::NodeSocketDestroy
         | Native::NodeReadablePause
         | Native::NodeReadableResume
+        | Native::NodeReadableSetEncoding
         | Native::NodeHttp
         | Native::NodeHttpCreateServer
+        | Native::NodeHttpRequest
+        | Native::NodeHttpGet
+        | Native::NodeClientRequestWrite
+        | Native::NodeClientRequestEnd
         | Native::NodeServerListen
         | Native::NodeServerClose
         | Native::NodeServerAddress
@@ -18427,9 +21697,94 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
         } else {
             Native::CollectionValues(false)
         }),
+        // The tag `Object.prototype.toString` reads: it is what makes a `Map` print as
+        // `[object Map]` rather than the bare `[object Object]` every object would give.
+        (_, key) if key == WellKnown::ToStringTag.property_key() => Value::String(
+            match (is_map, weak) {
+                (true, false) => "Map",
+                (false, false) => "Set",
+                (true, true) => "WeakMap",
+                (false, true) => "WeakSet",
+            }
+            .to_owned(),
+        ),
         _ => Value::Undefined,
     }
 }
+
+/// `JSON.rawJSON(text)`: an object carrying JSON text the serialiser will emit unchanged.
+///
+/// Only a *primitive* text is accepted. An object or an array would have to be re-serialised
+/// with the indentation and the replacer the enclosing `stringify` was given, and pasting it in
+/// whole would ignore both -- so the specification refuses the case rather than producing a
+/// document whose shape depends on where the raw value happened to sit.
+fn build_raw_json(text: &str) -> Result<Value, ExecutionError> {
+    // Not `trim`: surrounding whitespace is refused rather than removed, because the text is
+    // going into a document verbatim and a leading newline would be there too.
+    if text.is_empty()
+        || text.starts_with([' ', '\t', '\n', '\r'])
+        || text.ends_with([' ', '\t', '\n', '\r'])
+    {
+        return Err(ExecutionError::InvalidJson);
+    }
+    let mut reader = JsonReader { rest: text };
+    let parsed = reader.value()?;
+    if !reader.rest.is_empty() {
+        return Err(ExecutionError::InvalidJson);
+    }
+    if !matches!(
+        parsed,
+        Value::Null | Value::Boolean(_) | Value::Number(_) | Value::String(_)
+    ) {
+        return Err(ExecutionError::InvalidJson);
+    }
+    let mut object = ObjectData::default();
+    object.set(RAW_JSON_TEXT, Value::String(text.to_owned()));
+    object.set_non_enumerable(RAW_JSON_MARK, Value::Boolean(true));
+    // A null prototype, so the object cannot answer to `toJSON`, `toString` or anything else a
+    // program might have put on `Object.prototype` -- it is a carrier, not a participant.
+    object.set_prototype(Value::Null);
+    Ok(Value::Object(Rc::new(RefCell::new(object))))
+}
+
+/// What a `WeakRef` inherits from `WeakRef.prototype`.
+fn weak_ref_method(name: &str) -> Value {
+    match name {
+        "deref" => Value::Native(Native::WeakRefDeref),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String("WeakRef".to_owned()),
+        _ => Value::Undefined,
+    }
+}
+
+/// What a `FinalizationRegistry` inherits from `FinalizationRegistry.prototype`.
+///
+/// `cleanupSome` is absent rather than a no-op: it is a separate proposal, and a method that
+/// answered "the cleanup has run" without ever being able to run one would be a claim a program
+/// could build on and be wrong about.
+fn finalization_registry_method(name: &str) -> Value {
+    match name {
+        "register" => Value::Native(Native::FinalizationRegistryRegister),
+        "unregister" => Value::Native(Native::FinalizationRegistryUnregister),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("FinalizationRegistry".to_owned())
+        }
+        _ => Value::Undefined,
+    }
+}
+
+/// The slot that marks a raw JSON object, and the property that carries its text.
+///
+/// Two, because the text is a property a program reads -- `JSON.rawJSON(1).rawJSON` is `"1"` --
+/// while the mark is not: the object is required to have exactly one own property, so the thing
+/// that says "this is raw JSON" has to be invisible to `Object.getOwnPropertyNames`. The
+/// reserved prefix is what makes it so.
+const RAW_JSON_MARK: &str = "@@raw-json";
+const RAW_JSON_TEXT: &str = "rawJSON";
+
+/// The slot a `WeakRef` keeps its target in, and the two a registry keeps its state in.
+const WEAK_REF_TARGET: &str = "@@weakref-target";
+const REGISTRY_CELLS: &str = "@@finreg-cells";
+const REGISTRY_CALLBACK: &str = "@@finreg-callback";
 
 /// One of the five symbol-keyed methods on `RegExp.prototype`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18811,6 +22166,48 @@ fn collection_state(receiver: &Value) -> Option<(Rc<ArrayData>, bool)> {
 /// value against before deciding whether a non-configurable property is really changing.
 ///
 /// It differs from `===` in two places: NaN equals itself, and `0` and `-0` are distinct.
+/// The well-known symbol a `String.prototype` method hands its call to, if it is one of the
+/// five that do.
+///
+/// `replace` and `replaceAll` share `@@replace`: the pair differ in how many matches they cover,
+/// and that difference is settled by the regexp's own `g` flag rather than by two symbols.
+const fn string_delegating_symbol(native: Native) -> Option<WellKnown> {
+    match native {
+        Native::StringMatch => Some(WellKnown::Match),
+        Native::StringMatchAll => Some(WellKnown::MatchAll),
+        Native::StringReplace | Native::StringReplaceAll => Some(WellKnown::Replace),
+        Native::StringSearch => Some(WellKnown::Search),
+        Native::StringSplit => Some(WellKnown::Split),
+        _ => None,
+    }
+}
+
+/// `ToLength`: a count, clamped into the range an index may occupy.
+fn to_length(number: f64) -> usize {
+    if number.is_nan() || number <= 0.0 {
+        return 0;
+    }
+    number.trunc().min(9_007_199_254_740_991.0) as usize
+}
+
+/// `AdvanceStringIndex`: the next position a match may start at.
+///
+/// A whole code point at a time when the pattern is Unicode-aware, and a single code unit
+/// otherwise. The difference matters exactly once -- an empty match beside a surrogate pair --
+/// and getting it wrong there splits an astral character down the middle.
+fn advance_string_index(units: &[u16], index: usize, unicode: bool) -> usize {
+    if !unicode || index + 1 >= units.len() {
+        return index + 1;
+    }
+    let lead = units[index];
+    let trail = units[index + 1];
+    if (0xD800..=0xDBFF).contains(&lead) && (0xDC00..=0xDFFF).contains(&trail) {
+        index + 2
+    } else {
+        index + 1
+    }
+}
+
 fn same_value(left: &Value, right: &Value) -> bool {
     match (left, right) {
         (Value::Number(a), Value::Number(b)) => {
@@ -21106,22 +24503,31 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
         "resize" if !shared => Value::Native(Native::ArrayBufferResize),
         "grow" if shared => Value::Native(Native::ArrayBufferGrow),
         "slice" => Value::Native(Native::ArrayBufferSlice),
+        // Only the unshared type: transferring is *giving the bytes away*, which is precisely
+        // what a shared buffer's other holders have no way to survive.
         "transfer" if !shared => Value::Native(Native::ArrayBufferTransfer {
             preserve_resizability: true,
         }),
         "transferToFixedLength" if !shared => Value::Native(Native::ArrayBufferTransfer {
             preserve_resizability: false,
         }),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String(
+            if shared {
+                "SharedArrayBuffer"
+            } else {
+                "ArrayBuffer"
+            }
+            .to_owned(),
+        ),
         _ => Value::Undefined,
     }
 }
 
 /// What every iterator this realm makes inherits from `%IteratorPrototype%`.
 ///
-/// The five lazy helpers and the six methods that consume an iterator. `concat`, `zip`, the
-/// windowing pair and `Symbol.dispose` are absent: each is a separate proposal with its own
-/// semantics, and a name answering something that is not what the proposal defines is worse
-/// than a name answering nothing.
+/// The seven lazy helpers and the eight methods that consume an iterator, plus `@@dispose`.
+/// `Iterator.concat`, `Iterator.zip` and `Iterator.zipKeyed` are absent, and are not on this
+/// table anyway: they are statics on the constructor rather than methods on the prototype.
 fn iterator_method(name: &str) -> Value {
     match name {
         "map" => Value::Native(Native::IteratorLazy(HelperKind::Map)),
@@ -21135,10 +24541,17 @@ fn iterator_method(name: &str) -> Value {
         "some" => Value::Native(Native::IteratorTerminal(TerminalKind::Some)),
         "every" => Value::Native(Native::IteratorTerminal(TerminalKind::Every)),
         "find" => Value::Native(Native::IteratorTerminal(TerminalKind::Find)),
+        "chunks" => Value::Native(Native::IteratorLazy(HelperKind::Chunks)),
+        "windows" => Value::Native(Native::IteratorLazy(HelperKind::Windows)),
+        "includes" => Value::Native(Native::IteratorTerminal(TerminalKind::Includes)),
+        "join" => Value::Native(Native::IteratorTerminal(TerminalKind::Join)),
         "constructor" => Value::Native(Native::IteratorConstructor),
         // An iterator is its own iterable, which is what lets one be handed straight to a
         // `for-of` or to `Array.from`.
         key if key == WellKnown::Iterator.property_key() => Value::Native(Native::IteratorSelf),
+        // Closing an iterator is exactly what disposing of one means, so `using it = ...` ends
+        // the iteration the same way an early `break` does.
+        key if key == WellKnown::Dispose.property_key() => Value::Native(Native::IteratorDispose),
         _ => Value::Undefined,
     }
 }
@@ -21169,6 +24582,7 @@ fn data_view_method(name: &str) -> Value {
         "getBigInt64" => Value::Native(Native::DataViewGetBig { signed: true }),
         "getBigUint64" => Value::Native(Native::DataViewGetBig { signed: false }),
         "setBigInt64" | "setBigUint64" => Value::Native(Native::DataViewSetBig),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String("DataView".to_owned()),
         _ => Value::Undefined,
     }
 }
@@ -21278,6 +24692,7 @@ fn symbol_method(name: &str) -> Value {
     match name {
         "toString" | "toLocaleString" => Value::Native(Native::PrimitiveToString),
         "valueOf" => Value::Native(Native::PrimitiveValueOf),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String("Symbol".to_owned()),
         _ => Value::Undefined,
     }
 }
@@ -21289,6 +24704,7 @@ fn bigint_method(name: &str) -> Value {
         // The receiver, not a number: narrowing to a double would make `(5n).valueOf() === 5n`
         // false, which is the one thing this type exists to prevent.
         "valueOf" => Value::Native(Native::PrimitiveValueOf),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String("BigInt".to_owned()),
         _ => Value::Undefined,
     }
 }
@@ -21299,6 +24715,7 @@ fn promise_method(name: &str) -> Value {
         "then" => Value::Native(Native::PromiseThen),
         "catch" => Value::Native(Native::PromiseCatch),
         "finally" => Value::Native(Native::PromiseFinally),
+        key if key == WellKnown::ToStringTag.property_key() => Value::String("Promise".to_owned()),
         _ => Value::Undefined,
     }
 }
@@ -21382,6 +24799,9 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
     let width = kind.width();
     Ok(match arguments.first() {
         Some(Value::ArrayBuffer(buffer)) => {
+            // A view onto a buffer with no bytes is not an empty view but an impossible one:
+            // the specification refuses it outright rather than handing back something that
+            // reports length zero and could never report anything else.
             if buffer.detached() {
                 return Err(ExecutionError::BufferDetached);
             }
@@ -21859,7 +25279,6 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::ArrayValues
         | N::ArrayFlat
         | N::ArrayOf
-        | N::ArrayBufferTransfer { .. }
         // The nine wrappers that take no attribute; the four that do fall to the default of 1.
         | N::StringHtml(
             HtmlWrapper::Big
@@ -21899,6 +25318,15 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::WeakSetConstructor
         | N::WeakMapConstructor
         | N::SymbolConstructor
+        | N::ArrayBufferTransfer { .. }
+        | N::IteratorDispose
+        | N::RegExpStringIteratorNext
+        | N::IteratorConcat
+        | N::IteratorConcatNext
+        | N::IteratorConcatReturn
+        | N::IteratorZipNext
+        | N::IteratorZipReturn
+        | N::WeakRefDeref
         | N::ProxyRevoke => 0.0,
 
         // The two-argument ones. `Object.assign` is 2 because the specification counts the
@@ -21952,6 +25380,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::LegacyAccessor { defines: true, .. }
         | N::BigIntAsIntN
         | N::BigIntAsUintN
+        | N::FinalizationRegistryRegister
         | N::WeakMapSet => 2.0,
 
         // The three-argument ones.
@@ -22480,6 +25909,8 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         ],
         PrototypeTable::WeakMap => &["set", "get", "has", "delete"],
         PrototypeTable::WeakSet => &["add", "has", "delete"],
+        PrototypeTable::WeakRef => &["deref"],
+        PrototypeTable::FinalizationRegistry => &["register", "unregister"],
         PrototypeTable::EventEmitter => &[
             "on",
             "addListener",
@@ -22729,6 +26160,16 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     match native.property(key)? {
         Value::Undefined => None,
         found if found.type_of() == "function" => Some(Attributes::BUILT_IN),
+        // `@@toStringTag` is the one built-in *value* the specification leaves configurable, and
+        // it has to be: the tag is what `Object.prototype.toString` reads, and a program that
+        // wants the plain `[object Object]` back has no way to get it except by deleting the
+        // tag. Locked on every axis, `delete Map.prototype[Symbol.toStringTag]` answered false
+        // and recorded nothing.
+        _ if key == WellKnown::ToStringTag.property_key() => Some(Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        }),
         _ => Some(Attributes::NONE),
     }
 }
@@ -22863,6 +26304,30 @@ fn native_js_name(native: &Native) -> String {
         Native::ArrayCopy(method) => method.property_key().to_owned(),
         Native::StringHtml(wrapper) => wrapper.property_key().to_owned(),
         Native::RegExpSymbol(method) => method.js_name(),
+        // The derivation works from the variant's `Debug` spelling, and for these the payload is
+        // the whole of the name: `IteratorLazy(Map)` would otherwise be `iteratorLazy`.
+        Native::IteratorLazy(kind) => kind.property_key().to_owned(),
+        Native::IteratorTerminal(kind) => kind.property_key().to_owned(),
+        Native::IteratorDispose => "[Symbol.dispose]".to_owned(),
+        // The derivation has no `Iterator` in its table of type prefixes, so these three would
+        // keep it. Only the first is a name a program can read; the other two are the helper's
+        // own methods, named for what they are.
+        Native::IteratorConcat => "concat".to_owned(),
+        Native::IteratorConcatNext => "next".to_owned(),
+        Native::IteratorConcatReturn => "return".to_owned(),
+        Native::IteratorZip { keyed: false } => "zip".to_owned(),
+        Native::IteratorZip { keyed: true } => "zipKeyed".to_owned(),
+        Native::IteratorZipNext => "next".to_owned(),
+        Native::IteratorZipReturn => "return".to_owned(),
+        // The derivation strips a leading type name, which for these three takes a word that is
+        // part of the method rather than part of the type: `WeakRefDeref` lowers to `refDeref`.
+        Native::WeakRefDeref => "deref".to_owned(),
+        // The derivation lowers a trailing acronym as an ordinary word: `JsonRawJson` becomes
+        // `rawJson`, and the language spells the second half in capitals.
+        Native::JsonRawJson => "rawJSON".to_owned(),
+        Native::JsonIsRawJson => "isRawJSON".to_owned(),
+        Native::FinalizationRegistryRegister => "register".to_owned(),
+        Native::FinalizationRegistryUnregister => "unregister".to_owned(),
         // The derivation has no `Iterator` in its table of type prefixes, so it spells this
         // `iteratorFrom` rather than `from`.
         Native::IteratorFrom => "from".to_owned(),
@@ -22881,12 +26346,6 @@ fn native_js_name(native: &Native) -> String {
         // and the derivation cannot reach it: the payload it discards as "not part of the name"
         // is the only place the type is written, so what is left spells the family instead.
         Native::TypedArrayConstructor(kind) => kind.name().to_owned(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: true,
-        } => "transfer".to_owned(),
-        Native::ArrayBufferTransfer {
-            preserve_resizability: false,
-        } => "transferToFixedLength".to_owned(),
         // The URI four are an acronym the variant spelling flattens: `DecodeUri` lowers to
         // `decodeUri`, and the language spells it `decodeURI`. A derivation cannot recover a case
         // distinction that the input does not carry, so these are named outright.
@@ -22899,6 +26358,15 @@ fn native_js_name(native: &Native) -> String {
         Native::EncodeUriComponent => "encodeURIComponent".to_owned(),
         Native::DecodeUri => "decodeURI".to_owned(),
         Native::DecodeUriComponent => "decodeURIComponent".to_owned(),
+        // The derivation works from the variant's `Debug` spelling, and a variant with a named
+        // field prints the field too -- so these two would be named `transfer { preserve
+        // resizability: true }`. The flag is which method this is, not part of what it is called.
+        Native::ArrayBufferTransfer {
+            preserve_resizability: true,
+        } => "transfer".to_owned(),
+        Native::ArrayBufferTransfer {
+            preserve_resizability: false,
+        } => "transferToFixedLength".to_owned(),
         other => builtin_js_name(&format!("{other:?}")),
     }
 }

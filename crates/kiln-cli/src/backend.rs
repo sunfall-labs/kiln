@@ -121,11 +121,13 @@ pub trait Backend: Send {
         &mut self,
         path: String,
         project_root: String,
+        node: bool,
         source_view: SourceView,
     ) -> Result<SourceResponse<RunSummary>> {
         match self.request(Request::Run {
             path,
             project_root,
+            node,
             source_view,
         })? {
             Response::Ran(summary) => Ok(SourceResponse::Ready(summary)),

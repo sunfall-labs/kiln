@@ -21,6 +21,11 @@ There is no event-loop driver trait and no second executor. There is one service
 facilities. Deterministic conformance implements it with a script of requests and completions. The
 script is a provider, not an executor: Tokio still owns polling and realm wakeups.
 
+`kiln run --node` is the explicit product boundary. It selects the Node resolver, typed builtin
+graph nodes, adapter surface, cache identity, and Tokio-backed host provider as one coherent mode.
+Without the flag, `node:` specifiers fail closed; with it, unknown builtins still fail closed. A
+module cannot accidentally acquire Node semantics because a dependency happened to use Node syntax.
+
 ```text
 Interpreter / generated continuation
               │ opaque request + continuation
@@ -45,6 +50,12 @@ Interpreter / generated continuation
 3. Node adapters implement JavaScript API shape in JS where practical and thin Rust glue where the
    VM needs object integration. `EventEmitter`, streams, Buffer coordination, HTTP parsing policy,
    and errors belong above host operations. Tokio performs I/O; it does not define Node semantics.
+
+These are deliberately composable layers, not one adapter per module: transports produce owned
+byte/completion events; protocol codecs turn bytes into HTTP events; stream adapters impose Node's
+flow and encoding semantics; module facades expose the JavaScript objects. HTTP client and server
+therefore share transport, resource lifetime, event dispatch, and backpressure instead of growing
+two loops. Future TLS wraps the transport seam; it does not fork the scheduler.
 
 ## Determinism
 
@@ -94,6 +105,11 @@ The priority matrix follows real server leverage, not alphabetical module covera
 
 The self-driving server probes are vertical acceptance gates. Unit compatibility counts never
 substitute for running them.
+
+The first gate is `conformance/server/s01-http-hello.mjs`: an HTTP server and HTTP client share one
+realm, communicate over loopback, decode a streamed UTF-8 response, close the listener, and let the
+realm terminate. Passing it proves the production module graph and runtime path, not merely codec
+units or a test-only loader.
 
 ## Non-goals
 

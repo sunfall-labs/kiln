@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 #
 # What a ten-line HTTP server costs to ship, measured across the runtimes kiln means to compete
-# with, and recorded before kiln can compete.
+# with. The historical competitor measurements predate Kiln's first passing server; subsequent
+# runs add Kiln's supported interpreted form without rewriting that history.
 #
 # This is not kiln-bench. That harness measures design.md §13's iteration loops through
 # kiln-db's QueryEngine, and everything in it is kiln's own work. This measures the *shipped
 # artifact* instead - cold start, peak RSS, and bytes on disk - for other people's toolchains,
-# on a program kiln cannot yet run at all. Two different axes, two different tools; putting this
+# on a shipped server probe. Two different axes, two different tools; putting this
 # inside kiln-bench would have coupled a regression gate to whether deno happened to be
 # installed.
 #
@@ -15,15 +16,16 @@
 # `deno compile` and `bun build --compile` put an entire JavaScript engine inside the executable
 # and kiln does not. That claim is worth what its measurement is worth, and a measurement taken
 # after kiln can run the program is a measurement taken by someone who already knows what answer
-# they want. So the baseline column is recorded first, from a checkout where kiln scores nothing.
+# they want. So the competitor baseline was recorded first, from a checkout where kiln scored
+# nothing; later runs can add Kiln without rewriting those historical measurements.
 #
 # HONESTY RULES, the same ones conformance/status.sh and kiln_report_has_measurements enforce:
 #
 #   - A runtime that is not installed is recorded `"available": false` with a reason. It is never
 #     a zero, and never absent from the document: a missing row reads as "not applicable" and an
 #     absent runtime is nothing of the kind.
-#   - kiln is measured too, on the same program, and its refusal is recorded verbatim. The column
-#     is empty because the compiler said something specific, and the document says what.
+#   - kiln is measured too, on the same program and explicit `--node` path. Unsupported forms are
+#     still recorded with a reason rather than quietly omitted.
 #   - Nothing here is a gate. There is no threshold and no exit-1-on-regression, because these
 #     numbers are properties of node, deno and bun rather than of this repository, and failing
 #     our CI over someone else's release would be theatre.
@@ -65,8 +67,8 @@ while [[ $# -gt 0 ]]; do
 			  --probe <file>      the program to measure (default: conformance/server/s01-http-hello.mjs)
 
 			Measures cold start, peak RSS and artifact size for the same self-driving HTTP server
-			under node, deno and bun - each both as a script and, where the toolchain offers it,
-			as a standalone executable - and records what kiln currently says about the same file.
+			under node, deno, bun, and kiln as scripts and, where the toolchain offers it,
+			as a standalone executable.
 
 			Never gates. See the header of this file for why.
 		USAGE
@@ -222,20 +224,31 @@ standalone_target("bun", "bun", [
     "build", "--compile", "--outfile", os.path.join(work, "s01-bun"), os.path.abspath(probe),
 ], os.path.join(work, "s01-bun"), "the JavaScript engine is inside this file")
 
-# The column this whole document exists to eventually fill. Recorded as a refusal with its exact
-# text, not omitted: "kiln has no number here" and "kiln was never asked" are different facts,
-# and only one of them is true.
-kiln = {"target": "kiln", "form": "standalone", "available": False}
+# Node mode is currently an advertised interpreter path. Measure that honestly as a script; do
+# not relabel it standalone merely because the executable containing the interpreter is local.
 if not kiln_bin or not os.path.exists(kiln_bin):
-    kiln["reason"] = "no kiln binary at target/debug/kiln; build one with `mbx build -p kiln-cli`"
+    targets.append({
+        "target": "kiln", "form": "script", "available": False,
+        "reason": "no kiln binary at target/debug/kiln; build one with `mbx build -p kiln-cli`",
+    })
 else:
-    result = subprocess.run([os.path.abspath(kiln_bin), "--one-shot", "run", probe],
-                            capture_output=True, text=True)
-    refusal = (result.stderr or result.stdout).strip().splitlines()
-    kiln["reason"] = refusal[0] if refusal else "exited %d and said nothing" % result.returncode
-    kiln["note"] = ("the target of docs/design.md §14 step 10. Until it runs this file there is "
-                    "nothing to measure, and a placeholder number would be a claim")
-targets.append(kiln)
+    argv = [os.path.abspath(kiln_bin), "--one-shot", "run", os.path.abspath(probe), "--node"]
+    metrics, failure = measure(argv)
+    kiln = {
+        "target": "kiln", "form": "script", "available": failure is None,
+        "runtime_path": os.path.abspath(kiln_bin),
+        "note": "explicit Node interpreter mode; Tokio owns both loopback I/O paths",
+    }
+    if failure is None:
+        kiln.update(metrics)
+    else:
+        kiln["reason"] = failure
+    targets.append(kiln)
+
+targets.append({
+    "target": "kiln", "form": "standalone", "available": False,
+    "reason": "the native backend does not yet advertise Node mode; its async continuation ABI must use the same RealmRuntime before this form exists",
+})
 
 
 def version(binary, argv):
@@ -268,7 +281,7 @@ cp "$WORK/report.json" "$OUT"
 kiln_say "### Compiled-server baseline"
 kiln_say ""
 kiln_say "The same program under every runtime: \`$PROBE\`, a self-driving HTTP server that"
-kiln_say "answers one request and exits. All three runtimes print the byte-identical line the"
+kiln_say "answers one request and exits. Every available runtime prints the byte-identical line the"
 kiln_say "conformance corpus records, so the comparison is over one program and not three."
 kiln_say ""
 kiln_say '```'

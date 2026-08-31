@@ -48,10 +48,15 @@ impl Output {
 
 /// Compile and execute one file. Program stdout stays byte-for-byte on stdout; compiler and
 /// runtime diagnostics go to stderr and make the command unsuccessful.
-pub fn run(backend: &mut dyn Backend, path: &Path, project_root: &Path) -> Result<Output> {
+pub fn run(
+    backend: &mut dyn Backend,
+    path: &Path,
+    project_root: &Path,
+    node: bool,
+) -> Result<Output> {
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
-    run_source(backend, path, project_root, &canonical, text)
+    run_source(backend, path, project_root, &canonical, text, node)
 }
 
 /// Compile and execute a source snapshot that the caller has already read. This is used by
@@ -63,8 +68,9 @@ pub(crate) fn run_source(
     project_root: &Path,
     canonical: &str,
     text: String,
+    node: bool,
 ) -> Result<Output> {
-    run_source_with_manifest(backend, path, project_root, canonical, text)
+    run_source_with_manifest(backend, path, project_root, canonical, text, node)
         .map(|(output, _, _, _)| output)
 }
 
@@ -79,9 +85,10 @@ pub(crate) fn run_source_with_manifest(
     project_root: &Path,
     canonical: &str,
     text: String,
+    node: bool,
 ) -> Result<(Output, SourceManifest, bool, SourceView)> {
     let (mut project_notes, synced_paths, mut manifest, mut truncated, mut source_view) =
-        sync_project_sources_with_override(backend, project_root, Some((canonical, &text)))?;
+        sync_project_sources_with_override(backend, project_root, Some((canonical, &text)), node)?;
     // A source outside the discovered project (or an extension intentionally not walked) still
     // gets uploaded so the long-standing single-file command remains useful. In-project files
     // were already uploaded by the sync handshake when the daemon requested them.
@@ -97,6 +104,7 @@ pub(crate) fn run_source_with_manifest(
     let mut output = match backend.run_at_view(
         canonical.to_owned(),
         project_root_string(project_root)?,
+        node,
         source_view,
     )? {
         SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
@@ -110,6 +118,7 @@ pub(crate) fn run_source_with_manifest(
             match backend.run_at_view(
                 canonical.to_owned(),
                 project_root_string(project_root)?,
+                node,
                 source_view,
             )? {
                 SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
@@ -148,6 +157,7 @@ pub(crate) fn run_watched_source_at_view(
         .run_at_view(
             canonical.to_owned(),
             project_root_string(project_root)?,
+            false,
             source_view,
         )
         .map_err(ViewError::Other)?
@@ -184,8 +194,12 @@ fn set_external_source_with_one_resync(
     match backend.set_source_at_view(canonical.to_owned(), text.to_owned(), source_view)? {
         SourceUpdate::Updated(view) => Ok(view),
         SourceUpdate::Stale(_) => {
-            let (_, _, _, _, view) =
-                sync_project_sources_with_override(backend, project_root, Some((canonical, text)))?;
+            let (_, _, _, _, view) = sync_project_sources_with_override(
+                backend,
+                project_root,
+                Some((canonical, text)),
+                false,
+            )?;
             match backend.set_source_at_view(canonical.to_owned(), text.to_owned(), view)? {
                 SourceUpdate::Updated(view) => Ok(view),
                 SourceUpdate::Stale(current) => Err(Error::Protocol(format!(
@@ -212,7 +226,7 @@ fn establish_snapshot(
     text: &str,
 ) -> Result<Snapshot> {
     let (notes, paths, manifest, truncated, view) =
-        sync_project_sources_with_override(backend, project_root, Some((canonical, text)))?;
+        sync_project_sources_with_override(backend, project_root, Some((canonical, text)), false)?;
     let source_view = if paths.contains(canonical) {
         view
     } else {
@@ -272,7 +286,12 @@ pub fn build(
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     let (mut project_notes, synced_paths, _, _, mut source_view) =
-        sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
+        sync_project_sources_with_override(
+            backend,
+            project_root,
+            Some((&canonical, &text)),
+            false,
+        )?;
     if !synced_paths.contains(&canonical) {
         source_view = set_external_source_with_one_resync(
             backend,
@@ -379,7 +398,12 @@ pub fn native_run(
     let canonical = canonical_path(path)?;
     let text = read_source(path)?;
     let (mut project_notes, synced_paths, _, _, mut source_view) =
-        sync_project_sources_with_override(backend, project_root, Some((&canonical, &text)))?;
+        sync_project_sources_with_override(
+            backend,
+            project_root,
+            Some((&canonical, &text)),
+            false,
+        )?;
     if !synced_paths.contains(&canonical) {
         source_view = set_external_source_with_one_resync(
             backend,
@@ -462,7 +486,7 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     let before = backend.stats()?;
     let started = Instant::now();
     let (mut notes, synced_paths, _, _, mut source_view) =
-        sync_project_sources_with_override(backend, root, Some((&canonical, &text)))?;
+        sync_project_sources_with_override(backend, root, Some((&canonical, &text)), false)?;
     if !synced_paths.contains(&canonical) {
         source_view =
             set_external_source_with_one_resync(backend, root, &canonical, &text, source_view)?;
@@ -471,8 +495,12 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     let summary = match backend.check_at_view(canonical.clone(), root_text.clone(), source_view)? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
-            let (retry_notes, retry_paths, _, _, view) =
-                sync_project_sources_with_override(backend, root, Some((&canonical, &text)))?;
+            let (retry_notes, retry_paths, _, _, view) = sync_project_sources_with_override(
+                backend,
+                root,
+                Some((&canonical, &text)),
+                false,
+            )?;
             notes.extend(retry_notes);
             source_view = view;
             if !retry_paths.contains(&canonical) {
@@ -612,7 +640,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
 /// Synchronize all discoverable project sources, returning non-fatal walk notes. The source hash
 /// and uploaded text are deliberately derived from one read of each file.
 fn sync_project_sources(backend: &mut dyn Backend, root: &Path) -> SyncResult {
-    sync_project_sources_with_override(backend, root, None)
+    sync_project_sources_with_override(backend, root, None, false)
 }
 
 /// Synchronize project sources, optionally substituting one already-read snapshot.
@@ -623,6 +651,7 @@ fn sync_project_sources_with_override(
     backend: &mut dyn Backend,
     root: &Path,
     source_override: Option<(&str, &str)>,
+    node: bool,
 ) -> SyncResult {
     let walk = sources::collect(root)?;
     let mut notes = Vec::new();
@@ -644,7 +673,7 @@ fn sync_project_sources_with_override(
     // `read_all` keeps the walk's order so `FileId` assignment stays reproducible.
     let mut texts = sources::read_all(root, &walk.files, source_override)?;
     let resolution_entries = if let Some((entry, _)) = source_override {
-        sources::include_reachable_dependencies(root, entry, &mut texts)?
+        sources::include_reachable_dependencies(root, entry, &mut texts, node)?
     } else {
         Vec::new()
     };
@@ -1457,7 +1486,12 @@ mod tests {
             SourceUpdate::Stale(_) => panic!("unexpected stale source"),
         };
         let summary = fake
-            .run_at_view("/tmp/main.ts".to_string(), "/tmp".to_string(), source_view)
+            .run_at_view(
+                "/tmp/main.ts".to_string(),
+                "/tmp".to_string(),
+                false,
+                source_view,
+            )
             .expect("run succeeds");
         let SourceResponse::Ready(summary) = summary else {
             panic!("unexpected stale run")
@@ -1483,7 +1517,7 @@ mod tests {
         .expect("write entry");
 
         let mut backend = Fake::new();
-        let output = run(&mut backend, &entry, &root).expect("run graph");
+        let output = run(&mut backend, &entry, &root, false).expect("run graph");
         assert_eq!(output.text, "hello from kiln\n");
         assert_eq!(output.exit_code, 0);
         assert_eq!(
@@ -2198,8 +2232,15 @@ mod tests {
         let captured = "bytes captured by watch\n";
 
         let mut fake = Fake::new();
-        run_source(&mut fake, &path, &dir, &canonical, captured.to_owned())
-            .expect("captured snapshot runs");
+        run_source(
+            &mut fake,
+            &path,
+            &dir,
+            &canonical,
+            captured.to_owned(),
+            false,
+        )
+        .expect("captured snapshot runs");
 
         let Request::Sync { files, .. } = &fake.seen[0] else {
             panic!("first request must advertise the captured snapshot");

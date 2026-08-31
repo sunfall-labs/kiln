@@ -725,8 +725,9 @@ fn handle<E: QueryEngine>(
         Request::Run {
             path,
             project_root,
+            node,
             source_view,
-        } => handle_run(state, path, project_root, source_view),
+        } => handle_run(state, path, project_root, node, source_view),
         Request::Test {
             root,
             mode,
@@ -843,6 +844,7 @@ fn handle_run<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
     path: String,
     project_root: String,
+    node: bool,
     source_view: SourceView,
 ) -> (Response, Next) {
     let prepared = {
@@ -869,6 +871,7 @@ fn handle_run<E: QueryEngine>(
                 path,
                 project_root,
                 resolutions.as_ref(),
+                node,
             )
         })) {
             Ok(Ok(_prepared)) if guard.engine.revision().0 != revision => {
@@ -894,7 +897,7 @@ fn handle_run<E: QueryEngine>(
             }
         }
     };
-    run_without_engine_lock(|| execute_prepared_run(prepared))
+    run_without_engine_lock(|| execute_prepared_run(prepared, node))
 }
 
 /// Prepare a native build against one exact engine snapshot, compile without the lock, and

@@ -134,8 +134,12 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
         Request::Run {
             path,
             project_root,
+            node,
             source_view: _,
-        } => (run(engine, resolutions, path, project_root), Next::Continue),
+        } => (
+            run(engine, resolutions, path, project_root, node),
+            Next::Continue,
+        ),
         Request::NativeBuild {
             path,
             project_root,
@@ -290,7 +294,7 @@ pub(crate) fn check_with_cache<E: QueryEngine>(
         .collect::<Vec<_>>();
     let resolved_exports = if diagnostics.is_empty() {
         entry.and_then(|entry| {
-            match graph_snapshot(engine, cache, &entry, &project_root, resolutions) {
+            match graph_snapshot(engine, cache, &entry, &project_root, resolutions, false) {
                 Ok(graph) => graph.resolved_export_names(&entry),
                 Err(error) => {
                     diagnostics.extend(module_graph_diagnostics(error));
@@ -319,8 +323,9 @@ pub(crate) fn prepare_run<E: QueryEngine>(
     resolutions: Option<&ResolutionMap>,
     path: String,
     project_root: String,
+    node: bool,
 ) -> Result<PreparedRun, String> {
-    prepare_run_with_cache(engine, None, path, project_root, resolutions)
+    prepare_run_with_cache(engine, None, path, project_root, resolutions, node)
 }
 
 pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
@@ -329,12 +334,13 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
     path: String,
     project_root: String,
     resolutions: Option<&kiln_proto::ResolutionMap>,
+    node: bool,
 ) -> Result<PreparedRun, String> {
     let entry = resolve_source_path(&path, &project_root);
     let prepared = if let Some(entry) = entry {
         let file = ensure_canonical_source(engine, &path, &entry, &project_root)?;
         PreparedRun::Graph {
-            graph: graph_snapshot(engine, cache, &entry, &project_root, resolutions),
+            graph: graph_snapshot(engine, cache, &entry, &project_root, resolutions, node),
             path,
             file,
             revision: engine.revision().0,
@@ -352,7 +358,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
 }
 
 /// Execute an interpreted run after preparation has released the query-engine mutex.
-pub(crate) fn execute_prepared_run(prepared: PreparedRun) -> Response {
+pub(crate) fn execute_prepared_run(prepared: PreparedRun, node: bool) -> Response {
     #[cfg(test)]
     wait_for_run_gate(prepared.path());
 
@@ -362,13 +368,13 @@ pub(crate) fn execute_prepared_run(prepared: PreparedRun) -> Response {
             path,
             file,
             revision,
-        } => execute_graph(graph, path, file, revision),
+        } => execute_graph(graph, path, file, revision, node),
         PreparedRun::Program {
             program,
             path,
             file,
             revision,
-        } => execute_program(program, path, file, revision),
+        } => execute_program(program, path, file, revision, node),
     }
 }
 
@@ -487,9 +493,10 @@ fn run<E: QueryEngine>(
     resolutions: Option<&ResolutionMap>,
     path: String,
     project_root: String,
+    node: bool,
 ) -> Response {
-    match prepare_run(engine, resolutions, path, project_root) {
-        Ok(prepared) => execute_prepared_run(prepared),
+    match prepare_run(engine, resolutions, path, project_root, node) {
+        Ok(prepared) => execute_prepared_run(prepared, node),
         Err(message) => Response::Error { message },
     }
 }
@@ -499,9 +506,11 @@ fn execute_graph(
     path: String,
     file: kiln_db::FileId,
     revision: u64,
+    node: bool,
 ) -> Response {
     let mut host = kiln_runtime::CaptureHost::new();
     let result = match graph {
+        Ok(graph) if node => graph.execute_node(&mut host, Default::default()),
         Ok(graph) => graph.execute(&mut host, Default::default()),
         Err(error) => Err(error),
     };
@@ -539,6 +548,7 @@ fn build_graph<E: QueryEngine>(
     resolutions: Option<&ResolutionMap>,
     entry: &Path,
     project_root: &str,
+    node: bool,
 ) -> Result<ModuleGraph, kiln_module_graph::ModuleGraphError> {
     let entries = resolutions
         .into_iter()
@@ -550,13 +560,7 @@ fn build_graph<E: QueryEngine>(
                 PathBuf::from(&entry.target),
             )
         });
-    let resolver = kiln_module_resolver::PinnedPackageResolver::new(project_root, entries)
-        .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
-            importer: PathBuf::new(),
-            specifier: String::new(),
-            error,
-        })?;
-    ModuleGraph::build_with_policy(entry, resolver, |module_path| {
+    let provider = |module_path: &Path| {
         let module_path_string = module_path.to_str().ok_or_else(|| {
             kiln_module_graph::ModuleGraphError::FrontendPath {
                 path: module_path.to_path_buf(),
@@ -575,7 +579,26 @@ fn build_graph<E: QueryEngine>(
                 diagnostics,
             }
         })
-    })
+    };
+    if node {
+        let resolver =
+            kiln_module_resolver::NodeRuntimeResolver::new(project_root).map_err(|error| {
+                kiln_module_graph::ModuleGraphError::Resolve {
+                    importer: PathBuf::new(),
+                    specifier: String::new(),
+                    error,
+                }
+            })?;
+        ModuleGraph::build_with_policy(entry, resolver, provider)
+    } else {
+        let resolver = kiln_module_resolver::PinnedPackageResolver::new(project_root, entries)
+            .map_err(|error| kiln_module_graph::ModuleGraphError::Resolve {
+                importer: PathBuf::new(),
+                specifier: String::new(),
+                error,
+            })?;
+        ModuleGraph::build_with_policy(entry, resolver, provider)
+    }
 }
 
 /// Return one immutable graph snapshot for the exact committed daemon state.  The caller holds
@@ -587,6 +610,7 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
     entry: &Path,
     project_root: &str,
     resolutions: Option<&kiln_proto::ResolutionMap>,
+    node: bool,
 ) -> Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError> {
     let canonical_root = std::fs::canonicalize(project_root).map_err(|error| {
         kiln_module_graph::ModuleGraphError::Source {
@@ -612,13 +636,13 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
             kind: error.kind(),
         }
     })?;
-    let key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions);
+    let key = GraphCacheKey::new(canonical_root, canonical_entry.clone(), resolutions, node);
     match cache {
         Some(cache) => {
             if let Some(graph) = cache.get(&key, |file| engine.source_revision(file)) {
                 return Ok(graph);
             }
-            let graph = build_graph(engine, resolutions, &canonical_entry, project_root)?;
+            let graph = build_graph(engine, resolutions, &canonical_entry, project_root, node)?;
             let sources = graph
                 .module_order()
                 .iter()
@@ -638,7 +662,9 @@ pub(crate) fn graph_snapshot<E: QueryEngine>(
                 None => Arc::new(graph),
             })
         }
-        None => build_graph(engine, resolutions, &canonical_entry, project_root).map(Arc::new),
+        None => {
+            build_graph(engine, resolutions, &canonical_entry, project_root, node).map(Arc::new)
+        }
     }
 }
 
@@ -695,7 +721,7 @@ pub(crate) fn native_graph<E: QueryEngine>(
         return Ok(None);
     };
     ensure_canonical_source(engine, path, &entry, project_root)?;
-    build_graph(engine, resolutions, &entry, project_root)
+    build_graph(engine, resolutions, &entry, project_root, false)
         .map(Some)
         .map_err(|error| error.to_string())
 }
@@ -705,6 +731,7 @@ fn execute_program(
     path: String,
     file: kiln_db::FileId,
     revision: u64,
+    node: bool,
 ) -> Response {
     let program = match program {
         Ok(program) => program,
@@ -732,7 +759,12 @@ fn execute_program(
     };
 
     let mut host = kiln_runtime::CaptureHost::new();
-    match kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default()) {
+    let result = if node {
+        kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, Default::default())
+    } else {
+        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default())
+    };
+    match result {
         Ok(execution) => {
             let scalar_value = scalar_value_summary(&execution.value);
             Response::Ran(RunSummary {

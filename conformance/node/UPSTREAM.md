@@ -45,8 +45,9 @@ exclusions also require reasons. Every selected file carries its SHA-256, so val
 if a path disappears or its bytes differ from the pinned Node revision.
 
 The inventory follows the real-server dependency chain: filesystem cases pass completely;
-EventEmitter, TCP, and HTTP now have executable partial coverage; Buffer, generic streams, and the
-HTTP client remain explicit gaps. The HTTP partial is self-contained: `node:http` serves a paused /
-resumed body and chunked response to a `node:net` client in the same realm, so Tokio owns both I/O
-paths and the scheduler/liveness decision. Cluster stays out of scope explicitly rather than
+EventEmitter, TCP, and HTTP now have executable partial coverage; Buffer and generic streams remain
+explicit gaps. The HTTP partial is self-contained in two directions: one case exercises a paused /
+resumed chunked response from `node:http` to `node:net`; the canonical server probe uses
+`node:http` for both server and client, including response decoding and `setEncoding`. Tokio owns
+both I/O paths and the scheduler/liveness decision. Cluster stays out of scope explicitly rather than
 letting an absent test look like compatibility.

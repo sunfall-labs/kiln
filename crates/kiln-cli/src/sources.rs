@@ -132,6 +132,7 @@ pub(crate) fn include_reachable_dependencies(
     root: &Path,
     entry: &str,
     texts: &mut Vec<(String, String)>,
+    node: bool,
 ) -> Result<Vec<PackageResolution>> {
     let resolver = NodePackageResolver::new(root)
         .map_err(|error| Error::BadInput(format!("cannot resolve project modules: {error}")))?;
@@ -166,6 +167,11 @@ pub(crate) fn include_reachable_dependencies(
         let module = frontend_oxc::parse(importer_path, importer_text);
 
         for request in module.runtime_requested_modules() {
+            if node && kiln_module_resolver::NodeBuiltin::parse(&request.specifier).is_some() {
+                // Builtins are typed virtual graph nodes. They have no source bytes or package
+                // metadata to synchronize, and the daemon's Node resolver materializes them.
+                continue;
+            }
             let resolved = resolver
                 .resolve_with_metadata(&request.specifier, &importer)
                 .map_err(|error| Error::BadInput(error.to_string()))?;
@@ -444,6 +450,7 @@ mod tests {
             &tree.0,
             entry.to_str().expect("UTF-8 entry"),
             &mut texts,
+            false,
         )
         .expect("include reachable package closure");
 
@@ -476,6 +483,44 @@ mod tests {
                 .join("node_modules/pkg/package.json")
                 .to_string_lossy()
         );
+    }
+
+    #[test]
+    fn node_builtins_are_typed_graph_nodes_not_synchronized_files() {
+        let tree = Tree::new("node-builtins");
+        tree.file("main.mjs");
+        let entry = tree.0.join("main.mjs");
+        std::fs::write(
+            &entry,
+            "import { createServer } from 'node:http'; console.log(createServer);",
+        )
+        .expect("write entry");
+        let canonical = entry.canonicalize().expect("canonical entry");
+        let mut texts = vec![(
+            canonical.to_string_lossy().into_owned(),
+            std::fs::read_to_string(&entry).expect("read entry"),
+        )];
+        let resolutions = include_reachable_dependencies(
+            &tree.0,
+            canonical.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            true,
+        )
+        .expect("recognized builtin needs no source snapshot");
+        assert!(resolutions.is_empty());
+        assert_eq!(texts.len(), 1);
+
+        let error = include_reachable_dependencies(
+            &tree.0,
+            canonical.to_str().expect("UTF-8 entry"),
+            &mut vec![(
+                canonical.to_string_lossy().into_owned(),
+                "import 'node:not-real';".into(),
+            )],
+            true,
+        )
+        .expect_err("unknown builtin must fail closed");
+        assert!(error.to_string().contains("node:not-real"));
     }
 
     /// The loop `read_all` replaced: one `realpath` and one read per file.

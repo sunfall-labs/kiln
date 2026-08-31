@@ -118,7 +118,9 @@ impl Client {
                 source_view: view, ..
             }
             | Request::Run {
-                source_view: view, ..
+                node: false,
+                source_view: view,
+                ..
             }
             | Request::NativeBuild {
                 source_view: view, ..
@@ -499,6 +501,7 @@ fn stale_source_operations_are_rejected_after_a_competing_commit() {
     let response = stale
         .request_at_view(
             &Request::Run {
+                node: false,
                 source_view: old_view,
                 path: "source.js".into(),
                 project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -747,6 +750,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
         client.handshake().expect("run handshake");
         client
             .request(&Request::Run {
+                node: false,
                 source_view: SourceView(0),
                 path: run_path,
                 project_root: run_root,
@@ -799,6 +803,7 @@ fn interpreted_run_uses_a_snapshot_without_blocking_other_clients() {
     // already-prepared run above stays on the old bytecode.
     let Response::Ran(second) = editor
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path,
             project_root,
@@ -823,11 +828,12 @@ fn prepared_single_file_run_keeps_its_program_and_revision_after_an_edit() {
         None,
         path,
         fixture.dir.to_string_lossy().into_owned(),
+        false,
     )
     .expect("prepare unsaved buffer");
 
     engine.set_source(file, "console.log('new');\n".into());
-    let Response::Ran(summary) = execute_prepared_run(prepared) else {
+    let Response::Ran(summary) = execute_prepared_run(prepared, false) else {
         panic!("expected run summary");
     };
     assert_eq!(summary.stdout, "old\n");
@@ -984,6 +990,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .expect("upload first source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
@@ -1002,6 +1009,7 @@ fn revision_pinned_native_build_rejects_stale_source_before_publication() {
         .expect("upload second source");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: project_root.clone(),
@@ -1985,6 +1993,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set source");
     let Response::Ran(first) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2006,6 +2015,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("reset counters");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: path.clone(),
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2037,6 +2047,7 @@ fn production_daemon_executes_cached_bytecode_and_structures_compile_failures() 
         .expect("set unsupported source");
     let Response::Ran(failed) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path,
             project_root: fixture.dir.to_string_lossy().into_owned(),
@@ -2121,6 +2132,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
 
     let response = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2145,6 +2157,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     client.request(&Request::ResetStats).expect("reset stats");
     let Response::Ran(second) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2184,6 +2197,7 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
         .expect("set cycle");
     let Response::Ran(cycle) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: std::fs::canonicalize(&entry)
                 .expect("canonical entry")
@@ -2256,6 +2270,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
         .into_owned();
     let Response::Ran(first) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: entry_path.clone(),
             project_root: project_root.clone(),
@@ -2290,6 +2305,7 @@ fn production_daemon_sync_removes_omitted_dependency_before_a_warm_run() {
 
     let Response::Ran(second) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: entry_path,
             project_root,
@@ -2349,6 +2365,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
             .expect("set relative overlay");
         let Response::Ran(result) = client
             .request(&Request::Run {
+                node: false,
                 source_view: SourceView(0),
                 path: canonical_entry.clone(),
                 project_root: root.clone(),
@@ -2381,6 +2398,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
 
         let Response::Ran(repeated) = client
             .request(&Request::Run {
+                node: false,
                 source_view: SourceView(0),
                 path: "overlay.js".into(),
                 project_root: root.clone(),
@@ -2405,6 +2423,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .expect("set unresolved lexical overlay");
     let Response::Ran(lexical) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: canonical_entry.clone(),
             project_root: root.clone(),
@@ -2440,6 +2459,7 @@ fn relative_overlay_updates_are_reflected_by_canonical_graph_execution() {
         .expect("set newer canonical overlay");
     let Response::Ran(newest) = client
         .request(&Request::Run {
+            node: false,
             source_view: SourceView(0),
             path: "overlay.js".into(),
             project_root: root,
