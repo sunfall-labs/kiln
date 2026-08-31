@@ -20,4 +20,5 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 kiln-interpreter = { workspace = true }
+kiln-module-resolver = { workspace = true }
 kiln-runtime = { workspace = true }

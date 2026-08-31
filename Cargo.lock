@@ -969,6 +969,7 @@ dependencies = [
  "kiln-interpreter",
  "kiln-ir",
  "kiln-module-graph",
+ "kiln-module-resolver",
  "kiln-native-number",
  "kiln-native-runtime",
  "kiln-native-toolchain",
