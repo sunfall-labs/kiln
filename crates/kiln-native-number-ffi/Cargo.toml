@@ -24,6 +24,7 @@ bigint = ["dep:num-bigint", "dep:num-traits"]
 temporal = ["dep:kiln-temporal"]
 
 [dependencies]
+kiln-native-number-abi = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-host-abi = { workspace = true }
 kiln-runtime = { workspace = true, optional = true }
