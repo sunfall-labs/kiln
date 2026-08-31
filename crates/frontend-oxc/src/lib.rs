@@ -4,7 +4,7 @@
 //! accepts ordinary strings and returns [`kiln_hir`] values, so an Oxc upgrade cannot leak AST
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
@@ -122,8 +122,11 @@ fn parse_source_with_commonjs_requires(
             })
             .collect::<Vec<_>>();
         requires.sort_by_key(|(start, _)| *start);
-        requires.dedup_by(|left, right| left.1 == right.1);
-        requires.into_iter().map(|(_, value)| value).collect()
+        let mut seen = HashSet::new();
+        requires
+            .into_iter()
+            .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
+            .collect()
     };
     (lower_parsed(&parsed, source_type), requires)
 }
@@ -2250,8 +2253,8 @@ mod tests {
     fn commonjs_requires_use_oxc_scope_semantics() {
         let source = r#"
             require('./first');
-            require('./first');
             if (ready) require('./nested');
+            require('./first');
             require(dynamic);
             function parameter(require) { require('./parameter'); }
             function hoisted() {
