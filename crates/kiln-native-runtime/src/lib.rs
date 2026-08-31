@@ -337,6 +337,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 
 #define KILN_HOST_OP_WRITE_STDOUT 1
 #define KILN_HOST_OP_CLOCK_NOW 2
+#define KILN_HOST_OP_ENTROPY_U64 3
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
@@ -464,6 +465,10 @@ const RUNTIME_PREFIX: &str = r#"/* Kiln native CLI runtime: deterministic HostOp
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if defined(_WIN32)
+#include <windows.h>
+#include <bcrypt.h>
+#endif
 
 "#;
 
@@ -692,6 +697,26 @@ static int kiln_cli_clock_now(kiln_value *result) {
     return KILN_C99_OK;
 }
 
+static int kiln_cli_entropy_u64(kiln_value *result) {
+    uint64_t word = 0;
+#if defined(_WIN32)
+    if (BCryptGenRandom(NULL, (PUCHAR)&word, (ULONG)sizeof(word),
+                        BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0) {
+        return KILN_C99_HOST_ERROR;
+    }
+#else
+    FILE *random = fopen("/dev/urandom", "rb");
+    if (random == NULL) return KILN_C99_HOST_ERROR;
+    if (fread(&word, 1, sizeof(word), random) != sizeof(word) || fclose(random) != 0) {
+        return KILN_C99_HOST_ERROR;
+    }
+#endif
+    *result = kiln_cli_undefined();
+    result->tag = KILN_VALUE_NUMBER;
+    result->bits = word;
+    return KILN_C99_OK;
+}
+
 /* Stable CLI implementations of the explicit synchronous HostOps boundary. */
 int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                        const kiln_value *arguments, kiln_value *result) {
@@ -702,6 +727,9 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     }
     if (operation == KILN_HOST_OP_CLOCK_NOW) {
         return argc == 0 ? kiln_cli_clock_now(result) : KILN_C99_HOST_ERROR;
+    }
+    if (operation == KILN_HOST_OP_ENTROPY_U64) {
+        return argc == 0 ? kiln_cli_entropy_u64(result) : KILN_C99_HOST_ERROR;
     }
     if (operation != KILN_HOST_OP_WRITE_STDOUT) return KILN_C99_HOST_ERROR;
     for (index = 0; index < argc; ++index) {

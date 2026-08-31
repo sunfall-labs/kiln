@@ -14,9 +14,9 @@ use kiln_ir::{
     UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    ActiveHttpRuntime, ClockCapability, Realm, RealmRuntime, RuntimeHttpClientEvent,
-    RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem,
-    duration_from_milliseconds,
+    ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, Realm,
+    RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn,
+    TimerId, WorkItem, duration_from_milliseconds,
     node_http::HttpResponseEvent,
     node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
@@ -5627,16 +5627,6 @@ fn realm_runtime() -> Result<RealmRuntime, ExecutionError> {
     })
 }
 
-fn runtime_entropy_seed(runtime: &RealmRuntime) -> Result<u64, ExecutionError> {
-    runtime
-        .capabilities()
-        .entropy_seed()
-        .ok_or_else(|| ExecutionError::Host {
-            instruction: 0,
-            message: "host entropy must be requested through HostOp::EntropyU64".to_owned(),
-        })
-}
-
 /// Execute one IR program against a host implementation.
 pub fn execute<H: HostOps + ?Sized>(
     program: Rc<Program>,
@@ -5681,7 +5671,7 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime_entropy_seed(&runtime)?,
+        runtime.capabilities().entropy,
         runtime.capabilities().clock,
     );
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
@@ -5741,7 +5731,7 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime_entropy_seed(&runtime)?,
+        runtime.capabilities().entropy,
         runtime.capabilities().clock,
     );
     vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
@@ -5787,7 +5777,7 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime_entropy_seed(&runtime)?,
+        runtime.capabilities().entropy,
         runtime.capabilities().clock,
     );
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
@@ -6180,7 +6170,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime_entropy_seed(runtime)?,
+        runtime.capabilities().entropy,
         runtime.capabilities().clock,
     );
     if session.is_some() {
@@ -6663,6 +6653,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// The state `Math.random` advances. Seeded from a constant rather than from the environment
     /// (ADR 0026), so the same program produces the same sequence in both engines and on every
     /// machine -- the same trade the virtual clock makes.
+    entropy: EntropyCapability,
     random_state: u64,
     steps: u64,
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
@@ -6747,7 +6738,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         host: &'host mut H,
         locals: Vec<Value>,
         limits: ExecutionLimits,
-        entropy_seed: u64,
+        entropy: EntropyCapability,
         clock_capability: ClockCapability,
     ) -> Self {
         Self {
@@ -6790,7 +6781,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             module_suspension: None,
             module_completion: None,
             symbol_registry: Vec::new(),
-            random_state: entropy_seed,
+            random_state: match entropy {
+                EntropyCapability::Deterministic | EntropyCapability::Host => DEFAULT_ENTROPY_SEED,
+                EntropyCapability::Seeded(seed) => seed,
+            },
+            entropy,
             closures: Vec::new(),
             dynamic_modules: std::collections::HashMap::new(),
             dynamic_namespaces: std::collections::HashMap::new(),
@@ -6826,6 +6821,33 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     message: "HostOp::ClockNow must return finite epoch milliseconds".to_owned(),
                 }),
         }
+    }
+
+    fn entropy_word(&mut self, instruction: usize) -> Result<u64, ExecutionError> {
+        match self.entropy {
+            EntropyCapability::Deterministic | EntropyCapability::Seeded(_) => {
+                Ok(split_mix_64(&mut self.random_state))
+            }
+            EntropyCapability::Host => {
+                let value = self.host.call(HostOp::EntropyU64, &[]).map_err(|error| {
+                    ExecutionError::Host {
+                        instruction,
+                        message: error.to_string(),
+                    }
+                })?;
+                match value {
+                    HostValue::Number(bits) => Ok(bits),
+                    _ => Err(ExecutionError::Host {
+                        instruction,
+                        message: "HostOp::EntropyU64 must return one u64 word".to_owned(),
+                    }),
+                }
+            }
+        }
+    }
+
+    fn random_double(&mut self, instruction: usize) -> Result<f64, ExecutionError> {
+        Ok((self.entropy_word(instruction)? >> 11) as f64 / 9_007_199_254_740_992.0)
     }
 
     /// Cut the reference cycles this run created, so the process can reclaim what it allocated.
@@ -12360,8 +12382,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::NodeAsyncResourceEmitDestroy => return Ok(Value::Undefined),
             Native::NodeCryptoRandomUuid => {
-                let first = split_mix_64(&mut self.random_state).to_be_bytes();
-                let second = split_mix_64(&mut self.random_state).to_be_bytes();
+                let first = self.entropy_word(instruction)?.to_be_bytes();
+                let second = self.entropy_word(instruction)?.to_be_bytes();
                 let mut bytes = [0_u8; 16];
                 bytes[..8].copy_from_slice(&first);
                 bytes[8..].copy_from_slice(&second);
@@ -13041,7 +13063,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             // `Math.random` advances state that lives on the machine, so it cannot be a pure
             // function of its arguments either.
-            Native::MathRandom => Ok(Value::Number(random_double(&mut self.random_state))),
+            Native::MathRandom => Ok(Value::Number(self.random_double(instruction)?)),
             // The scheduling built-ins are the event loop's only entry points, and the loop lives
             // on the machine, so they cannot be pure functions of their arguments.
             Native::SetTimeout | Native::SetInterval => {
@@ -26782,13 +26804,6 @@ fn normalize_posix_path(path: &str) -> String {
     normalized
 }
 
-/// A double in `[0, 1)` from 53 random bits, which is every bit the mantissa has.
-fn random_double(state: &mut u64) -> f64 {
-    #[expect(clippy::cast_precision_loss)]
-    let bits = (split_mix_64(state) >> 11) as f64;
-    bits / 9_007_199_254_740_992.0
-}
-
 fn to_int32(value: f64) -> i32 {
     to_uint32(value) as i32
 }
@@ -36370,7 +36385,6 @@ mod tests {
     }
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
-    use kiln_runtime::DEFAULT_ENTROPY_SEED;
 
     #[test]
     fn commonjs_require_reads_replacements_through_the_shared_cache_cell() {
@@ -36416,6 +36430,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
@@ -36429,7 +36444,7 @@ mod tests {
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
-            DEFAULT_ENTROPY_SEED,
+            EntropyCapability::Deterministic,
             ClockCapability::Virtual,
         );
         assert_eq!(
@@ -36485,6 +36500,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
@@ -36498,7 +36514,7 @@ mod tests {
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
-            DEFAULT_ENTROPY_SEED,
+            EntropyCapability::Deterministic,
             ClockCapability::Virtual,
         );
         assert_eq!(
@@ -36525,6 +36541,7 @@ mod tests {
     struct TestHost {
         calls: Vec<(HostOp, Vec<HostValue>)>,
         clock_now: Option<f64>,
+        entropy: std::collections::VecDeque<u64>,
     }
 
     impl HostOps for TestHost {
@@ -36534,8 +36551,16 @@ mod tests {
             arguments: &[HostValue],
         ) -> Result<HostValue, HostError> {
             self.calls.push((operation, arguments.to_vec()));
-            match (operation, self.clock_now) {
-                (HostOp::ClockNow, Some(milliseconds)) => Ok(HostValue::number(milliseconds)),
+            match operation {
+                HostOp::ClockNow => self
+                    .clock_now
+                    .map(HostValue::number)
+                    .ok_or_else(|| HostError::new("no scripted clock value")),
+                HostOp::EntropyU64 => self
+                    .entropy
+                    .pop_front()
+                    .map(HostValue::Number)
+                    .ok_or_else(|| HostError::new("no scripted entropy word")),
                 _ => Ok(HostValue::Undefined),
             }
         }
@@ -36586,6 +36611,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         execute(
             Rc::new(program.clone()),
@@ -36602,7 +36628,7 @@ mod tests {
             host,
             vec![Value::Undefined; program.local_count as usize],
             ExecutionLimits::default(),
-            DEFAULT_ENTROPY_SEED,
+            EntropyCapability::Deterministic,
             ClockCapability::Virtual,
         )
     }
@@ -36619,6 +36645,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: Some(1_725_000_123_456.25),
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(program),
@@ -36626,7 +36653,7 @@ mod tests {
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
-            DEFAULT_ENTROPY_SEED,
+            EntropyCapability::Deterministic,
             ClockCapability::Host,
         );
 
@@ -36670,6 +36697,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: Some(123.0),
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         assert_eq!(
@@ -36678,6 +36706,92 @@ mod tests {
         );
         drop(vm);
         assert!(host.calls.is_empty());
+    }
+
+    #[test]
+    fn host_entropy_is_one_explicit_word_per_draw() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: [
+                0x8000_0000_0000_0000,
+                0x0011_2233_4455_6677,
+                0x8899_aabb_ccdd_eeff,
+            ]
+            .into(),
+        };
+        let mut vm = Vm::with_entropy_seed(
+            Rc::new(program),
+            Rc::new(Strictness::default()),
+            &mut host,
+            Vec::new(),
+            ExecutionLimits::default(),
+            EntropyCapability::Host,
+            ClockCapability::Virtual,
+        );
+
+        assert_eq!(
+            vm.dispatch_native(Native::MathRandom, &Value::Undefined, &[], 1),
+            Ok(Value::Number(0.5))
+        );
+        assert_eq!(
+            vm.dispatch_native(Native::NodeCryptoRandomUuid, &Value::Undefined, &[], 2),
+            Ok(Value::String(
+                "00112233-4455-4677-8899-aabbccddeeff".to_owned()
+            ))
+        );
+        drop(vm);
+        assert_eq!(
+            host.calls,
+            vec![
+                (HostOp::EntropyU64, Vec::new()),
+                (HostOp::EntropyU64, Vec::new()),
+                (HostOp::EntropyU64, Vec::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn seeded_entropy_reproduces_without_calling_the_host() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let draw = |host: &mut TestHost| {
+            let mut vm = Vm::with_entropy_seed(
+                Rc::new(program.clone()),
+                Rc::new(Strictness::default()),
+                host,
+                Vec::new(),
+                ExecutionLimits::default(),
+                EntropyCapability::Seeded(7),
+                ClockCapability::Virtual,
+            );
+            vm.dispatch_native(Native::MathRandom, &Value::Undefined, &[], 0)
+        };
+        let mut first = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+        };
+        let mut second = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+        };
+        assert_eq!(draw(&mut first), draw(&mut second));
+        assert!(first.calls.is_empty());
+        assert!(second.calls.is_empty());
     }
 
     #[test]
@@ -36692,6 +36806,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         let date = Value::Date(Rc::new(std::cell::Cell::new(0.0)));
@@ -36714,6 +36829,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         let target = ordinary_object(Vec::<(String, Value)>::new());
@@ -36744,6 +36860,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         let original = Value::Array(ArrayData::new(vec![Value::Number(1.0), Value::Number(2.0)]));
@@ -36779,6 +36896,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         assert_eq!(
@@ -36825,6 +36943,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
@@ -36875,6 +36994,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
@@ -36919,6 +37039,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
@@ -37848,6 +37969,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let limits = ExecutionLimits {
             max_call_depth: 8,
@@ -38013,6 +38135,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let result = execute(
             Rc::new(program.clone()),
@@ -38040,6 +38163,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let result = execute(
             Rc::new(program.clone()),
@@ -38072,6 +38196,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let result = execute(
             Rc::new(program.clone()),
@@ -38099,6 +38224,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         execute(
             Rc::new(program.clone()),
@@ -38118,6 +38244,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
         let error = execute(
             Rc::new(program.clone()),
@@ -38170,6 +38297,7 @@ mod tests {
         let mut host = TestHost {
             calls: Vec::new(),
             clock_now: None,
+            entropy: std::collections::VecDeque::new(),
         };
 
         let result = execute_module(

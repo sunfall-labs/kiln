@@ -127,11 +127,28 @@ impl NativeBuildOptions {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NativeRealmPolicy {
     pub host_clock: bool,
+    pub entropy: NativeEntropyPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum NativeEntropyPolicy {
+    #[default]
+    Deterministic,
+    Seeded(u64),
+    Host,
 }
 
 impl NativeRealmPolicy {
     pub const fn host_clock() -> Self {
-        Self { host_clock: true }
+        Self {
+            host_clock: true,
+            entropy: NativeEntropyPolicy::Deterministic,
+        }
+    }
+
+    pub const fn with_entropy(mut self, entropy: NativeEntropyPolicy) -> Self {
+        self.entropy = entropy;
+        self
     }
 }
 
@@ -139,6 +156,15 @@ impl NativeRealmPolicy {
     const fn emission(self) -> EmissionPolicy {
         EmissionPolicy {
             host_clock: self.host_clock,
+            entropy: match self.entropy {
+                NativeEntropyPolicy::Deterministic => {
+                    kiln_backend_c::EmissionEntropyPolicy::Deterministic
+                }
+                NativeEntropyPolicy::Seeded(seed) => {
+                    kiln_backend_c::EmissionEntropyPolicy::Seeded(seed)
+                }
+                NativeEntropyPolicy::Host => kiln_backend_c::EmissionEntropyPolicy::Host,
+            },
         }
     }
 }
@@ -635,8 +661,9 @@ impl NativeBuilder {
             compile_started.elapsed()
         };
 
-        let link_options_digest =
-            Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes());
+        let link_options_digest = Digest::hash(
+            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
+        );
         let executable_key = key(
             ArtifactKind::LinkedArtifact,
             &compiler,
@@ -666,6 +693,8 @@ impl NativeBuilder {
                     };
                     if cfg!(not(target_os = "windows")) {
                         link_options.libraries.push("m".to_owned());
+                    } else {
+                        link_options.libraries.push("bcrypt".to_owned());
                     }
                     link_options
                         .runtime_libraries
@@ -1416,8 +1445,9 @@ impl NativeBuilder {
                 compile_started.elapsed()
             };
 
-        let link_options_digest =
-            Digest::hash(format!("{}\0system-math", profile.as_str()).as_bytes());
+        let link_options_digest = Digest::hash(
+            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
+        );
         let mut link_inputs = module_objects
             .iter()
             .map(|(_, digest, _)| *digest)
@@ -1457,6 +1487,8 @@ impl NativeBuilder {
                 };
                 if cfg!(not(target_os = "windows")) {
                     link_options.libraries.push("m".to_owned());
+                } else {
+                    link_options.libraries.push("bcrypt".to_owned());
                 }
                 link_options
                     .runtime_libraries
@@ -6833,7 +6865,7 @@ int main(int argc, char **argv) {{
                 &NativeBuildOptions {
                     output: root.path.join("host"),
                     profile: NativeProfile::Dev,
-                    realm: NativeRealmPolicy { host_clock: true },
+                    realm: NativeRealmPolicy::host_clock(),
                 },
             )
             .expect("host-backed Date program runs");
@@ -6854,6 +6886,68 @@ int main(int argc, char **argv) {{
         assert_ne!(
             deterministic.build.module_symbol,
             host_backed.build.module_symbol
+        );
+    }
+
+    #[test]
+    fn native_entropy_policy_is_reproducible_or_explicitly_host_backed() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native entropy integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-entropy");
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("random".to_owned())],
+            code: vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Math),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let run = |name: &str, entropy: NativeEntropyPolicy| {
+            builder
+                .run(
+                    &program,
+                    &NativeBuildOptions::new(root.path.join(name), NativeProfile::Dev)
+                        .with_realm_policy(NativeRealmPolicy::default().with_entropy(entropy)),
+                )
+                .unwrap_or_else(|error| panic!("native entropy fixture {name} failed: {error}"))
+        };
+
+        let deterministic = run("deterministic", NativeEntropyPolicy::Deterministic);
+        let seeded_a = run(
+            "seeded-a",
+            NativeEntropyPolicy::Seeded(kiln_runtime::DEFAULT_ENTROPY_SEED),
+        );
+        let seeded_b = run(
+            "seeded-b",
+            NativeEntropyPolicy::Seeded(kiln_runtime::DEFAULT_ENTROPY_SEED),
+        );
+        let other_seed = run("seeded-other", NativeEntropyPolicy::Seeded(7));
+        assert_eq!(deterministic.result, seeded_a.result);
+        assert_eq!(seeded_a.result, seeded_b.result);
+        assert_eq!(seeded_a.build.module_symbol, seeded_b.build.module_symbol);
+        assert_ne!(seeded_a.build.module_symbol, other_seed.build.module_symbol);
+        assert_ne!(seeded_a.result, other_seed.result);
+
+        let host_a = run("host-a", NativeEntropyPolicy::Host);
+        let host_b = run("host-b", NativeEntropyPolicy::Host);
+        for report in [&host_a, &host_b] {
+            let value = report
+                .result
+                .as_ref()
+                .and_then(HostValue::as_number)
+                .expect("Math.random returns a number");
+            assert!((0.0..1.0).contains(&value));
+        }
+        assert_eq!(host_a.build.module_symbol, host_b.build.module_symbol);
+        assert_ne!(
+            host_a.build.module_symbol,
+            deterministic.build.module_symbol
         );
     }
 
