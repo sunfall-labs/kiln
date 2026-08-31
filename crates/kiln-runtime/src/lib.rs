@@ -659,6 +659,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 responses: Some(response_sender),
                 response_bodies: BTreeMap::new(),
                 body_events: BTreeMap::new(),
+                close_after_response: HashSet::new(),
                 client_requests: None,
                 client_events: None,
             },
@@ -688,6 +689,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 responses: None,
                 response_bodies: BTreeMap::new(),
                 body_events: BTreeMap::new(),
+                close_after_response: HashSet::new(),
                 client_requests: Some(request_sender),
                 client_events: Some(event_receiver),
             },
@@ -747,6 +749,16 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .map(|connection| connection.transport.pump_write())
     }
 
+    /// Retire an HTTP transport after Hyper has completed its connection future.
+    pub fn close_http_connection(
+        &mut self,
+        resource: ResourceId,
+    ) -> Option<Vec<node_stream::StreamAction>> {
+        self.http_connections
+            .get_mut(&resource)
+            .map(|connection| connection.transport.close())
+    }
+
     /// Drain protocol events already selected at this realm checkpoint.
     pub fn take_http_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
         let Some(connection) = self.http_connections.get_mut(&resource) else {
@@ -759,6 +771,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         while let Ok(event) = receiver.try_recv() {
             events.push(match event {
                 hyper_http::EngineEvent::RequestHead { id, request } => {
+                    if !request.keep_alive {
+                        connection.close_after_response.insert(id);
+                    }
                     RuntimeHttpEvent::RequestHead { id, request }
                 }
                 hyper_http::EngineEvent::RequestData { id, data } => {
@@ -773,7 +788,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             while let Ok(event) = receiver.try_recv() {
                 events.push(match event {
                     BodyEvent::Drain => RuntimeHttpEvent::Drain { id },
-                    BodyEvent::Finish => RuntimeHttpEvent::Finish { id },
+                    BodyEvent::Finish => {
+                        if connection.close_after_response.remove(&id) {
+                            connection.transport.close_requested();
+                        }
+                        RuntimeHttpEvent::Finish { id }
+                    }
                 });
             }
         }
@@ -816,6 +836,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         }
         connection.response_bodies.insert(id, body);
         connection.body_events.insert(id, body_event_receiver);
+        if connection.close_after_response.remove(&id) {
+            connection.transport.close_requested();
+        }
         true
     }
 
@@ -850,6 +873,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         }
         connection.response_bodies.insert(id, body);
         connection.body_events.insert(id, body_event_receiver);
+        if connection.close_after_response.remove(&id) {
+            connection.transport.close_requested();
+        }
         true
     }
 
@@ -874,13 +900,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        Some(
-            self.http_connections
-                .get_mut(&resource)?
-                .response_bodies
-                .get_mut(&id)?
-                .end(data),
-        )
+        let connection = self.http_connections.get_mut(&resource)?;
+        let disposition = connection.response_bodies.get_mut(&id)?.end(data);
+        Some(disposition)
     }
 
     pub fn send_http1_client_request(
@@ -992,6 +1014,7 @@ struct RuntimeHttpConnection {
     responses: Option<mpsc::UnboundedSender<hyper_http::ResponseCommand>>,
     response_bodies: BTreeMap<u64, ResponseBodyDriver>,
     body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
+    close_after_response: HashSet<u64>,
     client_requests: Option<mpsc::UnboundedSender<hyper_http::ClientRequestCommand>>,
     client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
 }
@@ -3077,7 +3100,16 @@ mod tests {
         let write_actions = runtime
             .complete_http_connection(resource, write_completion)
             .expect("response write belongs to HTTP connection");
-        assert!(write_actions.is_empty());
+        assert!(write_actions.iter().any(|action| matches!(
+            action,
+            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
+                if *closed == resource
+        )));
+        assert!(
+            !write_actions
+                .iter()
+                .any(|action| matches!(action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })))
+        );
         assert_ne!(connect_request, read_request);
         assert!(runtime.host_mut().is_exhausted());
     }
@@ -4017,6 +4049,34 @@ mod tests {
         assert!(response.contains("content-type: text/plain\r\n"));
         assert!(response.ends_with("\r\n\r\nping"));
         assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
+        assert!(runtime.http_connection_started(
+            resource,
+            &AsyncHostOp::TcpWrite {
+                stream: resource,
+                data: data.clone(),
+            },
+            RequestId::new(2),
+        ));
+        let after_write = runtime
+            .complete_http_connection(
+                resource,
+                Completion {
+                    request: RequestId::new(2),
+                    sequence: 1,
+                    result: Ok(AsyncHostValue::Undefined),
+                },
+            )
+            .expect("write completion belongs to connection");
+        assert!(after_write.iter().any(|action| matches!(
+            action,
+            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
+                if *closed == resource
+        )));
+        assert!(
+            !after_write
+                .iter()
+                .any(|action| matches!(action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })))
+        );
     }
 
     #[test]

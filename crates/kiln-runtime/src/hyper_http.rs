@@ -158,6 +158,7 @@ where
             async move {
                 let (parts, mut body) = request.into_parts();
                 let request = kiln_request_parts(&parts);
+                let keep_alive = request.keep_alive;
                 let _ = events.send(EngineEvent::RequestHead { id, request });
                 while let Some(frame) = body.frame().await {
                     match frame {
@@ -178,7 +179,7 @@ where
                     }
                 }
                 let _ = events.send(EngineEvent::RequestEnd { id });
-                let response = loop {
+                let mut response = loop {
                     match responses.lock().await.recv().await {
                         Some(command) if command.id == id => break command,
                         Some(_) => continue,
@@ -195,6 +196,14 @@ where
                         }
                     }
                 };
+                if !keep_alive
+                    && !response
+                        .headers
+                        .iter()
+                        .any(|(name, _)| name.eq_ignore_ascii_case("connection"))
+                {
+                    response.headers.push(("connection".into(), "close".into()));
+                }
                 Ok::<_, std::convert::Infallible>(hyper_response(response))
             }
         })

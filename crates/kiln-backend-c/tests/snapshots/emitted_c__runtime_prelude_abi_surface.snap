@@ -367,7 +367,11 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_TEMPORAL_TO_JSON 302
 #define KILN_C99_METHOD_TEMPORAL_VALUE_OF 303
 #define KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID 304
-#define KILN_C99_METHOD_TEMPORAL_LAST 304
+#define KILN_C99_METHOD_TEMPORAL_NOW_READ 305
+#define KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST 312
+#define KILN_C99_METHOD_TEMPORAL_OP 313
+#define KILN_C99_METHOD_TEMPORAL_OP_LAST 335
+#define KILN_C99_METHOD_TEMPORAL_LAST 335
 #define KILN_C99_METHOD_SET_TIME 177
 #define KILN_C99_METHOD_SET_FULL_YEAR 178
 #define KILN_C99_METHOD_SET_MONTH 179
@@ -412,6 +416,7 @@ struct kiln_node_server {
 struct kiln_node_socket {
 typedef struct kiln_node_client_request {
 typedef struct kiln_node_response {
+static void kiln_c99_node_unlink_response(kiln_node_response *response) {
 typedef struct kiln_node_completion {
 typedef struct kiln_json_reader {
 typedef struct kiln_text {
@@ -446,6 +451,7 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
 int kiln_realm_now(double *out_milliseconds);
+int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
@@ -455,18 +461,16 @@ int kiln_realm_start_host_op(uint64_t realm, const kiln_async_host_op *operation
 int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
 int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
 int kiln_realm_cancel_active_request(uint64_t request);
-typedef struct kiln_http1_request_view {
-int32_t kiln_http1_decoder_create(void **out_decoder);
-void kiln_http1_decoder_free(void *decoder);
-int32_t kiln_http1_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
-int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header_names,
-typedef struct kiln_http1_response_event_view {
-int32_t kiln_http1_response_decoder_create(void **out_decoder);
-void kiln_http1_response_decoder_free(void *decoder);
-int32_t kiln_http1_response_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
-size_t kiln_http1_response_events_len(const void *events);
-int32_t kiln_http1_response_events_get(const void *events, size_t index,
-void kiln_http1_response_events_free(void *events);
+typedef struct kiln_realm_http_event {
+typedef struct kiln_realm_http_request {
+typedef struct kiln_realm_http_response {
+typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
+int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
+int kiln_realm_http_client_send_active(uint64_t resource,
+int kiln_realm_http_response_start_active(uint64_t resource, uint64_t id,
+int kiln_realm_http_response_write_active(uint64_t resource, uint64_t id,
+int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
 void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,
@@ -484,12 +488,15 @@ int32_t kiln_bigint_is_zero(const void *handle);
 int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
-int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, void **out_handle);
+int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, const unsigned char *zone,
 void kiln_temporal_free(void *handle);
 int32_t kiln_temporal_kind(const void *handle);
 int32_t kiln_temporal_get(const void *handle, const unsigned char *name, size_t name_len,
 int32_t kiln_temporal_to_string(const void *handle, unsigned char *buffer, size_t capacity);
 int32_t kiln_temporal_compare(const void *left, const void *right, int32_t *out_order);
+typedef struct kiln_temporal_call {
+int32_t kiln_temporal_invoke(const kiln_temporal_call *call);
+int32_t kiln_temporal_to_kind(const void *handle, uint32_t kind, void **out_handle);
 int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_t capacity);
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len);
 static kiln_value kiln_c99_undefined(void);
@@ -508,6 +515,9 @@ static const char *kiln_c99_temporal_builtin_name(uint64_t builtin);
 static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin);
 static uint64_t kiln_c99_temporal_builtin_of(kiln_value value);
 static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
+static const char *kiln_c99_temporal_op_name(uint64_t code);
+static const char *kiln_c99_temporal_now_name(uint64_t code);
+static uint64_t kiln_c99_temporal_op_code(const char *key, size_t key_len);
 static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_method(uint64_t code);
 static kiln_value kiln_c99_function(kiln_closure *closure);
@@ -842,23 +852,40 @@ static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len) {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t argument,
 static void kiln_c99_node_cancel_request(uint64_t *request) {
 static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
-static int kiln_c99_node_http_request(kiln_node_socket *socket, const uint8_t *bytes,
-static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
+static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
 typedef struct kiln_temporal_key {
 static const kiln_temporal_key KILN_C99_TEMPORAL_FIELD_KEYS[15] = {
 static const kiln_temporal_key KILN_C99_TEMPORAL_DURATION_KEYS[10] = {
+#define KILN_C99_TEMPORAL_OP_COUNT 23
+static const char *const KILN_C99_TEMPORAL_OPS[KILN_C99_TEMPORAL_OP_COUNT] = {
+static const char *kiln_c99_temporal_op_name(uint64_t code) {
+static uint64_t kiln_c99_temporal_op_code(const char *key, size_t key_len) {
+static const char *kiln_c99_temporal_now_name(uint64_t code) {
+#define KILN_C99_TEMPORAL_OPTION_COUNT 11
+#define KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS 9
+#define KILN_C99_TEMPORAL_OPTION_NUMBER_SLOTS 2
+static const kiln_temporal_key KILN_C99_TEMPORAL_OPTION_KEYS[KILN_C99_TEMPORAL_OPTION_COUNT] = {
+#define KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS 5
 typedef struct kiln_temporal_text {
+static char *kiln_c99_temporal_pack(const kiln_temporal_text *texts, size_t count,
+static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value item,
+typedef struct kiln_temporal_options {
+static void kiln_c99_temporal_options_init(kiln_temporal_options *options) {
+static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag,
 static int kiln_c99_temporal_read_bag(kiln_host *host, kiln_value bag, int duration,
 static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
 static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value item,
+static int kiln_c99_temporal_answer(int32_t answered, void *handle, double number,
+static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,

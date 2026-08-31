@@ -15,11 +15,11 @@
       "target": "node",
       "form": "script",
       "available": true,
-      "runtime_path": "/opt/homebrew/bin/node",
+      "runtime_path": "~/.local/share/mise/shims/node",
       "note": "no standalone form measured: Node's SEA is a multi-step postject flow rather than one command, and half-doing it would put a number in this table that nobody could reproduce from the line above it",
-      "startup_ms_median": 81.51,
-      "startup_ms_min": 80.54,
-      "peak_rss_bytes": 60899328
+      "startup_ms_median": 128.97,
+      "startup_ms_min": 122.79,
+      "peak_rss_bytes": 60964864
     },
     {
       "target": "deno",
@@ -27,9 +27,9 @@
       "available": true,
       "runtime_path": "~/.local/share/mise/installs/deno/2.9.5/bin/deno",
       "note": "",
-      "startup_ms_median": 26.33,
-      "startup_ms_min": 25.27,
-      "peak_rss_bytes": 36167680
+      "startup_ms_median": 26.72,
+      "startup_ms_min": 26.13,
+      "peak_rss_bytes": 36233216
     },
     {
       "target": "bun",
@@ -37,9 +37,9 @@
       "available": true,
       "runtime_path": "~/.local/share/mise/installs/bun/latest/bin/bun",
       "note": "",
-      "startup_ms_median": 23.14,
-      "startup_ms_min": 21.77,
-      "peak_rss_bytes": 26640384
+      "startup_ms_median": 22.8,
+      "startup_ms_min": 21.73,
+      "peak_rss_bytes": 26566656
     },
     {
       "target": "deno",
@@ -47,9 +47,9 @@
       "available": true,
       "artifact_bytes": 67463474,
       "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 26.25,
-      "startup_ms_min": 24.81,
-      "peak_rss_bytes": 36339712
+      "startup_ms_median": 27.02,
+      "startup_ms_min": 25.25,
+      "peak_rss_bytes": 36372480
     },
     {
       "target": "bun",
@@ -57,9 +57,9 @@
       "available": true,
       "artifact_bytes": 63910514,
       "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 22.48,
-      "startup_ms_min": 21.74,
-      "peak_rss_bytes": 25665536
+      "startup_ms_median": 21.76,
+      "startup_ms_min": 21.3,
+      "peak_rss_bytes": 25583616
     },
     {
       "target": "kiln",
@@ -67,9 +67,9 @@
       "available": true,
       "runtime_path": "~/Developer/Personal/kiln/target/debug/kiln",
       "note": "explicit Node interpreter mode; Tokio owns both loopback I/O paths",
-      "startup_ms_median": 617.66,
-      "startup_ms_min": 593.96,
-      "peak_rss_bytes": 40493056
+      "startup_ms_median": 697.11,
+      "startup_ms_min": 614.8,
+      "peak_rss_bytes": 41656320
     },
     {
       "target": "kiln",

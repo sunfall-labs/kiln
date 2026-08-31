@@ -179,6 +179,11 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
         (Op::Prototype(kind), "constructor") => {
             Value::Native(Native::Temporal(Op::Constructor(kind)))
         }
+        // The tag lives on the prototype, which is where an instance reads it from and where a
+        // program that borrows `Object.prototype.toString` finds it.
+        (Op::Prototype(kind), name) if name == crate::WellKnown::ToStringTag.property_key() => {
+            Value::String(kind.tag().to_owned())
+        }
         (Op::Prototype(kind), _) => {
             Value::Native(Native::Temporal(Op::Method(prototype_method(kind, name)?)))
         }
@@ -206,6 +211,11 @@ fn named_kind(name: &str) -> Option<engine::Kind> {
 /// plausible zero -- `date.hour` is `undefined` because `get` says a `PlainDate` has no such field,
 /// not because nobody wrote an arm for it.
 pub fn instance_property(value: &engine::TemporalValue, name: &str) -> Option<Value> {
+    // The tag every `Temporal` type carries, which is how `Object.prototype.toString` tells one
+    // from an ordinary object: `[object Temporal.PlainDate]` rather than `[object Object]`.
+    if name == crate::WellKnown::ToStringTag.property_key() {
+        return Some(Value::String(value.kind().tag().to_owned()));
+    }
     if let Some(field) = value.get(name) {
         return Some(match field {
             engine::Field::Number(number) => Value::Number(number),

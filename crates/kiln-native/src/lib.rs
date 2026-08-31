@@ -61,7 +61,7 @@ const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
     assert!(PROVIDER_SCHEMA_VERSION == 1);
-    assert!(PROVIDER_ABI_VERSION == 8);
+    assert!(PROVIDER_ABI_VERSION == 9);
 };
 
 /// Native optimization and checking policy.
@@ -3551,7 +3551,7 @@ mod tests {
         assert!(runtime_abi_identity().contains("async-2"));
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-8"
+            "kiln-native-number-provider-9"
         );
     }
 
@@ -3781,10 +3781,16 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             r#"import { createServer } from "node:http";
 const server = createServer((request, response) => {
   console.log(request.method, request.url, request.httpVersion);
-  response.setHeader("Content-Type", "text/plain");
-  response.writeHead(201);
-  response.end("hello");
-  server.close();
+  let body = "";
+  request.on("data", chunk => body += chunk);
+  request.on("end", () => {
+    console.log(body);
+    response.setHeader("Content-Type", "text/plain");
+    response.writeHead(201);
+    response.write("echo:");
+    response.end(body);
+    server.close();
+  });
 });
 server.listen(0, "127.0.0.1", () => console.log(server.address().port));
 "#,
@@ -3830,23 +3836,51 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
 
         let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect HTTP client");
         client
-            .write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .expect("write HTTP request");
-        let mut response = String::new();
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+            .expect("set HTTP client timeout");
         client
-            .read_to_string(&mut response)
-            .expect("server closes complete HTTP response");
+            .write_all(
+                b"POST /echo HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\nConnection: close\r\n\r\nabc",
+            )
+            .expect("write first HTTP request fragment");
+        client
+            .write_all(b"123")
+            .expect("write second HTTP request fragment");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish HTTP request");
+        let mut response = String::new();
+        let read_result = client.read_to_string(&mut response);
+        if let Err(error) = read_result {
+            let status = child.wait().expect("server exits after failed HTTP read");
+            let mut stderr = String::new();
+            child
+                .stderr
+                .take()
+                .expect("capture stderr")
+                .read_to_string(&mut stderr)
+                .expect("read stderr");
+            panic!(
+                "HTTP read failed: {error}; status={status}; response={response:?}; stderr={stderr:?}"
+            );
+        }
         assert!(
             response.starts_with("HTTP/1.1 201 Created\r\n"),
             "{response:?}"
         );
+        let response_lower = response.to_ascii_lowercase();
         assert!(
-            response.contains("Content-Type: text/plain\r\n"),
+            response_lower.contains("content-type: text/plain\r\n"),
             "{response:?}"
         );
-        assert!(response.contains("Content-Length: 5\r\n"), "{response:?}");
-        assert!(response.contains("Connection: close\r\n"), "{response:?}");
-        assert!(response.ends_with("\r\n\r\nhello"), "{response:?}");
+        assert!(
+            response_lower.contains("connection: close\r\n"),
+            "{response:?}"
+        );
+        assert!(
+            response.ends_with("\r\n5\r\necho:\r\n6\r\nabc123\r\n0\r\n\r\n"),
+            "{response:?}"
+        );
 
         let status = child
             .wait()
@@ -3863,7 +3897,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .read_to_string(&mut stderr)
             .expect("read stderr");
         assert!(status.success(), "server failed: {stderr}");
-        assert_eq!(rest, "GET /health 1.1\n");
+        assert_eq!(rest, "POST /echo 1.1\nabc123\n");
     }
 
     #[test]

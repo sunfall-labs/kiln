@@ -1015,6 +1015,40 @@ impl Native {
         )
     }
 
+    /// Whether this `Array.prototype` method has a generic implementation that walks the
+    /// receiver the program supplied rather than a copy of it.
+    ///
+    /// The specification defines every one of them on an arbitrary object -- `HasProperty`,
+    /// `Get`, `Set` and `DeletePropertyOrThrow` against the receiver, with the bound read
+    /// through `Get(O, "length")` -- and a copy answers differently in three ways at once: a
+    /// mutating method writes nothing back, an index the walk deleted or that only the prototype
+    /// carries is visited anyway, and the receiver a callback is handed is an array the program
+    /// never saw. An array receiver keeps the dense path, which is the same walk without the
+    /// indirection.
+    fn walks_a_live_receiver(self) -> bool {
+        matches!(
+            self,
+            Self::ArrayAt
+                | Self::ArrayConcat
+                | Self::ArrayCopy(_)
+                | Self::ArrayCopyWithin
+                | Self::ArrayFill
+                | Self::ArrayFlat
+                | Self::ArrayIncludes
+                | Self::ArrayIndexOf
+                | Self::ArrayJoin
+                | Self::ArrayJoinDefault
+                | Self::ArrayLastIndexOf
+                | Self::ArrayPop
+                | Self::ArrayPush
+                | Self::ArrayReverse
+                | Self::ArrayShift
+                | Self::ArraySlice
+                | Self::ArraySplice
+                | Self::ArrayUnshift
+        )
+    }
+
     /// Whether this is one of the generic `String.prototype` methods.
     ///
     /// Each begins `RequireObjectCoercible(this)` then `ToString(this)`: they are defined on the
@@ -1888,6 +1922,12 @@ impl ObjectData {
                 Some(Value::Native(Native::PrototypeOf(table))) => return Some(table),
                 Some(Value::Object(parent)) => parent.borrow().prototype.clone(),
                 Some(Value::Function(parent)) => parent.properties.borrow().prototype.clone(),
+                // An array's own chain ends at `Array.prototype` unless the program moved it,
+                // which is where an object linked to an array finds the array methods.
+                Some(Value::Array(items)) => match items.properties.borrow().prototype.clone() {
+                    Some(moved) => Some(moved),
+                    None => return Some(PrototypeTable::Array),
+                },
                 _ => return None,
             };
         }
@@ -1907,6 +1947,21 @@ impl ObjectData {
         let mut current = self.prototype.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             let found = match &current {
+                // An array in a prototype chain contributes its elements and its `length` as
+                // well as its property store. `function f() {}; f.prototype = [1]` is how the
+                // corpus subclasses an array, and without this the instance inherits neither
+                // the element nor the length -- so every generic method reached through it
+                // walked an object that looked empty.
+                Some(Value::Array(items)) => match array_own_property(items, key) {
+                    Some(found) => Ok(found),
+                    None => {
+                        let store = items.properties.borrow();
+                        store
+                            .get_own_property(key)
+                            .cloned()
+                            .ok_or_else(|| store.prototype.clone())
+                    }
+                },
                 Some(Value::Object(parent)) => {
                     let parent = parent.borrow();
                     parent
@@ -2292,7 +2347,14 @@ fn own_property_state(
         }
         Value::Function(closure) => closure.properties.borrow().get_own_property(key).cloned(),
         Value::Array(items) => match key.parse::<usize>() {
-            Ok(index) => items.borrow().get(index).cloned().map(Property::Value),
+            Ok(index) => match array_exotic_element(items, index) {
+                Some(entry) => Some(entry.property),
+                None => items.borrow().get(index).cloned().map(Property::Value),
+            },
+            // `length` is an own property, and derived rather than stored: the elements are the
+            // only record of how many there are, so it is read off them here rather than kept
+            // beside them where the two could disagree.
+            Err(_) if key == "length" => array_own_property(items, key),
             Err(_) => items.properties.borrow().get_own_property(key).cloned(),
         },
         Value::TypedArray(view) => canonical_index(key)
@@ -2414,23 +2476,44 @@ fn install_property(
             .properties
             .borrow_mut()
             .install(key, property, attributes),
-        Value::Array(items) => match (key.parse::<usize>(), &property) {
+        Value::Array(items) => match key.parse::<usize>() {
             // Bounded like the ordinary indexed write: `defineProperty` reaches the same dense
             // storage and can name just as distant an index.
-            (Ok(index), Property::Value(value)) if index < MAX_DENSE_ARRAY => {
-                let mut items = items.borrow_mut();
-                if index >= items.len() {
-                    items.resize(index + 1, Value::Native(Native::Hole));
-                }
-                items[index] = value.clone();
-            }
-            (Ok(index), Property::Value(_)) => {
+            Ok(index) if index >= MAX_DENSE_ARRAY => {
                 return Err(ExecutionError::ArrayTooLarge { length: index + 1 });
             }
-            // An accessor at an index has nowhere to live: the dense storage holds values and
-            // nothing else, and a slot beside it would not be the element the walk reads.
-            (Ok(_), Property::Accessor { .. }) => {}
-            (Err(_), _) => items
+            Ok(index) => {
+                {
+                    let mut elements = items.borrow_mut();
+                    if index >= elements.len() {
+                        items.sparse.set(true);
+                        elements.resize(index + 1, Value::Native(Native::Hole));
+                    }
+                    // A data property keeps its value in the dense storage whatever its flags,
+                    // so every reader that walks the elements still sees it. An accessor leaves
+                    // a hole there: the storage holds values and nothing else, and the property
+                    // itself is recorded beside it.
+                    elements[index] = match &property {
+                        Property::Value(value) => value.clone(),
+                        Property::Accessor { .. } => {
+                            items.sparse.set(true);
+                            Value::Native(Native::Hole)
+                        }
+                    };
+                }
+                let ordinary =
+                    matches!(property, Property::Value(_)) && attributes == Attributes::DEFAULT;
+                let mut exotic = items.elements.borrow_mut();
+                exotic.retain(|entry| entry.index != index);
+                if !ordinary {
+                    exotic.push(ExoticElement {
+                        index,
+                        property,
+                        attributes,
+                    });
+                }
+            }
+            Err(_) => items
                 .properties
                 .borrow_mut()
                 .install(key, property, attributes),
@@ -2464,12 +2547,112 @@ fn refusal(intrinsics: &Intrinsics, target: &Value, key: &str) -> String {
 /// Answers with a boolean rather than throwing because its two callers want opposite things:
 /// `Reflect.defineProperty` reports the refusal as `false`, and `Object.defineProperty` -- which
 /// is `DefinePropertyOrThrow` -- raises it, in strict and sloppy mode alike.
+/// `ArraySetLength(A, Desc)`: an array's `[[DefineOwnProperty]]` for its own `length`.
+///
+/// Not the ordinary validation with a different store behind it. The value is coerced twice --
+/// once as `ToUint32` and once as `ToNumber` -- and a length that survives one but not the other
+/// is a `RangeError` rather than a refusal, which is the only place in the language where
+/// defining a property raises something that is not a `TypeError`. Shrinking then *deletes* the
+/// elements above the new length, and stops at the first one that will not go.
+fn array_set_length(
+    items: &Rc<ArrayData>,
+    descriptor: &Descriptor,
+) -> Result<bool, ExecutionError> {
+    let Some(value) = descriptor.value.clone() else {
+        // Flags only. `length` is non-configurable and never enumerable, so the only flag that
+        // can move is `writable`, and only ever from true to false.
+        if descriptor.configurable == Some(true) || descriptor.enumerable == Some(true) {
+            return Ok(false);
+        }
+        if descriptor.is_accessor() {
+            return Ok(false);
+        }
+        if descriptor.writable == Some(true) && !items.length_writable.get() {
+            return Ok(false);
+        }
+        if descriptor.writable == Some(false) {
+            items.length_writable.set(false);
+        }
+        return Ok(true);
+    };
+    // `ToUint32(value)` and `ToNumber(value)` disagreeing is what makes `{length: -1}` and
+    // `{length: 2 ** 32}` refusals the program can catch as a `RangeError`.
+    let number = value.as_number();
+    if !number.is_finite() || number < 0.0 || number.fract() != 0.0 || number > MAX_ARRAY_LENGTH {
+        return Err(ExecutionError::InvalidArrayLength);
+    }
+    if descriptor.configurable == Some(true)
+        || descriptor.enumerable == Some(true)
+        || descriptor.is_accessor()
+    {
+        return Ok(false);
+    }
+    #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let wanted = number as usize;
+    let current = items.borrow().len();
+    if !items.length_writable.get() && wanted != current {
+        return Ok(false);
+    }
+    if wanted > MAX_DENSE_ARRAY {
+        return Err(ExecutionError::ArrayTooLarge { length: wanted });
+    }
+    // The elements above the new length are deleted one at a time from the top, and the walk
+    // stops at the first one that will not go: `length` ends up one past it, describing an array
+    // that still matches what is in it rather than one the elements contradict.
+    let frozen = items.properties.borrow().is_frozen();
+    let mut reached = wanted;
+    let mut index = current;
+    while index > wanted {
+        index -= 1;
+        let defined = array_exotic_element(items, index);
+        let present = defined.is_some()
+            || items
+                .borrow()
+                .get(index)
+                .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
+        let removable = match &defined {
+            Some(entry) => entry.attributes.configurable && !frozen,
+            None => !frozen,
+        };
+        if present && !removable {
+            reached = index + 1;
+            break;
+        }
+    }
+    {
+        let mut elements = items.borrow_mut();
+        if reached <= elements.len() {
+            elements.truncate(reached);
+        } else {
+            // Growing leaves holes, which read as undefined and are not the same thing.
+            items.sparse.set(true);
+            elements.resize(reached, Value::Native(Native::Hole));
+        }
+    }
+    items
+        .elements
+        .borrow_mut()
+        .retain(|entry| entry.index < reached);
+    if descriptor.writable == Some(false) {
+        items.length_writable.set(false);
+    }
+    Ok(reached == wanted)
+}
+
 fn define_own_property(
     intrinsics: &Intrinsics,
     target: &Value,
     key: &str,
     descriptor: &Descriptor,
 ) -> Result<bool, ExecutionError> {
+    // An array's `length` has a definition of its own, and it has to run *instead of* the
+    // ordinary one: the ordinary one has no way to raise a `RangeError`, and no reason to
+    // shorten the elements when the length it was handed is smaller than the array.
+    if let Value::Array(items) = target
+        && key == "length"
+    {
+        return array_set_length(items, descriptor);
+    }
     let Some((current, attributes)) = own_property_state(intrinsics, target, key) else {
         if !is_extensible_target(intrinsics, target) {
             return Ok(false);
@@ -3548,13 +3731,55 @@ pub struct ArrayData {
     /// Empty for almost every array, and allocated with it rather than on demand because an
     /// array that never gains a named property still has to answer that it has none.
     properties: RefCell<ObjectData>,
+    /// Whether `length` may still change.
+    ///
+    /// `length` is an own data property of every array -- non-enumerable, non-configurable, and
+    /// writable until a program says otherwise -- and this is the one part of it that is not
+    /// derived from the elements. `Object.defineProperty(a, "length", {writable: false})` and
+    /// `Object.freeze(a)` both clear it, and afterwards a write to `length`, a `push`, and an
+    /// index past the end are all refused rather than silently taken.
+    length_writable: std::cell::Cell<bool>,
+    /// Index properties the dense storage cannot hold as it stands. Empty for almost every
+    /// array, and consulted only through [`array_exotic_element`].
+    elements: RefCell<Vec<ExoticElement>>,
+    /// Whether this array has ever had a hole in it.
+    ///
+    /// A hole is the *absence* of an own property, so every read of one is a question for the
+    /// prototype chain: `Array.prototype[1] = 13` really does make `[, , ,].forEach` visit
+    /// index 1 with that value. The dense fast paths skip a hole outright, which is right only
+    /// while nothing up the chain fills it -- so an array that has one is walked the way any
+    /// other object with a `length` is, and the fast paths keep the case they are for. Set
+    /// conservatively: claiming a hole an array no longer has costs speed, never correctness.
+    sparse: std::cell::Cell<bool>,
+}
+
+/// One index property of an array that is not an ordinary element.
+///
+/// Either an accessor -- the dense storage holds values and nothing else -- or a data property
+/// whose flags a program has moved off the ordinary writable/enumerable/configurable. A data
+/// property keeps its value in the dense storage as well, so every reader that walks the
+/// elements directly still sees it; an accessor leaves a hole there instead, and an array with
+/// any of these stops taking the dense fast paths, so its methods walk it the way they walk any
+/// other object -- through `HasProperty`, `Get` and `Set`, which is where a getter runs.
+#[derive(Clone, Debug)]
+struct ExoticElement {
+    index: usize,
+    property: Property,
+    attributes: Attributes,
 }
 
 impl ArrayData {
     fn new(items: Vec<Value>) -> Rc<Self> {
         Rc::new(Self {
+            sparse: std::cell::Cell::new(
+                items
+                    .iter()
+                    .any(|item| matches!(item, Value::Native(Native::Hole))),
+            ),
             items: RefCell::new(items),
             properties: RefCell::new(ObjectData::default()),
+            length_writable: std::cell::Cell::new(true),
+            elements: RefCell::new(Vec::new()),
         })
     }
 
@@ -10971,6 +11196,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Native::Date(method) = native {
             return self.date_dispatch(method, receiver, arguments, instruction);
         }
+        // An `Array.prototype` method whose receiver is not an array walks it live, through the
+        // specification's own `HasProperty`/`Get`/`Set`/`Delete` steps. Ahead of everything
+        // below because the arms there answer from a dense `Vec` that this receiver has not got.
+        if native.walks_a_live_receiver()
+            && !matches!(receiver, Value::TypedArray(_))
+            && dense_array(receiver).is_none()
+        {
+            return self.generic_array_native(native, receiver, arguments, instruction);
+        }
+        // These four take an index argument that the specification converts through
+        // `ToIntegerOrInfinity` -- which may be the program's own `valueOf` -- and then start
+        // the walk from it. A pure implementation can do neither, and the ones here did
+        // neither: `[0, 1, 1].lastIndexOf(1, "1")` searched the whole array and answered 2. So
+        // every receiver takes the generic walk, dense array included, and the pure arms are
+        // unreachable rather than a second answer that disagrees.
+        if matches!(
+            native,
+            Native::ArrayIndexOf
+                | Native::ArrayLastIndexOf
+                | Native::ArrayIncludes
+                | Native::ArrayAt
+        ) {
+            return self.generic_array_native(native, receiver, arguments, instruction);
+        }
         // These three answer from the machine because each can run program code -- a set-like's
         // `has`/`keys`, a sort comparator, a getter reached through a generic receiver -- and
         // `call_native` has no VM to run it with. Their arms in `call_native` are `unreachable!`
@@ -11528,6 +11777,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 matches!(
                     argument,
                     Value::Object(_) | Value::Function(_) | Value::Array(_)
+                    // A `Temporal` value reduces by *calling*, and every one of its types
+                    // refuses: `Number(date)` is a `TypeError`, where reading the value as it
+                    // arrived answered NaN.
+                    | Value::Temporal(_)
                 )
             })
         {
@@ -13396,10 +13649,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let Value::Array(items) = receiver else {
-            return Err(ExecutionError::TypeErrorMessage {
-                message: "Method called on an incompatible receiver".to_owned(),
-            });
+        let Some(items) = dense_array(receiver) else {
+            return self.generic_array_copy(method, receiver, arguments, instruction);
         };
         let source = dense_items(&items.borrow());
         let length = source.len();
@@ -16077,8 +16328,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let Value::Array(items) = receiver else {
-            return Ok(Value::Undefined);
+        let Some(items) = dense_array(receiver) else {
+            return self.generic_array_callback(method, receiver, arguments, instruction);
         };
         let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
         let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -16214,8 +16465,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let Value::Array(items) = receiver else {
-            return Ok(Value::Undefined);
+        let Some(items) = dense_array(receiver) else {
+            return self.generic_array_callback(method, receiver, arguments, instruction);
         };
         let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
         let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -16267,8 +16518,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         backwards: bool,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let Value::Array(items) = receiver else {
-            return Ok(Value::Undefined);
+        let Some(items) = dense_array(receiver) else {
+            let method = if backwards {
+                CallbackMethod::ReduceRight
+            } else {
+                CallbackMethod::Reduce
+            };
+            return self.generic_array_callback(method, receiver, arguments, instruction);
         };
         let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
 
@@ -16361,8 +16617,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let Value::Array(items) = receiver else {
-            return Ok(Value::Undefined);
+        let Some(items) = dense_array(receiver) else {
+            return self.generic_array_sort(receiver, arguments, instruction);
         };
         let comparator = arguments.first().cloned().unwrap_or(Value::Undefined);
         // `undefined` means the default ordering; anything else has to be callable, and the
@@ -17710,11 +17966,1304 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
-    /// Raise a JavaScript error of `kind` from the VM itself.
+    // ----------------------------------------------------------------------------------------
+    // The generic `Array.prototype` walk.
+    //
+    // Every method on `Array.prototype` is defined on an arbitrary object rather than on an
+    // array: each step is `HasProperty(O, k)`, `Get(O, k)`, `Set(O, k, v, true)` or
+    // `DeletePropertyOrThrow(O, k)` against the receiver the program supplied, and the bound
+    // comes from `Get(O, "length")`. `Array.prototype.slice.call(arguments)` is why they are
+    // written that way, and the whole family below is what a redirected call reaches.
+    //
+    // A copy walked in the receiver's place answers from a snapshot, and three things are then
+    // wrong at once: a mutating method writes nothing back, an index the walk deleted or that
+    // only the prototype carries is visited anyway, and the receiver a callback is handed is an
+    // array the program never saw. An array receiver keeps its dense fast path, which is the
+    // same walk with the indirection removed.
+    // ----------------------------------------------------------------------------------------
+
+    /// `ToLength(argument)`: the bound a generic walk runs to.
+    fn to_length(number: f64) -> u64 {
+        if number.is_nan() || number <= 0.0 {
+            return 0;
+        }
+        let integer = number.trunc();
+        if integer >= MAX_SAFE_INTEGER {
+            MAX_SAFE_INTEGER_AS_U64
+        } else {
+            #[expect(clippy::cast_possible_truncation)]
+            let bounded = integer as u64;
+            bounded
+        }
+    }
+
+    /// `ToIntegerOrInfinity`, kept as an `f64` so an infinite argument stays infinite: the
+    /// difference between `slice(-Infinity)` and `slice(-1)` is the whole array or one element.
+    fn to_integer_or_infinity(number: f64) -> f64 {
+        if number.is_nan() { 0.0 } else { number.trunc() }
+    }
+
+    /// A `start`/`end` argument resolved against a length: negative counts from the end, and
+    /// anything past either edge clamps to it.
+    fn relative_bound(relative: f64, length: u64) -> u64 {
+        #[expect(clippy::cast_precision_loss)]
+        let span = length as f64;
+        let resolved = if relative < 0.0 {
+            (span + relative).max(0.0)
+        } else {
+            relative.min(span)
+        };
+        #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        let resolved = resolved as u64;
+        resolved
+    }
+
+    /// One step of a generic walk, refusing once a walk has taken more of them than this
+    /// implementation will materialise an array of.
     ///
-    /// The point of building a real error object rather than failing outright is that a program
-    /// can catch it: `try { null.x } catch (e) { e instanceof TypeError }` is ordinary code, and
-    /// a fatal execution error would make it unwritable.
+    /// `Array.prototype.indexOf.call({length: 2 ** 32}, x)` is a four-billion-step loop the
+    /// specification really does ask for, and the corpus passes such objects on purpose --
+    /// always arranging for the answer to be found early, which is why the count is checked per
+    /// step rather than the length checked up front. A walk that genuinely runs to the end of
+    /// one is a hang, and refusing it is the same limit this implementation already reports for
+    /// an array that large.
+    fn walk_step(steps: &mut u64) -> Result<(), ExecutionError> {
+        *steps += 1;
+        if *steps > MAX_DENSE_ARRAY as u64 {
+            return Err(ExecutionError::ArrayTooLarge {
+                length: MAX_DENSE_ARRAY,
+            });
+        }
+        Ok(())
+    }
+
+    /// The key an index names. A number rather than its spelling, so an array or a view can
+    /// answer without the string ever being built.
+    fn element_key(index: u64) -> Value {
+        #[expect(clippy::cast_precision_loss)]
+        let index = index as f64;
+        Value::Number(index)
+    }
+
+    /// `LengthOfArrayLike(O)`: `ToLength(Get(O, "length"))`.
+    ///
+    /// The conversion is the program's own -- `{length: {valueOf() { throw x }}}` throws here --
+    /// and a `length` that is an object with no `valueOf` reads as `NaN`, which is an empty walk
+    /// rather than an error.
+    fn array_like_length(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<u64, ExecutionError> {
+        let raw = self.read_property(target, "length", instruction)?;
+        let number = self.as_number_argument(Some(&raw), instruction)?;
+        Ok(Self::to_length(number))
+    }
+
+    /// The element an array holds at `index` in its dense storage, when that storage is the
+    /// whole answer.
+    ///
+    /// An array reaches the generic walk when it is sparse, when an element has been defined
+    /// with flags of its own, or when its `length` is locked -- and in each of those cases only
+    /// *some* positions are unusual. This is the ordinary one, answered without building the
+    /// index's spelling or walking anything: the walk is the specification's, and this is the
+    /// step of it that an array can answer directly.
+    fn dense_element(target: &Value, index: u64) -> Option<Value> {
+        let Value::Array(items) = target else {
+            return None;
+        };
+        if !items.elements.borrow().is_empty() {
+            return None;
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        let index = index as usize;
+        items
+            .borrow()
+            .get(index)
+            .filter(|value| !Self::is_hole(value))
+            .cloned()
+    }
+
+    /// `HasProperty(O, ToString(index))`, prototype chain and proxy trap included.
+    fn element_has(
+        &mut self,
+        target: &Value,
+        index: u64,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        if Self::dense_element(target, index).is_some() {
+            return Ok(true);
+        }
+        self.has(target, &Self::element_key(index), instruction)
+    }
+
+    /// `Get(O, ToString(index))`, which may run a getter or a proxy trap.
+    fn element_get(
+        &mut self,
+        target: &Value,
+        index: u64,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if let Some(value) = Self::dense_element(target, index) {
+            return Ok(value);
+        }
+        self.read_computed(target, &Self::element_key(index), instruction)
+    }
+
+    /// `HasProperty(O, k)` and `Get(O, k)` in one step, for the walks that ask both: the value
+    /// when the position is there, and `None` when it is not.
+    ///
+    /// Not a shortcut past the specification's two steps -- a receiver that can observe them
+    /// still gets both -- but a position an array holds in its dense storage answers both at
+    /// once, and a walk that asked twice paid for the borrow and the clone twice.
+    fn element_read(
+        &mut self,
+        target: &Value,
+        index: u64,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        if let Some(value) = Self::dense_element(target, index) {
+            return Ok(Some(value));
+        }
+        if !self.element_has(target, index, instruction)? {
+            return Ok(None);
+        }
+        Ok(Some(self.element_get(target, index, instruction)?))
+    }
+
+    /// `Set(O, ToString(index), value, true)`.
+    fn element_set(
+        &mut self,
+        target: &Value,
+        index: u64,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        // An element that is already there, on an array with nothing unusual recorded about its
+        // elements and nothing frozen, is writable -- so the write is the write, with no
+        // descriptor to consult and no key to spell.
+        if let Value::Array(items) = target
+            && items.elements.borrow().is_empty()
+            && !items.properties.borrow().is_frozen()
+        {
+            #[expect(clippy::cast_possible_truncation)]
+            let at = index as usize;
+            let mut elements = items.borrow_mut();
+            if at < elements.len() {
+                elements[at] = value;
+                return Ok(());
+            }
+        }
+        self.set_or_throw(target, &Self::element_key(index), value, instruction)
+    }
+
+    /// `DeletePropertyOrThrow(O, ToString(index))`.
+    fn element_delete(
+        &mut self,
+        target: &Value,
+        index: u64,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let key = Self::element_key(index);
+        if self.delete(target, &key, instruction)? {
+            return Ok(());
+        }
+        Err(ExecutionError::TypeErrorMessage {
+            message: format!("Cannot delete property '{index}' of an object"),
+        })
+    }
+
+    /// `Set(O, "length", length, true)`.
+    fn set_array_like_length(
+        &mut self,
+        target: &Value,
+        length: u64,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        #[expect(clippy::cast_precision_loss)]
+        let length = length as f64;
+        self.set_or_throw(
+            target,
+            &Value::String("length".to_owned()),
+            Value::Number(length),
+            instruction,
+        )
+    }
+
+    /// `Set(O, P, V, true)`: the throwing spelling of a write.
+    ///
+    /// The ordinary assignment path cannot raise -- the machine does not know whether the code
+    /// that wrote it was strict -- but every write inside an `Array.prototype` method passes
+    /// `true` for `Throw`, so a `push` onto a frozen object is a `TypeError` rather than a
+    /// silence that reads as success.
+    fn set_or_throw(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        if let Value::Proxy(proxy) = target {
+            let proxy = Rc::clone(proxy);
+            let inner = proxy.target.clone();
+            return match self.proxy_trap(&proxy, "set", instruction)? {
+                Some(trap) => {
+                    let handler = proxy.handler.clone();
+                    let arguments = vec![inner, Self::trap_key(key), value, target.clone()];
+                    let answered = self.call_value(&trap, handler, arguments, instruction)?;
+                    if answered.is_truthy() {
+                        Ok(())
+                    } else {
+                        Err(Self::write_refused(key))
+                    }
+                }
+                None => self.set_or_throw(&inner, key, value, instruction),
+            };
+        }
+        let name = key.property_key();
+        if !self.write_accepted(target, &name) {
+            return Err(Self::write_refused(key));
+        }
+        self.set_computed(target, key, value, instruction)
+    }
+
+    /// Whether an ordinary `[[Set]]` of `name` would take, which is what decides whether the
+    /// throwing spelling throws.
+    fn write_accepted(&self, target: &Value, name: &str) -> bool {
+        match own_property_state(&self.intrinsics, target, name) {
+            Some((Property::Value(_), attributes)) => attributes.writable,
+            // A setter-less accessor discards the write, which the throwing spelling reports.
+            Some((Property::Accessor { set, .. }, _)) => set.is_some(),
+            None => is_extensible_target(&self.intrinsics, target),
+        }
+    }
+
+    fn write_refused(key: &Value) -> ExecutionError {
+        ExecutionError::TypeErrorMessage {
+            message: format!(
+                "Cannot assign to read only property '{}' of object",
+                key.property_key()
+            ),
+        }
+    }
+
+    /// `ToObject(this value)` for the receiver of a generic array method.
+    ///
+    /// Step one of every one of them, and the reason a redirected call onto a primitive answers
+    /// at all: `Array.prototype.reduce.call("abc", f, 1)` hands the callback a `String` wrapper
+    /// -- which the corpus checks by tag -- and walks its characters as indexed properties.
+    /// `null` and `undefined` have no object to become and stop here.
+    fn as_receiver_object(&mut self, receiver: Value) -> Result<Value, ExecutionError> {
+        match receiver {
+            Value::Undefined | Value::Null => Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "Array.prototype method called on {}",
+                    receiver.to_display_string()
+                ),
+            }),
+            primitive @ (Value::String(_)
+            | Value::Number(_)
+            | Value::Boolean(_)
+            | Value::Symbol(_)
+            | Value::BigInt(_)) => Ok(wrap_primitive(primitive)),
+            // Everything else is already an object here: a date, a regexp, a promise and a
+            // built-in namespace are all value kinds of their own rather than boxed primitives,
+            // and boxing one would hide the properties a program put on it.
+            other => Ok(other),
+        }
+    }
+
+    /// Whether this callee has a generic implementation that walks its receiver live.
+    fn walks_a_live_receiver(callee: &Value) -> bool {
+        match callee {
+            Value::Native(native) => native.walks_a_live_receiver(),
+            Value::Callback(method) => matches!(
+                method,
+                CallbackMethod::Map
+                    | CallbackMethod::ForEach
+                    | CallbackMethod::Filter
+                    | CallbackMethod::Reduce
+                    | CallbackMethod::ReduceRight
+                    | CallbackMethod::Sort
+                    | CallbackMethod::Find
+                    | CallbackMethod::FindIndex
+                    | CallbackMethod::FindLast
+                    | CallbackMethod::FindLastIndex
+                    | CallbackMethod::Some
+                    | CallbackMethod::Every
+                    | CallbackMethod::FlatMap
+            ),
+            _ => false,
+        }
+    }
+
+    /// `ArrayCreate(length)`, which is what `ArraySpeciesCreate` reduces to when the receiver is
+    /// not an array: the species lookup is skipped entirely for one that is not.
+    fn create_array_of_length(length: u64) -> Result<Value, ExecutionError> {
+        #[expect(clippy::cast_precision_loss)]
+        let requested = length as f64;
+        if requested > MAX_ARRAY_LENGTH {
+            return Err(ExecutionError::InvalidArrayLength);
+        }
+        if length > MAX_DENSE_ARRAY as u64 {
+            return Err(ExecutionError::ArrayTooLarge {
+                length: MAX_DENSE_ARRAY,
+            });
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        let length = length as usize;
+        Ok(Value::Array(ArrayData::new(vec![
+            Value::Native(
+                Native::Hole
+            );
+            length
+        ])))
+    }
+
+    /// `CreateDataPropertyOrThrow(A, ToString(index), value)` on an array this method made.
+    fn create_element(array: &Value, index: u64, value: Value) -> Result<(), ExecutionError> {
+        let Value::Array(items) = array else {
+            return Ok(());
+        };
+        if index >= MAX_DENSE_ARRAY as u64 {
+            return Err(ExecutionError::ArrayTooLarge {
+                length: MAX_DENSE_ARRAY,
+            });
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        let index = index as usize;
+        let mut elements = items.borrow_mut();
+        if index >= elements.len() {
+            items.sparse.set(true);
+            elements.resize(index + 1, Value::Native(Native::Hole));
+        }
+        elements[index] = value;
+        Ok(())
+    }
+
+    /// Shorten or lengthen an array this method made, so that its `length` is what the walk
+    /// counted rather than what it happened to reach.
+    fn truncate_created_array(array: &Value, length: u64) {
+        let Value::Array(items) = array else {
+            return;
+        };
+        #[expect(clippy::cast_possible_truncation)]
+        let length = length as usize;
+        let mut elements = items.borrow_mut();
+        if length <= elements.len() {
+            elements.truncate(length);
+        } else {
+            items.sparse.set(true);
+            elements.resize(length, Value::Native(Native::Hole));
+        }
+    }
+
+    /// `IsConcatSpreadable(O)`: `@@isConcatSpreadable` when it is defined, and otherwise whether
+    /// the value is an array.
+    fn is_concat_spreadable(
+        &mut self,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        if !is_reflect_target(value) {
+            return Ok(false);
+        }
+        let marker = self.read_property(
+            value,
+            WellKnown::IsConcatSpreadable.property_key(),
+            instruction,
+        )?;
+        if !matches!(marker, Value::Undefined) {
+            return Ok(marker.is_truthy());
+        }
+        Ok(matches!(unwrap_proxy(value), Value::Array(_)))
+    }
+
+    /// One `Array.prototype` method whose receiver is not an array, run over that receiver.
+    fn generic_array_native(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let receiver = &self.as_receiver_object(receiver.clone())?;
+        let mut steps = 0;
+        match native {
+            Native::ArrayAt => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let relative = Self::to_integer_or_infinity(
+                    self.as_number_argument(arguments.first(), instruction)?,
+                );
+                #[expect(clippy::cast_precision_loss)]
+                let span = length as f64;
+                let index = if relative >= 0.0 {
+                    relative
+                } else {
+                    span + relative
+                };
+                if index < 0.0 || index >= span {
+                    return Ok(Value::Undefined);
+                }
+                #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let index = index as u64;
+                self.element_get(receiver, index, instruction)
+            }
+            Native::ArrayPush => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let count = arguments.len() as u64;
+                Self::bounded_index(length, count)?;
+                for (offset, argument) in arguments.iter().enumerate() {
+                    self.element_set(
+                        receiver,
+                        length + offset as u64,
+                        argument.clone(),
+                        instruction,
+                    )?;
+                }
+                let grown = length + count;
+                self.set_array_like_length(receiver, grown, instruction)?;
+                #[expect(clippy::cast_precision_loss)]
+                let grown = grown as f64;
+                Ok(Value::Number(grown))
+            }
+            Native::ArrayPop => {
+                let length = self.array_like_length(receiver, instruction)?;
+                if length == 0 {
+                    self.set_array_like_length(receiver, 0, instruction)?;
+                    return Ok(Value::Undefined);
+                }
+                let last = length - 1;
+                let value = self.element_get(receiver, last, instruction)?;
+                self.element_delete(receiver, last, instruction)?;
+                self.set_array_like_length(receiver, last, instruction)?;
+                Ok(value)
+            }
+            Native::ArrayShift => {
+                let length = self.array_like_length(receiver, instruction)?;
+                if length == 0 {
+                    self.set_array_like_length(receiver, 0, instruction)?;
+                    return Ok(Value::Undefined);
+                }
+                let first = self.element_get(receiver, 0, instruction)?;
+                for index in 1..length {
+                    Self::walk_step(&mut steps)?;
+                    self.move_element(receiver, index, index - 1, instruction)?;
+                }
+                self.element_delete(receiver, length - 1, instruction)?;
+                self.set_array_like_length(receiver, length - 1, instruction)?;
+                Ok(first)
+            }
+            Native::ArrayUnshift => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let count = arguments.len() as u64;
+                if count > 0 {
+                    Self::bounded_index(length, count)?;
+                    let mut index = length;
+                    while index > 0 {
+                        Self::walk_step(&mut steps)?;
+                        self.move_element(receiver, index - 1, index + count - 1, instruction)?;
+                        index -= 1;
+                    }
+                    for (offset, argument) in arguments.iter().enumerate() {
+                        self.element_set(receiver, offset as u64, argument.clone(), instruction)?;
+                    }
+                }
+                let grown = length + count;
+                self.set_array_like_length(receiver, grown, instruction)?;
+                #[expect(clippy::cast_precision_loss)]
+                let grown = grown as f64;
+                Ok(Value::Number(grown))
+            }
+            Native::ArrayReverse => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let middle = length / 2;
+                let mut lower = 0;
+                while lower != middle {
+                    Self::walk_step(&mut steps)?;
+                    let upper = length - lower - 1;
+                    let lower_there = self.element_has(receiver, lower, instruction)?;
+                    let lower_value = if lower_there {
+                        self.element_get(receiver, lower, instruction)?
+                    } else {
+                        Value::Undefined
+                    };
+                    let upper_there = self.element_has(receiver, upper, instruction)?;
+                    let upper_value = if upper_there {
+                        self.element_get(receiver, upper, instruction)?
+                    } else {
+                        Value::Undefined
+                    };
+                    // A hole swapped with a value has to stay a hole on the other side, which
+                    // means deleting rather than writing an undefined: the two are the same
+                    // read and a different answer to `in`.
+                    if upper_there {
+                        self.element_set(receiver, lower, upper_value, instruction)?;
+                    } else {
+                        self.element_delete(receiver, lower, instruction)?;
+                    }
+                    if lower_there {
+                        self.element_set(receiver, upper, lower_value, instruction)?;
+                    } else {
+                        self.element_delete(receiver, upper, instruction)?;
+                    }
+                    lower += 1;
+                }
+                Ok(receiver.clone())
+            }
+            Native::ArrayFill => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let value = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let start = self.bound_argument(arguments.get(1), length, 0, instruction)?;
+                let end = self.bound_argument(arguments.get(2), length, length, instruction)?;
+                let mut index = start;
+                while index < end {
+                    Self::walk_step(&mut steps)?;
+                    self.element_set(receiver, index, value.clone(), instruction)?;
+                    index += 1;
+                }
+                Ok(receiver.clone())
+            }
+            Native::ArrayCopyWithin => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let to = self.bound_argument(arguments.first(), length, 0, instruction)?;
+                let from = self.bound_argument(arguments.get(1), length, 0, instruction)?;
+                let end = self.bound_argument(arguments.get(2), length, length, instruction)?;
+                let mut count = end.saturating_sub(from).min(length - to);
+                // The source and the destination overlap by design -- that overlap is the whole
+                // reason the method exists -- so an overlapping forward copy walks backwards
+                // instead, which is what keeps it from reading what it has already written.
+                let (mut from, mut to, direction) = if from < to && to < from + count {
+                    ((from + count - 1) as i64, (to + count - 1) as i64, -1i64)
+                } else {
+                    (from as i64, to as i64, 1i64)
+                };
+                while count > 0 {
+                    Self::walk_step(&mut steps)?;
+                    self.move_element(receiver, from as u64, to as u64, instruction)?;
+                    from += direction;
+                    to += direction;
+                    count -= 1;
+                }
+                Ok(receiver.clone())
+            }
+            Native::ArraySlice => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let start = self.bound_argument(arguments.first(), length, 0, instruction)?;
+                let end = self.bound_argument(arguments.get(1), length, length, instruction)?;
+                let count = end.saturating_sub(start);
+                let created = Self::create_array_of_length(count)?;
+                let mut written = 0;
+                let mut index = start;
+                while index < end {
+                    Self::walk_step(&mut steps)?;
+                    if let Some(value) = self.element_read(receiver, index, instruction)? {
+                        Self::create_element(&created, written, value)?;
+                    }
+                    index += 1;
+                    written += 1;
+                }
+                Self::truncate_created_array(&created, written);
+                Ok(created)
+            }
+            Native::ArraySplice => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let start = self.bound_argument(arguments.first(), length, 0, instruction)?;
+                let inserted = arguments.len().saturating_sub(2) as u64;
+                // A missing count removes everything from `start`, where an explicit `undefined`
+                // removes nothing: `splice(1)` and `splice(1, undefined)` are different calls.
+                let removed_count = match arguments.len() {
+                    0 => 0,
+                    1 => length - start,
+                    _ => {
+                        let wanted = Self::to_integer_or_infinity(
+                            self.as_number_argument(arguments.get(1), instruction)?,
+                        );
+                        if wanted <= 0.0 {
+                            0
+                        } else {
+                            #[expect(clippy::cast_precision_loss)]
+                            let room = (length - start) as f64;
+                            #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                            let taken = wanted.min(room) as u64;
+                            taken
+                        }
+                    }
+                };
+                Self::bounded_index(length + inserted, 0)?;
+                let removed = Self::create_array_of_length(removed_count)?;
+                for offset in 0..removed_count {
+                    Self::walk_step(&mut steps)?;
+                    if self.element_has(receiver, start + offset, instruction)? {
+                        let value = self.element_get(receiver, start + offset, instruction)?;
+                        Self::create_element(&removed, offset, value)?;
+                    }
+                }
+                Self::truncate_created_array(&removed, removed_count);
+                if inserted < removed_count {
+                    let mut index = start;
+                    while index < length - removed_count {
+                        Self::walk_step(&mut steps)?;
+                        self.move_element(
+                            receiver,
+                            index + removed_count,
+                            index + inserted,
+                            instruction,
+                        )?;
+                        index += 1;
+                    }
+                    let mut index = length;
+                    while index > length - removed_count + inserted {
+                        Self::walk_step(&mut steps)?;
+                        self.element_delete(receiver, index - 1, instruction)?;
+                        index -= 1;
+                    }
+                } else if inserted > removed_count {
+                    let mut index = length - removed_count;
+                    while index > start {
+                        Self::walk_step(&mut steps)?;
+                        self.move_element(
+                            receiver,
+                            index + removed_count - 1,
+                            index + inserted - 1,
+                            instruction,
+                        )?;
+                        index -= 1;
+                    }
+                }
+                for (offset, argument) in arguments.iter().skip(2).enumerate() {
+                    self.element_set(
+                        receiver,
+                        start + offset as u64,
+                        argument.clone(),
+                        instruction,
+                    )?;
+                }
+                self.set_array_like_length(
+                    receiver,
+                    length - removed_count + inserted,
+                    instruction,
+                )?;
+                Ok(removed)
+            }
+            Native::ArrayConcat => {
+                let created = Self::create_array_of_length(0)?;
+                let mut written = 0;
+                let mut sources = vec![receiver.clone()];
+                sources.extend(arguments.iter().cloned());
+                for source in sources {
+                    if self.is_concat_spreadable(&source, instruction)? {
+                        let length = self.array_like_length(&source, instruction)?;
+                        Self::bounded_index(written, length)?;
+                        for index in 0..length {
+                            Self::walk_step(&mut steps)?;
+                            if let Some(value) = self.element_read(&source, index, instruction)? {
+                                Self::create_element(&created, written, value)?;
+                            }
+                            written += 1;
+                        }
+                    } else {
+                        Self::walk_step(&mut steps)?;
+                        Self::create_element(&created, written, source)?;
+                        written += 1;
+                    }
+                }
+                Self::truncate_created_array(&created, written);
+                Ok(created)
+            }
+            Native::ArrayJoin => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let separator = match arguments.first() {
+                    None | Some(Value::Undefined) => ",".to_owned(),
+                    Some(value) => self.as_text(value, instruction)?,
+                };
+                let mut out = String::new();
+                for index in 0..length {
+                    Self::walk_step(&mut steps)?;
+                    if index > 0 {
+                        push_bounded(&mut out, &separator)?;
+                    }
+                    let element = self.element_get(receiver, index, instruction)?;
+                    if !matches!(element, Value::Undefined | Value::Null) {
+                        let text = self.as_text(&element, instruction)?;
+                        push_bounded(&mut out, &text)?;
+                    }
+                }
+                Ok(Value::String(out))
+            }
+            // `Array.prototype.toString` is defined as *calling* the receiver's own `join`, and
+            // falling back to `Object.prototype.toString` when that is not callable. Joining
+            // directly would make `Array.prototype.toString.call({})` the empty string where
+            // every engine answers `[object Object]`.
+            Native::ArrayJoinDefault => {
+                let join = self.read_property(receiver, "join", instruction)?;
+                if !is_callable(&join) {
+                    return self.dispatch_native(
+                        Native::ObjectToStringTag,
+                        receiver,
+                        &[],
+                        instruction,
+                    );
+                }
+                self.call_value(&join, receiver.clone(), Vec::new(), instruction)
+            }
+            Native::ArrayIndexOf => {
+                let length = self.array_like_length(receiver, instruction)?;
+                if length == 0 {
+                    return Ok(Value::Number(-1.0));
+                }
+                let needle = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let from = Self::to_integer_or_infinity(
+                    self.as_number_argument(arguments.get(1), instruction)?,
+                );
+                #[expect(clippy::cast_precision_loss)]
+                let span = length as f64;
+                if from >= span {
+                    return Ok(Value::Number(-1.0));
+                }
+                let mut index = Self::relative_bound(from, length);
+                while index < length {
+                    Self::walk_step(&mut steps)?;
+                    if let Some(value) = self.element_read(receiver, index, instruction)?
+                        && strict_equal(&value, &needle)
+                    {
+                        #[expect(clippy::cast_precision_loss)]
+                        let found = index as f64;
+                        return Ok(Value::Number(found));
+                    }
+                    index += 1;
+                }
+                Ok(Value::Number(-1.0))
+            }
+            Native::ArrayLastIndexOf => {
+                let length = self.array_like_length(receiver, instruction)?;
+                if length == 0 {
+                    return Ok(Value::Number(-1.0));
+                }
+                let needle = arguments.first().cloned().unwrap_or(Value::Undefined);
+                #[expect(clippy::cast_precision_loss)]
+                let last = (length - 1) as f64;
+                let from = if arguments.len() > 1 {
+                    Self::to_integer_or_infinity(
+                        self.as_number_argument(arguments.get(1), instruction)?,
+                    )
+                } else {
+                    last
+                };
+                #[expect(clippy::cast_precision_loss)]
+                let span = length as f64;
+                let start = if from >= 0.0 {
+                    from.min(last)
+                } else {
+                    span + from
+                };
+                if start < 0.0 {
+                    return Ok(Value::Number(-1.0));
+                }
+                #[expect(clippy::cast_possible_truncation)]
+                let mut index = start as i64;
+                while index >= 0 {
+                    Self::walk_step(&mut steps)?;
+                    let at = index as u64;
+                    if let Some(value) = self.element_read(receiver, at, instruction)?
+                        && strict_equal(&value, &needle)
+                    {
+                        #[expect(clippy::cast_precision_loss)]
+                        let found = at as f64;
+                        return Ok(Value::Number(found));
+                    }
+                    index -= 1;
+                }
+                Ok(Value::Number(-1.0))
+            }
+            // `includes` reads every position rather than asking whether it is there: a hole is
+            // an `undefined` to it, which is the one place it differs from `indexOf`.
+            Native::ArrayIncludes => {
+                let length = self.array_like_length(receiver, instruction)?;
+                if length == 0 {
+                    return Ok(Value::Boolean(false));
+                }
+                let needle = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let from = Self::to_integer_or_infinity(
+                    self.as_number_argument(arguments.get(1), instruction)?,
+                );
+                #[expect(clippy::cast_precision_loss)]
+                let span = length as f64;
+                if from >= span {
+                    return Ok(Value::Boolean(false));
+                }
+                let mut index = Self::relative_bound(from, length);
+                while index < length {
+                    Self::walk_step(&mut steps)?;
+                    let value = self.element_get(receiver, index, instruction)?;
+                    if same_value_zero(&value, &needle) {
+                        return Ok(Value::Boolean(true));
+                    }
+                    index += 1;
+                }
+                Ok(Value::Boolean(false))
+            }
+            Native::ArrayFlat => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let depth = match arguments.first() {
+                    None | Some(Value::Undefined) => 1.0,
+                    Some(_) => Self::to_integer_or_infinity(
+                        self.as_number_argument(arguments.first(), instruction)?,
+                    ),
+                };
+                let created = Self::create_array_of_length(0)?;
+                let mut written = 0;
+                self.flatten_into(
+                    &created,
+                    receiver,
+                    length,
+                    &mut written,
+                    depth,
+                    &mut steps,
+                    instruction,
+                )?;
+                Self::truncate_created_array(&created, written);
+                Ok(created)
+            }
+            Native::ArrayCopy(method) => {
+                self.generic_array_copy(method, receiver, arguments, instruction)
+            }
+            // Everything reaching here is in `walks_a_live_receiver`, which is the list the
+            // arms above answer to.
+            _ => Ok(Value::Undefined),
+        }
+    }
+
+    /// `2 ** 53 - 1` is the largest index the language will name, and a method that would push
+    /// past it refuses rather than wrapping around to a smaller array than it started with.
+    fn bounded_index(length: u64, added: u64) -> Result<(), ExecutionError> {
+        #[expect(clippy::cast_precision_loss)]
+        let total = length as f64 + added as f64;
+        if total > MAX_SAFE_INTEGER {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Invalid array length".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// A `start`/`end` argument, converted through the program's own `valueOf` and resolved
+    /// against the length. An argument that is absent or `undefined` means the default.
+    fn bound_argument(
+        &mut self,
+        argument: Option<&Value>,
+        length: u64,
+        default: u64,
+        instruction: usize,
+    ) -> Result<u64, ExecutionError> {
+        match argument {
+            None | Some(Value::Undefined) => Ok(default),
+            Some(_) => {
+                let relative =
+                    Self::to_integer_or_infinity(self.as_number_argument(argument, instruction)?);
+                Ok(Self::relative_bound(relative, length))
+            }
+        }
+    }
+
+    /// The `if HasProperty(O, from) then Set(O, to, Get(O, from)) else DeletePropertyOrThrow(O,
+    /// to)` step that `shift`, `unshift`, `splice` and `copyWithin` are all built out of.
+    ///
+    /// Written once because getting it wrong the same way four times is what a copied loop is
+    /// for: a hole moved as an `undefined` is a different array afterwards.
+    fn move_element(
+        &mut self,
+        target: &Value,
+        from: u64,
+        to: u64,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        if self.element_has(target, from, instruction)? {
+            let value = self.element_get(target, from, instruction)?;
+            self.element_set(target, to, value, instruction)
+        } else {
+            self.element_delete(target, to, instruction)
+        }
+    }
+
+    /// `FlattenIntoArray`, one level at a time.
+    #[expect(clippy::too_many_arguments)]
+    fn flatten_into(
+        &mut self,
+        into: &Value,
+        source: &Value,
+        length: u64,
+        written: &mut u64,
+        depth: f64,
+        steps: &mut u64,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        for index in 0..length {
+            Self::walk_step(steps)?;
+            let Some(value) = self.element_read(source, index, instruction)? else {
+                continue;
+            };
+            if depth > 0.0 && matches!(unwrap_proxy(&value), Value::Array(_)) {
+                let inner = self.array_like_length(&value, instruction)?;
+                self.flatten_into(
+                    into,
+                    &value,
+                    inner,
+                    written,
+                    depth - 1.0,
+                    steps,
+                    instruction,
+                )?;
+            } else {
+                Self::create_element(into, *written, value)?;
+                *written += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// The four copying methods -- `with`, `toReversed`, `toSorted`, `toSpliced` -- over a
+    /// receiver that is not an array. Each answers a plain array of the length it counted, with
+    /// every position read: these are the methods that deliberately have no holes.
+    fn generic_array_copy(
+        &mut self,
+        method: ArrayCopy,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let length = self.array_like_length(receiver, instruction)?;
+        let mut steps = 0;
+        match method {
+            ArrayCopy::With => {
+                let relative = Self::to_integer_or_infinity(
+                    self.as_number_argument(arguments.first(), instruction)?,
+                );
+                #[expect(clippy::cast_precision_loss)]
+                let span = length as f64;
+                let index = if relative >= 0.0 {
+                    relative
+                } else {
+                    span + relative
+                };
+                if index < 0.0 || index >= span {
+                    return Err(ExecutionError::ArrayIndexOutOfRange);
+                }
+                #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                let index = index as u64;
+                let created = Self::create_array_of_length(length)?;
+                let replacement = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                for at in 0..length {
+                    Self::walk_step(&mut steps)?;
+                    let value = if at == index {
+                        replacement.clone()
+                    } else {
+                        self.element_get(receiver, at, instruction)?
+                    };
+                    Self::create_element(&created, at, value)?;
+                }
+                Ok(created)
+            }
+            ArrayCopy::ToReversed => {
+                let created = Self::create_array_of_length(length)?;
+                for at in 0..length {
+                    Self::walk_step(&mut steps)?;
+                    let value = self.element_get(receiver, length - at - 1, instruction)?;
+                    Self::create_element(&created, at, value)?;
+                }
+                Ok(created)
+            }
+            ArrayCopy::ToSorted => {
+                let comparator = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !matches!(comparator, Value::Undefined) && !is_callable(&comparator) {
+                    return Err(comparator_refused());
+                }
+                let created = Self::create_array_of_length(length)?;
+                for at in 0..length {
+                    Self::walk_step(&mut steps)?;
+                    let value = self.element_get(receiver, at, instruction)?;
+                    Self::create_element(&created, at, value)?;
+                }
+                self.array_sort(&created, arguments, instruction)
+            }
+            ArrayCopy::ToSpliced => {
+                let start = self.bound_argument(arguments.first(), length, 0, instruction)?;
+                let removed = match arguments.len() {
+                    0 => 0,
+                    1 => length - start,
+                    _ => {
+                        let wanted = Self::to_integer_or_infinity(
+                            self.as_number_argument(arguments.get(1), instruction)?,
+                        );
+                        if wanted <= 0.0 {
+                            0
+                        } else {
+                            #[expect(clippy::cast_precision_loss)]
+                            let room = (length - start) as f64;
+                            #[expect(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+                            let taken = wanted.min(room) as u64;
+                            taken
+                        }
+                    }
+                };
+                let inserted = arguments.len().saturating_sub(2) as u64;
+                let total = length - removed + inserted;
+                let created = Self::create_array_of_length(total)?;
+                let mut written = 0;
+                for at in 0..start {
+                    Self::walk_step(&mut steps)?;
+                    let value = self.element_get(receiver, at, instruction)?;
+                    Self::create_element(&created, written, value)?;
+                    written += 1;
+                }
+                for argument in arguments.iter().skip(2) {
+                    Self::create_element(&created, written, argument.clone())?;
+                    written += 1;
+                }
+                let mut at = start + removed;
+                while at < length {
+                    Self::walk_step(&mut steps)?;
+                    let value = self.element_get(receiver, at, instruction)?;
+                    Self::create_element(&created, written, value)?;
+                    written += 1;
+                    at += 1;
+                }
+                Self::truncate_created_array(&created, written);
+                Ok(created)
+            }
+        }
+    }
+
+    /// One of the callback-taking `Array.prototype` methods over a receiver that is not an
+    /// array.
+    fn generic_array_callback(
+        &mut self,
+        method: CallbackMethod,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let receiver = &self.as_receiver_object(receiver.clone())?;
+        if matches!(method, CallbackMethod::Sort) {
+            return self.generic_array_sort(receiver, arguments, instruction);
+        }
+        let length = self.array_like_length(receiver, instruction)?;
+        let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
+        // Checked before the walk rather than at the first call: an empty receiver has no
+        // element to discover it with, and would otherwise excuse a callback that is not one.
+        if !is_callable(&callback) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not a function", callback.to_display_string()),
+            });
+        }
+        let mut steps = 0;
+        if matches!(method, CallbackMethod::Reduce | CallbackMethod::ReduceRight) {
+            let backwards = matches!(method, CallbackMethod::ReduceRight);
+            let bound = length as i64;
+            let step: i64 = if backwards { -1 } else { 1 };
+            let mut index: i64 = if backwards { bound - 1 } else { 0 };
+            let mut accumulator = match arguments.get(1) {
+                Some(initial) => initial.clone(),
+                None => {
+                    // The seed is the first position that is *there* from whichever end the walk
+                    // starts: a receiver of nothing but holes has no answer to give, exactly as
+                    // an empty one does not.
+                    let mut seed = None;
+                    while index >= 0 && index < bound {
+                        Self::walk_step(&mut steps)?;
+                        let at = index as u64;
+                        index += step;
+                        if let Some(value) = self.element_read(receiver, at, instruction)? {
+                            seed = Some(value);
+                            break;
+                        }
+                    }
+                    let Some(seed) = seed else {
+                        return Err(ExecutionError::EmptyReduce);
+                    };
+                    seed
+                }
+            };
+            while index >= 0 && index < bound {
+                Self::walk_step(&mut steps)?;
+                let at = index as u64;
+                index += step;
+                let Some(value) = self.element_read(receiver, at, instruction)? else {
+                    continue;
+                };
+                #[expect(clippy::cast_precision_loss)]
+                let position = at as f64;
+                accumulator = self.call_value(
+                    &callback,
+                    Value::Undefined,
+                    vec![
+                        accumulator,
+                        value,
+                        Value::Number(position),
+                        receiver.clone(),
+                    ],
+                    instruction,
+                )?;
+            }
+            return Ok(accumulator);
+        }
+        let this_value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+        let backwards = matches!(
+            method,
+            CallbackMethod::FindLast | CallbackMethod::FindLastIndex
+        );
+        // The four `find` methods read every position, holes included: they were added to the
+        // language after it stopped skipping them. The rest ask first.
+        let visits_holes = matches!(
+            method,
+            CallbackMethod::Find
+                | CallbackMethod::FindIndex
+                | CallbackMethod::FindLast
+                | CallbackMethod::FindLastIndex
+        );
+        let created = match method {
+            CallbackMethod::Map => Some(Self::create_array_of_length(length)?),
+            CallbackMethod::Filter | CallbackMethod::FlatMap => {
+                Some(Self::create_array_of_length(0)?)
+            }
+            _ => None,
+        };
+        let mut written = 0;
+        for order in 0..length {
+            let index = if backwards { length - order - 1 } else { order };
+            Self::walk_step(&mut steps)?;
+            let value = if visits_holes {
+                self.element_get(receiver, index, instruction)?
+            } else {
+                match self.element_read(receiver, index, instruction)? {
+                    Some(value) => value,
+                    None => continue,
+                }
+            };
+            #[expect(clippy::cast_precision_loss)]
+            let position = index as f64;
+            let produced = self.call_value(
+                &callback,
+                this_value.clone(),
+                vec![value.clone(), Value::Number(position), receiver.clone()],
+                instruction,
+            )?;
+            match method {
+                CallbackMethod::Map => {
+                    Self::create_element(
+                        created.as_ref().unwrap_or(&Value::Undefined),
+                        index,
+                        produced,
+                    )?;
+                }
+                CallbackMethod::Filter => {
+                    if produced.is_truthy() {
+                        Self::create_element(
+                            created.as_ref().unwrap_or(&Value::Undefined),
+                            written,
+                            value,
+                        )?;
+                        written += 1;
+                    }
+                }
+                // One level, and only of what the callback produced: `flatMap` does not flatten
+                // an array that was already an element.
+                CallbackMethod::FlatMap => {
+                    let into = created.as_ref().unwrap_or(&Value::Undefined);
+                    if matches!(unwrap_proxy(&produced), Value::Array(_)) {
+                        let inner = self.array_like_length(&produced, instruction)?;
+                        for at in 0..inner {
+                            Self::walk_step(&mut steps)?;
+                            if self.element_has(&produced, at, instruction)? {
+                                let nested = self.element_get(&produced, at, instruction)?;
+                                Self::create_element(into, written, nested)?;
+                            }
+                            written += 1;
+                        }
+                    } else {
+                        Self::create_element(into, written, produced)?;
+                        written += 1;
+                    }
+                }
+                CallbackMethod::Find | CallbackMethod::FindLast => {
+                    if produced.is_truthy() {
+                        return Ok(value);
+                    }
+                }
+                CallbackMethod::FindIndex | CallbackMethod::FindLastIndex => {
+                    if produced.is_truthy() {
+                        return Ok(Value::Number(position));
+                    }
+                }
+                CallbackMethod::Some => {
+                    if produced.is_truthy() {
+                        return Ok(Value::Boolean(true));
+                    }
+                }
+                CallbackMethod::Every if !produced.is_truthy() => {
+                    return Ok(Value::Boolean(false));
+                }
+                _ => {}
+            }
+        }
+        Ok(match method {
+            CallbackMethod::Map => created.unwrap_or(Value::Undefined),
+            CallbackMethod::Filter | CallbackMethod::FlatMap => {
+                let created = created.unwrap_or(Value::Undefined);
+                Self::truncate_created_array(&created, written);
+                created
+            }
+            CallbackMethod::FindIndex | CallbackMethod::FindLastIndex => Value::Number(-1.0),
+            CallbackMethod::Some => Value::Boolean(false),
+            CallbackMethod::Every => Value::Boolean(true),
+            _ => Value::Undefined,
+        })
+    }
+
+    /// `Array.prototype.sort` over a receiver that is not an array.
+    ///
+    /// The specification collects the positions that are there, sorts that list, writes it back
+    /// over the front and deletes what is left: holes end up at the end however they were spread
+    /// through the receiver, and the ordering is the same merge the dense path uses so the two
+    /// cannot disagree about where a comparator's ties land.
+    fn generic_array_sort(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let comparator = arguments.first().cloned().unwrap_or(Value::Undefined);
+        if !matches!(comparator, Value::Undefined) && !is_callable(&comparator) {
+            return Err(comparator_refused());
+        }
+        let length = self.array_like_length(receiver, instruction)?;
+        let mut steps = 0;
+        let mut present = Vec::new();
+        for index in 0..length {
+            Self::walk_step(&mut steps)?;
+            if let Some(value) = self.element_read(receiver, index, instruction)? {
+                present.push(value);
+            }
+        }
+        let counted = present.len() as u64;
+        let scratch = Value::Array(ArrayData::new(present));
+        self.array_sort(&scratch, arguments, instruction)?;
+        let Value::Array(ordered) = &scratch else {
+            unreachable!("just built as an array");
+        };
+        let ordered = ordered.borrow().clone();
+        for (index, value) in ordered.into_iter().enumerate() {
+            self.element_set(receiver, index as u64, value, instruction)?;
+        }
+        let mut index = counted;
+        while index < length {
+            Self::walk_step(&mut steps)?;
+            self.element_delete(receiver, index, instruction)?;
+            index += 1;
+        }
+        Ok(receiver.clone())
+    }
+
     /// The receiver an array method should walk, when one is being redirected onto something
     /// that is not an array.
     ///
@@ -17771,6 +19320,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             && view.buffer.detached()
         {
             return Err(ExecutionError::BufferDetached);
+        }
+        // The methods with a generic implementation walk the receiver itself. A typed array is
+        // the exception: its elements are bytes in a shared buffer rather than properties, and
+        // the copy-and-write-back below is what turns an array method into one of its own.
+        if Self::walks_a_live_receiver(callee) && !matches!(receiver, Value::TypedArray(_)) {
+            return self.as_receiver_object(receiver);
         }
         if !walks_an_array || matches!(receiver, Value::Array(_)) || preserves_live_typed_array {
             return Ok(receiver);
@@ -18324,6 +19879,55 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &arguments,
                 )?;
                 self.stack.push(object);
+            }
+            // `new Uint8Array(arrayLike)` and `new Uint8Array(iterable)` read their elements
+            // through the program: a `length` may be a getter and an iterator is a call, and the
+            // pure constructor can do neither. It applied `ToIndex` to the object instead --
+            // `NaN`, so zero -- and answered an *empty* view for every array-like there is,
+            // which the corpus builds a typed array from on almost every path. `Array.from`
+            // already decides between the two protocols, so the argument is collected with it,
+            // exactly as `%TypedArray%.from` does.
+            Value::Native(Native::TypedArrayConstructor(kind))
+                if arguments.first().is_some_and(|argument| {
+                    // A buffer, an array and another view each have a construction of their own
+                    // above; every other object is one of the two protocols `Array.from` knows.
+                    is_reflect_target(argument)
+                        && !matches!(
+                            argument,
+                            Value::ArrayBuffer(_) | Value::Array(_) | Value::TypedArray(_)
+                        )
+                }) =>
+            {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let iterator =
+                    self.read_property(&source, WellKnown::Iterator.property_key(), current)?;
+                let built = if is_callable(&iterator) {
+                    // An iterable has no count ahead of its elements: they arrive through calls,
+                    // and `Array.from` is where that protocol is already written.
+                    let collected = self.array_from(&arguments[..1], current)?;
+                    construct_typed_array(kind, &[collected])?
+                } else {
+                    // An array-like states its count first, so a `length` no buffer could hold
+                    // is refused before anything is allocated -- rather than after materialising
+                    // sixteen million `Value`s to copy eight-bit numbers out of.
+                    let length = self.array_like_length(&source, current)?;
+                    #[expect(clippy::cast_precision_loss)]
+                    let requested = length as f64;
+                    let count = bounded_buffer(requested, kind.width())?;
+                    #[expect(clippy::cast_precision_loss)]
+                    let view = construct_typed_array(kind, &[Value::Number(count as f64)])?;
+                    let Value::TypedArray(elements) = &view else {
+                        unreachable!("a typed array constructor answers with a view");
+                    };
+                    let elements = Rc::clone(elements);
+                    for index in 0..count {
+                        let value = self.element_get(&source, index as u64, current)?;
+                        let element = self.as_element(kind, &value, current)?;
+                        elements.set(index, &element)?;
+                    }
+                    view
+                };
+                self.stack.push(built);
             }
             Value::Native(native @ Native::TypedArrayConstructor(_)) => {
                 let built = call_native(&self.intrinsics, native, &Value::Undefined, &arguments)?;
@@ -19493,9 +21097,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         prefer_string: bool,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        // A `Temporal` value is an object in the specification's sense, and reducing one is a
+        // *call*: every `Temporal` type's `valueOf` throws on purpose, so that `date1 < date2`
+        // cannot quietly compare two NaNs and answer false in both directions. Passing it
+        // through as its own primitive is what made `Number(date)` answer NaN.
         if !matches!(
             value,
-            Value::Object(_) | Value::Function(_) | Value::Array(_)
+            Value::Object(_) | Value::Function(_) | Value::Array(_) | Value::Temporal(_)
         ) {
             return Ok(value.clone());
         }
@@ -19722,13 +21330,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// accessors, or they would disagree about which shadows which.
     fn stored_property(&self, target: &Value, name: &str) -> Option<Property> {
         match target {
-            Value::Object(object) => object.borrow().lookup(name),
+            Value::Object(object) => object
+                .borrow()
+                .lookup(name)
+                .or_else(|| inherited_object_accessor(&self.intrinsics, &object.borrow(), name)),
             Value::Function(closure) if name != "prototype" => {
                 closure.properties.borrow().lookup(name)
             }
             // An array's non-element properties live in an ordinary store with an ordinary
-            // chain, so a subclass's accessor is reachable the same way.
-            Value::Array(items) => items.properties.borrow().lookup(name),
+            // chain, so a subclass's accessor is reachable the same way. An *index* may hold an
+            // accessor too, either its own or one the chain carries where the array has a hole.
+            Value::Array(items) => match canonical_index(name) {
+                Some(index) => match array_exotic_element(items, index) {
+                    Some(entry) => Some(entry.property),
+                    None if items
+                        .borrow()
+                        .get(index)
+                        .is_some_and(|value| !Self::is_hole(value)) =>
+                    {
+                        None
+                    }
+                    None => array_inherited_index(&self.intrinsics, items, name),
+                },
+                None => items.properties.borrow().lookup(name),
+            },
             // A built-in keeps what a program defined on it in the realm's store, accessors
             // included: `Object.defineProperty(Math, "x", { get })` has to run its getter here
             // rather than read as undefined.
@@ -20581,10 +22206,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             && let Some(index) = array_index(key)
         {
             // A hole *reads* as undefined even though it is not one, which is why the marker
-            // never escapes into an expression.
-            return match items.borrow().get(index) {
-                Some(value) if !Self::is_hole(value) => value.clone(),
-                _ => Value::Undefined,
+            // never escapes into an expression -- but only after the chain has been asked, since
+            // a hole is an absence and `Array.prototype[1] = 1` fills exactly that.
+            let element = items.borrow().get(index).cloned();
+            return match element {
+                Some(value) if !Self::is_hole(&value) => value,
+                _ => match array_inherited_index(&self.intrinsics, items, &key.property_key()) {
+                    Some(Property::Value(value)) => value,
+                    // An inherited accessor is a call, which this pure read cannot make. The
+                    // computed read above it consults the same chain and does.
+                    _ => Value::Undefined,
+                },
             };
         }
         if let Value::TypedArray(view) = target
@@ -20719,12 +22351,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.builtin_accessor(builtin, receiver, instruction);
         }
         let accessor = match target {
-            Value::Object(object) => object.borrow().lookup(&property_key),
+            Value::Object(object) => object.borrow().lookup(&property_key).or_else(|| {
+                inherited_object_accessor(&self.intrinsics, &object.borrow(), &property_key)
+            }),
             Value::Function(closure) if property_key != "prototype" => {
                 closure.properties.borrow().lookup(&property_key)
             }
             Value::Bound(bound) => bound.properties.borrow().lookup(&property_key),
-            Value::Array(items) => items.properties.borrow().lookup(&property_key),
+            Value::Array(_) => self.stored_property(target, &property_key),
             Value::Native(_) | Value::Callback(_) => {
                 match self.intrinsics.overridden(target, &property_key) {
                     Overridden::Held(property, _) => Some(property),
@@ -20849,49 +22483,71 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Array(items) if items.properties.borrow().is_frozen() => Ok(()),
             Value::Array(items) => match array_index(key) {
                 Some(index) => {
-                    let mut items = items.borrow_mut();
+                    // An element the program defined answers for itself: a setter is a call, and
+                    // a data property that is not writable discards the write the same way a
+                    // frozen object's does.
+                    if let Some(entry) = array_exotic_element(items, index) {
+                        match entry.property {
+                            Property::Accessor { set, .. } => {
+                                if let Some(setter) = set {
+                                    self.call_value(
+                                        &setter,
+                                        target.clone(),
+                                        vec![value],
+                                        instruction,
+                                    )?;
+                                }
+                                return Ok(());
+                            }
+                            Property::Value(_) if !entry.attributes.writable => return Ok(()),
+                            Property::Value(_) => {}
+                        }
+                    }
+                    // An index past the end is a *new* property and grows `length`, so an array
+                    // that is closed to new properties, or whose `length` is not writable,
+                    // refuses it. The write is discarded rather than raised for the same reason
+                    // a frozen object's is: the machine does not know whether the code that
+                    // wrote it was strict.
+                    if index >= items.borrow().len()
+                        && (!items.length_writable.get()
+                            || !items.properties.borrow().is_extensible())
+                    {
+                        return Ok(());
+                    }
+                    let mut elements = items.borrow_mut();
                     // Writing past the end extends with *holes*, not undefined: `a[3] = 4` on a
                     // one-element array leaves two positions that `in` denies, `for...in` skips
                     // and a console shows as `<2 empty items>`. A sparse array would pay nothing
                     // for a distant index; this one pays a slot each, so the same bound the
                     // constructor uses applies here.
-                    if index >= items.len() {
+                    if index >= elements.len() {
                         if index >= MAX_DENSE_ARRAY {
                             return Err(ExecutionError::ArrayTooLarge { length: index + 1 });
                         }
-                        items.resize(index + 1, Value::Native(Native::Hole));
+                        items.sparse.set(true);
+                        elements.resize(index + 1, Value::Native(Native::Hole));
                     }
-                    items[index] = value;
+                    elements[index] = value;
                     Ok(())
                 }
-                // `length` is derived, not stored: writing it truncates or extends. This is how
-                // a program empties an array in place -- `arr.length = 0` -- and storing it as an
-                // ordinary property left the array untouched while the write appeared to work.
+                // `length` is derived, not stored: writing it truncates or extends. The write
+                // runs the same `ArraySetLength` a definition does, so `arr.length = 0` and
+                // `Object.defineProperty(arr, "length", {value: 0})` cannot disagree about an
+                // element that will not go. A refusal is discarded rather than raised, for the
+                // same reason a frozen object's write is: the machine does not know whether the
+                // code that wrote it was strict.
                 None if key.property_key() == "length" => {
-                    let length = value.as_number();
-                    // A length that is not a whole number in range is a RangeError, not a
-                    // silently ignored write: `arr.length = -1` is a bug in the program.
-                    if !length.is_finite()
-                        || length < 0.0
-                        || length.fract() != 0.0
-                        || length > MAX_ARRAY_LENGTH
-                    {
-                        return Err(ExecutionError::InvalidArrayLength);
-                    }
-                    {
-                        let length = length as usize;
-                        if length > MAX_DENSE_ARRAY {
-                            return Err(ExecutionError::ArrayTooLarge { length });
-                        }
-                        let mut items = items.borrow_mut();
-                        if length <= items.len() {
-                            items.truncate(length);
-                        } else {
-                            // Growing leaves holes, which read as undefined and are not the same
-                            // thing: `1 in a` is false for one.
-                            items.resize(length, Value::Native(Native::Hole));
-                        }
-                    }
+                    array_set_length(
+                        items,
+                        &Descriptor {
+                            value: Some(value),
+                            get: None,
+                            set: None,
+                            writable: None,
+                            enumerable: None,
+                            configurable: None,
+                        },
+                    )?;
                     Ok(())
                 }
                 // Not an index, so it is an ordinary named property of the array.
@@ -22539,7 +24195,33 @@ fn json_stringify(
         Value::String(text) => Some(json_quote(text)),
         Value::Array(items) => {
             let guard = CycleGuard::enter(seen, Rc::as_ptr(items).cast::<()>())?;
-            let items = items.borrow().clone();
+            // An accessor at an index leaves a hole in the dense storage, and serialising that
+            // as null would report as absent an element the program reads perfectly well. The
+            // getter is a call, which is what `resolve` is here for.
+            let items = if items.elements.borrow().is_empty() {
+                items.borrow().clone()
+            } else {
+                let count = items.borrow().len();
+                let mut collected = Vec::with_capacity(count);
+                for index in 0..count {
+                    let element = match array_exotic_element(items, index) {
+                        Some(ExoticElement {
+                            property: Property::Accessor { get, .. },
+                            ..
+                        }) => match &get {
+                            Some(getter) => resolve(Some(getter), value)?,
+                            None => Value::Undefined,
+                        },
+                        _ => items
+                            .borrow()
+                            .get(index)
+                            .cloned()
+                            .unwrap_or(Value::Undefined),
+                    };
+                    collected.push(element);
+                }
+                collected
+            };
             let parts = items
                 .iter()
                 .map(|item| {
@@ -22802,6 +24484,10 @@ fn call_native(
             | Value::Native(_)
             | Value::Callback(_)
             | Value::Bound(_)
+            // An array's elements, its `length` and its property store are all own properties,
+            // and `has_property` is the wrong question for any of them: it follows the chain,
+            // and `Array.prototype[1] = 2` would make every array claim an own `1`.
+            | Value::Array(_)
             | Value::TypedArray(_) => own_attributes(intrinsics,
                 receiver,
                 &arguments
@@ -22989,7 +24675,12 @@ fn call_native(
                 // An array's *elements* are not properties of its property store, so freezing
                 // has to reach them separately. Without this, `Object.freeze(list)` looked like
                 // it worked and changed nothing at all.
-                Value::Array(items) => items.properties.borrow_mut().freeze(),
+                Value::Array(items) => {
+                    // A frozen array's `length` is not writable either, which is what
+                    // `Object.isFrozen` asks about and what stops a `push` afterwards.
+                    items.length_writable.set(false);
+                    items.properties.borrow_mut().freeze();
+                }
                 Value::Function(closure) => closure.properties.borrow_mut().freeze(),
                 Value::Bound(bound) => bound.properties.borrow_mut().freeze(),
                 _ => {}
@@ -23043,7 +24734,37 @@ fn call_native(
                 Value::Object(object) => close(&mut object.borrow_mut()),
                 Value::Function(closure) => close(&mut closure.properties.borrow_mut()),
                 Value::Bound(bound) => close(&mut bound.properties.borrow_mut()),
-                Value::Array(items) => close(&mut items.properties.borrow_mut()),
+                Value::Array(items) => {
+                    // An element is only non-configurable if something says so, and the dense
+                    // storage has nowhere to say it -- so sealing records it, element by
+                    // element, in the same place `defineProperty` would. Without this a sealed
+                    // array reported itself unsealed and gave its elements away to `delete`.
+                    if sealing {
+                        let present: Vec<usize> = items
+                            .borrow()
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+                            .map(|(index, _)| index)
+                            .collect();
+                        let mut elements = items.elements.borrow_mut();
+                        for index in present {
+                            match elements.iter_mut().find(|entry| entry.index == index) {
+                                Some(entry) => entry.attributes.configurable = false,
+                                None => elements.push(ExoticElement {
+                                    index,
+                                    property: Property::Value(Value::Undefined),
+                                    attributes: Attributes {
+                                        writable: true,
+                                        enumerable: true,
+                                        configurable: false,
+                                    },
+                                }),
+                            }
+                        }
+                    }
+                    close(&mut items.properties.borrow_mut());
+                }
                 // A built-in has no store of its own; the realm keeps one for it, and that is
                 // where the closure has to be recorded or the next `isExtensible` undoes it.
                 Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
@@ -23063,11 +24784,14 @@ fn call_native(
             Some(Value::Object(object)) => object.borrow().is_sealed(),
             Some(Value::Function(closure)) => closure.properties.borrow().is_sealed(),
             Some(Value::Bound(bound)) => bound.properties.borrow().is_sealed(),
-            // An array's elements live in dense storage rather than in slots with flags, so
-            // sealing one closes its property store and leaves the elements deletable. Reporting
-            // it sealed would be a claim this representation cannot keep.
+            // Sealed means closed *and* every element non-configurable, which an array records
+            // one element at a time beside its dense storage.
             Some(Value::Array(items)) => {
-                items.borrow().is_empty() && items.properties.borrow().is_sealed()
+                items.properties.borrow().is_sealed()
+                    && (0..items.borrow().len()).all(|index| {
+                        own_attributes(intrinsics, &Value::Array(Rc::clone(items)), &index.to_string())
+                            .is_none_or(|attributes| !attributes.configurable)
+                    })
             }
             _ => false,
         }),
@@ -25367,10 +27091,18 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
     if let Value::Array(items) = target
         && let Some(index) = array_index(key)
     {
-        return items
+        if array_exotic_element(items, index).is_some() {
+            return true;
+        }
+        if items
             .borrow()
             .get(index)
-            .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
+            .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)))
+        {
+            return true;
+        }
+        // A hole is the absence of an own property, so the question carries on up the chain.
+        return array_inherited_index(intrinsics, items, &key.property_key()).is_some();
     }
     if let Value::TypedArray(view) = target
         && let Some(index) = typed_array_index(key)
@@ -25402,6 +27134,20 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                     .and_then(|table| Native::PrototypeOf(table).property(&name))
                     .is_some_and(|found| !matches!(found, Value::Undefined))
                 || !matches!(inherited_object_property(intrinsics, &name), Value::Undefined)
+                // A property the program *defined* on `Object.prototype` that reads as
+                // undefined is still there: an accessor given only a setter answers `undefined`
+                // to a read and `true` to `in`, and asking the read whether it found anything
+                // cannot tell those apart. Every generic array walk consults `HasProperty`, so
+                // the difference decides whether an index is visited at all. Only the realm's
+                // store is consulted, not the table beneath it: a module namespace has no
+                // prototype at all, and the table would hand one `__proto__` and `toString`.
+                || matches!(
+                    intrinsics.overridden(
+                        &Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
+                        &name,
+                    ),
+                    Overridden::Held(..)
+                )
         }
         Value::Array(items) => {
             if let Some(index) = array_index(key) {
@@ -26370,13 +28116,29 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
         // `<1 empty item>`. The comment said hole and the code wrote undefined, which is the
         // one place the difference between the two is directly observable.
         Value::Array(items) => {
+            // `length` is non-configurable, so `delete a.length` is false and the array keeps it.
+            if key.property_key() == "length" {
+                return false;
+            }
             if items.properties.borrow().is_frozen() {
                 return false;
             }
-            if let Some(index) = array_index(key)
-                && let Some(slot) = items.borrow_mut().get_mut(index)
-            {
-                *slot = Value::Native(Native::Hole);
+            if let Some(index) = array_index(key) {
+                // An element a program locked down will not go, and `delete` reports that
+                // rather than leaving `length` describing an array that no longer matches it.
+                if let Some(entry) = array_exotic_element(items, index) {
+                    if !entry.attributes.configurable {
+                        return false;
+                    }
+                    items
+                        .elements
+                        .borrow_mut()
+                        .retain(|other| other.index != index);
+                }
+                if let Some(slot) = items.borrow_mut().get_mut(index) {
+                    items.sparse.set(true);
+                    *slot = Value::Native(Native::Hole);
+                }
             }
             true
         }
@@ -27385,6 +29147,23 @@ fn bounded_buffer(length: f64, width: usize) -> Result<usize, ExecutionError> {
 
 /// The largest value the specification accepts as an array length.
 const MAX_ARRAY_LENGTH: f64 = 4_294_967_295.0;
+
+/// `Number.MAX_SAFE_INTEGER`: the largest index the language will name.
+///
+/// `ToLength` clamps to it, and the methods that grow an array-like refuse to push past it --
+/// which is not the same bound as an array's own `length`, and the two are checked separately.
+const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// The same bound as an integer, for the walks that count in one.
+const MAX_SAFE_INTEGER_AS_U64: u64 = 9_007_199_254_740_991;
+
+/// What `sort` and `toSorted` refuse a comparator that is neither a function nor `undefined`
+/// with. Written once because both check it, and before either touches its receiver.
+fn comparator_refused() -> ExecutionError {
+    ExecutionError::TypeErrorMessage {
+        message: "The comparison function must be either a function or undefined".to_owned(),
+    }
+}
 
 /// The length an array-like claims, bounded to what this representation can materialise.
 ///
@@ -29165,6 +30944,10 @@ fn unwrap_proxy(value: &Value) -> &Value {
 /// what the program put there.
 fn intrinsic_constructor(value: &Value) -> Option<Value> {
     let native = match value {
+        // A `Temporal` value's constructor is the one of the eight its kind names, which is what
+        // `date.constructor === Temporal.PlainDate` asks and what a library reaches for to build
+        // another of the same type.
+        Value::Temporal(value) => Native::Temporal(temporal::Op::Constructor(value.kind())),
         Value::Date(_) => Native::DateConstructor,
         Value::RegExp(_) => Native::RegExpConstructor,
         Value::Promise(_) => Native::PromiseConstructor,
@@ -29265,6 +31048,113 @@ fn string_exotic(target: &Value, key: &str) -> Option<Value> {
     text.chars()
         .nth(index)
         .map(|character| Value::String(character.to_string()))
+}
+
+/// Whether this array still behaves ordinarily enough for the dense fast paths to answer for it.
+///
+/// An array whose `length` a program has locked is not one: `push` has to refuse rather than
+/// grow it, `sort` has to refuse rather than rearrange it, and the refusal is a `TypeError` the
+/// specification raises from inside the generic walk. The dense paths have no way to express
+/// that, so such an array is walked the way any other object with a `length` is -- which is the
+/// same algorithm, and already written.
+fn array_walks_densely(items: &ArrayData) -> bool {
+    items.length_writable.get()
+        && !items.sparse.get()
+        && items.elements.borrow().is_empty()
+        && items.properties.borrow().is_extensible()
+}
+
+/// The property an array holds at `index` outside its dense storage, if any.
+fn array_exotic_element(items: &ArrayData, index: usize) -> Option<ExoticElement> {
+    items
+        .elements
+        .borrow()
+        .iter()
+        .find(|entry| entry.index == index)
+        .cloned()
+}
+
+/// What an index reaches on an array's prototype chain, for a position the array has no element
+/// at.
+///
+/// `Array.prototype[1] = 1` really does make `[0, , 2][1]` read as 1 and `1 in [0, , 2]` true: a
+/// hole is the *absence* of an own property rather than a stored undefined, so the read carries
+/// on up the chain exactly as it would for any other missing name. Answering `undefined` for one
+/// made every generic walk visit a position no engine visits, and skip one every engine does.
+fn array_inherited_index(
+    intrinsics: &Intrinsics,
+    items: &ArrayData,
+    name: &str,
+) -> Option<Property> {
+    if let Some(found) = items.properties.borrow().lookup(name) {
+        return Some(found);
+    }
+    // A chain the program moved has already been walked by `lookup`; only an array still linked
+    // to `Array.prototype` reaches the realm's own store.
+    if items.properties.borrow().prototype().is_some() {
+        return None;
+    }
+    for table in [PrototypeTable::Array, PrototypeTable::Object] {
+        if let Overridden::Held(property, _) =
+            intrinsics.overridden(&Value::Native(Native::PrototypeOf(table)), name)
+        {
+            return Some(property);
+        }
+    }
+    None
+}
+
+/// The dense storage behind an array receiver, when the fast paths may answer for it.
+fn dense_array(value: &Value) -> Option<&Rc<ArrayData>> {
+    match value {
+        Value::Array(items) if array_walks_densely(items) => Some(items),
+        _ => None,
+    }
+}
+
+/// What an array answers as an own property: an element, its `length`, or nothing.
+///
+/// Separate from the property store beside it because neither of those two is in the store --
+/// the elements are a dense `Vec` and `length` is derived from its size -- and a prototype chain
+/// that walks into an array has to see all three.
+/// An accessor the realm's `Object.prototype` carries, for an object whose chain still ends
+/// there.
+///
+/// `ObjectData::lookup` walks stored links and stops: the realm keeps what a program defined on
+/// `Object.prototype` in its own store, which no link points at. A *data* property there is
+/// already answered by the read that falls through to `inherited_object_property`; an accessor is
+/// a call, and reaching it needs the property itself rather than the value it would have read as.
+fn inherited_object_accessor(
+    intrinsics: &Intrinsics,
+    object: &ObjectData,
+    name: &str,
+) -> Option<Property> {
+    // An object whose prototype is explicitly `null` inherits nothing.
+    if matches!(object.prototype(), Some(Value::Null)) {
+        return None;
+    }
+    match intrinsics.overridden(
+        &Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
+        name,
+    ) {
+        Overridden::Held(property @ Property::Accessor { .. }, _) => Some(property),
+        _ => None,
+    }
+}
+
+fn array_own_property(items: &ArrayData, key: &str) -> Option<Property> {
+    if key == "length" {
+        #[expect(clippy::cast_precision_loss)]
+        let length = items.borrow().len() as f64;
+        return Some(Property::Value(Value::Number(length)));
+    }
+    let index = canonical_index(key)?;
+    items
+        .borrow()
+        .get(index)
+        .filter(|value| !matches!(value, Value::Native(Native::Hole)))
+        .cloned()
+        .map(Property::Value)
 }
 
 /// The primitive a wrapper object boxes, or `None` for anything else.
@@ -30294,13 +32184,33 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             keys
         }
         Value::Array(items) => {
-            let mut keys: Vec<String> = items
+            // An accessor leaves a hole in the dense storage, so the indices that are really
+            // there are the union of the two: the walk below would otherwise list an array's
+            // getters as absent.
+            let mut indices: Vec<usize> = items
                 .borrow()
                 .iter()
                 .enumerate()
                 .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
-                .map(|(index, _)| index.to_string())
+                .map(|(index, _)| index)
                 .collect();
+            let defined: Vec<usize> = items
+                .elements
+                .borrow()
+                .iter()
+                .map(|entry| entry.index)
+                .collect();
+            for index in defined {
+                if !indices.contains(&index) {
+                    indices.push(index);
+                }
+            }
+            indices.sort_unstable();
+            let mut keys: Vec<String> = indices.iter().map(usize::to_string).collect();
+            // After the indices and before whatever the program hung on the array: `length` is
+            // an own property created with the array, and the specification lists integer
+            // indices first and everything else in creation order.
+            keys.push("length".to_owned());
             keys.extend(from_object(&items.properties.borrow()));
             keys
         }
@@ -30382,8 +32292,27 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
             .borrow()
             .get_own_attributes(key)
             .or_else(|| tabulated_attributes(target, key)),
+        Value::Array(items) if key == "length" => Some(Attributes {
+            writable: items.length_writable.get(),
+            enumerable: false,
+            configurable: false,
+        }),
         Value::Array(items) => match key.parse::<usize>() {
             Ok(index) => {
+                let frozen = items.properties.borrow().is_frozen();
+                // A definition the program made wins over the ordinary flags, and freezing wins
+                // over both: a frozen array's elements are locked whatever they were defined as.
+                if let Some(entry) = array_exotic_element(items, index) {
+                    return Some(if frozen {
+                        Attributes {
+                            writable: false,
+                            enumerable: entry.attributes.enumerable,
+                            configurable: false,
+                        }
+                    } else {
+                        entry.attributes
+                    });
+                }
                 let present = matches!(
                     items.borrow().get(index),
                     Some(item) if !matches!(item, Value::Native(Native::Hole))
@@ -30391,7 +32320,7 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
                 if !present {
                     return None;
                 }
-                Some(if items.properties.borrow().is_frozen() {
+                Some(if frozen {
                     Attributes::NONE
                 } else {
                     Attributes::DEFAULT
