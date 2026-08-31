@@ -70,15 +70,19 @@ for probe in "$PROBES"/*.js; do
 	# TZ pinned so the reference implementation is in the same zone this realm is.
 	expected="$(TZ=UTC node "$probe" 2>&1 || true)"
 	# --one-shot so a stale daemon can never answer for a build that no longer exists.
-	actual="$("$KILN" --one-shot run "$probe" 2>&1 || true)"
+	kiln_status=0
+	actual="$("$KILN" --one-shot run "$probe" 2>&1)" || kiln_status=$?
 
 	if [[ $actual == "$expected" ]]; then
 		matched=$((matched + 1))
 		continue
 	fi
-	if [[ $actual == kiln:* ]]; then
-		# The first line carries the reason; the path prefix in it is noise here.
-		REFUSALS+=("$name	$(printf '%s' "$actual" | head -1 | sed 's/^kiln: [^:]*: //')")
+	if ((kiln_status != 0)) && [[ $actual == kiln:* || $actual == *$'\n'kiln:* ]]; then
+		# A runtime error may follow stdout produced before the failing instruction. Look for the
+		# diagnostic at the start of any line, or strict-mode failures in otherwise matching probes
+		# are misreported as silent divergences. The first diagnostic line carries the reason; the
+		# path prefix in it is noise here.
+		REFUSALS+=("$name	$(printf '%s\n' "$actual" | sed -n '/^kiln:/ { s/^kiln: [^:]*: //; p; q; }')")
 		continue
 	fi
 	diverged=$((diverged + 1))
