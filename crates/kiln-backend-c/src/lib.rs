@@ -729,6 +729,17 @@ enum kiln_value_tag {
  * They need distinct codes from the intrinsic typed-array methods, which return a typed view. */
 #define KILN_C99_METHOD_ARRAY_GENERIC_MAP 235
 #define KILN_C99_METHOD_ARRAY_GENERIC_FILTER 236
+/* Runtime-module methods. They use the same canonical call path as language intrinsics while
+ * keeping their state on ordinary backend objects. Appended outside every range-dispatch block
+ * so adding a runtime facade never changes the meaning of an existing intrinsic code. */
+#define KILN_C99_METHOD_NODE_EVENT_ON 260
+#define KILN_C99_METHOD_NODE_EVENT_ONCE 261
+#define KILN_C99_METHOD_NODE_EVENT_EMIT 262
+#define KILN_C99_METHOD_NODE_EVENT_LISTENERS 263
+#define KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER 264
+#define KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS 265
+#define KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS 266
+#define KILN_C99_METHOD_NODE_EVENT_EMITTER 267
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -1471,6 +1482,9 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
+static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
+                               kiln_value receiver, const kiln_value *args, size_t argc,
+                               int depth, kiln_value *thrown);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -7471,12 +7485,237 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     return status;
 }
 
+/* A compact native EventEmitter core shared by node:events and the socket/server facades.
+ *
+ * Listener state is an unspellable, non-enumerable own property. Keeping the state in ordinary
+ * backend values makes emit synchronous, preserves registration order, and lets every future
+ * I/O facade use the same callback semantics without exposing backend object layout across the
+ * generated-module boundary. */
+static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
+                               kiln_value receiver, const kiln_value *args, size_t argc,
+                               int depth, kiln_value *thrown) {
+    kiln_value table;
+    kiln_value name;
+    kiln_value bucket;
+    kiln_array *entries;
+    size_t index;
+    int status;
+    if (code == KILN_C99_METHOD_NODE_EVENT_EMITTER) {
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            *result = receiver;
+        } else {
+            status = kiln_c99_new_object(result);
+            if (status != KILN_C99_OK) return status;
+        }
+        status = kiln_c99_define_method(*result, "on", 2,
+                                        kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_ON));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(*result, "addListener", 11,
+                                            kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_ON));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(*result, "once", 4,
+                                            kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_ONCE));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(*result, "emit", 4,
+                                            kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMIT));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(
+                *result, "listeners", 9, kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_LISTENERS));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(
+                *result, "removeListener", 14,
+                kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(
+                *result, "off", 3, kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(
+                *result, "removeAllListeners", 18,
+                kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(
+                *result, "setMaxListeners", 15,
+                kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS));
+        return status;
+    }
+    if (receiver.tag != KILN_VALUE_OBJECT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "EventEmitter method called on an incompatible receiver");
+    }
+    {
+        kiln_property *state = kiln_c99_own_private(receiver, "@@node:events", 13);
+        if (state == NULL) {
+            kiln_object *object = kiln_c99_object_of(receiver);
+            status = kiln_c99_put(NULL, receiver, "@@node:events", 13,
+                                  kiln_c99_undefined(), 0, NULL);
+            if (status != KILN_C99_OK) return status;
+            state = kiln_c99_own_private(receiver, "@@node:events", 13);
+            if (state == NULL) return KILN_C99_CONTROL_ERROR;
+            state->enumerable = 0;
+            (void)object;
+        }
+        table = state->value;
+        if (table.tag != KILN_VALUE_ARRAY) {
+            status = kiln_c99_new_array(&table);
+            if (status != KILN_C99_OK) return status;
+            state->value = table;
+        }
+    }
+    entries = kiln_c99_array_of(table);
+    name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+    bucket = kiln_c99_undefined();
+    for (index = 0; index < entries->count; ++index) {
+        kiln_value found;
+        if (entries->elements[index].tag != KILN_VALUE_OBJECT) continue;
+        status = kiln_c99_get(NULL, entries->elements[index], "name", 4, &found, 0, NULL);
+        if (status != KILN_C99_OK) return status;
+        if (kiln_c99_strict_equal(found, name)) {
+            bucket = entries->elements[index];
+            break;
+        }
+    }
+    if (code == KILN_C99_METHOD_NODE_EVENT_ON || code == KILN_C99_METHOD_NODE_EVENT_ONCE) {
+        kiln_value listener = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value listeners;
+        kiln_value record;
+        if (!kiln_c99_is_callable(listener))
+            return kiln_c99_throw_not_a(thrown, listener, "function");
+        if (bucket.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&bucket);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, bucket, "name", 4, name, 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_new_array(&listeners);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, bucket, "listeners", 9, listeners, 0, NULL);
+            if (status == KILN_C99_OK) status = kiln_c99_array_push(table, bucket);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            status = kiln_c99_get(NULL, bucket, "listeners", 9, &listeners, 0, NULL);
+            if (status != KILN_C99_OK || listeners.tag != KILN_VALUE_ARRAY)
+                return KILN_C99_CONTROL_ERROR;
+        }
+        status = kiln_c99_new_object(&record);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, record, "callback", 8, listener, 0, NULL);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_put(NULL, record, "once", 4,
+                                  kiln_c99_boolean(code == KILN_C99_METHOD_NODE_EVENT_ONCE), 0,
+                                  NULL);
+        if (status == KILN_C99_OK) status = kiln_c99_array_push(listeners, record);
+        if (status != KILN_C99_OK) return status;
+        *result = receiver;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS) {
+        *result = receiver;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS) {
+        if (argc == 0) {
+            kiln_c99_array_of(table)->count = 0;
+        } else if (bucket.tag == KILN_VALUE_OBJECT) {
+            kiln_value listeners;
+            status = kiln_c99_get(NULL, bucket, "listeners", 9, &listeners, 0, NULL);
+            if (status != KILN_C99_OK || listeners.tag != KILN_VALUE_ARRAY)
+                return KILN_C99_CONTROL_ERROR;
+            kiln_c99_array_of(listeners)->count = 0;
+        }
+        *result = receiver;
+        return KILN_C99_OK;
+    }
+    if (bucket.tag != KILN_VALUE_OBJECT) {
+        if (code == KILN_C99_METHOD_NODE_EVENT_EMIT) *result = kiln_c99_boolean(0);
+        else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS) return kiln_c99_new_array(result);
+        else *result = receiver;
+        return KILN_C99_OK;
+    }
+    {
+        kiln_value listeners;
+        kiln_array *stored;
+        status = kiln_c99_get(NULL, bucket, "listeners", 9, &listeners, 0, NULL);
+        if (status != KILN_C99_OK || listeners.tag != KILN_VALUE_ARRAY)
+            return KILN_C99_CONTROL_ERROR;
+        stored = kiln_c99_array_of(listeners);
+        if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS) {
+            status = kiln_c99_new_array(result);
+            for (index = 0; status == KILN_C99_OK && index < stored->count; ++index) {
+                kiln_value callback;
+                status = kiln_c99_get(NULL, stored->elements[index], "callback", 8, &callback, 0,
+                                      NULL);
+                if (status == KILN_C99_OK) status = kiln_c99_array_push(*result, callback);
+            }
+            return status;
+        }
+        if (code == KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER) {
+            kiln_value wanted = argc > 1 ? args[1] : kiln_c99_undefined();
+            if (!kiln_c99_is_callable(wanted))
+                return kiln_c99_throw_not_a(thrown, wanted, "function");
+            for (index = stored->count; index > 0; --index) {
+                kiln_value callback;
+                status = kiln_c99_get(NULL, stored->elements[index - 1], "callback", 8, &callback,
+                                      0, NULL);
+                if (status != KILN_C99_OK) return status;
+                if (kiln_c99_strict_equal(callback, wanted)) {
+                    memmove(stored->elements + index - 1, stored->elements + index,
+                            (stored->count - index) * sizeof *stored->elements);
+                    --stored->count;
+                    break;
+                }
+            }
+            *result = receiver;
+            return KILN_C99_OK;
+        }
+        if (code == KILN_C99_METHOD_NODE_EVENT_EMIT) {
+            kiln_value snapshot;
+            kiln_array *copy;
+            status = kiln_c99_new_array(&snapshot);
+            for (index = 0; status == KILN_C99_OK && index < stored->count; ++index)
+                status = kiln_c99_array_push(snapshot, stored->elements[index]);
+            if (status != KILN_C99_OK) return status;
+            copy = kiln_c99_array_of(snapshot);
+            for (index = 0; index < copy->count; ++index) {
+                kiln_value callback;
+                kiln_value once;
+                kiln_value ignored;
+                status = kiln_c99_get(NULL, copy->elements[index], "callback", 8, &callback, 0,
+                                      NULL);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_get(NULL, copy->elements[index], "once", 4, &once, 0, NULL);
+                if (status != KILN_C99_OK) return status;
+                if (kiln_c99_truthy(once)) {
+                    size_t live;
+                    for (live = 0; live < stored->count; ++live) {
+                        if (kiln_c99_strict_equal(stored->elements[live], copy->elements[index])) {
+                            memmove(stored->elements + live, stored->elements + live + 1,
+                                    (stored->count - live - 1) * sizeof *stored->elements);
+                            --stored->count;
+                            break;
+                        }
+                    }
+                }
+                status = kiln_c99_call(host, &ignored, callback, receiver,
+                                       argc > 1 ? args + 1 : NULL, argc > 1 ? argc - 1 : 0,
+                                       depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+            *result = kiln_c99_boolean(copy->count != 0);
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
+
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown) {
     kiln_array *array;
     size_t index;
     int status;
+    if (code >= KILN_C99_METHOD_NODE_EVENT_ON &&
+        code <= KILN_C99_METHOD_NODE_EVENT_EMITTER) {
+        return kiln_c99_node_event(host, result, code, receiver, args, argc, depth, thrown);
+    }
     /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
      * `length` and writes an element through the handler's traps, which is how a copy-on-write
      * layer sees the write at all. Every method here operates on the receiver's own storage
@@ -14207,6 +14446,14 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "constructor");
     }
+    if (callee.tag == KILN_VALUE_METHOD &&
+        callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER) {
+        /* Runtime-provided constructors are methods so their identity can cross generated
+         * modules without exporting a backend-private closure. EventEmitter is constructible,
+         * and its ordinary-call and `new` forms deliberately share one initializer. */
+        return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
+                                   depth, thrown);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_REGEXP ||
                                              callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||
@@ -17902,6 +18149,90 @@ mod tests {
         assert!(emitted.source.contains("static int kiln_module_path_"));
         assert!(emitted.source.contains("kiln_realm_enter"));
         assert!(!emitted.source.contains("extern kiln_value"));
+    }
+
+    #[test]
+    fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
+        let module = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::Return],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![kiln_ir::ExportBinding {
+                exported: "EventEmitter".to_owned(),
+                local_slot: 0,
+            }],
+        };
+        let generated = emit_runtime_module_with_logical_path(
+            &module,
+            ".kiln/builtins/events.builtin",
+            "exports[0] = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);",
+        )
+        .expect("events runtime module emits");
+        let wrapper = format!(
+            r#"
+static int calls = 0;
+static int listener(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+                    kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                    kiln_value *thrown, kiln_generator *frame) {{
+    (void)host; (void)upvalues; (void)receiver; (void)depth; (void)thrown; (void)frame;
+    if (argc != 1 || args[0].tag != KILN_VALUE_NUMBER) return 91;
+    calls = calls * 10 + (int)kiln_c99_as_number(args[0]);
+    *result = kiln_c99_undefined();
+    return KILN_C99_OK;
+}}
+int main(void) {{
+    kiln_value exports[1];
+    kiln_value result;
+    kiln_value emitter;
+    kiln_value callback;
+    kiln_value args[2];
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_make_closure(&callback, listener, "listener", 8, 0, 1, 0, 0, 0, 0,
+                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK) return 1;
+    if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
+    if (kiln_c99_construct(NULL, &emitter, exports[0], NULL, 0, 0,
+                           &thrown) != KILN_C99_OK) return 3;
+    if (emitter.tag != KILN_VALUE_OBJECT) return 31;
+    {{ kiln_value keys;
+       if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
+       if (kiln_c99_array_of(keys)->count != 0) return 33;
+    }}
+    args[0] = kiln_c99_copy_text("tick", 4); args[1] = callback;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_ON, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK) return 4;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_ONCE, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK) return 5;
+    args[1] = kiln_c99_number(7.0);
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK || !kiln_c99_truthy(result)) return 6;
+    args[1] = kiln_c99_number(8.0);
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK || calls != 778) return 7;
+    args[1] = callback;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER,
+                               emitter, args, 2, 0, &thrown) != KILN_C99_OK) return 8;
+    args[1] = kiln_c99_number(9.0);
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
+                               0, &thrown) != KILN_C99_OK || kiln_c99_truthy(result)) return 9;
+    return 0;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "runtime-event-emitter");
+        assert!(
+            run.status.success(),
+            "runtime EventEmitter failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 
     fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {

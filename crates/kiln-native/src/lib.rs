@@ -20,7 +20,10 @@ use kiln_artifact_cache::{
     ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, CacheError,
     Digest, Lookup,
 };
-use kiln_backend_c::{C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_path};
+use kiln_backend_c::{
+    C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_path,
+    emit_runtime_module_with_logical_path,
+};
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
 use kiln_ir::Program;
@@ -888,13 +891,14 @@ impl NativeBuilder {
         graph: &ModuleGraph,
         options: &NativeBuildOptions,
     ) -> Result<NativeSharedLibraryReport, NativeError> {
+        validate_native_node_builtins(graph)?;
         let total_started = Instant::now();
         let emit_started = Instant::now();
         let mut modules = Vec::with_capacity(graph.module_count());
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
+            let emitted = emit_native_graph_module(node, &logical_path)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1200,7 +1204,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_module_with_logical_path(&node.program, &logical_path)?;
+            let emitted = emit_native_graph_module(node, &logical_path)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1593,7 +1597,9 @@ impl NativeBuilder {
 /// graph construction until each accepted builtin has an explicit native materializer.
 fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError> {
     if let Some(builtin) = graph.modules().find_map(|node| match node.source {
-        ModuleSource::NodeBuiltin(builtin) => Some(builtin),
+        ModuleSource::NodeBuiltin(builtin) if native_builtin_body(builtin).is_none() => {
+            Some(builtin)
+        }
         _ => None,
     }) {
         return Err(NativeError::UnsupportedNodeBuiltin {
@@ -1601,6 +1607,37 @@ fn validate_native_node_builtins(graph: &ModuleGraph) -> Result<(), NativeError>
         });
     }
     Ok(())
+}
+
+fn emit_native_graph_module(
+    node: &kiln_module_graph::ModuleNode,
+    logical_path: &str,
+) -> Result<kiln_backend_c::CModule, NativeError> {
+    match node.source {
+        ModuleSource::NodeBuiltin(builtin) => {
+            let body = native_builtin_body(builtin).ok_or(NativeError::UnsupportedNodeBuiltin {
+                specifier: builtin.specifier(),
+            })?;
+            Ok(emit_runtime_module_with_logical_path(
+                &node.program,
+                logical_path,
+                body,
+            )?)
+        }
+        _ => Ok(emit_module_with_logical_path(&node.program, logical_path)?),
+    }
+}
+
+fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'static str> {
+    use kiln_module_resolver::NodeBuiltin;
+    match builtin {
+        NodeBuiltin::Events => Some(
+            r#"kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);
+exports[0] = constructor;
+exports[1] = constructor;"#,
+        ),
+        _ => None,
+    }
 }
 
 fn cached_payload(
@@ -3490,6 +3527,51 @@ mod tests {
                 .to_string(),
             "native Node execution does not yet materialize the `node:http` builtin"
         );
+    }
+
+    #[test]
+    fn node_events_has_a_native_runtime_module_materializer() {
+        use kiln_module_resolver::NodeBuiltin;
+
+        let module = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::Return],
+                local_count: 2,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: vec![
+                ExportBinding {
+                    exported: "EventEmitter".to_owned(),
+                    local_slot: 0,
+                },
+                ExportBinding {
+                    exported: "default".to_owned(),
+                    local_slot: 1,
+                },
+            ],
+        };
+        let node = kiln_module_graph::ModuleNode {
+            path: PathBuf::from("/.kiln/builtins/events.builtin"),
+            source: ModuleSource::NodeBuiltin(NodeBuiltin::Events),
+            program: module,
+            data: None,
+            dependencies: Vec::new(),
+        };
+        let emitted = emit_native_graph_module(&node, ".kiln/builtins/events.builtin")
+            .expect("events materializes");
+
+        assert!(
+            emitted
+                .source
+                .contains("KILN_C99_METHOD_NODE_EVENT_EMITTER")
+        );
+        assert!(emitted.source.contains("exports[0] = constructor;"));
+        assert!(emitted.source.contains("exports[1] = constructor;"));
+        assert!(native_builtin_body(NodeBuiltin::Http).is_none());
     }
 
     #[test]
