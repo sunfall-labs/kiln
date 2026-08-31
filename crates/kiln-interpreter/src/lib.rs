@@ -32231,6 +32231,78 @@ mod tests {
     }
 
     #[test]
+    fn node_next_tick_runs_before_promise_reactions() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("nextTick".into()),
+                Constant::String("resolve".into()),
+                Constant::String("then".into()),
+                Constant::String("tick".into()),
+                Constant::String("promise".into()),
+            ],
+            code: vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Process),
+                Instruction::GetProperty(0),
+                Instruction::MakeFunction(0),
+                Instruction::Call { argc: 1 },
+                Instruction::Pop,
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Promise),
+                Instruction::CallMethod { name: 1, argc: 0 },
+                Instruction::MakeFunction(1),
+                Instruction::CallMethod { name: 2, argc: 1 },
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![
+                kiln_ir::FunctionProto {
+                    prologue_end: 0,
+                    asynchronous: false,
+                    name: None,
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    declared_length: 0,
+                    local_count: 0,
+                    code: vec![
+                        Instruction::Const(3),
+                        Instruction::HostCall {
+                            op: HostOp::WriteStdout,
+                            argc: 1,
+                        },
+                        Instruction::Return,
+                    ],
+                    upvalues: Vec::new(),
+                },
+                kiln_ir::FunctionProto {
+                    prologue_end: 0,
+                    asynchronous: false,
+                    name: None,
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    declared_length: 0,
+                    local_count: 0,
+                    code: vec![
+                        Instruction::Const(4),
+                        Instruction::HostCall {
+                            op: HostOp::WriteStdout,
+                            argc: 1,
+                        },
+                        Instruction::Return,
+                    ],
+                    upvalues: Vec::new(),
+                },
+            ],
+        };
+
+        assert_eq!(stdout_of(&program), "tick,promise");
+    }
+
+    #[test]
     fn a_program_is_not_finished_while_it_still_has_work_scheduled() {
         // Returning at the end of the module body would make every timer unobservable.
         let program = timer_program(&[("scheduled", 5.0)]);

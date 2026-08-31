@@ -1965,6 +1965,53 @@ mod tests {
         assert_eq!(host.output, ["import require"]);
     }
 
+    #[test]
+    fn node_modules_share_one_next_tick_and_promise_checkpoint() {
+        let project = TempProject::new();
+        project.write(
+            "dep.mjs",
+            r#"
+                process.nextTick(() => console.log('dep-tick'));
+                Promise.resolve().then(() => console.log('dep-promise'));
+                console.log('dep-body');
+                export const ready = 1;
+            "#,
+        );
+        let entry = project.write(
+            "main.mjs",
+            r#"
+                import { ready } from './dep.mjs';
+                process.nextTick(() => console.log('entry-tick'));
+                Promise.resolve().then(() => console.log('entry-promise'));
+                console.log(ready);
+            "#,
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build shared-realm graph");
+
+        let mut host = TestHost::default();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute shared-realm graph");
+        assert_eq!(
+            host.output,
+            [
+                "dep-body",
+                "1",
+                "dep-tick",
+                "entry-tick",
+                "dep-promise",
+                "entry-promise",
+            ]
+        );
+    }
+
     struct OxcFrontend;
 
     impl Frontend for OxcFrontend {
