@@ -33,6 +33,7 @@ use tokio::net::{
     tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
 use tokio::sync::mpsc;
+use tokio_util::task::JoinMap;
 
 use crate::http_body::{BodyEvent, ResponseBodyDriver};
 use crate::http_transport::HttpTransportDriver;
@@ -500,6 +501,26 @@ impl std::error::Error for RuntimeBuildError {
     }
 }
 
+/// One interval of stable Tokio runtime diagnostics.
+///
+/// The snapshot is deliberately made of Kiln-owned scalar types. Tokio and `tokio-metrics` remain
+/// implementation details below the runtime seam, and sampling never changes realm scheduling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeMetricsSnapshot {
+    /// Wall-clock time since the previous sample (or runtime construction for the first sample).
+    pub elapsed: Duration,
+    /// Number of worker threads. A realm runtime currently owns exactly one.
+    pub workers: usize,
+    /// Tasks alive at the instant of the sample.
+    pub live_tasks: usize,
+    /// Tasks waiting in Tokio's global injection queue.
+    pub global_queue_depth: usize,
+    /// Number of times runtime workers parked during the interval.
+    pub park_count: u64,
+    /// Wall-clock duration workers spent polling tasks during the interval.
+    pub busy_duration: Duration,
+}
+
 /// A deterministic, current-thread runtime for realm tasks.
 ///
 /// The runtime starts Tokio time paused on the first call to [`Self::drive`]. A drive advances
@@ -515,6 +536,7 @@ impl std::error::Error for RuntimeBuildError {
 pub struct RealmRuntime<H = TokioHost> {
     runtime: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
+    runtime_metrics: tokio_metrics::RuntimeIntervals,
     time_paused: bool,
     host: H,
     capabilities: RealmCapabilities,
@@ -566,9 +588,11 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .enable_time()
             .build()
             .map_err(RuntimeBuildError)?;
+        let runtime_metrics = tokio_metrics::RuntimeMonitor::new(runtime.handle()).intervals();
         Ok(Self {
             runtime,
             local: tokio::task::LocalSet::new(),
+            runtime_metrics,
             time_paused: false,
             host,
             capabilities,
@@ -580,6 +604,26 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 
     pub fn capabilities(&self) -> &RealmCapabilities {
         &self.capabilities
+    }
+
+    /// Samples stable whole-runtime counters accumulated since the previous call.
+    ///
+    /// These are developer diagnostics, not JavaScript-observable time or scheduler state. The
+    /// sample's `elapsed` and durations use wall time even though realm timers use paused Tokio
+    /// time for deterministic execution.
+    pub fn sample_runtime_metrics(&mut self) -> RuntimeMetricsSnapshot {
+        let metrics = self
+            .runtime_metrics
+            .next()
+            .expect("Tokio runtime metric intervals are infinite");
+        RuntimeMetricsSnapshot {
+            elapsed: metrics.elapsed,
+            workers: metrics.workers_count,
+            live_tasks: metrics.live_tasks_count,
+            global_queue_depth: metrics.global_queue_depth,
+            park_count: metrics.total_park_count,
+            busy_duration: metrics.total_busy_duration,
+        }
     }
 
     /// Returns the asynchronous host owned by this realm runtime.
@@ -1490,6 +1534,7 @@ pub struct TokioHost {
     pending: BTreeMap<RequestId, PendingRequest>,
     resources: BTreeMap<ResourceId, HostResource>,
     ready: BTreeMap<u64, Completion>,
+    tasks: JoinMap<RequestId, ()>,
     sender: mpsc::UnboundedSender<HostCompletion>,
     receiver: mpsc::UnboundedReceiver<HostCompletion>,
     _not_send: PhantomData<Rc<()>>,
@@ -1540,7 +1585,6 @@ enum HostResource {
 struct PendingRequest {
     sequence: u64,
     referenced: bool,
-    task: tokio::task::JoinHandle<()>,
 }
 
 impl std::fmt::Debug for TokioHost {
@@ -1564,10 +1608,26 @@ impl TokioHost {
             pending: BTreeMap::new(),
             resources: BTreeMap::new(),
             ready: BTreeMap::new(),
+            tasks: JoinMap::new(),
             sender,
             receiver,
             _not_send: PhantomData,
         }
+    }
+
+    fn spawn_task<F>(&mut self, request: RequestId, sequence: u64, referenced: bool, task: F)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        self.tasks.spawn_local(request, task);
+        let replaced = self.pending.insert(
+            request,
+            PendingRequest {
+                sequence,
+                referenced,
+            },
+        );
+        assert!(replaced.is_none(), "request identities must be unique");
     }
 
     fn start_on(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
@@ -1578,23 +1638,7 @@ impl TokioHost {
         let operation = match operation {
             AsyncHostOp::CloseResource { resource } => {
                 let result = self.close_resource(resource);
-                let task = tokio::task::spawn_local(async {});
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
-                self.ready.insert(
-                    sequence,
-                    Completion {
-                        request,
-                        sequence,
-                        result,
-                    },
-                );
+                self.insert_immediate(request, sequence, referenced, result);
                 return request;
             }
             AsyncHostOp::SetResourceReferenced {
@@ -1602,23 +1646,7 @@ impl TokioHost {
                 referenced,
             } => {
                 let result = self.set_resource_referenced(resource, referenced);
-                let task = tokio::task::spawn_local(async {});
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
-                self.ready.insert(
-                    sequence,
-                    Completion {
-                        request,
-                        sequence,
-                        result,
-                    },
-                );
+                self.insert_immediate(request, sequence, referenced, result);
                 return request;
             }
             AsyncHostOp::ResourceState { resource } => {
@@ -1628,7 +1656,7 @@ impl TokioHost {
             }
             AsyncHostOp::TcpListen { host, port } => {
                 let sender = self.sender.clone();
-                let task = tokio::task::spawn_local(async move {
+                self.spawn_task(request, sequence, referenced, async move {
                     let result = TcpListener::bind((host.as_str(), port))
                         .await
                         .map(|listener| HostCompletionValue::TcpListener {
@@ -1643,14 +1671,6 @@ impl TokioHost {
                         result,
                     });
                 });
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
                 return request;
             }
             AsyncHostOp::TcpAccept { listener } => {
@@ -1671,7 +1691,7 @@ impl TokioHost {
                 let listener = Rc::clone(listener);
                 let accepted_referenced = *resource_referenced;
                 let sender = self.sender.clone();
-                let task = tokio::task::spawn_local(async move {
+                self.spawn_task(request, sequence, referenced, async move {
                     let result = listener
                         .accept()
                         .await
@@ -1691,19 +1711,11 @@ impl TokioHost {
                         }),
                     });
                 });
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
                 return request;
             }
             AsyncHostOp::TcpConnect { host, port } => {
                 let sender = self.sender.clone();
-                let task = tokio::task::spawn_local(async move {
+                self.spawn_task(request, sequence, referenced, async move {
                     let result = async {
                         let stream = TcpStream::connect((host.as_str(), port)).await?;
                         let peer = stream.peer_addr()?;
@@ -1723,14 +1735,6 @@ impl TokioHost {
                         result,
                     });
                 });
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
                 return request;
             }
             AsyncHostOp::TcpRead { stream, max_bytes } => {
@@ -1760,7 +1764,7 @@ impl TokioHost {
                 }
                 let reader = Rc::clone(reader);
                 let sender = self.sender.clone();
-                let task = tokio::task::spawn_local(async move {
+                self.spawn_task(request, sequence, referenced, async move {
                     let mut bytes = vec![0; max_bytes];
                     let result = async {
                         let mut reader = reader.lock().await;
@@ -1781,14 +1785,6 @@ impl TokioHost {
                         result: result.map(HostCompletionValue::Public),
                     });
                 });
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
                 return request;
             }
             AsyncHostOp::TcpWrite { stream, data } => {
@@ -1818,7 +1814,7 @@ impl TokioHost {
                 }
                 let writer = Rc::clone(writer);
                 let sender = self.sender.clone();
-                let task = tokio::task::spawn_local(async move {
+                self.spawn_task(request, sequence, referenced, async move {
                     let result = async {
                         writer.lock().await.write_all(&data).await?;
                         Ok(AsyncHostValue::Undefined)
@@ -1832,14 +1828,6 @@ impl TokioHost {
                         result: result.map(HostCompletionValue::Public),
                     });
                 });
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
                 return request;
             }
             AsyncHostOp::TcpShutdown { stream } => {
@@ -1869,7 +1857,7 @@ impl TokioHost {
                 }
                 let writer = Rc::clone(writer);
                 let sender = self.sender.clone();
-                let task = tokio::task::spawn_local(async move {
+                self.spawn_task(request, sequence, referenced, async move {
                     let result = writer
                         .lock()
                         .await
@@ -1887,20 +1875,12 @@ impl TokioHost {
                         result: result.map(HostCompletionValue::Public),
                     });
                 });
-                self.pending.insert(
-                    request,
-                    PendingRequest {
-                        sequence,
-                        referenced,
-                        task,
-                    },
-                );
                 return request;
             }
             operation => operation,
         };
         let sender = self.sender.clone();
-        let task = tokio::task::spawn_local(async move {
+        self.spawn_task(request, sequence, referenced, async move {
             let result = execute_async_host_op(operation).await;
             let _ = sender.send(HostCompletion {
                 request,
@@ -1909,14 +1889,6 @@ impl TokioHost {
                 result: result.map(HostCompletionValue::Public),
             });
         });
-        self.pending.insert(
-            request,
-            PendingRequest {
-                sequence,
-                referenced,
-                task,
-            },
-        );
         request
     }
 
@@ -1927,13 +1899,11 @@ impl TokioHost {
         referenced: bool,
         result: Result<AsyncHostValue, AsyncHostError>,
     ) {
-        let task = tokio::task::spawn_local(async {});
         self.pending.insert(
             request,
             PendingRequest {
                 sequence,
                 referenced,
-                task,
             },
         );
         self.ready.insert(
@@ -2014,6 +1984,45 @@ impl TokioHost {
         while let Ok(completion) = self.receiver.try_recv() {
             self.promote_completion(completion);
         }
+        while let Some((request, result)) = self.tasks.try_join_next() {
+            self.handle_task_exit(request, result);
+        }
+    }
+
+    fn handle_task_exit(&mut self, request: RequestId, result: Result<(), tokio::task::JoinError>) {
+        let Err(error) = result else {
+            return;
+        };
+        if error.is_cancelled() || !self.pending.contains_key(&request) {
+            return;
+        }
+
+        let sequence = self
+            .pending
+            .get(&request)
+            .expect("pending request was checked")
+            .sequence;
+        let message = error.to_string();
+
+        // A task panic is a realm failure, not an individual I/O result. Stop every sibling task
+        // and discard completions that raced with the failure; only the failing request remains
+        // long enough to carry the deterministic error through the existing completion ingress.
+        self.tasks.abort_all();
+        self.pending.retain(|candidate, _| *candidate == request);
+        self.ready.clear();
+        self.ready.insert(
+            sequence,
+            Completion {
+                request,
+                sequence,
+                result: Err(AsyncHostError::new(
+                    "ERR_KILN_RUNTIME_TASK_PANIC",
+                    "runtime",
+                    None,
+                    message,
+                )),
+            },
+        );
     }
 
     fn promote_completion(&mut self, completion: HostCompletion) {
@@ -2123,15 +2132,6 @@ impl TokioHost {
     }
 }
 
-impl Drop for TokioHost {
-    fn drop(&mut self) {
-        for request in self.pending.values() {
-            request.task.abort();
-        }
-        self.pending.clear();
-    }
-}
-
 impl AsyncHostOps for TokioHost {
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         let request = RequestId::new(self.next_request);
@@ -2139,7 +2139,7 @@ impl AsyncHostOps for TokioHost {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let sender = self.sender.clone();
-        let task = tokio::task::spawn_local(async move {
+        self.spawn_task(request, sequence, referenced, async move {
             let result = execute_async_host_op(operation)
                 .await
                 .map(HostCompletionValue::Public);
@@ -2150,14 +2150,6 @@ impl AsyncHostOps for TokioHost {
                 result,
             });
         });
-        self.pending.insert(
-            request,
-            PendingRequest {
-                sequence,
-                referenced,
-                task,
-            },
-        );
         request
     }
 
@@ -2165,7 +2157,7 @@ impl AsyncHostOps for TokioHost {
         let Some(pending) = self.pending.remove(&request) else {
             return false;
         };
-        pending.task.abort();
+        self.tasks.abort(&request);
         self.ready.remove(&pending.sequence);
         true
     }
@@ -2206,11 +2198,26 @@ impl RealmHostProvider for TokioHost {
     ) -> Pin<Box<dyn Future<Output = Option<Completion>> + 'a>> {
         Box::pin(async move {
             loop {
+                self.collect_ready_nonblocking();
                 if let Some(completion) = self.take_ready() {
                     return Some(completion);
                 }
-                let completion = self.receiver.recv().await?;
-                self.collect_ready(completion);
+                if self.tasks.is_empty() {
+                    let completion = self.receiver.recv().await?;
+                    self.collect_ready(completion);
+                    continue;
+                }
+                tokio::select! {
+                    biased;
+                    completion = self.receiver.recv() => {
+                        self.collect_ready(completion?);
+                    }
+                    joined = self.tasks.join_next() => {
+                        let (request, result) = joined
+                            .expect("a non-empty task map must yield a task exit");
+                        self.handle_task_exit(request, result);
+                    }
+                }
             }
         })
     }
@@ -2922,6 +2929,46 @@ mod tests {
         assert!(!AsyncHostOps::cancel(runtime.host(), request));
         assert!(!runtime.host().has_referenced_work());
         assert!(runtime.next_host_completion().is_none());
+    }
+
+    #[test]
+    fn supervised_task_panic_fails_the_request_and_cancels_siblings() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let failed = RequestId::new(90);
+        let sibling = RequestId::new(91);
+        let (local, tokio_runtime, host) =
+            (&mut runtime.local, &runtime.runtime, &mut runtime.host);
+        local.block_on(tokio_runtime, async {
+            host.spawn_task(failed, 90, true, async {
+                panic!("supervised task panic");
+            });
+            host.spawn_task(sibling, 91, true, std::future::pending());
+        });
+
+        let completion = runtime
+            .next_host_completion()
+            .expect("task panic becomes a completion");
+        assert_eq!(completion.request, failed);
+        assert_eq!(completion.sequence, 90);
+        let error = completion.result.expect_err("task panic fails the realm");
+        assert_eq!(error.code, "ERR_KILN_RUNTIME_TASK_PANIC");
+        assert!(error.message.contains("supervised task panic"));
+        assert!(!runtime.has_pending_host_work());
+        assert!(!runtime.has_referenced_host_work());
+        assert!(runtime.next_host_completion().is_none());
+    }
+
+    #[test]
+    fn runtime_metrics_are_exposed_as_a_kiln_owned_snapshot() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let first = runtime.sample_runtime_metrics();
+        assert_eq!(first.workers, 1);
+        assert_eq!(first.global_queue_depth, 0);
+
+        runtime.enter(|| {});
+        let second = runtime.sample_runtime_metrics();
+        assert_eq!(second.workers, 1);
+        assert!(second.busy_duration <= second.elapsed);
     }
 
     #[test]

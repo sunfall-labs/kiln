@@ -164,10 +164,97 @@ impl Manifest {
     /// This is what lets one manifest at the top of a corpus serve `kiln test conformance/guard`
     /// and `kiln test conformance/effect` without either invocation picking up the other's tests.
     pub fn tests_under<'a>(&'a self, root: &'a Path) -> impl Iterator<Item = &'a ManifestTest> {
-        self.tests
-            .iter()
-            .filter(move |test| self.source_path(test).starts_with(root))
+        let root = normalized_path(root);
+        self.tests.iter().filter(move |test| {
+            // The manifest is allowed to describe a whole corpus while a caller asks for a
+            // subtree.  Check every path that execution may read, not only the source: a
+            // bundle or one of its provenance inputs outside the requested root would let a
+            // narrow run consume files the caller did not select.  `starts_with` on raw paths
+            // is not enough here because `guard/../outside.js` lexically starts with
+            // `guard`, and a symlink can make an apparently-contained path escape as well.
+            let mut paths = std::iter::once(self.source_path(test))
+                .chain(test.bundle.as_ref().map(|path| self.directory.join(path)))
+                .chain(
+                    test.bundle_inputs
+                        .iter()
+                        .map(|path| self.directory.join(path)),
+                );
+            paths.all(|path| path_is_under(&path, &root))
+        })
     }
+}
+
+/// Normalize a path without touching the filesystem.  Discovery must still report a missing
+/// source, so containment cannot depend solely on `canonicalize`; lexical normalization handles
+/// `.` and `..` first and the canonical check below covers existing symlink components.
+fn normalized_path(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // For a relative path whose leading components are `..`, retain the parent
+                // markers.  Absolute roots cannot pop past their root, so `pop` is sufficient
+                // there.
+                if !normalized.pop() && !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let path = normalized_path(path);
+    let root = normalized_path(root);
+    if !path.starts_with(&root) {
+        return false;
+    }
+
+    // A missing source is still a useful manifest result (the runner can report it), but its
+    // nearest existing ancestor can still expose a symlink escape.  Resolve that ancestor and
+    // append the missing tail so both existing and missing paths receive the same containment
+    // check.
+    match (
+        canonical_with_missing_tail(&root),
+        canonical_with_missing_tail(&path),
+    ) {
+        (Some(root), Some(path)) => path.starts_with(root),
+        // A containment check that cannot be proven is not safe to accept.  The only missing
+        // path case that reaches here is handled by canonical_with_missing_tail itself, which
+        // resolves its nearest real ancestor before appending the missing tail.
+        _ => false,
+    }
+}
+
+fn canonical_with_missing_tail(path: &Path) -> Option<PathBuf> {
+    let mut current = path.to_path_buf();
+    let mut missing = Vec::new();
+    loop {
+        // `exists` follows links and turns a dangling symlink into an indistinguishable missing
+        // component.  symlink_metadata lets us stop at the link itself; canonicalize then either
+        // proves where it points or returns None, rejecting the path.
+        match fs::symlink_metadata(&current) {
+            Ok(_) => break,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                missing.push(current.file_name()?.to_owned());
+                current = current.parent()?.to_path_buf();
+            }
+            // Permission and other filesystem errors must not become a containment bypass.
+            Err(_) => return None,
+        }
+    }
+    let mut canonical = fs::canonicalize(current).ok()?;
+    for component in missing.iter().rev() {
+        canonical.push(component);
+    }
+    Some(canonical)
 }
 
 fn read_test(table: &Table) -> Result<ManifestTest, UnlocatedError> {
@@ -483,6 +570,85 @@ expected_stdout = "bundle\n"
             manifest.tests_under(Path::new("/elsewhere")).count(),
             0,
             "a manifest that describes nothing under a root must not claim that root"
+        );
+    }
+
+    #[test]
+    fn subtree_selection_normalizes_paths_and_rejects_escaping_inputs() {
+        let text = format!(
+            "{ONE_TEST}\n[[test]]\nid = \"escape\"\nsource = \"guard/../outside.js\"\nexpected_stdout = \"\"\n"
+        );
+        let manifest = manifest(&text).expect("manifest is well formed");
+
+        // Raw starts_with would incorrectly claim `escape` for /corpus/guard.  A path that
+        // escapes the requested subtree must not become runnable merely because its spelling
+        // begins with that subtree.
+        let selected: Vec<_> = manifest
+            .tests_under(Path::new("/corpus/./guard"))
+            .map(|test| test.id.as_str())
+            .collect();
+        assert_eq!(selected, ["guard/probe"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subtree_selection_rejects_a_symlinked_input_outside_the_root() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TemporaryManifest::new();
+        let guard = fixture.directory.join("guard");
+        let outside = fixture.directory.join("outside");
+        fs::create_dir_all(&guard).expect("create requested subtree");
+        fs::create_dir_all(&outside).expect("create outside directory");
+        fs::write(outside.join("probe.js"), "console.log('outside');\n")
+            .expect("write outside source");
+        symlink(&outside, guard.join("linked")).expect("create escaping source symlink");
+
+        let manifest = Manifest::from_text(
+            "[[test]]\nid = \"escape\"\nsource = \"guard/linked/probe.js\"\nexpected_stdout = \"\"\n",
+            fixture.directory.clone(),
+        )
+        .ok()
+        .expect("manifest is well formed");
+        assert_eq!(
+            manifest.tests_under(&guard).count(),
+            0,
+            "a symlink to a file outside the requested subtree must not be selected"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn subtree_selection_rejects_a_dangling_symlink_even_if_its_target_appears_later() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = TemporaryManifest::new();
+        let guard = fixture.directory.join("guard");
+        let target = fixture.directory.join("created-later");
+        fs::create_dir_all(&guard).expect("create requested subtree");
+        symlink(&target, guard.join("linked")).expect("create dangling source symlink");
+
+        let manifest = Manifest::from_text(
+            "[[test]]\nid = \"escape\"\nsource = \"guard/linked/probe.js\"\nexpected_stdout = \"\"\n",
+            fixture.directory.clone(),
+        )
+        .ok()
+        .expect("manifest is well formed");
+        assert_eq!(
+            manifest.tests_under(&guard).count(),
+            0,
+            "a dangling symlink is not an ordinary missing source"
+        );
+
+        // A source appearing after discovery must not turn a previously unsafe path into a
+        // runnable one on the next scan.
+        fs::create_dir_all(&target).expect("create symlink target later");
+        fs::write(target.join("probe.js"), "console.log('outside');\n")
+            .expect("write target source later");
+        assert_eq!(
+            manifest.tests_under(&guard).count(),
+            0,
+            "a later-created target remains outside the requested subtree"
         );
     }
 
