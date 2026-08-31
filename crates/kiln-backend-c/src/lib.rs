@@ -826,7 +826,7 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
-#define KILN_C99_METHOD_NODE_NET_CONNECT 336
+#define KILN_C99_METHOD_NODE_NET_CONNECT 338
 
 /* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
@@ -852,7 +852,12 @@ enum kiln_value_tag {
  * read from either end (`KILN_C99_TEMPORAL_OPS` below). */
 #define KILN_C99_METHOD_TEMPORAL_OP 313
 #define KILN_C99_METHOD_TEMPORAL_OP_LAST 335
-#define KILN_C99_METHOD_TEMPORAL_LAST 335
+/* `Temporal.Instant`'s two epoch constructors. Statics rather than `from`, and one code each
+ * rather than a kind-bearing range, because only `Instant` has them: an epoch count names a point
+ * on the timeline, and no other one of the eight is a point on a timeline by itself. */
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS 336
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS 337
+#define KILN_C99_METHOD_TEMPORAL_LAST 337
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -1589,6 +1594,11 @@ int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *rig
 int32_t kiln_bigint_negate(const void *handle, void **out);
 int32_t kiln_bigint_compare(const void *left, const void *right);
 int32_t kiln_bigint_is_zero(const void *handle);
+/* The exact 128-bit value, split into a signed top half and an unsigned bottom half because C99
+ * has no portable 128-bit integer. Non-zero when it does not fit, never a truncated answer:
+ * `Temporal.Instant.fromEpochNanoseconds` is the caller, and an instant off by 2^128 nanoseconds
+ * would be a wrong answer that prints rather than the RangeError the language specifies. */
+int32_t kiln_bigint_to_i128(const void *handle, int64_t *out_high, uint64_t *out_low);
 /* `Temporal`, over the same `kiln-temporal` adapter the interpreter links (ADR 0025, ADR 0029 section 4).
  *
  * The handles are opaque and every readback is a scalar, exactly as the BigInt block above. The
@@ -1601,6 +1611,12 @@ int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t fi
                                   void **out_handle);
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
                                            void **out_handle);
+/* `Temporal.Instant`'s two epoch constructors. The nanosecond count arrives in the same two
+ * halves `kiln_temporal_now` takes, read out of the BigInt provider: the two providers are
+ * independent features of one archive and only scalars pass between them. */
+int32_t kiln_temporal_instant_from_epoch_milliseconds(double milliseconds, void **out_handle);
+int32_t kiln_temporal_instant_from_epoch_nanoseconds(int64_t high, uint64_t low,
+                                                     void **out_handle);
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
                             const unsigned char *option_text,
                             const int64_t *option_text_lengths, size_t option_text_count,
@@ -2856,6 +2872,10 @@ static const char *kiln_c99_method_name(uint64_t code) {
         return kiln_c99_temporal_now_name(code);
     }
     switch (code) {
+    case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
+        return "fromEpochMilliseconds";
+    case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS:
+        return "fromEpochNanoseconds";
     case KILN_C99_METHOD_PUSH: return "push";
     case KILN_C99_METHOD_POP: return "pop";
     case KILN_C99_METHOD_JOIN: return "join";
@@ -6281,32 +6301,44 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
         case 2:
-            if (length >= 0) {
-                *out = kiln_c99_copy_text(inline_buffer, (size_t)length);
-                return KILN_C99_OK;
-            }
-            {
+        case 5: {
+            /* Two shapes, one buffer. Shape 2 is text the language shows as a string; shape 5 is
+             * `epochNanoseconds`, whose exact value only a BigInt can hold, so it arrives as its
+             * decimal digits and is parsed into one rather than read out of the double slot --
+             * a `Temporal` instant carries more precision than a double, and rounding it would be
+             * a wrong answer that prints. */
+            const int wide = shape == 5;
+            const char *digits = inline_buffer;
+            char *spilled = NULL;
+            void *big = NULL;
+            if (length < 0) {
                 size_t wanted = (size_t)(-length);
-                char *spilled = (char *)malloc(wanted);
+                spilled = (char *)malloc(wanted);
                 if (spilled == NULL) {
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 shape = kiln_temporal_get(kiln_c99_temporal_of(target),
                                           (const unsigned char *)key, key_len, &number,
                                           (unsigned char *)spilled, wanted, &length);
-                if (shape != 2 || length < 0) {
+                if (shape != (wide ? 5 : 2) || length < 0) {
                     free(spilled);
                     return KILN_C99_CONTROL_ERROR;
                 }
-                *out = kiln_c99_copy_text(spilled, (size_t)length);
+                digits = spilled;
+            }
+            if (!wide) {
+                *out = kiln_c99_copy_text(digits, (size_t)length);
                 free(spilled);
                 return KILN_C99_OK;
             }
-        case 5:
-            /* `epochNanoseconds`, which only a BigInt can hold. Refused by name rather than
-             * rounded through a double, because a rounded answer is a wrong answer that prints. */
-            return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), key,
-                                                 key_len);
+            if (kiln_bigint_parse((const unsigned char *)digits, (size_t)length, 10, &big) != 0) {
+                free(spilled);
+                return KILN_C99_CONTROL_ERROR;
+            }
+            free(spilled);
+            *out = kiln_c99_bigint_value(big);
+            return KILN_C99_OK;
+        }
         default:
             break;
         }
@@ -6798,11 +6830,36 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                         : kiln_c99_copy_text(bare, strlen(bare));
                     return KILN_C99_OK;
                 }
-                /* `prototype` and the rest of the static surface exist in the language and are not
-                 * here, so they say which rather than reading as undefined. */
-                if (kiln_c99_same_name(key, key_len, "prototype") ||
-                    kiln_c99_same_name(key, key_len, "fromEpochMilliseconds") ||
-                    kiln_c99_same_name(key, key_len, "fromEpochNanoseconds")) {
+                /* `Temporal.Instant` alone has the two epoch constructors: an epoch count names a
+                 * point on the timeline, and no other of the eight *is* a point on a timeline. On
+                 * the other seven these names do not exist in the language at all, so they read as
+                 * undefined below rather than saying which. */
+                if (constructed == 6) {
+                    if (kiln_c99_same_name(key, key_len, "fromEpochMilliseconds")) {
+                        *out = kiln_c99_method(
+                            KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS);
+                        return KILN_C99_OK;
+                    }
+                    if (kiln_c99_same_name(key, key_len, "fromEpochNanoseconds")) {
+                        *out = kiln_c99_method(
+                            KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS);
+                        return KILN_C99_OK;
+                    }
+                }
+                /* `prototype` exists in the language and is not here, so it says which rather
+                 * than reading as undefined.
+                 *
+                 * It stays a refusal on purpose rather than for want of effort. In the language it
+                 * is an ordinary object with a property store, and neither engine has one for it:
+                 * the interpreter answers a `Native::Temporal(Op::Prototype(kind))`, which carries
+                 * `constructor`, the tag and the methods but cannot hold a name a program writes,
+                 * and which reports `typeof` as "function" where the specification and `deno` say
+                 * "object". Reproducing that here would make the two engines agree on a wrong
+                 * answer, which is the one outcome this arrangement exists to prevent; answering
+                 * correctly instead would diverge from the interpreter until it gives `Temporal`
+                 * the property store the other exotic objects already have. Either way the move is
+                 * the interpreter's, so this names the missing member and waits for it. */
+                if (kiln_c99_same_name(key, key_len, "prototype")) {
                     const char *owner = kiln_c99_temporal_builtin_name(target.bits);
                     return kiln_c99_temporal_unsupported(thrown, owner == NULL ? "Temporal" : owner,
                                                          key, key_len);
@@ -10777,6 +10834,49 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
             (uint32_t)kind, high, low,
             zone.tag == KILN_VALUE_STRING ? (const unsigned char *)zone.ptr : NULL,
             zone.tag == KILN_VALUE_STRING ? zone.len : 0, &handle);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *result = kiln_c99_temporal_value(handle);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS) {
+        /* `ToNumber` first, and through the checked path, because the argument may be an object
+         * with a `valueOf` and running it is observable. A fractional or out-of-range count is the
+         * engine's RangeError, not a truncation. */
+        double milliseconds = 0.0;
+        void *handle = NULL;
+        int32_t answered;
+        int status = kiln_c99_to_number_checked(host, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                &milliseconds, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        answered = kiln_temporal_instant_from_epoch_milliseconds(milliseconds, &handle);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *result = kiln_c99_temporal_value(handle);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS) {
+        /* A BigInt and nothing else -- not a number coerced to one. Nanoseconds since the epoch
+         * pass what a double holds exactly within four months of 1970, so the language refuses a
+         * number here rather than accepting one it would have to round. */
+        kiln_value argument = argc > 0 ? args[0] : kiln_c99_undefined();
+        int64_t high = 0;
+        uint64_t low = 0;
+        void *handle = NULL;
+        int32_t answered;
+        if (argument.tag != KILN_VALUE_BIGINT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Temporal.Instant.fromEpochNanoseconds needs a BigInt");
+        }
+        if (kiln_bigint_to_i128((const void *)(uintptr_t)argument.bits, &high, &low) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "epochNanoseconds is outside the representable range");
+        }
+        answered = kiln_temporal_instant_from_epoch_nanoseconds(high, low, &handle);
         if (answered != 0) {
             return kiln_c99_temporal_raise(thrown, answered);
         }
@@ -22244,6 +22344,10 @@ int32_t kiln_bigint_compare(const void *left, const void *right) {
     return 0;
 }
 int32_t kiln_bigint_is_zero(const void *handle) { (void)handle; return 1; }
+int32_t kiln_bigint_to_i128(const void *handle, int64_t *out_high, uint64_t *out_low) {
+    (void)handle; (void)out_high; (void)out_low;
+    return -1;
+}
 int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
                                   const unsigned char *text, const int64_t *text_lengths,
                                   size_t text_count, const unsigned char *option_text,
@@ -22270,6 +22374,15 @@ int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t le
 int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, const unsigned char *zone,
                           size_t zone_len, void **out_handle) {
     (void)kind; (void)high; (void)low; (void)zone; (void)zone_len; (void)out_handle;
+    return -1;
+}
+int32_t kiln_temporal_instant_from_epoch_milliseconds(double milliseconds, void **out_handle) {
+    (void)milliseconds; (void)out_handle;
+    return -1;
+}
+int32_t kiln_temporal_instant_from_epoch_nanoseconds(int64_t high, uint64_t low,
+                                                     void **out_handle) {
+    (void)high; (void)low; (void)out_handle;
     return -1;
 }
 void kiln_temporal_free(void *handle) { (void)handle; }
