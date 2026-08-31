@@ -4722,11 +4722,11 @@ mod tests {
         assert!(runtime_abi_identity().contains("async-4"));
         // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
         // would silently invalidate every cached native artifact. When the bump is intended,
-        // update this with the change that makes it -- it went 14 -> 15 when the Temporal
-        // surface grew and nothing moved the expectation, leaving main red.
+        // update this with the change that makes it -- it went 15 -> 16 when HTTP close modes
+        // grew and nothing moved the expectation, leaving main red.
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-15"
+            "kiln-native-number-provider-16"
         );
     }
 
@@ -6064,6 +6064,94 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             rest,
             "request\nbefore-close\nafter-close open\ntimer\nsocket-close:1\n"
         );
+    }
+
+    #[test]
+    fn native_node_http_socket_destroy_uses_abort_close() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::{BufRead, Read, Write};
+        use std::net::TcpStream;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native HTTP destroy integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-http-destroy");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { createServer } from "node:http";
+const server = createServer((request, response) => {
+  console.log("destroy");
+  request.socket.destroy();
+  server.close(() => console.log("closed"));
+});
+server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+"#,
+        )
+        .expect("write HTTP destroy fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native HTTP destroy fixture builds");
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run native HTTP destroy fixture");
+        let stdout = child.stdout.take().expect("capture destroy stdout");
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut listening = String::new();
+        stdout
+            .read_line(&mut listening)
+            .expect("read destroy listening port");
+        let port: u16 = listening.trim().parse().expect("numeric destroy port");
+        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect HTTP client");
+        client
+            .write_all(b"GET /destroy HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write destroy request");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll destroy server") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("kill destroy server after timeout");
+                break child.wait().expect("reap destroy server after timeout");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut rest = String::new();
+        stdout
+            .read_to_string(&mut rest)
+            .expect("read destroy callback output");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture destroy stderr")
+            .read_to_string(&mut stderr)
+            .expect("read destroy stderr");
+        assert!(
+            status.success(),
+            "status={status} stdout={rest:?} stderr={stderr:?}"
+        );
+        assert_eq!(rest, "destroy\nclosed\n");
     }
 
     #[test]

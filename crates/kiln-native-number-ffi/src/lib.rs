@@ -41,8 +41,9 @@ mod realm {
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
     use kiln_runtime::{
-        ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
-        RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
+        ActiveHttpRuntime, HttpCloseMode, Realm, RealmRuntime, RuntimeHttpClientEvent,
+        RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem,
+        duration_from_milliseconds,
         node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
         node_stream::StreamAction,
     };
@@ -76,6 +77,8 @@ mod realm {
     const HTTP_AGENT_IDLE: i32 = 4;
     const HTTP_AGENT_DISPATCH: i32 = 5;
     const HTTP_AGENT_RETIRE: i32 = 6;
+    const HTTP_CLOSE_GRACEFUL: i32 = 0;
+    const HTTP_CLOSE_ABORT: i32 = 1;
 
     #[repr(C)]
     pub struct HttpEventView {
@@ -929,6 +932,7 @@ mod realm {
                 };
                 let mut payloads = Vec::new();
                 let mut close_transport = false;
+                let mut close_mode = HttpCloseMode::Graceful;
                 match role {
                     HttpRole::Server => {
                         let events = if in_context {
@@ -1024,6 +1028,9 @@ mod realm {
                                     data: message.into_bytes(),
                                 },
                                 RuntimeHttpEvent::Closed => {
+                                    // Server protocol completion can race the final response
+                                    // write. Keep the default graceful mode so that write is
+                                    // acknowledged before the portable resource is retired.
                                     close_transport = true;
                                     HttpEventPayload {
                                         owner: Rc::clone(&owner),
@@ -1118,7 +1125,10 @@ mod realm {
                                     message.into_bytes(),
                                 ),
                                 RuntimeHttpClientEvent::Closed => {
+                                    // A client connection disappearing is an abort: pending
+                                    // request/response writes must be cancelled before close.
                                     close_transport = true;
+                                    close_mode = HttpCloseMode::Abort;
                                     (
                                         0,
                                         HTTP_EVENT_CLOSED,
@@ -1178,9 +1188,12 @@ mod realm {
                             return Err(INVALID_ARGUMENT);
                         };
                         // SAFETY: this is the current realm's exclusively active runtime.
-                        unsafe { &mut *runtime }.close_http_connection(resource)
+                        unsafe { &mut *runtime }.close_http_connection(resource, close_mode)
                     } else {
-                        realm.runtime.borrow_mut().close_http_connection(resource)
+                        realm
+                            .runtime
+                            .borrow_mut()
+                            .close_http_connection(resource, close_mode)
                     };
                     let Some(actions) = actions else {
                         return Err(RUNTIME_ERROR);
@@ -1205,14 +1218,20 @@ mod realm {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_realm_http_server_close_active(resource: u64) -> i32 {
+    pub unsafe extern "C" fn kiln_realm_http_server_close_active(resource: u64, mode: i32) -> i32 {
         ffi(|| {
             let (Some(realm), Some(runtime)) = (active_realm(), active_runtime()) else {
                 return INVALID_ARGUMENT;
             };
+            let mode = match mode {
+                HTTP_CLOSE_GRACEFUL => HttpCloseMode::Graceful,
+                HTTP_CLOSE_ABORT => HttpCloseMode::Abort,
+                _ => return INVALID_ARGUMENT,
+            };
             let resource = kiln_host_abi::ResourceId::new(resource);
             // SAFETY: this private ABI call runs synchronously inside the active realm callback.
-            let Some(actions) = (unsafe { &mut *runtime }).close_http_connection(resource) else {
+            let Some(actions) = (unsafe { &mut *runtime }).close_http_connection(resource, mode)
+            else {
                 return INVALID_ARGUMENT;
             };
             apply_http_actions(&realm, resource, actions, true)
@@ -2288,6 +2307,34 @@ mod realm {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        unsafe extern "C" fn close_unregistered_http_connection(context: *mut c_void) -> i32 {
+            // A missing HTTP registration is a failed capability lookup, never permission to
+            // reinterpret this protocol socket as a raw node:net resource.
+            unsafe {
+                *context.cast::<i32>() = kiln_realm_http_server_close_active(42, HTTP_CLOSE_ABORT)
+            };
+            0
+        }
+
+        #[test]
+        fn missing_http_registration_never_falls_back_to_raw_close() {
+            let mut handle = 0;
+            let mut observed = 0;
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(close_unregistered_http_connection),
+                        (&raw mut observed).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(observed, INVALID_ARGUMENT);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+        }
 
         unsafe extern "C" fn exercises_symbol_registry(context: *mut c_void) -> i32 {
             let output = unsafe { &mut *context.cast::<[u64; 3]>() };
@@ -3931,7 +3978,7 @@ mod realm {
             const _: unsafe extern "C" fn(u64, i32, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = kiln_realm_http_server_attach_with_options_active;
         };
         (realm, kiln_realm_http_server_close_active, realm_http_close) => {
-            const _: unsafe extern "C" fn(u64) -> i32 = kiln_realm_http_server_close_active;
+            const _: unsafe extern "C" fn(u64, i32) -> i32 = kiln_realm_http_server_close_active;
         };
         (realm, kiln_realm_http_client_request_id_active, realm_http_request_id) => {
             const _: unsafe extern "C" fn(*mut u64) -> i32 = kiln_realm_http_client_request_id_active;

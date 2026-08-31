@@ -30,7 +30,6 @@ pub enum HttpConnectionEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpConnectionError {
     pub error: HttpParseError,
-    pub actions: Vec<StreamAction>,
 }
 
 /// Node-facing events and transport work selected by one connection completion.
@@ -80,13 +79,9 @@ impl HttpConnectionDriver {
         self.stream.write(response.encode(keep_alive))
     }
 
-    pub fn close(&mut self) -> Vec<StreamAction> {
-        self.stream.close_actions()
-    }
-
     /// Apply one realm completion, returning Node-facing events separately from new transport
-    /// actions. Protocol failure closes the resource through the same cancellation path as a
-    /// socket destroy rather than leaking a parser-specific operation to the adapter.
+    /// actions. Protocol failure is reported to the HTTP owner, which must retire the connection
+    /// through the runtime HTTP close operation with abort semantics.
     pub fn completed(&mut self, completion: Completion) -> Option<HttpConnectionTransition> {
         let actions = self.stream.completed(completion)?;
         let mut events = Vec::new();
@@ -98,10 +93,7 @@ impl HttpConnectionDriver {
                         events.extend(decoded.into_iter().map(HttpConnectionEvent::Request))
                     }
                     Err(error) => {
-                        return Some(Err(HttpConnectionError {
-                            error,
-                            actions: self.stream.close_actions(),
-                        }));
+                        return Some(Err(HttpConnectionError { error }));
                     }
                 },
                 StreamAction::Event(event) => {
@@ -969,8 +961,8 @@ mod tests {
     }
 
     #[test]
-    fn connection_driver_routes_protocol_failure_through_stream_close() {
-        use kiln_host_abi::{AsyncHostOp, AsyncHostValue};
+    fn connection_driver_reports_protocol_failure_without_raw_close() {
+        use kiln_host_abi::AsyncHostValue;
 
         let resource = ResourceId::new(42);
         let mut connection = HttpConnectionDriver::new(resource);
@@ -989,13 +981,7 @@ mod tests {
             )),
             Some(Err(HttpConnectionError {
                 error: HttpParseError::ConflictingBodyFraming,
-                actions: vec![StreamAction::Start(AsyncHostOp::CloseResource { resource })],
             }))
         );
-        assert!(connection.stream.is_closing());
-        assert!(connection.close().is_empty());
-        assert!(!connection.stream.state().resource_closed());
-        // The close operation has been selected and awaits the provider completion.
-        assert!(!connection.stream.has_pending_read());
     }
 }

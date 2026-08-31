@@ -375,6 +375,21 @@ impl HttpTransportDriver {
         }
     }
 
+    /// Abort the protocol immediately, canceling both transport directions before closing the
+    /// portable resource. Unlike [`Self::close`], this intentionally does not wait for a queued
+    /// response write; it is the path for Node's forced destroy and protocol failure/EOF.
+    pub(crate) fn abort(&mut self) -> Vec<StreamAction> {
+        self.close_requested = true;
+        self.close_started = true;
+        self.write_selected = false;
+        let write_request = self.write_request.take();
+        let mut actions = self.stream.close_actions();
+        if let Some(request) = write_request {
+            actions.insert(0, StreamAction::Cancel(request));
+        }
+        actions
+    }
+
     pub(crate) fn close_requested(&mut self) {
         self.close_requested = true;
     }
@@ -535,6 +550,34 @@ mod tests {
                 "one protocol frame writes once: {completed:?}"
             );
             assert!(driver.pump_write().is_empty());
+        });
+    }
+
+    #[test]
+    fn abort_cancels_pending_http_write_before_closing_resource() {
+        use kiln_host_abi::{AsyncHostOp, ResourceId};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let resource = ResourceId::new(8);
+            let (mut hyper, mut driver) = HttpTransportDriver::new(resource);
+            hyper.write_all(b"response").await.expect("write buffers");
+            let pumped = driver.pump_write();
+            let [StreamAction::Start(write)] = pumped.as_slice() else {
+                panic!("driver starts exactly one HTTP write");
+            };
+            assert!(driver.started(write, RequestId::new(1)));
+
+            assert_eq!(
+                driver.abort(),
+                vec![
+                    StreamAction::Cancel(RequestId::new(1)),
+                    StreamAction::Start(AsyncHostOp::CloseResource { resource }),
+                ]
+            );
         });
     }
 }

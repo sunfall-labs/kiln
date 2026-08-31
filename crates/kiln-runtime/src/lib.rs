@@ -103,6 +103,15 @@ pub enum RuntimeHttpClientEvent {
     Closed,
 }
 
+/// How an HTTP connection is retired by its owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpCloseMode {
+    /// Drain protocol-selected response bytes before retiring the transport.
+    Graceful,
+    /// Cancel protocol work and retire the transport immediately.
+    Abort,
+}
+
 /// Runtime-owned HTTP/1 control used by language adapters.
 ///
 /// This stays separate from `HostOps`: TCP is a versioned capability boundary, while HTTP
@@ -141,7 +150,11 @@ pub trait ActiveHttpRuntime {
         &mut self,
         resource: ResourceId,
     ) -> Option<Vec<node_stream::StreamAction>>;
-    fn close_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>>;
+    fn close_connection(
+        &mut self,
+        resource: ResourceId,
+        mode: HttpCloseMode,
+    ) -> Option<Vec<node_stream::StreamAction>>;
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
     fn start_response(
         &mut self,
@@ -990,8 +1003,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     pub fn close_http_connection(
         &mut self,
         resource: ResourceId,
+        mode: HttpCloseMode,
     ) -> Option<Vec<node_stream::StreamAction>> {
         let connection = self.http_connections.get_mut(&resource)?;
+        if mode == HttpCloseMode::Abort {
+            return Some(connection.transport.abort());
+        }
         // `server.close()` may run in the same JavaScript turn as `response.end()`. The response
         // command has only been sent to Hyper at that point; its task has not necessarily polled
         // yet, so the transport can have no queued write even though a body is active. Keep the
@@ -1462,8 +1479,12 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         self.poll_http_connection_in_context(resource)
     }
 
-    fn close_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>> {
-        self.close_http_connection(resource)
+    fn close_connection(
+        &mut self,
+        resource: ResourceId,
+        mode: HttpCloseMode,
+    ) -> Option<Vec<node_stream::StreamAction>> {
+        self.close_http_connection(resource, mode)
     }
 
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
@@ -3556,7 +3577,11 @@ mod tests {
                 .take_http_events(resource)
                 .contains(&RuntimeHttpEvent::Closed)
             {
-                write_actions.extend(runtime.close_http_connection(resource).unwrap_or_default());
+                write_actions.extend(
+                    runtime
+                        .close_http_connection(resource, HttpCloseMode::Graceful)
+                        .unwrap_or_default(),
+                );
             }
             write_actions.extend(runtime.poll_http_connection(resource).unwrap_or_default());
             if write_actions.iter().any(|action| {
@@ -3647,7 +3672,7 @@ mod tests {
         // This is the native callback's ordering: response.end() queues the Hyper command, then
         // server.close() runs before Tokio gets another poll of the connection task.
         let close_actions = runtime
-            .close_http_connection(resource)
+            .close_http_connection(resource, HttpCloseMode::Graceful)
             .expect("server close belongs to HTTP connection");
         assert!(
             close_actions.is_empty(),
@@ -3708,6 +3733,60 @@ mod tests {
         assert_eq!(
             next_host_completion(&mut runtime)
                 .expect("close follows the response write")
+                .request,
+            close_request
+        );
+        assert!(runtime.host_mut().is_exhausted());
+    }
+
+    #[test]
+    fn scripted_runtime_aborts_http_connection_without_waiting_for_response_write() {
+        use crate::node_stream::StreamAction;
+
+        let resource = ResourceId::new(46);
+        let read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: node_stream::DEFAULT_HIGH_WATER_MARK,
+        };
+        let close = AsyncHostOp::CloseResource { resource };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
+            ScriptedHostStep {
+                operation: read.clone(),
+                result: Ok(AsyncHostValue::Bytes(b"late".to_vec())),
+            },
+            ScriptedHostStep {
+                operation: close.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+        ]))
+        .expect("scripted runtime builds");
+
+        let start = runtime.start_http1_connection(resource);
+        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+            panic!("HTTP connection starts one scripted read");
+        };
+        let read_request = runtime.start_host_op(read_operation.clone(), true);
+        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+
+        let actions = runtime
+            .close_http_connection(resource, HttpCloseMode::Abort)
+            .expect("HTTP connection is registered");
+        assert_eq!(
+            actions,
+            vec![
+                StreamAction::Cancel(read_request),
+                StreamAction::Start(close.clone()),
+            ]
+        );
+        assert!(runtime.cancel_host_op(read_request));
+        let StreamAction::Start(close_operation) = &actions[1] else {
+            panic!("abort must select a portable close operation");
+        };
+        let close_request = runtime.start_host_op(close_operation.clone(), true);
+        assert!(runtime.http_connection_started(resource, close_operation, close_request));
+        assert_eq!(
+            next_host_completion(&mut runtime)
+                .expect("aborted close completes")
                 .request,
             close_request
         );
@@ -4732,7 +4811,11 @@ mod tests {
                 .take_http_events(resource)
                 .contains(&RuntimeHttpEvent::Closed)
             {
-                after_write.extend(runtime.close_http_connection(resource).unwrap_or_default());
+                after_write.extend(
+                    runtime
+                        .close_http_connection(resource, HttpCloseMode::Graceful)
+                        .unwrap_or_default(),
+                );
             }
             after_write.extend(runtime.poll_http_connection(resource).unwrap_or_default());
             if after_write.iter().any(|action| {

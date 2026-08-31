@@ -15,9 +15,9 @@ use kiln_ir::{
     Strictness, UnaryOp, Upvalue,
 };
 use kiln_runtime::{
-    ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, LocaleCapability,
-    Realm, RealmCapabilities, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
-    RuntimeHttpEvent, RuntimeTurn, TimeZoneCapability, TimerId, WorkItem,
+    ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, HttpCloseMode,
+    LocaleCapability, Realm, RealmCapabilities, RealmRuntime, RuntimeHttpClientEvent,
+    RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimeZoneCapability, TimerId, WorkItem,
     duration_from_milliseconds,
     node_http::HttpResponseEvent,
     node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
@@ -8715,6 +8715,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             })?;
             (server, resource)
         };
+        if native == Native::NodeSocketDestroy && server.borrow().protocol != ServerProtocol::Net {
+            let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "node:http requires the realm HTTP runtime".into(),
+            })?;
+            let actions = unsafe {
+                ActiveHttpRuntime::close_connection(&mut *runtime, resource, HttpCloseMode::Abort)
+            }
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "HTTP socket disappeared while destroying".into(),
+            })?;
+            for action in actions {
+                self.start_http_stream_action(&server, resource, action, instruction)?;
+            }
+            return Ok(receiver.clone());
+        }
         let (result, actions) = {
             let mut server_state = server.borrow_mut();
             let connection = server_state
@@ -9407,7 +9424,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .into_iter()
                             .map(|resource| {
                                 let actions = unsafe {
-                                    ActiveHttpRuntime::close_connection(&mut *runtime, resource)
+                                    ActiveHttpRuntime::close_connection(
+                                        &mut *runtime,
+                                        resource,
+                                        HttpCloseMode::Graceful,
+                                    )
                                 }
                                 .ok_or_else(|| {
                                     ExecutionError::Host {
@@ -10023,6 +10044,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     {
                         stream.closed = true;
                     }
+                    let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "node:http requires the realm HTTP runtime".into(),
+                    })?;
+                    let actions = unsafe {
+                        ActiveHttpRuntime::close_connection(
+                            &mut *runtime,
+                            resource,
+                            // Hyper's server task can publish Closed after selecting the final
+                            // response bytes. Treat protocol completion as graceful so the
+                            // transport drains that write; forced socket destruction remains the
+                            // explicit Abort path below (and in node:net destroy).
+                            HttpCloseMode::Graceful,
+                        )
+                    }
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "HTTP stream disappeared while closing after protocol completion"
+                            .into(),
+                    })?;
+                    for action in actions {
+                        self.start_http_stream_action(server, resource, action, instruction)?;
+                    }
                 }
             }
         }
@@ -10131,9 +10175,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             instruction,
                         )?;
                     } else if release == AgentRelease::Retire {
-                        let actions =
-                            unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
-                                .unwrap_or_default();
+                        let actions = unsafe {
+                            ActiveHttpRuntime::close_connection(
+                                &mut *runtime,
+                                resource,
+                                HttpCloseMode::Graceful,
+                            )
+                        }
+                        .unwrap_or_default();
                         for action in actions {
                             self.start_http_stream_action(owner, resource, action, instruction)?;
                         }
@@ -10166,13 +10215,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         ActiveHttpRuntime::client_connection_closed(&mut *runtime, resource)
                     };
                     let actions = {
-                        let mut owner = owner.borrow_mut();
-                        owner
-                            .streams
-                            .iter_mut()
-                            .find(|stream| stream.resource() == resource)
-                            .map(|stream| stream.driver.close_actions())
-                            .unwrap_or_default()
+                        unsafe {
+                            ActiveHttpRuntime::close_connection(
+                                &mut *runtime,
+                                resource,
+                                HttpCloseMode::Abort,
+                            )
+                        }
+                        .unwrap_or_default()
                     };
                     for action in actions {
                         self.start_http_stream_action(owner, resource, action, instruction)?;
@@ -10252,11 +10302,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction,
             message: "node:http requires the realm HTTP runtime".into(),
         })?;
-        let actions = unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
-            .ok_or_else(|| ExecutionError::Host {
-                instruction,
-                message: "HTTP server stream disappeared while closing".into(),
-            })?;
+        let actions = unsafe {
+            ActiveHttpRuntime::close_connection(&mut *runtime, resource, HttpCloseMode::Graceful)
+        }
+        .ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "HTTP server stream disappeared while closing".into(),
+        })?;
         for action in actions {
             self.start_http_stream_action(&server, resource, action, instruction)?;
         }
