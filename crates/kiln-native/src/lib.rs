@@ -3774,40 +3774,67 @@ mod tests {
             program: Program {
                 version: BYTECODE_VERSION,
                 constants: vec![
+                    Constant::String("dependency microtask".to_owned()),
                     Constant::String("dependency timer".to_owned()),
                     Constant::Number(0.0_f64.to_bits()),
                     Constant::Undefined,
                 ],
                 code: vec![
+                    Instruction::LoadBuiltin(kiln_ir::Builtin::QueueMicrotask),
+                    Instruction::MakeFunction(1),
+                    Instruction::Call { argc: 1 },
+                    Instruction::Pop,
                     Instruction::LoadBuiltin(kiln_ir::Builtin::SetTimeout),
                     Instruction::MakeFunction(0),
-                    Instruction::Const(1),
+                    Instruction::Const(2),
                     Instruction::Call { argc: 2 },
                     Instruction::Pop,
-                    Instruction::Const(2),
+                    Instruction::Const(3),
                     Instruction::Return,
                 ],
                 local_count: 0,
-                functions: vec![FunctionProto {
-                    prologue_end: 0,
-                    asynchronous: false,
-                    name: None,
-                    arrow: false,
-                    generator: false,
-                    async_generator: false,
-                    parameter_count: 0,
-                    declared_length: 0,
-                    local_count: 0,
-                    code: vec![
-                        Instruction::Const(0),
-                        Instruction::HostCall {
-                            op: HostOp::WriteStdout,
-                            argc: 1,
-                        },
-                        Instruction::Return,
-                    ],
-                    upvalues: Vec::new(),
-                }],
+                functions: vec![
+                    FunctionProto {
+                        prologue_end: 0,
+                        asynchronous: false,
+                        name: None,
+                        arrow: false,
+                        generator: false,
+                        async_generator: false,
+                        parameter_count: 0,
+                        declared_length: 0,
+                        local_count: 0,
+                        code: vec![
+                            Instruction::Const(1),
+                            Instruction::HostCall {
+                                op: HostOp::WriteStdout,
+                                argc: 1,
+                            },
+                            Instruction::Return,
+                        ],
+                        upvalues: Vec::new(),
+                    },
+                    FunctionProto {
+                        prologue_end: 0,
+                        asynchronous: false,
+                        name: None,
+                        arrow: false,
+                        generator: false,
+                        async_generator: false,
+                        parameter_count: 0,
+                        declared_length: 0,
+                        local_count: 0,
+                        code: vec![
+                            Instruction::Const(0),
+                            Instruction::HostCall {
+                                op: HostOp::WriteStdout,
+                                argc: 1,
+                            },
+                            Instruction::Return,
+                        ],
+                        upvalues: Vec::new(),
+                    },
+                ],
             },
             dependencies: Vec::new(),
             imports: Vec::new(),
@@ -3867,7 +3894,10 @@ mod tests {
                 },
             )
             .expect("native scheduling graph runs");
-        assert_eq!(run.stdout, b"entry body\ndependency timer\n");
+        assert_eq!(
+            run.stdout,
+            b"entry body\ndependency microtask\ndependency timer\n"
+        );
     }
 
     #[test]
@@ -3960,7 +3990,10 @@ int main(void) {{
             "embedded scheduling graph failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(output.stdout, b"entry body\ndependency timer\n");
+        assert_eq!(
+            output.stdout,
+            b"entry body\ndependency microtask\ndependency timer\n"
+        );
     }
 
     fn star_reexport_graph(project: &Path) -> ModuleGraph {
