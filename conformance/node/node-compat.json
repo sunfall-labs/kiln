@@ -32,10 +32,11 @@
     "parallel/test-http-server.js": {
       "expectation": "expected-failure",
       "sha256": "e62450f338b93c15eab588fc70c91db638d35f30cb35c4da283f838f054cfb05",
-      "reason": "partial: the Tokio-owned server/client, request stream, response stream, pause/resume timer, full-duplex socket path, IncomingMessage/ServerResponse request and accepted-socket identity, sequential and pipelined request identity, realm-owned Agent connection reuse, net.Socket UTF-8 decoding and readyState, and httpAllowHalfOpen pass; the upstream test still needs CommonJS harness support and url/querystring",
+      "reason": "partial: the Tokio-owned server/client, request stream, response stream, pause/resume timer, full-duplex socket path, IncomingMessage/ServerResponse request and accepted-socket identity, sequential and pipelined request identity, realm-owned Agent connection reuse, net.Socket UTF-8 decoding and readyState, legacy url/querystring parsing, and httpAllowHalfOpen pass; the upstream test still needs its private CommonJS test harness and invalid Server option error assertions",
       "adapted": [
         "upstream-adapted/http-server-tokio-owned.mjs",
         "upstream-adapted/http-server-allow-half-open.mjs",
+        "upstream-adapted/http-legacy-url-querystring.mjs",
         "upstream-adapted/http-sequential-request-identity.mjs",
         "upstream-adapted/http-pipelined-request-identity.mjs"
       ],

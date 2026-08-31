@@ -72,6 +72,7 @@ pub enum NodeBuiltin {
     PerfHooks,
     Os,
     Stream,
+    QueryString,
     Url,
     Util,
 }
@@ -98,6 +99,7 @@ impl NodeBuiltin {
             "perf_hooks" => Self::PerfHooks,
             "os" => Self::Os,
             "stream" => Self::Stream,
+            "querystring" => Self::QueryString,
             "url" => Self::Url,
             "util" => Self::Util,
             _ => return None,
@@ -125,6 +127,7 @@ impl NodeBuiltin {
             Self::PerfHooks => "node:perf_hooks",
             Self::Os => "node:os",
             Self::Stream => "node:stream",
+            Self::QueryString => "node:querystring",
             Self::Url => "node:url",
             Self::Util => "node:util",
         }
