@@ -1945,14 +1945,14 @@ mod tests {
         .expect("build dual package graph");
         assert_eq!(
             graph
-                .module(&project.root.join("node_modules/pkg/esm.mjs"))
+                .module(project.root.join("node_modules/pkg/esm.mjs"))
                 .expect("import target node")
                 .source,
             ModuleSource::Source
         );
         assert_eq!(
             graph
-                .module(&project.root.join("node_modules/pkg/cjs.cjs"))
+                .module(project.root.join("node_modules/pkg/cjs.cjs"))
                 .expect("require target node")
                 .source,
             ModuleSource::CommonJs

@@ -177,9 +177,9 @@ pub enum Method {
 #[derive(Debug)]
 pub enum IntlValue {
     Collator(engine::collator::Collator),
-    DateTimeFormat(engine::datetime::DateTimeFormat),
+    DateTimeFormat(Box<engine::datetime::DateTimeFormat>),
     DisplayNames(engine::displaynames::DisplayNames),
-    DurationFormat(engine::duration::DurationFormat),
+    DurationFormat(Box<engine::duration::DurationFormat>),
     ListFormat(engine::list::ListFormat),
     /// The canonical tag. `Intl.Locale` has no formatter behind it -- it *is* the tag.
     Locale(String),
@@ -735,9 +735,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Service::DateTimeFormat => {
                 let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
                 let options = self.intl_date_time_options(arguments.get(1), instruction)?;
-                IntlValue::DateTimeFormat(
+                IntlValue::DateTimeFormat(Box::new(
                     engine::datetime::DateTimeFormat::new(&locales, options).map_err(failure)?,
-                )
+                ))
             }
             Service::RelativeTimeFormat => {
                 let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
@@ -809,9 +809,9 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Service::DurationFormat => {
                 let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;
                 let options = self.intl_duration_options(arguments.get(1), instruction)?;
-                IntlValue::DurationFormat(
+                IntlValue::DurationFormat(Box::new(
                     engine::duration::DurationFormat::new(&locales, options).map_err(failure)?,
-                )
+                ))
             }
             Service::ListFormat => {
                 let locales = self.canonicalize_locale_list(arguments.first(), instruction)?;

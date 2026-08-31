@@ -727,12 +727,12 @@ fn finish_run(
             diagnostics.push(runtime_diagnostic(&error));
             // A missing host facility or a missing intrinsic is a gap in this implementation,
             // not a wrong answer from the language, and must not be counted as a failure.
-            let outcome = if message.contains(HOST_CAPABILITY_MARKER) {
-                Outcome::Unsupported
             // A module `import()` reached that this compiler cannot build is a gap of the same
             // kind a compile diagnostic is, and counting it a failure would claim the language
             // got something wrong that this engine never attempted.
-            } else if message.starts_with("unsupported dynamic import:") {
+            let outcome = if message.contains(HOST_CAPABILITY_MARKER)
+                || message.starts_with("unsupported dynamic import:")
+            {
                 Outcome::Unsupported
             } else if let Some(name) = missing_intrinsic(&message) {
                 diagnostics.push(Diagnostic::new(
