@@ -235,9 +235,13 @@ fn assert_numeric_id_invariants(prelude: &str) {
         ids.entry(define.value).or_default().push(define.name);
     }
 
+    // `TEMPORAL_LAST` is deliberately an alias for whatever the highest Temporal code currently
+    // is, because the dispatcher routes Temporal by range rather than by equality. It moves every
+    // time the Temporal surface grows -- it aliased `OP_LAST` until the two `Instant.fromEpoch*`
+    // statics were wired -- so this names the pair rather than pinning one member.
     const TEMPORAL_ALIASES: [&str; 2] = [
+        "KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS",
         "KILN_C99_METHOD_TEMPORAL_LAST",
-        "KILN_C99_METHOD_TEMPORAL_OP_LAST",
     ];
     for (value, names) in &methods {
         if names.len() > 1 {
@@ -249,7 +253,10 @@ fn assert_numeric_id_invariants(prelude: &str) {
                 "duplicate method ID {value} is claimed by {}",
                 names.join(", ")
             );
-            assert_eq!(*value, 335, "Temporal method aliases moved from ID 335");
+            // A tripwire against accidental renumbering, not a fixed fact: this rises whenever
+            // the Temporal surface grows, and the two `Instant.fromEpoch*` statics took it from
+            // 335 to 337. Update it deliberately, with the Temporal range still contiguous.
+            assert_eq!(*value, 337, "Temporal method aliases moved from ID 337");
         }
     }
 
