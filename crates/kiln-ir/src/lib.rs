@@ -1736,6 +1736,9 @@ impl Compiler {
     }
 
     fn compile_body(&mut self, module: &Module) {
+        // A module body is a variable environment like a function's, so its `var`s are hoisted
+        // to the top of it rather than to the top of whichever block they were written in.
+        self.hoist_var_names(&module.body);
         self.plain_statements(&module.body);
         self.push_constant(Constant::Undefined);
         self.code.push(Instruction::Return);
@@ -1759,6 +1762,7 @@ impl Compiler {
         self.code.push(Instruction::StoreLocal(completion));
         // The same three passes `statements` makes -- names, then hoisted function values, then
         // the rest -- with the expression statements diverted into the completion slot.
+        self.hoist_var_names(&module.body);
         for statement in &module.body {
             self.hoist_names(statement);
         }
@@ -2953,6 +2957,109 @@ impl Compiler {
                     }
                 }
             }
+            _ => {}
+        }
+    }
+
+    /// Predeclare every `var` a body contains, wherever inside it the declaration is written.
+    ///
+    /// `hoist_names` runs once per *block*, which is right for a lexical declaration and wrong
+    /// for a `var`: a `var` belongs to the function, not to the block it appears in. Its slot
+    /// already went to scope 0, but the instructions `predeclare` emits went wherever the block
+    /// was compiled -- so a captured `var` written inside one arm of an `if` had its `NewCell`
+    /// inside that arm, and the *other* arm's write found an unboxed slot. That is
+    /// `local slot 460 does not hold a captured cell`, and `import "react-dom/server"` is
+    /// exactly it -- `if (typeof performance === "object") { var getCurrentTime = ... } else {
+    /// getCurrentTime = ... }`, with the closure that reads `getCurrentTime` being what makes
+    /// the binding boxed and the else path fatal.
+    ///
+    /// The initialisation is the same story told quietly: a `var` reads as `undefined` from the
+    /// top of its function, not from the top of the block it was written in.
+    ///
+    /// Walks into every statement that shares this variable environment and into none that
+    /// starts a new one, which is the specification's `VarScopedDeclarations`: a nested function
+    /// owns its own `var`s, and a class body is a function's worth of scopes away.
+    fn hoist_var_names(&mut self, body: &[Statement]) {
+        for statement in body {
+            self.hoist_var_names_in(statement);
+        }
+    }
+
+    fn hoist_var_names_in(&mut self, statement: &Statement) {
+        match &statement.kind {
+            StatementKind::Variable {
+                kind: VariableKind::Var,
+                declarations,
+            } => {
+                for declaration in declarations {
+                    let mut names = Vec::new();
+                    pattern_names_in_order(&declaration.pattern, &mut names);
+                    for name in names {
+                        self.predeclare(VariableKind::Var, &name, true);
+                    }
+                }
+            }
+            StatementKind::Block(body) => self.hoist_var_names(body),
+            StatementKind::If {
+                consequent,
+                alternate,
+                ..
+            } => {
+                self.hoist_var_names_in(consequent);
+                if let Some(alternate) = alternate {
+                    self.hoist_var_names_in(alternate);
+                }
+            }
+            StatementKind::While { body, .. }
+            | StatementKind::DoWhile { body, .. }
+            | StatementKind::Labelled { body, .. }
+            | StatementKind::With { body, .. } => self.hoist_var_names_in(body),
+            StatementKind::For { init, body, .. } => {
+                if let Some(init) = init {
+                    self.hoist_var_names_in(init);
+                }
+                self.hoist_var_names_in(body);
+            }
+            StatementKind::ForIn {
+                kind, name, body, ..
+            } => {
+                if *kind == VariableKind::Var {
+                    self.predeclare(VariableKind::Var, name, true);
+                }
+                self.hoist_var_names_in(body);
+            }
+            StatementKind::ForOf {
+                kind,
+                pattern,
+                body,
+                ..
+            } => {
+                if *kind == VariableKind::Var {
+                    let mut names = Vec::new();
+                    pattern_names_in_order(pattern, &mut names);
+                    for name in names {
+                        self.predeclare(VariableKind::Var, &name, true);
+                    }
+                }
+                self.hoist_var_names_in(body);
+            }
+            StatementKind::Switch { cases, .. } => {
+                for case in cases {
+                    self.hoist_var_names(&case.body);
+                }
+            }
+            StatementKind::Try {
+                block,
+                handler,
+                finalizer,
+            } => {
+                self.hoist_var_names(block);
+                if let Some(handler) = handler {
+                    self.hoist_var_names(&handler.body);
+                }
+                self.hoist_var_names(finalizer);
+            }
+            // A function owns its own `var`s, and everything else declares nothing.
             _ => {}
         }
     }
@@ -5698,6 +5805,10 @@ impl Compiler {
         // implicit in the instruction stream.
         let prologue_end = self.code.len() as u32;
 
+        // Every `var` in the body belongs to *this* function, so its slot and its `undefined`
+        // are established here rather than wherever the block containing it happens to be
+        // compiled.
+        self.hoist_var_names(&function.body);
         if let Some(class) = &class {
             if class.forwards_to_super {
                 // `super(...arguments)`, and nothing else can run before it -- so by the line
@@ -7371,6 +7482,17 @@ fn collect_nested_function_names(
                 if let Some(initializer) = &declaration.initializer {
                     collect_identifiers(initializer, names, inside_function);
                 }
+                // The *pattern* reads names too, and only the initializer was ever walked. A
+                // destructuring default and a computed key are both ordinary expressions
+                // evaluated in this scope -- `const { a = n } = {}` inside a nested function
+                // reads `n` from the enclosing one -- so a binding named only there was left
+                // unboxed and the nested function could not resolve it at all.
+                //
+                // `collect_pattern_identifiers` records what a pattern *reads*, never what it
+                // binds, which is why walking it here cannot box the declaration's own names.
+                if inside_function {
+                    collect_pattern_identifiers(&declaration.pattern, names);
+                }
             }
         }
         StatementKind::Expression(expression) | StatementKind::ExportDefault(expression) => {
@@ -7447,8 +7569,18 @@ fn collect_nested_function_names(
             }
             collect_nested_function_names(body, names, inside_function);
         }
-        StatementKind::ForOf { iterable, body, .. } => {
+        StatementKind::ForOf {
+            pattern,
+            iterable,
+            body,
+            ..
+        } => {
             collect_identifiers(iterable, names, inside_function);
+            // The loop's own pattern, for the reason a declaration's is walked above:
+            // `for (const { a = n } of xs)` reads `n` where the loop is written.
+            if inside_function {
+                collect_pattern_identifiers(pattern, names);
+            }
             collect_nested_function_names(body, names, inside_function);
         }
         StatementKind::Throw(value) => collect_identifiers(value, names, inside_function),
