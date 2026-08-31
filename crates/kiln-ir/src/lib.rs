@@ -8959,10 +8959,13 @@ mod tests {
     }
 
     #[test]
-    fn a_direct_read_before_a_declaration_is_refused() {
-        // Pre-declaring every name in a block would otherwise turn this from a diagnostic into a
-        // silent `undefined`, which is the trade the dead-zone flag exists to avoid.
-        let messages = errors(vec![
+    fn a_direct_read_before_a_declaration_throws_where_the_read_is() {
+        // `x; let x = 1` is well-formed JavaScript: it compiles, and the read throws a
+        // `ReferenceError` when it is reached. Pre-declaring every name in a block would
+        // otherwise turn that into a silent `undefined`, which is the trade the dead-zone
+        // marker exists to avoid -- so the read becomes one of a cell that is uninitialised by
+        // construction, and the source is not refused.
+        let program = compile(&module(vec![
             statement(StatementKind::Expression(identifier("x"))),
             statement(StatementKind::Variable {
                 kind: VariableKind::Let,
@@ -8972,12 +8975,15 @@ mod tests {
                     span: Span::default(),
                 }],
             }),
-        ]);
+        ]))
+        .expect("a temporal dead zone is not a compile error");
         assert!(
-            messages
+            program
+                .code
                 .iter()
-                .any(|message| message.contains("before its declaration")),
-            "{messages:?}"
+                .any(|instruction| matches!(instruction, Instruction::MarkUninitialized(_))),
+            "{:?}",
+            program.code
         );
     }
 
