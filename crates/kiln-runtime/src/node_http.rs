@@ -7,7 +7,111 @@
 
 use std::collections::BTreeMap;
 
+use kiln_host_abi::{Completion, RequestId, ResourceId};
+
+use crate::node_stream::{
+    DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent, WriteDisposition,
+};
+
 const MAX_HEAD_BYTES: usize = 64 * 1024;
+
+/// Provider-neutral events produced by one HTTP server connection.
+///
+/// This is the stable seam between protocol engines and Node adapters. The current incremental
+/// decoder and the Hyper migration both produce this vocabulary; neither Tokio nor Hyper types
+/// cross it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpConnectionEvent {
+    Request(HttpRequestEvent),
+    Transport(StreamEvent),
+}
+
+/// A protocol failure plus the transport actions required to retire the connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpConnectionError {
+    pub error: HttpParseError,
+    pub actions: Vec<StreamAction>,
+}
+
+/// One HTTP connection composed with Node's provider-neutral duplex stream driver.
+///
+/// Host operations selected here run unchanged against `TokioHost` and `ScriptedHost`. The
+/// decoder is deliberately private so replacing it with a Hyper connection task does not change
+/// interpreter, native, or generated-C adapters.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpConnectionDriver {
+    stream: StreamDriver,
+    decoder: Http1Decoder,
+}
+
+impl HttpConnectionDriver {
+    pub fn new(resource: ResourceId) -> Self {
+        Self::with_high_water_mark(resource, DEFAULT_HIGH_WATER_MARK)
+    }
+
+    pub fn with_high_water_mark(resource: ResourceId, high_water_mark: usize) -> Self {
+        Self {
+            stream: StreamDriver::new(resource, high_water_mark),
+            decoder: Http1Decoder::default(),
+        }
+    }
+
+    pub const fn resource(&self) -> ResourceId {
+        self.stream.resource()
+    }
+
+    pub fn start(&mut self) -> Vec<StreamAction> {
+        self.stream.start_reading()
+    }
+
+    pub fn started(&mut self, operation: &kiln_host_abi::AsyncHostOp, request: RequestId) -> bool {
+        self.stream.started(operation, request)
+    }
+
+    pub fn write_response(
+        &mut self,
+        response: HttpResponse,
+        keep_alive: bool,
+    ) -> (WriteDisposition, Vec<StreamAction>) {
+        self.stream.write(response.encode(keep_alive))
+    }
+
+    pub fn close(&mut self) -> Vec<StreamAction> {
+        self.stream.close_actions()
+    }
+
+    /// Apply one realm completion, returning Node-facing events separately from new transport
+    /// actions. Protocol failure closes the resource through the same cancellation path as a
+    /// socket destroy rather than leaking a parser-specific operation to the adapter.
+    pub fn completed(
+        &mut self,
+        completion: Completion,
+    ) -> Option<Result<(Vec<HttpConnectionEvent>, Vec<StreamAction>), HttpConnectionError>> {
+        let actions = self.stream.completed(completion)?;
+        let mut events = Vec::new();
+        let mut transport = Vec::new();
+        for action in actions {
+            match action {
+                StreamAction::Data(bytes) => match self.decoder.push_events(&bytes) {
+                    Ok(decoded) => {
+                        events.extend(decoded.into_iter().map(HttpConnectionEvent::Request))
+                    }
+                    Err(error) => {
+                        return Some(Err(HttpConnectionError {
+                            error,
+                            actions: self.stream.close_actions(),
+                        }));
+                    }
+                },
+                StreamAction::Event(event) => {
+                    events.push(HttpConnectionEvent::Transport(event));
+                }
+                action => transport.push(action),
+            }
+        }
+        Some(Ok((events, transport)))
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HttpRequest {
@@ -804,5 +908,93 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].body, b"x");
         assert_eq!(requests[1].target, "/b");
+    }
+
+    fn completion(request: u64, value: kiln_host_abi::AsyncHostValue) -> Completion {
+        Completion {
+            request: RequestId::new(request),
+            sequence: request,
+            result: Ok(value),
+        }
+    }
+
+    #[test]
+    fn connection_driver_keeps_transport_actions_below_request_events() {
+        use kiln_host_abi::{AsyncHostOp, AsyncHostValue};
+
+        let resource = ResourceId::new(41);
+        let mut connection = HttpConnectionDriver::with_high_water_mark(resource, 32);
+        let read = connection.start();
+        assert_eq!(
+            read,
+            [StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 32,
+            })]
+        );
+        let StreamAction::Start(operation) = &read[0] else {
+            unreachable!()
+        };
+        assert!(connection.started(operation, RequestId::new(1)));
+
+        let (events, actions) = connection
+            .completed(completion(
+                1,
+                AsyncHostValue::Bytes(
+                    b"POST /items HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc".to_vec(),
+                ),
+            ))
+            .expect("completion belongs to connection")
+            .expect("request parses");
+        assert!(matches!(
+            &events[..],
+            [
+                HttpConnectionEvent::Request(HttpRequestEvent::Head(HttpRequest {
+                    method,
+                    target,
+                    ..
+                })),
+                HttpConnectionEvent::Request(HttpRequestEvent::Data(data)),
+                HttpConnectionEvent::Request(HttpRequestEvent::End),
+            ] if method == "POST" && target == "/items" && data == b"abc"
+        ));
+        assert_eq!(
+            actions,
+            [StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 32,
+            })]
+        );
+    }
+
+    #[test]
+    fn connection_driver_routes_protocol_failure_through_stream_close() {
+        use kiln_host_abi::{AsyncHostOp, AsyncHostValue};
+
+        let resource = ResourceId::new(42);
+        let mut connection = HttpConnectionDriver::new(resource);
+        let read = connection.start();
+        let StreamAction::Start(operation) = &read[0] else {
+            unreachable!()
+        };
+        assert!(connection.started(operation, RequestId::new(1)));
+        assert_eq!(
+            connection.completed(completion(
+                1,
+                AsyncHostValue::Bytes(
+                    b"POST / HTTP/1.1\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n"
+                        .to_vec(),
+                ),
+            )),
+            Some(Err(HttpConnectionError {
+                error: HttpParseError::ConflictingBodyFraming,
+                actions: vec![StreamAction::Start(AsyncHostOp::CloseResource { resource })],
+            }))
+        );
+        assert!(connection.stream.is_closing());
+        assert!(connection.close().is_empty());
+        assert!(!connection.stream.state().resource_closed());
+        // The close operation has been selected and awaits the provider completion.
+        assert!(!connection.stream.has_pending_read());
     }
 }
