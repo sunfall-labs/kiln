@@ -1943,6 +1943,11 @@ fn native_builtin_supports_export(
         ),
         NodeBuiltin::Dns => matches!(export_name, "default" | "lookup"),
         NodeBuiltin::Os => matches!(export_name, "default" | "hostname" | "networkInterfaces"),
+        NodeBuiltin::Stream => matches!(
+            export_name,
+            "Readable" | "Writable" | "addAbortSignal" | "default" | "finished"
+        ),
+        NodeBuiltin::PerfHooks => matches!(export_name, "default" | "performance"),
         _ => false,
     }
 }
@@ -2125,6 +2130,40 @@ if (status != KILN_C99_OK) return status;
 exports[0] = namespace;
 exports[1] = hostname;
 exports[2] = network_interfaces;"#,
+        ),
+        NodeBuiltin::Stream => Some(
+            r#"kiln_value readable = kiln_c99_method(KILN_C99_METHOD_NODE_READABLE);
+kiln_value writable = kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE);
+kiln_value add_abort_signal = kiln_c99_method(KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL);
+kiln_value finished = kiln_c99_method(KILN_C99_METHOD_NODE_STREAM_FINISHED);
+kiln_value stream = kiln_c99_method(KILN_C99_METHOD_NODE_STREAM);
+int status = kiln_c99_put(host, stream, "Readable", 8, readable, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, stream, "Writable", 8, writable, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, stream, "addAbortSignal", 14, add_abort_signal, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, stream, "finished", 8, finished, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = readable;
+exports[1] = writable;
+exports[2] = add_abort_signal;
+exports[3] = stream;
+exports[4] = finished;"#,
+        ),
+        NodeBuiltin::PerfHooks => Some(
+            r#"kiln_value performance;
+int status = kiln_c99_new_object(&performance);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, performance, "now", 3, kiln_c99_method(KILN_C99_METHOD_NODE_PERFORMANCE_NOW), 0, NULL);
+if (status != KILN_C99_OK) return status;
+kiln_value namespace;
+status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "performance", 11, performance, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = namespace;
+exports[1] = performance;"#,
         ),
         _ => None,
     }
@@ -4202,6 +4241,28 @@ mod tests {
         assert!(body.contains("exports[2] = create_server;"));
         assert!(native_builtin_body(NodeBuiltin::Https).is_some());
         assert!(native_builtin_body(NodeBuiltin::Path).is_none());
+    }
+
+    #[test]
+    fn node_stream_and_perf_hooks_have_native_runtime_module_materializers() {
+        use kiln_module_resolver::NodeBuiltin;
+
+        let stream = native_builtin_body(NodeBuiltin::Stream).expect("stream materializes");
+        assert!(stream.contains("KILN_C99_METHOD_NODE_READABLE"));
+        assert!(stream.contains("KILN_C99_METHOD_NODE_WRITABLE"));
+        assert!(stream.contains("KILN_C99_METHOD_NODE_STREAM_FINISHED"));
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::Stream,
+            "addAbortSignal"
+        ));
+
+        let performance =
+            native_builtin_body(NodeBuiltin::PerfHooks).expect("perf_hooks materializes");
+        assert!(performance.contains("KILN_C99_METHOD_NODE_PERFORMANCE_NOW"));
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::PerfHooks,
+            "performance"
+        ));
     }
 
     #[test]
