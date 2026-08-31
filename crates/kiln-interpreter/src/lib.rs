@@ -7483,10 +7483,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 for action in actions {
                     self.start_http_server_action(&state, action, instruction)?;
                 }
-                let streams = if matches!(
-                    state.borrow().protocol,
-                    ServerProtocol::Net | ServerProtocol::Http
-                ) {
+                let streams = if state.borrow().protocol == ServerProtocol::Net {
                     let mut state = state.borrow_mut();
                     state
                         .streams

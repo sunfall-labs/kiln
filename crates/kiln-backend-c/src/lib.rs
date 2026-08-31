@@ -9357,9 +9357,11 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (server->accept_request != 0) {
                 kiln_c99_node_cancel_request(&server->accept_request);
             }
-            for (socket = server->sockets; socket != NULL; socket = socket->next) {
-                status = kiln_c99_node_close_socket(socket, 1);
-                if (status != KILN_C99_OK) return status;
+            if (!server->protocol_http) {
+                for (socket = server->sockets; socket != NULL; socket = socket->next) {
+                    status = kiln_c99_node_close_socket(socket, 1);
+                    if (status != KILN_C99_OK) return status;
+                }
             }
             if (server->listener != 0) {
                 work = (kiln_node_completion *)calloc(1, sizeof *work);
