@@ -26,6 +26,7 @@ struct Shared {
     state: DuplexState<Vec<u8>>,
     next_submission: u64,
     in_flight: Option<RequestId>,
+    finish_emitted: bool,
     waker: Option<Waker>,
 }
 
@@ -42,6 +43,7 @@ impl ResponseBodyDriver {
                 state: DuplexState::new(high_water_mark),
                 next_submission: 1,
                 in_flight: None,
+                finish_emitted: false,
                 waker: None,
             })),
         }
@@ -109,7 +111,11 @@ impl hyper::body::Body for ResponseBody {
                     let _ = self.events.send(BodyEvent::Drain);
                 }
             }
-            if shared.state.end_requested() && shared.state.buffered_bytes() == 0 {
+            if shared.state.end_requested()
+                && shared.state.buffered_bytes() == 0
+                && !shared.finish_emitted
+            {
+                shared.finish_emitted = true;
                 let _ = self.events.send(BodyEvent::Finish);
             }
         }
@@ -127,6 +133,10 @@ impl hyper::body::Body for ResponseBody {
             && shared.state.buffered_bytes() == 0
             && shared.in_flight.is_none()
         {
+            if !shared.finish_emitted {
+                shared.finish_emitted = true;
+                let _ = self.events.send(BodyEvent::Finish);
+            }
             return std::task::Poll::Ready(None);
         }
         shared.waker = Some(context.waker().clone());
@@ -208,5 +218,22 @@ mod tests {
             assert!(frames.frame().await.is_none());
         });
         assert_eq!(events.try_recv(), Ok(BodyEvent::Finish));
+    }
+
+    #[test]
+    fn empty_end_emits_finish_before_eof() {
+        let mut body = ResponseBodyDriver::new(8);
+        assert!(body.end(Vec::new()).ready);
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let mut frames = body.body(sender);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime builds");
+        runtime.block_on(async {
+            assert!(frames.frame().await.is_none());
+            assert!(frames.frame().await.is_none());
+        });
+        assert_eq!(events.try_recv(), Ok(BodyEvent::Finish));
+        assert!(events.try_recv().is_err());
     }
 }
