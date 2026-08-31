@@ -16225,10 +16225,50 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_iterate(host, built, argc > 0 ? args[0] : kiln_c99_undefined(),
-                                      depth, thrown);
-            if (status != KILN_C99_OK) {
-                return status;
+            {
+                /* `Array.from` takes an iterable *or* an array-like, and the second is not a
+                 * fallback for a failed iteration -- it is chosen up front by whether the source
+                 * has a callable `@@iterator`. That is what makes `Array.from({length: 2})` two
+                 * undefineds where `[...{length: 2}]` is a TypeError, and it is why the
+                 * array-like walk lives here rather than in `kiln_c99_iterate`, which spread
+                 * shares and which must keep refusing. */
+                kiln_value source = argc > 0 ? args[0] : kiln_c99_undefined();
+                kiln_value method = kiln_c99_undefined();
+                if (source.tag == KILN_VALUE_OBJECT) {
+                    status = kiln_c99_get(host, source, "@@iterator", 10, &method, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
+                if (source.tag == KILN_VALUE_OBJECT && !kiln_c99_is_callable(method)) {
+                    kiln_value length;
+                    double count;
+                    status = kiln_c99_get(host, source, "length", 6, &length, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                    count = kiln_c99_as_number(length);
+                    /* `ToLength`: a negative, NaN or fractional length is clamped rather than
+                     * refused, so `Array.from({length: -1})` is empty and not an error. */
+                    count = (count != count || count < 0.0) ? 0.0 : floor(count);
+                    for (index = 0; index < (size_t)count; ++index) {
+                        kiln_value element;
+                        status = kiln_c99_get_computed(host, source, kiln_c99_number((double)index),
+                                                       &element, depth, thrown);
+                        if (status != KILN_C99_OK) {
+                            return status;
+                        }
+                        status = kiln_c99_array_push(built, element);
+                        if (status != KILN_C99_OK) {
+                            return status;
+                        }
+                    }
+                } else {
+                    status = kiln_c99_iterate(host, built, source, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                }
             }
             if (!kiln_c99_is_callable(mapper)) {
                 *result = built;
