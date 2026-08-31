@@ -28,6 +28,180 @@ const INVALID_ARGUMENT: i32 = -1;
 #[cfg(feature = "realm")]
 const RUNTIME_ERROR: i32 = -8;
 
+#[cfg(feature = "realm")]
+mod http {
+    use super::INVALID_ARGUMENT;
+    use kiln_runtime::node_http::{Http1Decoder, HttpResponse};
+    use std::slice;
+
+    #[repr(C)]
+    pub struct RequestView {
+        pub method: *mut u8,
+        pub method_capacity: usize,
+        pub method_len: usize,
+        pub target: *mut u8,
+        pub target_capacity: usize,
+        pub target_len: usize,
+        pub version_minor: u8,
+        pub keep_alive: u8,
+    }
+
+    /// Allocate an opaque incremental HTTP/1 decoder. The handle never exposes Rust layout.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_decoder_create(out: *mut *mut Http1Decoder) -> i32 {
+        if out.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: null was rejected and the caller promises a writable pointer slot.
+        unsafe { out.write(Box::into_raw(Box::new(Http1Decoder::default()))) };
+        0
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_decoder_free(decoder: *mut Http1Decoder) {
+        if !decoder.is_null() {
+            // SAFETY: the private ABI requires a live handle returned by create, exactly once.
+            drop(unsafe { Box::from_raw(decoder) });
+        }
+    }
+
+    /// Push one transport chunk and borrow the first complete request for this callback only.
+    ///
+    /// Returns 0 for a request, 1 when more bytes are needed, and a negative value for malformed
+    /// input. This initial native server slice intentionally accepts one request per connection;
+    /// the decoder itself remains pipelining-safe for the later keep-alive adapter.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_decoder_push(
+        decoder: *mut Http1Decoder,
+        bytes: *const u8,
+        bytes_len: usize,
+        out: *mut RequestView,
+    ) -> i32 {
+        if decoder.is_null() || out.is_null() || (bytes.is_null() && bytes_len != 0) {
+            return INVALID_ARGUMENT;
+        }
+        let chunk = if bytes_len == 0 {
+            &[]
+        } else {
+            // SAFETY: the caller supplies a readable span for this call.
+            unsafe { slice::from_raw_parts(bytes, bytes_len) }
+        };
+        // SAFETY: the handle contract guarantees exclusive access during this call.
+        let decoder = unsafe { &mut *decoder };
+        let Ok(requests) = decoder.push(chunk) else {
+            return -2;
+        };
+        let Some(request) = requests.first() else {
+            return 1;
+        };
+        // SAFETY: `out` is writable by contract and is initialized by the caller with its owned
+        // output spans. No pointer into a temporary Rust request crosses the boundary.
+        let view = unsafe { &mut *out };
+        if request.method.len() > view.method_capacity
+            || request.target.len() > view.target_capacity
+        {
+            return -3;
+        }
+        if (!view.method.is_null() || request.method.is_empty())
+            && (!view.target.is_null() || request.target.is_empty())
+        {
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    request.method.as_ptr(),
+                    view.method,
+                    request.method.len(),
+                );
+                std::ptr::copy_nonoverlapping(
+                    request.target.as_ptr(),
+                    view.target,
+                    request.target.len(),
+                );
+            }
+        } else {
+            return INVALID_ARGUMENT;
+        }
+        view.method_len = request.method.len();
+        view.target_len = request.target.len();
+        view.version_minor = u8::from(matches!(
+            request.version,
+            kiln_runtime::node_http::HttpVersion::Http11
+        ));
+        view.keep_alive = u8::from(request.keep_alive);
+        0
+    }
+
+    /// Encode one complete response through the shared Rust HTTP implementation.
+    ///
+    /// A null output buffer queries the required length; a sufficiently large buffer receives the
+    /// bytes. Header pairs are passed as parallel borrowed spans to keep the ABI layout explicit.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_http1_response_encode(
+        status: u16,
+        header_names: *const *const u8,
+        header_name_lens: *const usize,
+        header_values: *const *const u8,
+        header_value_lens: *const usize,
+        header_count: usize,
+        body: *const u8,
+        body_len: usize,
+        keep_alive: u8,
+        buffer: *mut u8,
+        capacity: usize,
+    ) -> isize {
+        if (body.is_null() && body_len != 0)
+            || (header_count != 0
+                && (header_names.is_null()
+                    || header_name_lens.is_null()
+                    || header_values.is_null()
+                    || header_value_lens.is_null()))
+        {
+            return INVALID_ARGUMENT as isize;
+        }
+        let names = unsafe { slice::from_raw_parts(header_names, header_count) };
+        let name_lens = unsafe { slice::from_raw_parts(header_name_lens, header_count) };
+        let values = unsafe { slice::from_raw_parts(header_values, header_count) };
+        let value_lens = unsafe { slice::from_raw_parts(header_value_lens, header_count) };
+        let mut headers = Vec::with_capacity(header_count);
+        for index in 0..header_count {
+            let Some((&name, &name_len)) = names.get(index).zip(name_lens.get(index)) else {
+                return INVALID_ARGUMENT as isize;
+            };
+            let Some((&value, &value_len)) = values.get(index).zip(value_lens.get(index)) else {
+                return INVALID_ARGUMENT as isize;
+            };
+            if (name.is_null() && name_len != 0) || (value.is_null() && value_len != 0) {
+                return INVALID_ARGUMENT as isize;
+            }
+            let name = unsafe { slice::from_raw_parts(name, name_len) };
+            let value = unsafe { slice::from_raw_parts(value, value_len) };
+            let (Ok(name), Ok(value)) = (str::from_utf8(name), str::from_utf8(value)) else {
+                return -2;
+            };
+            headers.push((name.to_owned(), value.to_owned()));
+        }
+        let body = unsafe { slice::from_raw_parts(body, body_len) }.to_vec();
+        let encoded = HttpResponse {
+            status,
+            reason: None,
+            headers,
+            body,
+        }
+        .encode(keep_alive != 0);
+        let Ok(length) = isize::try_from(encoded.len()) else {
+            return INVALID_ARGUMENT as isize;
+        };
+        if buffer.is_null() {
+            return length;
+        }
+        if capacity < encoded.len() {
+            return INVALID_ARGUMENT as isize;
+        }
+        // SAFETY: the caller provides writable storage for at least the encoded length.
+        unsafe { std::ptr::copy_nonoverlapping(encoded.as_ptr(), buffer, encoded.len()) };
+        length
+    }
+}
+
 /// The private native Realm ABI.
 ///
 /// Handles are process-unique integers rather than Rust pointers. The owning thread keeps the

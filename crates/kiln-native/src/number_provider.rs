@@ -12,7 +12,7 @@ use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-pub(crate) const PROVIDER_ABI_VERSION: u32 = 6;
+pub(crate) const PROVIDER_ABI_VERSION: u32 = 7;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
@@ -26,7 +26,7 @@ const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// The regexp five joined the number two when the provider grew a second semantic core (ADR
 /// 0025). The list is part of the identity below, so an archive built before them is rejected
 /// rather than linked and found wanting.
-const REQUIRED_EXPORTS: [&str; 31] = [
+const REQUIRED_EXPORTS: [&str; 35] = [
     "kiln_realm_create",
     "kiln_realm_enter",
     "kiln_realm_is_active",
@@ -42,6 +42,10 @@ const REQUIRED_EXPORTS: [&str; 31] = [
     "kiln_realm_start_active_host_op",
     "kiln_realm_cancel_request",
     "kiln_realm_cancel_active_request",
+    "kiln_http1_decoder_create",
+    "kiln_http1_decoder_free",
+    "kiln_http1_decoder_push",
+    "kiln_http1_response_encode",
     "kiln_number_to_js_string",
     "kiln_string_to_number",
     "kiln_regexp_compile",
@@ -820,7 +824,7 @@ mod tests {
             "cpu_features": "generic",
             "deployment": "",
             "libc_baseline": "",
-            "exports": REQUIRED_EXPORTS,
+            "exports": REQUIRED_EXPORTS.as_slice(),
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
@@ -878,7 +882,7 @@ mod tests {
             "cpu_features": "generic",
             "deployment": "",
             "libc_baseline": "",
-            "exports": REQUIRED_EXPORTS,
+            "exports": REQUIRED_EXPORTS.as_slice(),
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
