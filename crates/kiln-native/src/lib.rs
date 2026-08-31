@@ -5425,6 +5425,132 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
     }
 
     #[test]
+    fn native_node_http_server_close_waits_for_delayed_response_after_half_close() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::{BufRead, Read, Write};
+        use std::net::TcpStream;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native HTTP delayed-close integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-http-delayed-close");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { createServer } from "node:http";
+let socket_closes = 0;
+const server = createServer((request, response) => {
+  console.log("request");
+  request.socket.on("close", () => {
+    socket_closes += 1;
+    console.log(`socket-close:${socket_closes}`);
+  });
+  setTimeout(() => { console.log("timer"); response.end("delayed"); }, 0);
+  console.log("before-close");
+  server.close();
+  console.log("after-close", request.socket.readyState);
+});
+server.httpAllowHalfOpen = true;
+server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+"#,
+        )
+        .expect("write delayed-close fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native delayed-close fixture builds");
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run native delayed-close fixture");
+        let stdout = child.stdout.take().expect("capture server stdout");
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut listening = String::new();
+        stdout
+            .read_line(&mut listening)
+            .expect("read delayed-close listening port");
+        let port: u16 = listening
+            .trim()
+            .parse()
+            .expect("server prints numeric port");
+        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect HTTP client");
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("set HTTP client timeout");
+        client
+            .write_all(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .expect("write HTTP request");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("half-close HTTP request");
+        let mut response = String::new();
+        if let Err(error) = client.read_to_string(&mut response) {
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .expect("reap delayed-close server after read failure");
+            panic!("read delayed HTTP response: {error}; status={status}; response={response:?}");
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll delayed-close server exit") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child
+                    .kill()
+                    .expect("kill delayed-close server after timeout");
+                break child
+                    .wait()
+                    .expect("reap delayed-close server after timeout");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut rest = String::new();
+        stdout
+            .read_to_string(&mut rest)
+            .expect("read delayed-close callback output");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture server stderr")
+            .read_to_string(&mut stderr)
+            .expect("read server stderr");
+        assert!(
+            response.starts_with("HTTP/1.1 200 OK\r\n"),
+            "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
+        );
+        assert!(
+            response.ends_with("\r\n7\r\ndelayed\r\n0\r\n\r\n"),
+            "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
+        );
+        assert!(status.success(), "server failed: {stderr}");
+        assert_eq!(rest.matches("socket-close:").count(), 1, "stdout={rest:?}");
+        assert_eq!(
+            rest,
+            "request\nbefore-close\nafter-close open\ntimer\nsocket-close:1\n"
+        );
+    }
+
+    #[test]
     fn compiler_environment_identity_is_allowlisted_and_unambiguously_framed() {
         let clang_baseline = environment_digest(CompilerKind::Clang, &[]);
         for name in C_COMPILER_ENVIRONMENT {
