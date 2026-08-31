@@ -13,9 +13,10 @@ use std::path::{Path, PathBuf};
 use kiln_hir::{Module, commonjs_literal_requires};
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
-    ExecutionError, ExecutionLimits, ExecutionResult, ModuleRealmSession, Value,
+    Cell, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult, ModuleRealmSession,
+    Value,
     execute_module_in_runtime, execute_node_module_in_session, node_builtin_export_names,
-    node_builtin_exports,
+    node_builtin_exports, ordinary_object, own_data_property,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -499,15 +500,31 @@ impl ModuleGraph {
         R: ResolutionPolicy,
     {
         let mut provider = provider;
-        Self::build_with_typed_policy_provider(entry, resolver, move |path, _source| {
-            provider(path)
-        })
+        Self::build_with_policy_provider_mode(
+            entry,
+            resolver,
+            move |path, _source| provider(path),
+            false,
+        )
     }
 
     fn build_with_typed_policy_provider<P, R>(
         entry: impl AsRef<Path>,
         resolver: R,
         provider: P,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_policy_provider_mode(entry, resolver, provider, true)
+    }
+
+    fn build_with_policy_provider_mode<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+        typed_sources: bool,
     ) -> Result<Self, ModuleGraphError>
     where
         P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
@@ -559,6 +576,7 @@ impl ModuleGraph {
         let mut builder = Builder {
             resolver,
             provider,
+            typed_sources,
             modules: BTreeMap::new(),
             states: HashMap::new(),
             stack: Vec::new(),
@@ -679,6 +697,19 @@ impl ModuleGraph {
         node: bool,
     ) -> Result<ExecutionResult, ModuleGraphError> {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
+        // Allocated for every CommonJS node before any body runs. This is the module cache's
+        // identity seam: every require edge names the same mutable export cell.
+        let commonjs_cache: HashMap<PathBuf, Cell> = self
+            .modules
+            .iter()
+            .filter(|(_, node)| node.source == ModuleSource::CommonJs)
+            .map(|(path, _)| {
+                (
+                    path.clone(),
+                    std::rc::Rc::new(std::cell::RefCell::new(ordinary_object([]))),
+                )
+            })
+            .collect();
         let mut total_steps = 0_u64;
         let mut entry_result = None;
         let mut runtime = RealmRuntime::new().map_err(|error| ModuleGraphError::Execution {
@@ -699,6 +730,93 @@ impl ModuleGraph {
                 let exports = node_builtin_exports(builtin.specifier())
                     .expect("only materializable builtins have linkable exports");
                 values.insert(path.clone(), exports.into_iter().collect());
+                continue;
+            }
+            if module_node.source == ModuleSource::CommonJs {
+                let exports_cell = commonjs_cache.get(path).ok_or_else(|| {
+                    ModuleGraphError::InternalMissingModule { path: path.clone() }
+                })?;
+                let initial_exports = exports_cell.borrow().clone();
+                let mut targets = Vec::with_capacity(module_node.dependencies.len());
+                for dependency in &module_node.dependencies {
+                    let value = if let Some(cell) = commonjs_cache.get(&dependency.target) {
+                        std::rc::Rc::clone(cell)
+                    } else if let Some(provider) = values.get(&dependency.target) {
+                        let mut entries: Vec<_> = provider
+                            .iter()
+                            .map(|(name, value)| (name.clone(), value.clone()))
+                            .collect();
+                        entries.sort_by(|left, right| left.0.cmp(&right.0));
+                        std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
+                    } else {
+                        return Err(ModuleGraphError::InternalMissingModule {
+                            path: dependency.target.clone(),
+                        });
+                    };
+                    targets.push((dependency.specifier.clone(), value));
+                }
+                let module_object = ordinary_object([("exports".to_owned(), initial_exports.clone())]);
+                let imports = vec![
+                    initial_exports,
+                    Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::new(targets))),
+                    module_object.clone(),
+                    Value::String(path.to_string_lossy().into_owned()),
+                    Value::String(
+                        path.parent()
+                            .unwrap_or_else(|| Path::new(""))
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                ];
+                if total_steps >= limits.max_steps {
+                    return Err(ModuleGraphError::Execution {
+                        module: path.clone(),
+                        error: ExecutionError::StepLimitExceeded {
+                            steps: total_steps,
+                            limit: limits.max_steps,
+                        },
+                    });
+                }
+                let remaining_limits = ExecutionLimits {
+                    max_steps: limits.max_steps - total_steps,
+                    ..limits
+                };
+                let result = if node {
+                    execute_node_module_in_session(
+                        &module_node.program,
+                        &imports,
+                        host,
+                        remaining_limits,
+                        &mut runtime,
+                        node_session.as_mut().expect("Node mode owns a session"),
+                        path == &self.entry,
+                    )
+                } else {
+                    execute_module_in_runtime(
+                        &module_node.program,
+                        &imports,
+                        host,
+                        remaining_limits,
+                        &mut runtime,
+                    )
+                }
+                .map_err(|error| ModuleGraphError::Execution {
+                    module: path.clone(),
+                    error,
+                })?;
+                total_steps = total_steps
+                    .checked_add(result.execution.steps)
+                    .ok_or(ModuleGraphError::StepOverflow)?;
+                let final_exports = own_data_property(&module_object, "exports")
+                    .unwrap_or(Value::Undefined);
+                *exports_cell.borrow_mut() = final_exports.clone();
+                values.insert(
+                    path.clone(),
+                    HashMap::from([("default".to_owned(), final_exports)]),
+                );
+                if path == &self.entry {
+                    entry_result = Some(result.execution);
+                }
                 continue;
             }
             let mut imports = Vec::with_capacity(module_node.program.imports.len());
@@ -835,6 +953,7 @@ impl ModuleGraph {
 struct Builder<P, R> {
     resolver: R,
     provider: P,
+    typed_sources: bool,
     modules: BTreeMap<PathBuf, ModuleNode>,
     states: HashMap<PathBuf, VisitState>,
     stack: Vec<PathBuf>,
@@ -889,6 +1008,7 @@ where
                         self.stack.push(path.clone());
 
                         let source = match source {
+                            ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
                             ModuleSource::Source => {
                                 match self
                                     .resolver
@@ -927,6 +1047,8 @@ where
                                 })?;
                             let source = if let Some(builtin) = resolved.builtin() {
                                 ModuleSource::NodeBuiltin(builtin)
+                            } else if !self.typed_sources {
+                                ModuleSource::Source
                             } else if self.resolver.node_format(&resolved).map_err(|error| {
                                 ModuleGraphError::Resolve {
                                     importer: path.clone(),
@@ -1335,6 +1457,37 @@ mod tests {
             node.dependencies[0].target,
             fs::canonicalize(dependency).unwrap()
         );
+    }
+
+    #[test]
+    fn node_executes_commonjs_require_and_esm_default_interop() {
+        let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
+        fs::create_dir_all(project.root.join("pkg")).unwrap();
+        project.write("pkg/package.json", r#"{"type":"commonjs"}"#);
+        project.write("pkg/dep.js", "module.exports = 41;");
+        project.write(
+            "pkg/index.js",
+            "const answer = require('./dep.js'); module.exports = answer + 1;",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import answer from './pkg/index.js'; console.log(answer);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build mixed graph");
+        let mut host = kiln_runtime::CaptureHost::new();
+        let execution = graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute mixed graph");
+        assert_eq!(host.into_stdout(), "42\n");
+        assert_eq!(execution.value, Value::Undefined);
     }
 
     impl Drop for TempProject {

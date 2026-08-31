@@ -13,6 +13,7 @@ kiln-host-abi = { workspace = true }
 kiln-native-runtime = { workspace = true }
 kiln-module-resolver = { workspace = true }
 frontend-oxc = { workspace = true }
+kiln-hir = { workspace = true }
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 rayon = { workspace = true }

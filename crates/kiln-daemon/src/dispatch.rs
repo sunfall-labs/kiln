@@ -561,7 +561,7 @@ fn build_graph<E: QueryEngine>(
             )
         })
         .collect::<Vec<_>>();
-    let provider = |module_path: &Path| {
+    let provider = |module_path: &Path, source_kind: kiln_module_graph::ModuleSource| {
         let module_path_string = module_path.to_str().ok_or_else(|| {
             kiln_module_graph::ModuleGraphError::FrontendPath {
                 path: module_path.to_path_buf(),
@@ -573,6 +573,18 @@ fn build_graph<E: QueryEngine>(
                 path: module_path.to_path_buf(),
                 message: "source is not synchronized".to_owned(),
             });
+        }
+        if source_kind == kiln_module_graph::ModuleSource::CommonJs {
+            let source = engine.source(module_file).expect("source checked above");
+            let hir = frontend_oxc::parse_commonjs(module_path_string, source);
+            let mut program = kiln_ir::compile_commonjs(&hir).map_err(|diagnostics| {
+                kiln_module_graph::ModuleGraphError::Compile {
+                    path: module_path.to_path_buf(),
+                    diagnostics,
+                }
+            })?;
+            program.dependencies = kiln_hir::commonjs_literal_requires(&hir);
+            return Ok(program);
         }
         engine.module_ir(module_file).map_err(|diagnostics| {
             kiln_module_graph::ModuleGraphError::Compile {
@@ -591,7 +603,7 @@ fn build_graph<E: QueryEngine>(
         specifier: String::new(),
         error,
     })?;
-    ModuleGraph::build_with_policy(entry, resolver, provider)
+    ModuleGraph::build_with_typed_policy(entry, resolver, provider)
 }
 
 /// Return one immutable graph snapshot for the exact committed daemon state.  The caller holds
