@@ -35,6 +35,13 @@ materialized. Run the complete interpreted pinned gate with:
 mbx run -p kiln-cli -- --one-shot test conformance/node --node
 ```
 
+CI runs that exact public command. `node-compat.json` decides which upstream files Kiln claims as
+complete, its unit validation pins their bytes and requires one manifest oracle for every passing
+adaptation, and the public corpus run executes all promoted adapted cases—including useful partial
+slices of upstream files that remain expected failures. The inventory therefore cannot become
+greener merely because an adapted file exists, while a partial gain cannot silently regress until
+the entire upstream source is ready to be promoted.
+
 Ordinary deterministic conformance continues to omit `--node`, so it never observes ambient I/O.
 
 ## Compatibility inventory

@@ -154,6 +154,73 @@ impl NodeCompatInventory {
         })
     }
 
+    /// Repository-owned executable cases that make up the passing compatibility claim.
+    ///
+    /// Paths are returned relative to the configuration directory so the caller can execute
+    /// them through the ordinary conformance discovery path. Keeping this derivation on the
+    /// inventory prevents CI from maintaining a second allowlist beside the Deno-style one.
+    pub fn passing_adaptations(&self, config_path: &Path) -> Result<Vec<PathBuf>, NodeCompatError> {
+        let base = config_path.parent().unwrap_or(Path::new("."));
+        let mut paths = Vec::new();
+        for (_, expectation) in self.passing() {
+            for adapted in &expectation.adapted {
+                let path = base.join(adapted);
+                if !path.is_file() {
+                    return Err(NodeCompatError::Io {
+                        path: path.clone(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            "passing Node adaptation is missing",
+                        ),
+                    });
+                }
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
+    }
+
+    /// Verify that every adaptation behind a `pass` claim has one executable stdout oracle.
+    ///
+    /// Expected stdout is read from the ordinary conformance manifest, so the compatibility
+    /// inventory selects *which* claims gate while the corpus manifest remains the sole oracle.
+    /// Actual execution belongs to the public `kiln test conformance/node --node` gate, where
+    /// repository-relative filesystem fixtures have product-equivalent project-root semantics.
+    pub fn verify_passing_adaptation_oracles(
+        &self,
+        config_path: &Path,
+    ) -> Result<(), NodeCompatError> {
+        let base = config_path.parent().unwrap_or(Path::new("."));
+        let manifest = crate::Manifest::read(&base.join("manifest.toml")).map_err(|source| {
+            NodeCompatError::Schema {
+                path: config_path.to_owned(),
+                message: format!("cannot read executable Node manifest: {source}"),
+            }
+        })?;
+        for path in self.passing_adaptations(config_path)? {
+            let relative = path
+                .strip_prefix(base)
+                .map_err(|_| NodeCompatError::Schema {
+                    path: config_path.to_owned(),
+                    message: format!("adaptation escaped Node corpus: {}", path.display()),
+                })?;
+            manifest
+                .tests()
+                .iter()
+                .find(|test| Path::new(&test.source) == relative)
+                .ok_or_else(|| NodeCompatError::Schema {
+                    path: config_path.to_owned(),
+                    message: format!(
+                        "passing adaptation has no executable manifest oracle: {}",
+                        relative.display()
+                    ),
+                })?;
+        }
+        Ok(())
+    }
+
     /// Fail closed when a configured upstream file is absent from the pinned suite checkout.
     pub fn verify_suite(&self, config_path: &Path) -> Result<(), NodeCompatError> {
         let base = config_path.parent().unwrap_or(Path::new("."));
@@ -242,6 +309,20 @@ mod tests {
             .verify_suite(&path)
             .expect("suite matches inventory");
         assert!(inventory.passing().count() >= 2);
+        let declared = inventory
+            .passing()
+            .map(|(_, expectation)| expectation.adapted.len())
+            .sum::<usize>();
+        assert_eq!(
+            inventory
+                .passing_adaptations(&path)
+                .expect("passing adaptations exist")
+                .len(),
+            declared
+        );
+        inventory
+            .verify_passing_adaptation_oracles(&path)
+            .expect("passing adaptations have executable oracles");
         assert!(inventory.tests.values().any(|test| {
             matches!(
                 test.expectation,
