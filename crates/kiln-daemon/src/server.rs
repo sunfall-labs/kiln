@@ -742,24 +742,9 @@ fn handle<E: QueryEngine>(
                 Err(message) => Response::Error { message },
             }
         }),
-        Request::NativeBuildAtRevision {
-            path,
-            project_root,
-            node,
-            output,
-            profile,
-            source_view,
-            expected_revision,
-        } => handle_native_build_at_revision(
-            state,
-            path,
-            project_root,
-            node,
-            output,
-            profile,
-            source_view,
-            expected_revision,
-        ),
+        request @ Request::NativeBuildAtRevision { .. } => {
+            handle_native_build_at_revision(state, request)
+        }
         Request::NativeBuild {
             path,
             project_root,
@@ -927,14 +912,20 @@ fn handle_run<E: QueryEngine>(
 /// publish atomically only if no source edit occurred while the toolchain was running.
 fn handle_native_build_at_revision<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
-    path: String,
-    project_root: String,
-    node: bool,
-    output: Option<String>,
-    profile: kiln_proto::NativeProfile,
-    source_view: SourceView,
-    expected_revision: u64,
+    request: Request,
 ) -> (Response, Next) {
+    let Request::NativeBuildAtRevision {
+        path,
+        project_root,
+        node,
+        output,
+        profile,
+        source_view,
+        expected_revision,
+    } = request
+    else {
+        unreachable!("native revision build handler received another request")
+    };
     let (revision, prepared) = {
         let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
         if guard.source_view != source_view {
