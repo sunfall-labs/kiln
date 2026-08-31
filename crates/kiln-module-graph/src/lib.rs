@@ -103,13 +103,15 @@ pub enum ModuleSource {
     NodeBuiltin(NodeBuiltin),
 }
 
-/// An acyclic, entry-rooted module graph.
+/// An entry-rooted module graph. ESM cycles are rejected during construction; CommonJS `require`
+/// cycles are retained so execution can expose their cache's partially initialized exports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleGraph {
     entry: PathBuf,
     project_root: PathBuf,
     modules: BTreeMap<PathBuf, ModuleNode>,
-    /// Dependencies-first, deterministic (source-occurrence ordered) module order.
+    /// Dependencies-first, deterministic (source-occurrence ordered) module order. CommonJS
+    /// cycles appear once in the order, with the back-edge omitted from traversal.
     order: Vec<PathBuf>,
     /// Link-time export identity for every visible, non-missing name.
     export_resolutions: HashMap<PathBuf, BTreeMap<String, ResolvedExport>>,
@@ -580,6 +582,7 @@ impl ModuleGraph {
             modules: BTreeMap::new(),
             states: HashMap::new(),
             stack: Vec::new(),
+            stack_sources: Vec::new(),
             order: Vec::new(),
         };
         builder.visit(entry_path.clone())?;
@@ -957,6 +960,7 @@ struct Builder<P, R> {
     modules: BTreeMap<PathBuf, ModuleNode>,
     states: HashMap<PathBuf, VisitState>,
     stack: Vec<PathBuf>,
+    stack_sources: Vec<ModuleSource>,
     order: Vec<PathBuf>,
 }
 
@@ -999,14 +1003,21 @@ where
                             .iter()
                             .position(|item| item == &path)
                             .unwrap_or(0);
+                        // CommonJS requires observe a cache entry even while that module is
+                        // executing. Keep the edge in the already-built parent's dependency
+                        // list, but do not descend into it again. Any ESM node in the cycle keeps
+                        // the established cycle error rather than getting CommonJS semantics.
+                        if self.stack_sources[start..]
+                            .iter()
+                            .all(|source| *source == ModuleSource::CommonJs)
+                        {
+                            continue;
+                        }
                         let mut cycle = self.stack[start..].to_vec();
                         cycle.push(path);
                         return Err(ModuleGraphError::Cycle { paths: cycle });
                     }
                     None => {
-                        self.states.insert(path.clone(), VisitState::Visiting);
-                        self.stack.push(path.clone());
-
                         let source = match source {
                             ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
                             ModuleSource::Source => {
@@ -1027,6 +1038,9 @@ where
                             }
                             source => source,
                         };
+                        self.states.insert(path.clone(), VisitState::Visiting);
+                        self.stack.push(path.clone());
+                        self.stack_sources.push(source);
                         let program = match source {
                             ModuleSource::Source | ModuleSource::CommonJs => {
                                 (self.provider)(&path, source)?
@@ -1093,6 +1107,7 @@ where
                     dependencies,
                 } => {
                     self.stack.pop();
+                    self.stack_sources.pop();
                     self.states.insert(path.clone(), VisitState::Done);
                     self.order.push(path.clone());
                     self.modules.insert(
@@ -1217,8 +1232,9 @@ fn validate_links(
 
 /// Resolve every exported name in dependency-first order.
 ///
-/// The graph builder has already rejected cycles, so every star provider has a completed table by
-/// the time its importer is visited. This avoids both recursive stack growth and an arbitrary
+/// ESM cycles are rejected by the graph builder, so every star provider has a completed table by
+/// the time its importer is visited. CommonJS cycles expose only their synthetic default and do
+/// not participate in star expansion. This avoids both recursive stack growth and an arbitrary
 /// maximum star depth.
 fn resolve_exports(
     modules: &BTreeMap<PathBuf, ModuleNode>,
@@ -1588,6 +1604,65 @@ mod tests {
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("execute mixed ESM/CommonJS graph");
         assert_eq!(host.output, ["42"]);
+    }
+
+    #[test]
+    fn node_commonjs_require_cycles_share_partial_cache_and_execute_once() {
+        let project = TempProject::new();
+        project.write(
+            "a.cjs",
+            "exports.count = (exports.count || 0) + 1; const b = require('./b.cjs'); exports.seenB = b.count;",
+        );
+        project.write(
+            "b.cjs",
+            "exports.count = (exports.count || 0) + 1; const a = require('./a.cjs'); exports.seenA = a.count;",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import a from './a.cjs'; import b from './b.cjs'; console.log(a.count, b.count, b.seenA, a.seenB);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build CommonJS cycle");
+        assert_eq!(graph.module_count(), 3);
+        assert_eq!(
+            graph
+                .module_order()
+                .iter()
+                .filter(|path| {
+                    path.extension().and_then(|extension| extension.to_str()) == Some("cjs")
+                })
+                .count(),
+            2
+        );
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute CommonJS cycle");
+        assert_eq!(host.into_stdout(), "1 1 undefined 1\n");
+    }
+
+    #[test]
+    fn node_commonjs_esm_cycles_remain_structured_errors() {
+        let project = TempProject::new();
+        project.write("a.cjs", "require('./b.mjs');");
+        project.write("b.mjs", "import './a.cjs';");
+        let entry = project.write("main.mjs", "import './a.cjs';");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let error = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect_err("mixed ESM/CommonJS cycle should be rejected");
+        assert!(matches!(error, ModuleGraphError::Cycle { paths } if paths.len() == 3));
     }
 
     impl Drop for TempProject {
