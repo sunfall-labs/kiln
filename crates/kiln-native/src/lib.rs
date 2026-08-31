@@ -1968,6 +1968,20 @@ exports[0] = connect;
 exports[1] = connect;
 exports[2] = create_server;"#,
         ),
+        // Slots are positions in `node_builtin_export_names("http")`, which lives in
+        // kiln-interpreter and is shared with the interpreter and `process.getBuiltinModule`.
+        // The indices below are therefore a cross-crate coupling, and they silently rotted once
+        // already: this body was written against a six-name list and the table later grew
+        // `IncomingMessage`, `METHODS` and `ServerResponse` at the front, which shifted every
+        // slot. Nothing failed to compile. `default` landed on `request`, so `typeof http` was
+        // "function" instead of "object", and `createServer` landed on `get`, so the first real
+        // server refused with "a function is not a request options object" - a wrong answer
+        // rather than a refusal, which is the class regress/r07 exists to catch.
+        //
+        // `native_builtin_slots_match_the_shared_export_table` now pins this, so the next
+        // addition to the table fails a test here instead of miscompiling a server. The three
+        // gated names hold `undefined` because `native_builtin_supports_export` refuses them as
+        // named imports; they are slots to keep the alignment, not exports.
         NodeBuiltin::Http => Some(
             r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
 kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
@@ -1984,12 +1998,14 @@ status = kiln_c99_put(host, namespace, "get", 3, get, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "request", 7, request, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = server;
+exports[0] = kiln_c99_undefined();
 exports[1] = kiln_c99_undefined();
-exports[2] = create_server;
-exports[3] = namespace;
-exports[4] = get;
-exports[5] = request;"#,
+exports[2] = server;
+exports[3] = kiln_c99_undefined();
+exports[4] = create_server;
+exports[5] = namespace;
+exports[6] = get;
+exports[7] = request;"#,
         ),
         _ => None,
     }
@@ -4071,13 +4087,22 @@ mod tests {
     fn node_http_native_materializer_matches_the_authoritative_export_order() {
         use kiln_module_resolver::NodeBuiltin;
 
+        // These indices were six slots wide and started at `Server`, which is the layout that
+        // shipped and did not work: the authoritative list is eight names beginning
+        // `IncomingMessage, METHODS, Server`, so every slot sat two low. `default` resolved to
+        // `request` and `typeof http` answered "function" where node answers "object";
+        // `createServer` resolved to `get`, so the first real server refused with "a function is
+        // not a request options object". Node is the arbiter on both and the corrected layout
+        // agrees with it, so the assertions below moved rather than the materializer.
         let body = native_builtin_body(NodeBuiltin::Http).expect("http materializes");
-        assert!(body.contains("exports[0] = server;"));
+        assert!(body.contains("exports[0] = kiln_c99_undefined();"));
         assert!(body.contains("exports[1] = kiln_c99_undefined();"));
-        assert!(body.contains("exports[2] = create_server;"));
-        assert!(body.contains("exports[3] = namespace;"));
-        assert!(body.contains("exports[4] = get;"));
-        assert!(body.contains("exports[5] = request;"));
+        assert!(body.contains("exports[2] = server;"));
+        assert!(body.contains("exports[3] = kiln_c99_undefined();"));
+        assert!(body.contains("exports[4] = create_server;"));
+        assert!(body.contains("exports[5] = namespace;"));
+        assert!(body.contains("exports[6] = get;"));
+        assert!(body.contains("exports[7] = request;"));
         assert!(native_builtin_supports_export(NodeBuiltin::Http, "Server"));
     }
 
@@ -7915,5 +7940,51 @@ int main(int argc, char **argv) {{
                 },
             ),
         ]
+    }
+
+    /// Every native builtin body must fill exactly the slots the shared export table declares.
+    ///
+    /// The bodies index `exports[]` by position, and the positions are decided in another crate
+    /// by `node_builtin_export_names`. Nothing makes that a compile error, and it has already
+    /// broken once: `node:http`'s body was written against a six-name list, the table later grew
+    /// three names at the front, and every slot shifted by two without a single warning. The
+    /// result was not a refusal but a wrong answer - `default` bound to `request`, `createServer`
+    /// bound to `get` - which is the failure mode this repository treats as the expensive one.
+    ///
+    /// So the coupling is pinned here rather than trusted. Adding a name to the shared table now
+    /// fails this test, which is the cheapest place to find out.
+    #[test]
+    fn native_builtin_slots_match_the_shared_export_table() {
+        use kiln_module_resolver::NodeBuiltin;
+
+        for builtin in [NodeBuiltin::Events, NodeBuiltin::Net, NodeBuiltin::Http] {
+            let Some(body) = native_builtin_body(builtin) else {
+                panic!("{} has no native body", builtin.specifier());
+            };
+            let specifier = builtin.specifier();
+            let declared = kiln_interpreter::node_builtin_export_names(specifier)
+                .unwrap_or_else(|| panic!("{specifier} has no declared export names"));
+
+            let mut assigned: Vec<usize> = body
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("exports["))
+                .filter_map(|rest| rest.split(']').next())
+                .map(|index| {
+                    index
+                        .parse()
+                        .unwrap_or_else(|_| panic!("{specifier}: unparseable slot `{index}`"))
+                })
+                .collect();
+            assigned.sort_unstable();
+            assigned.dedup();
+
+            let expected: Vec<usize> = (0..declared.len()).collect();
+            assert_eq!(
+                assigned, expected,
+                "{specifier} assigns slots {assigned:?} but its declared exports are {declared:?}; \
+                 a body that skips a slot leaves an export `undefined` and one that overruns \
+                 writes past the array"
+            );
+        }
     }
 }

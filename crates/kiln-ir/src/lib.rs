@@ -44,6 +44,17 @@ pub enum UnaryOp {
     TypeOf,
     BitwiseNot,
     Void,
+    /// `ToNumeric`: the conversion `x++` performs before it adds anything.
+    ///
+    /// No source text spells it. It exists because `+x` is *not* it: `+` narrows to a number and
+    /// is a TypeError on a BigInt, while an update leaves a BigInt a BigInt. Lowering `x++` to
+    /// `+x` then `x + 1` therefore turned every BigInt it touched into a number -- twice over,
+    /// since the `1` would have mixed the two types even if the conversion had not.
+    ToNumeric,
+    /// `ToNumeric(x)` plus one, in the type the conversion produced.
+    Increment,
+    /// `ToNumeric(x)` minus one, in the type the conversion produced.
+    Decrement,
 }
 
 /// Binary operations understood by the bytecode runtime.
@@ -513,6 +524,11 @@ pub enum Builtin {
     EvalError,
     /// The shared-memory namespace. Appended for the same reason.
     Atomics,
+    /// WHATWG UTF-8 decoder. Appended so existing artifact discriminants remain stable.
+    TextDecoder,
+    /// Node's check-phase task primitives. Appended to preserve existing artifact discriminants.
+    SetImmediate,
+    ClearImmediate,
 }
 
 impl Builtin {
@@ -551,6 +567,8 @@ impl Builtin {
             "clearTimeout" => Some(Self::ClearTimeout),
             "clearInterval" => Some(Self::ClearInterval),
             "queueMicrotask" => Some(Self::QueueMicrotask),
+            "setImmediate" => Some(Self::SetImmediate),
+            "clearImmediate" => Some(Self::ClearImmediate),
             "Promise" => Some(Self::Promise),
             "RegExp" => Some(Self::RegExp),
             "Date" => Some(Self::Date),
@@ -585,6 +603,7 @@ impl Builtin {
             "AsyncDisposableStack" => Some(Self::AsyncDisposableStack),
             "EvalError" => Some(Self::EvalError),
             "Atomics" => Some(Self::Atomics),
+            "TextDecoder" => Some(Self::TextDecoder),
 
             _ => None,
         }
@@ -624,6 +643,8 @@ impl Builtin {
             Self::ClearTimeout => "clearTimeout",
             Self::ClearInterval => "clearInterval",
             Self::QueueMicrotask => "queueMicrotask",
+            Self::SetImmediate => "setImmediate",
+            Self::ClearImmediate => "clearImmediate",
             Self::Promise => "Promise",
             Self::RegExp => "RegExp",
             Self::Date => "Date",
@@ -655,6 +676,7 @@ impl Builtin {
             Self::AsyncDisposableStack => "AsyncDisposableStack",
             Self::EvalError => "EvalError",
             Self::Atomics => "Atomics",
+            Self::TextDecoder => "TextDecoder",
         }
     }
 }
@@ -1187,6 +1209,13 @@ enum ParameterStep<'a> {
 pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
     const WRAPPER: [&str; 5] = ["exports", "require", "module", "__filename", "__dirname"];
     let mut compiler = Compiler::new(module);
+    // A CommonJS module's values routinely leave their defining module through `module.exports`
+    // and are invoked by importers. Module-slot instructions are caller-relative in the VM, so
+    // no CommonJS function may depend on one: its defining bindings have to travel as cells.
+    // Boxing the whole top level makes that invariant structural rather than dependent on a
+    // syntax-shape capture scan keeping pace with every form emitted by npm packages (notably
+    // destructured parameter defaults in path-to-regexp).
+    compiler.cell_everything = true;
     let mut imports = Vec::with_capacity(WRAPPER.len());
     for name in WRAPPER {
         let slot = compiler.local_count;
@@ -1573,7 +1602,7 @@ impl Compiler {
     }
 
     fn compile_body(&mut self, module: &Module) {
-        self.statements(&module.body);
+        self.plain_statements(&module.body);
         self.push_constant(Constant::Undefined);
         self.code.push(Instruction::Return);
     }
@@ -5430,17 +5459,16 @@ impl Compiler {
             let miss = self.emit_jump(Instruction::JumpIfFalse(0));
             self.load_with_object(with);
             self.code.push(Instruction::GetProperty(key));
-            // `ToNumber` first, for the same reason the lexical form does it: `x++` where `x` is
-            // "5" is 5 then 6, not "5" then "51".
-            self.code.push(Instruction::Unary(UnaryOp::Plus));
+            // `ToNumeric` first, for the same reason the lexical form does it: `x++` where `x`
+            // is "5" is 5 then 6, not "5" then "51".
+            self.code.push(Instruction::Unary(UnaryOp::ToNumeric));
             self.declare_hidden(&held, span);
             self.load_with_object(with);
             self.load_hidden(&held);
-            self.push_constant(Constant::Number(1.0f64.to_bits()));
-            self.code.push(Instruction::Binary(if increment {
-                BinaryOp::Add
+            self.code.push(Instruction::Unary(if increment {
+                UnaryOp::Increment
             } else {
-                BinaryOp::Subtract
+                UnaryOp::Decrement
             }));
             self.code.push(self.set_property_instruction(key));
             if !prefix {
@@ -5491,18 +5519,19 @@ impl Compiler {
         };
 
         self.code.push(load);
-        // `ToNumber` first: `x++` where `x` is "5" is 5 then 6, not "5" then "51". Without this
-        // the `+ 1` below concatenates, which is the same trap the member form fell into.
-        self.code.push(Instruction::Unary(UnaryOp::Plus));
+        // `ToNumeric` first: `x++` where `x` is "5" is 5 then 6, not "5" then "51". Without a
+        // conversion the `+ 1` below concatenates, which is the trap the member form fell into --
+        // and `ToNumber` is not the conversion an update applies: it narrows a BigInt, so `1n++`
+        // left a *number* behind and the addition would have refused to mix the two anyway.
+        self.code.push(Instruction::Unary(UnaryOp::ToNumeric));
         if !prefix {
             // Keep the old value beneath the arithmetic; the store below consumes the new one.
             self.code.push(Instruction::Dup);
         }
-        self.push_constant(Constant::Number(1.0f64.to_bits()));
-        self.code.push(Instruction::Binary(if increment {
-            BinaryOp::Add
+        self.code.push(Instruction::Unary(if increment {
+            UnaryOp::Increment
         } else {
-            BinaryOp::Subtract
+            UnaryOp::Decrement
         }));
         if prefix {
             self.code.push(Instruction::Dup);
@@ -5708,8 +5737,8 @@ impl Compiler {
             ObjectKey::Private(_) => unreachable!("refused above"),
         };
 
-        // Read the current value, as a number: `+ 0` is not a no-op but `ToNumber`, and the old
-        // value a postfix update yields has to be the number rather than whatever was stored.
+        // Read the current value, as a *numeric*: the old value a postfix update yields is the
+        // conversion's result rather than whatever was stored.
         self.load_hidden(&receiver);
         match name {
             Some(name) => self.code.push(Instruction::GetProperty(name)),
@@ -5718,9 +5747,10 @@ impl Compiler {
                 self.code.push(Instruction::GetComputed);
             }
         }
-        // Unary plus, not `+ 0`: `+` on a string concatenates, so `o.s++` where `s` is "5"
-        // would produce "50". This is `ToNumber`, which is what an update actually applies.
-        self.code.push(Instruction::Unary(UnaryOp::Plus));
+        // `ToNumeric`, not `+ 0` and not unary plus: `+` on a string concatenates, so `o.s++`
+        // where `s` is "5" would produce "50", and unary plus narrows a BigInt to a number, which
+        // an update must not.
+        self.code.push(Instruction::Unary(UnaryOp::ToNumeric));
         self.declare_hidden(&old_binding, span);
 
         // Write the new value through the same reference the read used.
@@ -5729,11 +5759,10 @@ impl Compiler {
             self.load_hidden(&key_binding);
         }
         self.load_hidden(&old_binding);
-        self.push_constant(Constant::Number(1f64.to_bits()));
-        self.code.push(Instruction::Binary(if increment {
-            BinaryOp::Add
+        self.code.push(Instruction::Unary(if increment {
+            UnaryOp::Increment
         } else {
-            BinaryOp::Subtract
+            UnaryOp::Decrement
         }));
         match name {
             Some(name) => self.code.push(self.set_property_instruction(name)),
@@ -6510,10 +6539,14 @@ fn names_captured_by_nested_functions(body: &[Statement]) -> HashSet<String> {
 fn names_captured_by_this_function(function: &Function) -> HashSet<String> {
     let mut captured = names_captured_by_nested_functions(&function.body);
     for parameter in &function.parameters {
-        collect_pattern_captures(&parameter.pattern, &mut captured);
+        // A parameter default runs in this function's own scope. Ordinary identifiers in it may
+        // therefore refer outward and must be captured by this function itself, not only when a
+        // second nested function appears inside the pattern. `path-to-regexp` relies on exactly
+        // this shape: `function match(path, { delimiter = DEFAULT_DELIMITER } = {})`.
+        collect_pattern_identifiers(&parameter.pattern, &mut captured);
     }
     if let Some(rest) = &function.rest {
-        collect_pattern_captures(rest, &mut captured);
+        collect_pattern_identifiers(rest, &mut captured);
     }
     captured
 }
@@ -6869,6 +6902,9 @@ fn collect_pattern_identifiers(pattern: &Pattern, names: &mut HashSet<String>) {
                 if let PatternKey::Computed(key) = &property.key {
                     collect_identifiers(key, names, true);
                 }
+                // `{ delimiter = DEFAULT_DELIMITER }` stores the default on the property value
+                // pattern, so recurse into that pattern's expressions as well as its computed
+                // key. Merely walking the bound name misses the initializer entirely.
                 collect_pattern_identifiers(&property.value, names);
             }
             if let Some(rest) = rest {
@@ -6921,9 +6957,6 @@ fn collect_nested_function_names(
         }
         StatementKind::Variable { declarations, .. } => {
             for declaration in declarations {
-                if inside_function {
-                    collect_pattern_names(&declaration.pattern, names);
-                }
                 if let Some(initializer) = &declaration.initializer {
                     collect_identifiers(initializer, names, inside_function);
                 }
@@ -7172,7 +7205,19 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
     match &expression.kind {
         // A nested function's body is always collected, whatever the enclosing flag says.
         ExpressionKind::Function(function) => {
+            for parameter in &function.parameters {
+                collect_pattern_identifiers(&parameter.pattern, names);
+            }
+            if let Some(rest) = &function.rest {
+                collect_pattern_identifiers(rest, names);
+            }
             for statement in &function.body {
+                // A function expression always establishes a nested function relative to the
+                // expression that contains it. This must not inherit `collecting`: at module
+                // level that flag is false by design, yet
+                // `Layer.prototype.match = function match () { return MODULE_CONST }` still
+                // closes over the module. Inheriting false emitted a `LoadGlobal` that later
+                // indexed whichever CommonJS module called the exported method.
                 collect_nested_function_names(statement, names, true);
             }
         }
@@ -7291,7 +7336,11 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
         ExpressionKind::MemberAssignment { object, value, .. } => {
             collect_identifiers(object, names, collecting);
-            collect_identifiers(value, names, collecting);
+            // The value is already inside this property definition. Once the collector
+            // is walking a function body, a function expression assigned here remains
+            // nested relative to that owner. Losing that state is what left module
+            // bindings unboxed in `Layer.prototype.match = function match (...) {}`.
+            collect_identifiers(value, names, true);
         }
         ExpressionKind::Chain { expression } | ExpressionKind::Await(expression) => {
             collect_identifiers(expression, names, collecting);
@@ -7332,7 +7381,11 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                         if let ObjectKey::Computed(key) = &property.key {
                             collect_identifiers(key, names, collecting);
                         }
-                        collect_identifiers(&property.value, names, collecting);
+                        // Property values are expressions in this lexical region. For capture
+                        // analysis the important case is a function value: its body is nested
+                        // relative to the current owner even when the surrounding expression is
+                        // itself already inside another function.
+                        collect_identifiers(&property.value, names, true);
                     }
                     ObjectMember::Spread(source) => {
                         collect_identifiers(source, names, collecting);
@@ -8136,6 +8189,105 @@ mod tests {
         );
         // The cell is made at module scope, before anything can capture it.
         assert!(program.code.contains(&Instruction::NewCell(0)));
+    }
+
+    /// A function expression assigned to a prototype is still nested in the surrounding module.
+    ///
+    /// This is the shape used by Express' router (`Layer.prototype.match = function match (...)`)
+    /// and it once lost the collector's `inside_function` state while walking the assignment.
+    /// The method consequently emitted `LoadGlobal`, which indexed the importer's module frame
+    /// when the function crossed the CommonJS boundary.
+    #[test]
+    fn a_prototype_assigned_function_captures_its_module_binding() {
+        let assigned = Expression {
+            kind: ExpressionKind::MemberAssignment {
+                operator: AssignmentOperator::Assign,
+                object: Box::new(identifier("prototype")),
+                property: "match".to_owned(),
+                value: Box::new(Expression {
+                    kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
+                        strict: false,
+                        binds_own_name: true,
+                        asynchronous: false,
+                        name: Some("match".to_owned()),
+                        arrow: false,
+                        generator: false,
+                        parameters: Vec::new(),
+                        rest: None,
+                        body: vec![statement(StatementKind::Return(Some(identifier(
+                            "module_constant",
+                        ))))],
+                        span: Span::default(),
+                    })),
+                    span: Span::default(),
+                }),
+            },
+            span: Span::default(),
+        };
+        let program = compile(&module(vec![
+            declaration(VariableKind::Const, "module_constant", Some(number(1.0))),
+            declaration(
+                VariableKind::Const,
+                "prototype",
+                Some(Expression {
+                    kind: ExpressionKind::Object {
+                        members: Vec::new(),
+                    },
+                    span: Span::default(),
+                }),
+            ),
+            statement(StatementKind::Expression(assigned)),
+        ]))
+        .expect("prototype assignment compiles");
+        let method = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("match"))
+            .expect("assigned function proto");
+        assert!(method.code.contains(&Instruction::LoadUpvalue(0)));
+        assert!(
+            !method
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_))),
+            "an exported method must carry the module binding it reads: {:?}",
+            method.code
+        );
+        assert!(program.code.contains(&Instruction::NewCell(0)));
+    }
+
+    #[test]
+    fn a_function_does_not_capture_a_local_it_declares_itself() {
+        let program = compile(&module(vec![
+            declaration(VariableKind::Const, "DEFAULT_DELIMITER", Some(string("/"))),
+            function(
+                "uses_default",
+                &[],
+                vec![
+                    declaration(
+                        VariableKind::Const,
+                        "delimiter",
+                        Some(identifier("DEFAULT_DELIMITER")),
+                    ),
+                    statement(StatementKind::Return(Some(identifier("delimiter")))),
+                ],
+            ),
+        ]))
+        .expect("function with a local compiles");
+        let body = &program.functions[0];
+        assert!(
+            body.code.contains(&Instruction::LoadUpvalue(0)),
+            "the outer module binding is the capture: {:?}",
+            body.code
+        );
+        assert!(
+            !body.code.iter().any(|instruction| matches!(
+                instruction,
+                Instruction::LoadGlobal(_) | Instruction::StoreGlobal(_)
+            )),
+            "the function's own local must not force caller-relative module reads: {:?}",
+            body.code
+        );
     }
 
     #[test]

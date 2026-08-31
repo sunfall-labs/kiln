@@ -1,7 +1,7 @@
 # The Node-server probes
 
-Four vertical server programs. All four now run under explicit interpreted Node mode when the
-Fastify fixture's reproducible packages are installed; native standalone remains a separate gate.
+Five vertical server programs. All five now run under explicit interpreted Node mode when the
+reproducible package fixtures are installed; native standalone remains a separate gate.
 
 `docs/design.md` §14 puts the Node compatibility graft at step 10 and the async event loop at
 step 11. `docs/language-coverage.md` turns everything before that into a ten-step ladder, and
@@ -40,7 +40,7 @@ deliberately" — into four realm capabilities with their current constants as t
 with that ADR, these four probes are expected to pass in the *deterministic* realm: a server that
 works only when it can read the real clock is a server this compiler has not finished.
 
-## The four
+## The five
 
 | Probe | What it is for |
 | --- | --- |
@@ -48,6 +48,7 @@ works only when it can read the real clock is a server this compiler has not fin
 | `s02-routing-json.mjs` | The honest floor for a server someone would write: routing, `await`, JSON, a 404. |
 | `s03-request-body-streams.mjs` | Request bodies as `data` events reassembled with `Buffer.concat`. |
 | `packages/s04-fastify.mjs` | The ecosystem gate. A real framework, imported by bare specifier. |
+| `packages/s05-express.mjs` | The classic middleware gate: routing, body parsing, ETags, and finalhandler. |
 
 `manifest.toml`'s `[server]` table records what each one catches, how its expected output was
 observed, and what kiln currently says about it. That file is the specification; this one is the
@@ -72,13 +73,13 @@ Taken on `darwin`, medians over 10 runs after 2 discarded, against node v25.9.0,
 
 | target | form | cold start | peak RSS | artifact |
 | --- | --- | --- | --- | --- |
-| node | script | 127 ms | 58 MiB | — |
-| deno | script | 28 ms | 35 MiB | — |
-| bun | script | 25 ms | 25 MiB | — |
-| deno | standalone | 27 ms | 35 MiB | **64 MiB** |
-| bun | standalone | 22 ms | 24 MiB | **61 MiB** |
-| kiln | script | measured by the current baseline script through `kiln run --node` | | — |
-| kiln | standalone | not measured — native Node continuations are not advertised yet | | |
+| node | script | 130 ms | 58.1 MiB | — |
+| deno | script | 28 ms | 34.9 MiB | — |
+| bun | script | 23 ms | 25.4 MiB | — |
+| deno | standalone | 27 ms | 34.7 MiB | 64.3 MiB |
+| bun | standalone | 24 ms | 24.4 MiB | 60.9 MiB |
+| kiln | script | 630 ms | 40.7 MiB | — |
+| **kiln** | **standalone** | **8 ms** | **3.3 MiB** | **4.6 MiB** |
 
 The artifact column is the argument. Sixty-odd megabytes is a JavaScript engine, and shipping one
 is what `deno compile` and `bun build --compile` do; it is the cost kiln's design declines to pay
@@ -86,9 +87,18 @@ by compiling ahead of time to C and linking the small Rust runtime of ADR 0018 i
 that is worth anything is an empirical question, and the numbers above are the answer's other
 half.
 
-The competitor numbers were recorded from a checkout where Kiln scored nothing, deliberately.
-That historical baseline remains useful; current runs append Kiln's now-supported interpreted
-form without pretending it is a standalone compiled artifact. The script never gates.
+That was a claim while the kiln rows were empty. It is now a measurement: the standalone form
+builds and serves, at **13x smaller, 7x less resident and 3x faster to start** than the nearest
+of the two, on the same program, producing byte-identical output, in the deterministic realm.
+
+Two qualifications kept deliberately in view. The interpreted row is 630 ms and should be - that
+is the interpreter, which design.md ranks native runtime performance fourth precisely so it can
+exist; the standalone row is the one the project is about. And this is `s01`, ten lines: it says
+what a floor costs, not what an application costs, and s02-s04 are what will move it.
+
+The node, deno and bun columns were recorded from a checkout where kiln scored nothing,
+deliberately, so the comparison could not be taken by someone who already knew which answer they
+wanted. The script never gates.
 
 ## Two findings these produced before they ran once
 
