@@ -1033,8 +1033,8 @@ method_ids! {
     (KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER, 408, Direct, NodeResponse),
     (KILN_C99_METHOD_SYMBOL_FOR, 409, Direct),
     (KILN_C99_METHOD_SYMBOL_KEY_FOR, 410, Direct),
-    (KILN_C99_METHOD_NODE_STAT_IS_FILE, 411, Direct),
-    (KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY, 412, Direct),
+    (KILN_C99_METHOD_NODE_STAT_IS_FILE, 414, Direct),
+    (KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY, 415, Direct),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -2955,7 +2955,7 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t ke
                                   int mode);
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
                                    kiln_value function, int kind);
-static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len);
+static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_can_be_prototype(kiln_value value);
 static int kiln_c99_new_promise(kiln_value *out);
@@ -4141,7 +4141,7 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
      * but they are not JavaScript properties.  A program can spell the key as a string, so hide
      * and ignore these protocol slots explicitly instead of exposing a C pointer as an object or
      * allowing an assignment to replace it. */
-    if (kiln_c99_is_node_pointer_key(key, key_len)) {
+    if (kiln_c99_is_node_hidden_key(key, key_len)) {
         return KILN_C99_OK;
     }
     if (target.tag == KILN_VALUE_PROXY) {
@@ -9377,7 +9377,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown) {
     int status;
-    if (kiln_c99_is_node_pointer_key(key, key_len)) {
+    if (kiln_c99_is_node_hidden_key(key, key_len)) {
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
     }
@@ -11133,7 +11133,7 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
     return KILN_C99_OK;
 }
 
-static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len) {
+static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
     static const char *const names[] = {
         "@@node:socket", "@@node:server", "@@node:client", "@@node:response",
         "@@kiln:node:is-file", "@@kiln:node:is-directory",
@@ -18080,6 +18080,11 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
     kiln_object *object;
     size_t index;
     *answer = 1;
+    /* Native adapter state is not part of the JavaScript object. Deleting its reserved spelling
+     * therefore succeeds as an ordinary absent-property delete without touching the slot. */
+    if (kiln_c99_is_node_hidden_key(key, key_len)) {
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_delete_computed(host, target,
                                         kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len),
@@ -18588,7 +18593,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     int status;
     size_t at;
     /* Protocol slots are owned by their native adapters, never by JavaScript definitions. */
-    if (kiln_c99_is_node_pointer_key(key, key_len)) {
+    if (kiln_c99_is_node_hidden_key(key, key_len)) {
         return KILN_C99_OK;
     }
     if (descriptor.tag != KILN_VALUE_OBJECT) {

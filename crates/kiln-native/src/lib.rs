@@ -5013,6 +5013,8 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
   console.log(info['@@kiln:node:is-file'] === undefined);
   Object.defineProperty(info, '@@kiln:node:is-file', {{ value: false }});
   console.log(info.isFile());
+  delete info['@@kiln:node:is-file'];
+  console.log(info.isFile());
   return readFile({missing_path:?});
 }}).then(() => console.log('unexpected'), (error) => {{
   console.log(error.code);
@@ -5054,7 +5056,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
         );
         assert_eq!(
             output.stdout,
-            "héllo\ntrue\n6\n6\ntrue\nfalse\ntrue\ntrue\nENOENT\nopen\ntrue\n".as_bytes()
+            "héllo\ntrue\n6\n6\ntrue\nfalse\ntrue\ntrue\ntrue\nENOENT\nopen\ntrue\n".as_bytes()
         );
     }
 
