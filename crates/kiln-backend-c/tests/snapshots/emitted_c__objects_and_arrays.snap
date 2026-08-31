@@ -162,7 +162,7 @@ kiln_label_25:;
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;
 kiln_uncaught:;
-    *result = kiln_c99_text(*thrown);
+    { kiln_value message = kiln_c99_text(*thrown); kiln_value site = kiln_c99_control_diagnostic(); if (message.tag == KILN_VALUE_STRING && site.tag == KILN_VALUE_STRING && site.len != 0) { kiln_value separator = kiln_c99_copy_text(" at " , 4); *result = kiln_c99_concat(kiln_c99_concat(message, separator), site); } else { *result = message; } }
     return KILN_C99_THROWN;
     goto kiln_refusal;
 kiln_refusal:;
