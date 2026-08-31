@@ -13552,7 +13552,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
                 // way the specification says it may be written saw an exception where it had
                 // been promised a rejection.
-                let combined = match self.drain_iterable(&source, instruction) {
+                // Install a host boundary while obtaining the iterator and draining it. User
+                // code in `Symbol.iterator`, `next`, `done`, or `value` can throw an arbitrary
+                // value; without this boundary it becomes an `Uncaught` machine error before
+                // `thrown_value` gets a chance to turn it into the combinator's rejection.
+                let installed = self.handlers.len();
+                self.handlers.push(Handler {
+                    target: HOST_HANDLER,
+                    frame_depth: self.frames.len(),
+                    stack_height: self.stack.len(),
+                    native_depth: self.native_depth,
+                });
+                let drained = self.drain_iterable(&source, instruction);
+                self.handlers.truncate(installed);
+                let combined = match drained {
                     Ok(items) => self.combine(native, items),
                     Err(error) => Err(error),
                 };
@@ -37793,6 +37806,69 @@ mod tests {
         let replacement = Value::Number(42.0);
         *cache.borrow_mut() = replacement.clone();
         assert_eq!(require.get("./dep.cjs"), Some(replacement));
+    }
+
+    /// An abrupt iterator step is a rejection, and it must carry the exact thrown value through
+    /// every Promise combinator. The iterator method is compiled by hand so it can throw its
+    /// `this` object, which makes this test check identity rather than merely checking that some
+    /// promise rejected.
+    #[test]
+    fn promise_combinators_reject_with_the_iterator_thrown_value() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: vec![Instruction::Return],
+            local_count: 0,
+            functions: vec![kiln_ir::FunctionProto {
+                prologue_end: 0,
+                asynchronous: false,
+                name: Some("iterator".to_owned()),
+                arrow: false,
+                generator: false,
+                async_generator: false,
+                parameter_count: 0,
+                declared_length: 0,
+                local_count: 0,
+                code: vec![Instruction::LoadThis, Instruction::Throw],
+                upvalues: Vec::new(),
+            }],
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
+        };
+        let mut vm = test_vm(&program, &mut host);
+        let method = Value::Function(vm.make_closure(0).expect("iterator closure"));
+        let source = ordinary_object([(WellKnown::Iterator.property_key().to_owned(), method)]);
+
+        for native in [
+            Native::PromiseAll,
+            Native::PromiseAllSettled,
+            Native::PromiseRace,
+            Native::PromiseAny,
+        ] {
+            let result = vm
+                .dispatch_native(
+                    native,
+                    &Value::Native(Native::PromiseConstructor),
+                    std::slice::from_ref(&source),
+                    0,
+                )
+                .expect("combinator returns a promise");
+            let Value::Promise(promise) = result else {
+                panic!("combinator returned a non-promise");
+            };
+            let Some(Settled::Rejected(reason)) = promise.borrow().settled.clone() else {
+                panic!("combinator did not reject immediately");
+            };
+            assert!(
+                strict_equal(&reason, &source),
+                "thrown value identity was lost"
+            );
+        }
     }
 
     #[test]
