@@ -102,6 +102,9 @@ fn run(args: &Args) -> Result<Outcome, String> {
     report
         .measurements
         .push(scenarios::daemon_startup(&args.kiln, args.budget)?);
+    report
+        .measurements
+        .extend(scenarios::daemon_warm(args.budget)?);
     for w in &workloads {
         report.workloads.push(WorkloadInfo::of(w));
         report

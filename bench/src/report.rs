@@ -165,6 +165,37 @@ impl Measurement {
         stats: DbStats,
         steady_state: bool,
     ) -> Measurement {
+        Self::from_stats(
+            scenario,
+            warmup_iterations,
+            samples,
+            convert(stats),
+            steady_state,
+        )
+    }
+
+    /// Construct a measurement from the daemon's wire stats, including graph-cache counters.
+    ///
+    /// The ordinary in-process scenarios only have [`kiln_db::Stats`]. A daemon request also
+    /// reports the entry-rooted graph cache, and dropping those additive fields would make the
+    /// resident-process benchmark unable to prove that an unchanged run hit its graph snapshot.
+    pub fn new_with_proto_stats(
+        scenario: Scenario<'_>,
+        warmup_iterations: usize,
+        samples: Samples,
+        stats: Stats,
+        steady_state: bool,
+    ) -> Measurement {
+        Self::from_stats(scenario, warmup_iterations, samples, stats, steady_state)
+    }
+
+    fn from_stats(
+        scenario: Scenario<'_>,
+        warmup_iterations: usize,
+        samples: Samples,
+        stats: Stats,
+        steady_state: bool,
+    ) -> Measurement {
         Measurement {
             id: format!("{}/{}", scenario.workload, scenario.slug),
             workload: scenario.workload.to_string(),
@@ -177,7 +208,6 @@ impl Measurement {
             p90_ms: samples.percentile(0.9),
             max_ms: samples.max(),
             cache_hit_rate: cache_hit_rate(&stats),
-            stats: convert(stats),
             steady_state,
             native: None,
         }
@@ -203,7 +233,7 @@ impl Measurement {
 ///
 /// Spelled out because the phrase is ambiguous: the denominator is every query the pipeline
 /// visited, and a "hit" is a query the engine validated without recomputing.
-fn cache_hit_rate(s: &DbStats) -> f64 {
+fn cache_hit_rate(s: &Stats) -> f64 {
     let recomputed = s.parse_computed + s.ir_computed + s.interface_computed + s.project_computed;
     let total = s.validated + recomputed;
     if total == 0 {
@@ -260,6 +290,13 @@ notes
   \"daemon process startup + socket handshake\" launches the sibling `kiln` CLI with a unique
   socket, waits through daemon process creation and the protocol handshake, and stops that daemon
   outside the timed region. A failed start, handshake, or cleanup fails the harness.
+
+  \"warm unchanged daemon Run request\" and \"warm daemon SetSource + Run body edit\" keep one
+  daemon and one protocol client alive for the whole loop. Source installation, graph priming,
+  and shutdown are outside the timed region. The first row requires one graph-cache hit per
+  request; the second requires one miss and replacement after changing a reachable dependency.
+  Graph-cache counters come from the daemon's protocol `Stats`, not from the in-process query
+  engine counters used by the other rows.
 
   \"engine ingest floor\" constructs the query engine and installs every workload source while
   deriving nothing. It isolates source-database population and is not labelled daemon startup.
@@ -340,8 +377,32 @@ fn render_standalone(out: &mut String, report: &Report, workload: &str, label: &
                 native.generated_c_bytes, native.object_bytes, native.executable_bytes
             );
         }
+        render_graph_cache_stats(&mut out, measurement);
     }
     out.push('\n');
+}
+
+fn render_graph_cache_stats(out: &mut String, measurement: &Measurement) {
+    let stats = &measurement.stats;
+    if stats.graph_cache_hits == 0
+        && stats.graph_cache_misses == 0
+        && stats.graph_cache_evictions == 0
+        && stats.graph_cache_invalidations == 0
+        && stats.graph_cache_entries == 0
+        && stats.graph_cache_modules == 0
+    {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "    graph cache: hits {}, misses {}, evictions {}, invalidations {}, entries {}, modules {}",
+        stats.graph_cache_hits,
+        stats.graph_cache_misses,
+        stats.graph_cache_evictions,
+        stats.graph_cache_invalidations,
+        stats.graph_cache_entries,
+        stats.graph_cache_modules,
+    );
 }
 
 fn render_workload(out: &mut String, report: &Report, info: &WorkloadInfo) {
@@ -415,6 +476,7 @@ fn render_workload(out: &mut String, report: &Report, info: &WorkloadInfo) {
             m.stats.early_cutoff,
             m.cache_hit_rate * 100.0,
         );
+        render_graph_cache_stats(out, m);
         if !m.steady_state {
             let _ = writeln!(
                 out,
@@ -808,8 +870,8 @@ mod tests {
             validated: 8,
             ..DbStats::default()
         };
-        assert_eq!(cache_hit_rate(&s), 0.8);
-        assert_eq!(cache_hit_rate(&DbStats::default()), 0.0);
+        assert_eq!(cache_hit_rate(&convert(s)), 0.8);
+        assert_eq!(cache_hit_rate(&convert(DbStats::default())), 0.0);
     }
 
     #[test]
@@ -846,6 +908,25 @@ mod tests {
             !text.contains("no module-to-module edges"),
             "stale graph narrative leaked into report: {text}"
         );
+    }
+
+    #[test]
+    fn human_report_renders_daemon_graph_cache_counters() {
+        let mut r = Report::new("persistent daemon request");
+        let mut warm = measurement("daemon/warm-run", 1.0, 0);
+        warm.workload = "daemon".to_string();
+        warm.operation = "warm unchanged daemon Run request".to_string();
+        warm.stats.graph_cache_hits = 1;
+        warm.stats.graph_cache_entries = 1;
+        warm.stats.graph_cache_modules = 2;
+        r.measurements.push(warm);
+
+        let text = render_human(&r);
+        assert!(
+            text.contains("graph cache: hits 1, misses 0, evictions 0"),
+            "{text}"
+        );
+        assert!(text.contains("entries 1, modules 2"), "{text}");
     }
 
     #[test]
