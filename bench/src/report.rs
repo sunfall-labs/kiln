@@ -208,6 +208,7 @@ impl Measurement {
             p90_ms: samples.percentile(0.9),
             max_ms: samples.max(),
             cache_hit_rate: cache_hit_rate(&stats),
+            stats,
             steady_state,
             native: None,
         }
@@ -377,7 +378,7 @@ fn render_standalone(out: &mut String, report: &Report, workload: &str, label: &
                 native.generated_c_bytes, native.object_bytes, native.executable_bytes
             );
         }
-        render_graph_cache_stats(&mut out, measurement);
+        render_graph_cache_stats(out, measurement);
     }
     out.push('\n');
 }
