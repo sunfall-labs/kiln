@@ -5,13 +5,13 @@
 //! is intentionally a scalar runtime for the first execution slice; object allocation,
 //! exceptions, and async scheduling belong above this VM.
 
-use kiln_host_abi::{
-    AsyncHostOp, AsyncHostOps, AsyncHostValue, Completion, HostOps, HostValue, RequestId,
-};
+use kiln_host_abi::{AsyncHostOp, AsyncHostValue, Completion, HostOps, HostValue, RequestId};
 use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
 };
-use kiln_runtime::{Realm, RealmRuntime, TimerId, TokioHost, WorkItem, duration_from_milliseconds};
+use kiln_runtime::{
+    NodeHostOps, Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds,
+};
 
 // `Temporal` is glue over a linked calendar engine, and it is long enough that inlining a ninth
 // built-in family here would bury the machine. ADR 0025 links the engine; ADR 0029 §4 names it.
@@ -4346,7 +4346,7 @@ pub fn execute_node<H: HostOps + ?Sized>(
     let mut runtime = realm_runtime()?;
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::new(program, host, locals, limits);
-    vm.node_host = Some(runtime.host_mut() as *mut TokioHost);
+    vm.node_host = Some(&mut runtime as *mut RealmRuntime as *mut dyn NodeHostOps);
     let execution = runtime.enter(|| vm.run())?;
     vm.run_node_event_loop(&mut runtime)?;
     Ok(ExecutionResult {
@@ -4520,7 +4520,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
     // every exported function to one module execution.
     let mut vm = Vm::new(Rc::new(module.program.clone()), host, locals, limits);
     if node {
-        vm.node_host = Some(runtime.host_mut() as *mut TokioHost);
+        vm.node_host = Some(runtime as *mut RealmRuntime as *mut dyn NodeHostOps);
     }
     let execution = runtime.enter(|| vm.run())?;
     // Exports are read before the event loop runs: they are the module's interface, and a timer
@@ -4801,7 +4801,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
     /// Runtime-owned live I/O installed only for explicitly Node-compatible execution.
-    node_host: Option<*mut TokioHost>,
+    node_host: Option<*mut dyn NodeHostOps>,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
@@ -5082,9 +5082,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction,
             message: "node filesystem operation requires the Node execution Adapter".to_owned(),
         })?;
-        // The pointer names `runtime.host`; it outlives this VM and is accessed only while the
-        // current-thread RealmRuntime is polling the VM, so no alias can concurrently mutate it.
-        let request = unsafe { (&mut *node).start(operation, true) };
+        // The pointer names the caller-owned realm runtime. It outlives this VM and is accessed
+        // only while that current-thread owner is polling the VM, so no alias can concurrently
+        // mutate it. The trait hides Tokio and the runtime's resource table from language code.
+        let request = unsafe { (&mut *node).start_node_op(operation, true) };
         let conversion = match native {
             Native::NodeFsReadFile if node_encoding(arguments.get(1))? => {
                 HostResultConversion::Utf8
@@ -16681,8 +16682,15 @@ fn string_property(name: &str) -> Value {
         "localeCompare" => Value::Native(Native::Intl(intl::Op::Adapter(
             intl::Adapter::StringLocaleCompare,
         ))),
-        "toLocaleUpperCase" => Value::Native(Native::StringToUpperCase),
-        "toLocaleLowerCase" => Value::Native(Native::StringToLowerCase),
+        "toLocaleUpperCase" => Value::Native(Native::Intl(intl::Op::Adapter(
+            intl::Adapter::StringToLocaleUpperCase,
+        ))),
+        // ECMA-402 gives these two their own definitions -- they validate the locale list and
+        // may take a locale-specific mapping -- so they are separate functions rather than
+        // aliases of `toLowerCase` and `toUpperCase`.
+        "toLocaleLowerCase" => Value::Native(Native::Intl(intl::Op::Adapter(
+            intl::Adapter::StringToLocaleLowerCase,
+        ))),
         "normalize" => Value::Native(Native::StringNormalize),
         "charAt" => Value::Native(Native::StringCharAt),
         "charCodeAt" => Value::Native(Native::StringCharCodeAt),

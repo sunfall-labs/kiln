@@ -36,11 +36,15 @@
 //! time, timezone and locale data remain explicit inputs".
 
 pub mod collator;
+pub mod datetime;
+pub mod displaynames;
+pub mod duration;
 pub mod list;
 pub mod locale;
 pub mod number;
 mod parts;
 pub mod plurals;
+pub mod relative;
 pub mod segmenter;
 
 /// Which JavaScript error a rejected input should become.
@@ -126,11 +130,15 @@ impl Setting {
 /// string is knowable; the runtime-identity computation folds it in the way it already folds the
 /// number provider's format and parse versions.
 ///
+/// `icu_experimental` is versioned separately because it is pre-1.0 and moves on its own line;
+/// `Intl.RelativeTimeFormat`, `Intl.DisplayNames` and `Intl.DurationFormat` answer from its bundle
+/// rather than the 2.3 one, so a build that could not say which would not be reproducible either.
+///
 /// The CLDR version here is the one `icu_*_data` 2.3 was generated from. It is *not* necessarily
 /// the version the differential oracle (`node`) was built against, so a spelled-out currency name
 /// or a newly-added locale can legitimately differ between the two; that is a data-version
 /// difference to be recorded, not a bug to be chased.
-pub const ENGINE_IDENTITY: &str = "icu4x=2.3;cldr=48.2.1;icu=release-78.1rc";
+pub const ENGINE_IDENTITY: &str = "icu4x=2.3;icu4x-experimental=0.6;cldr=48.2.1;icu=release-78.1rc";
 
 #[cfg(test)]
 mod tests {

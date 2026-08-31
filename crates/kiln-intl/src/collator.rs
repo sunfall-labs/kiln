@@ -53,6 +53,19 @@ impl Default for Options {
     }
 }
 
+/// The collation types `Intl.supportedValuesOf("collation")` reports.
+///
+/// Empty, and deliberately so. ICU4X's baked collator data is a lookup rather than an enumeration,
+/// and there is no probe that distinguishes "this build has tailoring data for `phonebk`" from
+/// "this build fell back to the root collation and produced the same order anyway" -- a collator
+/// built for an unknown collation succeeds and sorts, it just sorts the default way. Reporting a
+/// guessed list would be claiming data this crate cannot confirm it has, which is the wrong-answer
+/// failure mode; an empty list understates and says nothing false. `Intl.Collator` itself still
+/// honours `-u-co-` for the collations the bundle does carry.
+pub fn available_collations() -> Vec<String> {
+    Vec::new()
+}
+
 /// A built collator.
 pub struct Collator {
     collator: CollatorBorrowed<'static>,
