@@ -2,13 +2,13 @@
 source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
-/* Program hash: 578d43dfcb717b93; bytecode version: 1. */
-static const char kiln_module_578d43dfcb717b9350f84611917a170c_constant_0[] = "h\xC3""\xA9""llo \"world\"\n\t7";
-static const char kiln_module_578d43dfcb717b9350f84611917a170c_constant_1[] = "length";
-static const char kiln_module_578d43dfcb717b9350f84611917a170c_constant_2[] = "toUpperCase";
-static const char kiln_module_578d43dfcb717b9350f84611917a170c_constant_3[] = " & more";
-static const char kiln_module_578d43dfcb717b9350f84611917a170c_constant_4[] = "concat";
-static int kiln_module_578d43dfcb717b9350f84611917a170c_body(kiln_host *host, kiln_value *result) {
+/* Program hash: 8d1d06810ac4661e; bytecode version: 1. */
+static const char kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_0[] = "h\xC3""\xA9""llo \"world\"\n\t7";
+static const char kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_1[] = "length";
+static const char kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_2[] = "toUpperCase";
+static const char kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_3[] = " & more";
+static const char kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_4[] = "concat";
+static int kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_body(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
@@ -18,9 +18,9 @@ static int kiln_module_578d43dfcb717b9350f84611917a170c_body(kiln_host *host, ki
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
     locals[0] = kiln_c99_undefined();
 kiln_label_0:;
-    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_578d43dfcb717b9350f84611917a170c_constant_0, 17);
+    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_0, 17);
 kiln_label_1:;
-    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_578d43dfcb717b9350f84611917a170c_constant_3, 7);
+    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_3, 7);
 kiln_label_2:;
     { kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked(1, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; stack[sp++] = answer; }
 kiln_label_3:;
@@ -28,17 +28,17 @@ kiln_label_3:;
 kiln_label_4:;
     stack[sp++] = locals[0];
 kiln_label_5:;
-    { kiln_value read; int status = kiln_c99_get(host, stack[sp - 1], kiln_module_578d43dfcb717b9350f84611917a170c_constant_1, 6, &read, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }
+    { kiln_value read; int status = kiln_c99_get(host, stack[sp - 1], kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_1, 6, &read, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }
 kiln_label_6:;
     --sp;
 kiln_label_7:;
     stack[sp++] = locals[0];
 kiln_label_8:;
-    { kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - 0 - 1]; const kiln_value *call_args = 0 == 0 ? NULL : &stack[sp - 0]; status = kiln_c99_get(host, self_value, kiln_module_578d43dfcb717b9350f84611917a170c_constant_2, 11, &method, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t)0, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; sp -= (size_t)1; stack[sp++] = call_result; }
+    { kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - 0 - 1]; const kiln_value *call_args = 0 == 0 ? NULL : &stack[sp - 0]; status = kiln_c99_get(host, self_value, kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_2, 11, &method, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t)0, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; sp -= (size_t)1; stack[sp++] = call_result; }
 kiln_label_9:;
-    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_578d43dfcb717b9350f84611917a170c_constant_3, 7);
+    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_3, 7);
 kiln_label_10:;
-    { kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - 1 - 1]; const kiln_value *call_args = 1 == 0 ? NULL : &stack[sp - 1]; status = kiln_c99_get(host, self_value, kiln_module_578d43dfcb717b9350f84611917a170c_constant_4, 6, &method, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t)1, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; sp -= (size_t)2; stack[sp++] = call_result; }
+    { kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - 1 - 1]; const kiln_value *call_args = 1 == 0 ? NULL : &stack[sp - 1]; status = kiln_c99_get(host, self_value, kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_constant_4, 6, &method, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t)1, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; sp -= (size_t)2; stack[sp++] = call_result; }
 kiln_label_11:;
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
@@ -50,29 +50,29 @@ kiln_uncaught:;
     return KILN_C99_CONTROL_ERROR;
 }
 
-typedef struct kiln_module_578d43dfcb717b9350f84611917a170c_realm_context {
+typedef struct kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_realm_context {
     kiln_host *host;
     kiln_value *result;
-} kiln_module_578d43dfcb717b9350f84611917a170c_realm_context;
+} kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_realm_context;
 
-static int kiln_module_578d43dfcb717b9350f84611917a170c_realm_entry(void *opaque) {
-    kiln_module_578d43dfcb717b9350f84611917a170c_realm_context *context = (kiln_module_578d43dfcb717b9350f84611917a170c_realm_context *)opaque;
+static int kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_realm_entry(void *opaque) {
+    kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_realm_context *context = (kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_realm_context *)opaque;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    return kiln_module_578d43dfcb717b9350f84611917a170c_body(context->host, context->result);
+    return kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_body(context->host, context->result);
 }
 
-int kiln_module_578d43dfcb717b9350f84611917a170c(kiln_host *host, kiln_value *result) {
-    kiln_module_578d43dfcb717b9350f84611917a170c_realm_context context;
+int kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5(kiln_host *host, kiln_value *result) {
+    kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_realm_context context;
     uint64_t realm = 0;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_realm_is_active()) return kiln_module_578d43dfcb717b9350f84611917a170c_body(host, result);
+    if (kiln_realm_is_active()) return kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_body(host, result);
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, kiln_module_578d43dfcb717b9350f84611917a170c_realm_entry, &context);
+        status = kiln_realm_enter(realm, kiln_module_8d1d06810ac4661eca1bc4e5c9bd18f5_realm_entry, &context);
     if (status == KILN_C99_OK)
         status = kiln_realm_drive(realm, host, result);
     if (realm != 0) {
