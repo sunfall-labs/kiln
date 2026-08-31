@@ -83,6 +83,12 @@ pub fn run_variant_with_harness(
     // frontend of its own to do it with. Installing one here rather than at startup is what keeps
     // this crate's execution path the same one the CLI takes -- a VM per case, nothing global.
     crate::source_compiler::install();
+    // `import()` names its module at run time, so the linker has to be reachable from a running
+    // program too. It is rooted at the test's own directory, which is where every fixture the
+    // corpus imports lives.
+    if let Some(directory) = case.path.parent() {
+        crate::module_loader::install(directory);
+    }
     // A compiler or interpreter bug reached by one test must not take the run with it. Before
     // this, a single `unreachable!` in lowering aborted the process, and a sweep of
     // `language/expressions` reported nothing at all for the other eleven thousand tests in the
@@ -723,6 +729,11 @@ fn finish_run(
             // not a wrong answer from the language, and must not be counted as a failure.
             let outcome = if message.contains(HOST_CAPABILITY_MARKER) {
                 Outcome::Unsupported
+            // A module `import()` reached that this compiler cannot build is a gap of the same
+            // kind a compile diagnostic is, and counting it a failure would claim the language
+            // got something wrong that this engine never attempted.
+            } else if message.starts_with("unsupported dynamic import:") {
+                Outcome::Unsupported
             } else if let Some(name) = missing_intrinsic(&message) {
                 diagnostics.push(Diagnostic::new(
                     DiagnosticPhase::Runtime,
@@ -1258,12 +1269,11 @@ mod tests {
     #[test]
     fn unsupported_hir_is_not_a_negative_runtime_pass() {
         // Whatever construct stands in here has to be one the frontend still refuses, so this
-        // test has moved four times as coverage grew -- `function f() {}`, `switch (0) {}`,
-        // `async function f() {}` and `#private` all stopped refusing. `with` should be the last
-        // move: it is forbidden in strict mode, modules are always strict, and implementing it
-        // would be a step backwards. That churn was the signal working, though: a refused
-        // construct must never be scored as a negative test's expected failure.
-        let mut negative = case("with (this) {}\n");
+        // test has moved five times as coverage grew -- `function f() {}`, `switch (0) {}`,
+        // `async function f() {}`, `#private` and `with` all stopped refusing. That churn is the
+        // signal working, though: a refused construct must never be scored as a negative test's
+        // expected failure. A class static block is what is left; when it lands, move this again.
+        let mut negative = case("class C { static { } }\n");
         negative.metadata.flags.push("raw".to_owned());
         negative.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,

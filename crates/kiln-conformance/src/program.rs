@@ -273,9 +273,7 @@ fn source_goal(path: &Path) -> SourceGoal {
 fn out_of_process_build_requirement(path: &Path) -> Option<&'static str> {
     let is_javascript = path
         .extension()
-        .is_some_and(|extension| {
-            extension == "js" || extension == "mjs" || extension == "cjs"
-        });
+        .is_some_and(|extension| extension == "js" || extension == "mjs" || extension == "cjs");
     (!is_javascript).then_some(
         "TypeScript entry point: this program runs only as a single-file bundle, which \
          conformance/effect/build.sh produces out of process",

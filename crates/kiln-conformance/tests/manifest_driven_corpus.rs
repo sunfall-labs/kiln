@@ -181,14 +181,16 @@ expected_stdout = "source\n"
 
 #[test]
 fn a_program_the_compiler_refuses_fails_with_the_refusal_as_its_reason() {
-    // The construct here only has to be one the compiler still refuses. It has moved four times
-    // as coverage grew; `with` should be the last, being forbidden in strict mode and so never
-    // worth implementing. What is being tested is that a refusal is reported as a refusal, never
-    // as a pass.
+    // The construct here only has to be one the compiler still refuses. It has moved five times
+    // as coverage grew, most recently off `with`. What is being tested is that a refusal is
+    // reported as a refusal, never as a pass, so when a class static block lands, move it again.
     let root = corpus(
         "refused",
         &entry("refused", "refused.js", "unreachable\n"),
-        &[("refused.js", "with (this) { console.log('unreachable'); }")],
+        &[(
+            "refused.js",
+            "class C { static { console.log('unreachable'); } }",
+        )],
     );
 
     let result = &run_all(&root)[0].1;

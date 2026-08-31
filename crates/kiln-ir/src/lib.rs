@@ -183,6 +183,24 @@ pub enum Instruction {
     RestArguments(u32),
     /// Set an object's prototype. Stack is object, then prototype; the object is left.
     SetPrototype,
+    /// `ToObject`, for the head of a `with`. Stack: `[value] -> [object]`.
+    ///
+    /// A primitive is boxed and `null` or `undefined` is a TypeError, which is what makes
+    /// `with (null) {}` throw before its body runs rather than at the first name inside it.
+    ToObject,
+    /// Whether the object on top has the named binding, for a `with`. Stack: `[object] -> [bool]`.
+    ///
+    /// Not `Binary(In)`: an object environment record also consults `Symbol.unscopables`, which
+    /// is the mechanism that let `Array.prototype.flat` be added without `with (array) { flat }`
+    /// changing meaning in code written before it existed.
+    WithHas(u32),
+    /// `import(specifier)`. Stack: `[specifier] -> [promise]`.
+    ///
+    /// The promise is handed back before anything is loaded, and the load happens on the job
+    /// queue: `import()` is asynchronous even when the module is already in memory, and a
+    /// program that observed it settling synchronously would be seeing this engine rather than
+    /// the language.
+    DynamicImport,
     /// Run a parent constructor against the current `this`, forwarding the arguments this frame
     /// received.
     ///
@@ -424,6 +442,7 @@ pub enum Builtin {
     RangeError,
     ReferenceError,
     SyntaxError,
+    UriError,
     SetTimeout,
     SetInterval,
     ClearTimeout,
@@ -496,6 +515,7 @@ impl Builtin {
             "RangeError" => Some(Self::RangeError),
             "ReferenceError" => Some(Self::ReferenceError),
             "SyntaxError" => Some(Self::SyntaxError),
+            "URIError" => Some(Self::UriError),
             "setTimeout" => Some(Self::SetTimeout),
             "setInterval" => Some(Self::SetInterval),
             "clearTimeout" => Some(Self::ClearTimeout),
@@ -563,6 +583,7 @@ impl Builtin {
             Self::RangeError => "RangeError",
             Self::ReferenceError => "ReferenceError",
             Self::SyntaxError => "SyntaxError",
+            Self::UriError => "URIError",
             Self::SetTimeout => "setTimeout",
             Self::SetInterval => "setInterval",
             Self::ClearTimeout => "clearTimeout",
@@ -690,6 +711,14 @@ pub const NAMESPACE_IMPORT: &str = "*namespace*";
 /// and the linker -- which does have both tables -- expands it. The prefix carries characters no
 /// exported name can, so it can never be mistaken for one.
 pub const STAR_REEXPORT_PREFIX: &str = "*star*";
+
+/// The prefix of the local name `export { x } from "./m"` binds its borrowed value to.
+///
+/// A re-export is desugared into an import the module never names plus an export of what that
+/// import brought in, and the import needs a local to land in. The name carries characters no
+/// identifier can, so no source can read the slot -- which is what lets a linker resolving the
+/// export through to its origin leave the slot itself unfilled.
+pub const REEXPORT_LOCAL_PREFIX: &str = "*reexport";
 
 /// A provider-visible name backed by one module-scope local slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -927,7 +956,7 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         };
         // A name no program can write, and one per re-export, so two of them from the same
         // module do not share a slot.
-        let local = format!("*reexport{index}*");
+        let local = format!("{REEXPORT_LOCAL_PREFIX}{index}*");
         let Some(local_slot) = compiler.declare_import(&local, export.span) else {
             continue;
         };
@@ -1158,6 +1187,20 @@ struct FunctionState {
 }
 
 /// Where a name lives, which decides how it is read and whether it can be read at all.
+/// One active `with`, and where it sits so a binding written inside it can shadow it.
+#[derive(Clone, Debug)]
+struct WithScope {
+    /// The hidden binding holding the object. It is celled, because a function created inside
+    /// the body still resolves its names against the object when it is called later.
+    name: String,
+    /// How many functions deep the `with` itself is, so a nested function can tell that its own
+    /// parameters and locals are inside the object environment rather than outside it.
+    functions: usize,
+    /// How many scopes were open when the body started. A binding declared at or beyond this is
+    /// nested *within* the object environment record and therefore shadows it.
+    scopes: usize,
+}
+
 enum Resolution {
     /// A binding in the function currently being compiled.
     Local(Local),
@@ -1216,6 +1259,12 @@ struct Compiler {
     loops: Vec<LoopContext>,
     /// Counter for compiler-introduced bindings, so two in one scope never collide.
     hidden_bindings: usize,
+    /// The `with` statements whose bodies are being compiled, outermost first.
+    ///
+    /// Every name mentioned inside one is looked for on these objects before the bindings around
+    /// it, and only code lexically inside a `with` pays for that: the resolution everywhere else
+    /// is the static one it has always been.
+    with_scopes: Vec<WithScope>,
     /// `finally` blocks enclosing the code being compiled, innermost last. A non-local exit has
     /// to run each of them on its way out, so it needs their bodies rather than their addresses.
     finalizers: Vec<Cleanup>,
@@ -1281,6 +1330,7 @@ impl Compiler {
             cell_everything: body_contains_direct_eval(&module.body),
             loops: Vec::new(),
             hidden_bindings: 0,
+            with_scopes: Vec::new(),
             private_scopes: Vec::new(),
             next_private_scope: 0,
             finalizers: Vec::new(),
@@ -1449,6 +1499,9 @@ impl Compiler {
                 self.scopes.push(HashMap::new());
                 self.statements(statements);
                 self.scopes.pop().expect("block scope was just pushed");
+            }
+            StatementKind::With { object, body } => {
+                self.with_statement(object, body, statement.span);
             }
             StatementKind::If {
                 test,
@@ -2190,6 +2243,172 @@ impl Compiler {
                 continue;
             }
             self.statement(statement);
+        }
+    }
+
+    /// Read `name` from the bindings around it, ignoring any `with` object.
+    ///
+    /// The whole of Kiln's ordinary identifier resolution: a slot, a cell, an upvalue, a module
+    /// slot, or -- when nothing bound it -- a built-in or a `ReferenceError` where the read is.
+    fn load_lexically(&mut self, name: &str, span: Span) {
+        match self.resolve_or_capture(name) {
+            // Reading a binding whose declaration has not run yet is the temporal dead zone.
+            // Refused rather than read as undefined, which is what pre-declaring every name
+            // in a block would otherwise turn a loud mistake into. A nested function reading
+            // the same name resolves as an upvalue and never reaches this arm, which is
+            // correct: it runs later, by which time the declaration has.
+            // Eval code raises this at run time instead. The read is still refused --
+            // the cell holds the uninitialised marker and `LoadCell` throws on it -- but as
+            // the `ReferenceError` the language names rather than as a rejection of the
+            // source, which is what a caller waiting on `assert.throws(ReferenceError, …)`
+            // is entitled to see.
+            Resolution::Local(local) if !local.initialized && local.celled && self.eval_program => {
+                self.code.push(Instruction::LoadCell(local.slot))
+            }
+            Resolution::Local(local) if !local.initialized => self.error(
+                Some(span),
+                format!("cannot access `{name}` before its declaration"),
+            ),
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot))
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::Unresolved if name == "this" => self.code.push(Instruction::LoadThis),
+            // `arguments` is not a declared binding, so it only resolves when nothing else
+            // bound the name -- a parameter or local called `arguments` shadows it, as it
+            // does in JavaScript.
+            Resolution::Unresolved if name == "arguments" && self.compiling_function() => {
+                self.code.push(Instruction::LoadArguments)
+            }
+            Resolution::Unresolved if name == "undefined" => {
+                self.push_constant(Constant::Undefined)
+            }
+            // A built-in is only reachable when nothing else bound the name, so a program
+            // that declares its own `Error` shadows it exactly as it would any other global.
+            Resolution::Unresolved => match Builtin::from_name(name) {
+                Some(builtin) => self.code.push(Instruction::LoadBuiltin(builtin)),
+                // A `ReferenceError` where the read happens, which is what JavaScript does
+                // and what lets a module compile when a branch it never takes mentions a
+                // global this realm does not provide. See ADR 0017.
+                None => {
+                    let name = self.constant_index(Constant::String(name.to_owned()));
+                    self.code.push(Instruction::ThrowReference(name));
+                }
+            },
+        }
+    }
+
+    /// `with (object) body`: an object environment record around the body's scope.
+    ///
+    /// The object goes into a hidden binding rather than staying on the stack, because the body
+    /// may create a function that outlives the statement -- and that function's names still
+    /// resolve against the object when it is called. A binding is the only thing a closure can
+    /// capture, so the object becomes one, and it is boxed like any other captured binding.
+    fn with_statement(&mut self, object: &Expression, body: &Statement, span: Span) {
+        // Each level costs one lookup chain at every name inside it, and an assignment repeats
+        // its value expression once per level. Four is far past anything written on purpose, and
+        // refusing beyond it is a limit that says so rather than emitting code nobody can read.
+        if self.with_scopes.len() >= 4 {
+            self.error(
+                Some(span),
+                "unsupported statement: `with` nested more than four deep",
+            );
+            return;
+        }
+        let name = format!("%with{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        self.scopes.push(HashMap::new());
+        self.captured.insert(name.clone());
+        self.expression(object);
+        self.code.push(Instruction::ToObject);
+        self.declare_bound(VariableKind::Let, &name, span);
+        self.with_scopes.push(WithScope {
+            name,
+            functions: self.enclosing.len(),
+            scopes: self.scopes.len(),
+        });
+        self.statement(body);
+        self.with_scopes.pop().expect("just pushed");
+        self.scopes.pop().expect("with scope was just pushed");
+    }
+
+    /// The `with` objects `name` has to be looked for on, innermost first.
+    ///
+    /// Empty for every name in a program with no `with` in it, and for a name whose binding is
+    /// written *inside* the body: `with (o) { let x = 1; x }` is the `let`, whatever `o` holds,
+    /// because the block's scope is nested within the object environment record.
+    fn with_scopes_for(&self, name: &str) -> Vec<WithScope> {
+        if self.with_scopes.is_empty() {
+            return Vec::new();
+        }
+        // `this` is not a binding an environment record answers for, and a compiler-introduced
+        // name is not one any object can have: neither is ever looked for on a `with` object.
+        if name == "this" || name.starts_with('%') || name.starts_with('*') {
+            return Vec::new();
+        }
+        let bound = self
+            .scopes
+            .iter()
+            .rposition(|scope| scope.contains_key(name));
+        let functions = self.enclosing.len();
+        self.with_scopes
+            .iter()
+            .rev()
+            .filter(|with| {
+                if with.functions == functions {
+                    bound.is_none_or(|at| at < with.scopes)
+                } else {
+                    // The `with` is in an enclosing function, so every binding this function
+                    // declares -- a parameter, a local -- is written inside it and shadows it.
+                    bound.is_none()
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Push the object of one active `with`.
+    fn load_with_object(&mut self, with: &WithScope) {
+        match self.resolve_or_capture(&with.name) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot))
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
+            Resolution::Unresolved => {
+                self.error(None, "a `with` object went out of scope");
+                self.push_constant(Constant::Undefined);
+            }
+        }
+    }
+
+    /// Read `name`, looking on each active `with` object before the bindings around it.
+    ///
+    /// `fallback` emits the read for the case no object has it -- the ordinary lexical one, or
+    /// the `"undefined"` that a `typeof` of an unbound name produces.
+    fn with_scoped_load(&mut self, name: &str, fallback: impl FnOnce(&mut Self)) {
+        let scopes = self.with_scopes_for(name);
+        if scopes.is_empty() {
+            fallback(self);
+            return;
+        }
+        let key = self.constant_index(Constant::String(name.to_owned()));
+        let mut found = Vec::with_capacity(scopes.len());
+        for with in &scopes {
+            self.load_with_object(with);
+            self.code.push(Instruction::WithHas(key));
+            let miss = self.emit_jump(Instruction::JumpIfFalse(0));
+            self.load_with_object(with);
+            self.code.push(Instruction::GetProperty(key));
+            found.push(self.emit_jump(Instruction::Jump(0)));
+            self.patch_jump(miss);
+        }
+        fallback(self);
+        for jump in found {
+            self.patch_jump(jump);
         }
     }
 
@@ -3156,55 +3375,40 @@ impl Compiler {
     fn expression(&mut self, expression: &Expression) {
         match &expression.kind {
             ExpressionKind::Literal(literal) => self.push_literal(literal),
-            ExpressionKind::Identifier(name) => match self.resolve_or_capture(name) {
-                // Reading a binding whose declaration has not run yet is the temporal dead zone.
-                // Refused rather than read as undefined, which is what pre-declaring every name
-                // in a block would otherwise turn a loud mistake into. A nested function reading
-                // the same name resolves as an upvalue and never reaches this arm, which is
-                // correct: it runs later, by which time the declaration has.
-                // Eval code raises this at run time instead. The read is still refused --
-                // the cell holds the uninitialised marker and `LoadCell` throws on it -- but as
-                // the `ReferenceError` the language names rather than as a rejection of the
-                // source, which is what a caller waiting on `assert.throws(ReferenceError, …)`
-                // is entitled to see.
-                Resolution::Local(local)
-                    if !local.initialized && local.celled && self.eval_program =>
-                {
-                    self.code.push(Instruction::LoadCell(local.slot))
-                }
-                Resolution::Local(local) if !local.initialized => self.error(
-                    Some(expression.span),
-                    format!("cannot access `{name}` before its declaration"),
-                ),
-                Resolution::Local(local) if local.celled => {
-                    self.code.push(Instruction::LoadCell(local.slot))
-                }
-                Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
-                Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-                Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
-                Resolution::Unresolved if name == "this" => self.code.push(Instruction::LoadThis),
-                // `arguments` is not a declared binding, so it only resolves when nothing else
-                // bound the name -- a parameter or local called `arguments` shadows it, as it
-                // does in JavaScript.
-                Resolution::Unresolved if name == "arguments" && self.compiling_function() => {
-                    self.code.push(Instruction::LoadArguments)
-                }
-                Resolution::Unresolved if name == "undefined" => {
-                    self.push_constant(Constant::Undefined)
-                }
-                // A built-in is only reachable when nothing else bound the name, so a program
-                // that declares its own `Error` shadows it exactly as it would any other global.
-                Resolution::Unresolved => match Builtin::from_name(name) {
-                    Some(builtin) => self.code.push(Instruction::LoadBuiltin(builtin)),
-                    // A `ReferenceError` where the read happens, which is what JavaScript does
-                    // and what lets a module compile when a branch it never takes mentions a
-                    // global this realm does not provide. See ADR 0017.
-                    None => {
-                        let name = self.constant_index(Constant::String(name.clone()));
-                        self.code.push(Instruction::ThrowReference(name));
+            ExpressionKind::Identifier(name) => {
+                let span = expression.span;
+                self.with_scoped_load(name, |compiler| compiler.load_lexically(name, span));
+            }
+            // `typeof x` inside a `with` has to ask the object first, and only then fall back
+            // to the rule below -- the name may be absent from every binding around it and still
+            // be a property of the object.
+            ExpressionKind::Unary {
+                operator: UnaryOperator::TypeOf,
+                argument,
+            } if matches!(
+                &argument.kind,
+                ExpressionKind::Identifier(name) if !self.with_scopes_for(name).is_empty()
+            ) =>
+            {
+                let ExpressionKind::Identifier(name) = &argument.kind else {
+                    unreachable!("the guard above matched an identifier")
+                };
+                let span = argument.span;
+                let unbound = self.names_nothing(name)
+                    && Builtin::from_name(name).is_none()
+                    && name != "undefined"
+                    && !(name == "arguments" && self.compiling_function());
+                self.with_scoped_load(name, |compiler| {
+                    // The *value* `undefined`, not the string: the `typeof` below is what turns
+                    // it into one, and pushing the answer here would report `"string"`.
+                    if unbound {
+                        compiler.push_constant(Constant::Undefined);
+                    } else {
+                        compiler.load_lexically(name, span);
                     }
-                },
-            },
+                });
+                self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+            }
             // `typeof undeclaredName` is "undefined" rather than a throw -- the one place a name
             // may be read without existing, and the whole reason feature detection works.
             ExpressionKind::Unary {
@@ -3429,6 +3633,20 @@ impl Compiler {
                 }
                 self.expression(value);
                 self.code.push(Instruction::Await);
+            }
+            // The specifier expression is evaluated like any other, so a `throw` inside it
+            // throws. Only what happens *after* it -- coercing it to a string, resolving it,
+            // evaluating the module -- rejects the promise instead, which is why the coercion
+            // is the instruction's job and not something emitted around it.
+            ExpressionKind::ImportCall { specifier, options } => {
+                self.expression(specifier);
+                // The second argument is evaluated in source order and then discarded: nothing
+                // reads an import attribute yet, but a getter written in one still runs.
+                if let Some(options) = options {
+                    self.expression(options);
+                    self.code.push(Instruction::Pop);
+                }
+                self.code.push(Instruction::DynamicImport);
             }
             ExpressionKind::Chain { expression: inner } => {
                 self.chains.push(Vec::new());
@@ -3661,6 +3879,21 @@ impl Compiler {
 
         for member in members {
             match member {
+                // `{ __proto__: v }` is not a property at all: it links the object to `v`. Only
+                // this spelling does -- `{ __proto__ }` and `{ __proto__() {} }` are ordinary own
+                // properties, and so is `{ ["__proto__"]: v }`, because the specification asks
+                // whether the key was computed rather than what it evaluated to.
+                ObjectMember::Property(property)
+                    if matches!(&property.key, ObjectKey::Static(key) if key == "__proto__")
+                        && property.form == kiln_hir::PropertyForm::KeyValue =>
+                {
+                    // The prototype is set on an object, so the run of pairs written before it
+                    // has to become one first -- the same reason an accessor flushes the run.
+                    self.emit_object_segment(&mut pending, accumulating);
+                    accumulating = true;
+                    self.expression(&property.value);
+                    self.code.push(Instruction::SetPrototype);
+                }
                 ObjectMember::Property(property) => {
                     match &property.key {
                         // Only a class body can declare one, so a literal never has one.
@@ -3748,6 +3981,76 @@ impl Compiler {
     }
 
     fn assignment(
+        &mut self,
+        operator: AssignmentOperator,
+        target: &str,
+        value: &Expression,
+        span: Span,
+    ) {
+        let scopes = self.with_scopes_for(target);
+        if !scopes.is_empty() {
+            self.with_assignment(&scopes, operator, target, value, span);
+            return;
+        }
+        self.assign_lexically(operator, target, value, span);
+    }
+
+    /// `name = value` inside a `with`, written to the innermost object that has the name.
+    ///
+    /// The value expression is compiled once per object plus once for the lexical case. Only one
+    /// of those copies ever runs, and the alternative -- spilling the value into a temporary
+    /// first -- would evaluate it before the reference is resolved, which is the opposite of the
+    /// order the specification gives.
+    fn with_assignment(
+        &mut self,
+        scopes: &[WithScope],
+        operator: AssignmentOperator,
+        target: &str,
+        value: &Expression,
+        span: Span,
+    ) {
+        let key = self.constant_index(Constant::String(target.to_owned()));
+        let mut found = Vec::with_capacity(scopes.len());
+        for with in scopes {
+            self.load_with_object(with);
+            self.code.push(Instruction::WithHas(key));
+            let miss = self.emit_jump(Instruction::JumpIfFalse(0));
+            if operator.is_short_circuiting() {
+                self.load_with_object(with);
+                self.code.push(Instruction::GetProperty(key));
+                let skip = self.emit_jump(short_circuit_jump(operator));
+                self.load_with_object(with);
+                self.expression(value);
+                self.code.push(Instruction::SetProperty(key));
+                let done = self.emit_jump(Instruction::Jump(0));
+                self.patch_jump(skip);
+                self.load_with_object(with);
+                self.code.push(Instruction::GetProperty(key));
+                self.patch_jump(done);
+            } else if operator == AssignmentOperator::Assign {
+                self.load_with_object(with);
+                self.expression(value);
+                self.code.push(Instruction::SetProperty(key));
+            } else {
+                self.load_with_object(with);
+                self.load_with_object(with);
+                self.code.push(Instruction::GetProperty(key));
+                self.expression(value);
+                self.code
+                    .push(Instruction::Binary(compound_operator(operator)));
+                self.code.push(Instruction::SetProperty(key));
+            }
+            found.push(self.emit_jump(Instruction::Jump(0)));
+            self.patch_jump(miss);
+        }
+        self.assign_lexically(operator, target, value, span);
+        for jump in found {
+            self.patch_jump(jump);
+        }
+    }
+
+    /// `name = value` against the bindings around it, ignoring any `with` object.
+    fn assign_lexically(
         &mut self,
         operator: AssignmentOperator,
         target: &str,
@@ -4242,6 +4545,13 @@ impl Compiler {
         if let Some(super_binding) = self.super_bindings.last() {
             captured.insert(super_binding.clone());
         }
+        // A `with` object is a hidden binding for the same reason, and the name walk cannot see
+        // it either. A function written inside a `with` body still resolves its names against
+        // that object when it is called, which may be long after the statement has ended -- so
+        // the closure has to carry it.
+        for with in &self.with_scopes {
+            captured.insert(with.name.clone());
+        }
         // A direct `eval` anywhere in this function -- including inside one nested in it -- means
         // the eval'd source may name any binding here, so every one of them has to be a cell.
         let cell_everything = function_contains_direct_eval(function);
@@ -4253,9 +4563,18 @@ impl Compiler {
         let mut parameters = HashMap::with_capacity(function.parameters.len());
         let mut celled_parameters = Vec::new();
         let mut destructured = Vec::new();
+        let mut defaulted_identifiers = Vec::new();
         for (slot, parameter) in function.parameters.iter().enumerate() {
             let slot = slot as u32;
-            let Pattern::Identifier(name) = &parameter.pattern else {
+            let identifier = match &parameter.pattern {
+                Pattern::Identifier(name) => Some(name),
+                Pattern::WithDefault { inner, .. } => match inner.as_ref() {
+                    Pattern::Identifier(name) => Some(name),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(name) = identifier else {
                 destructured.push((slot, &parameter.pattern, parameter.span));
                 continue;
             };
@@ -4280,6 +4599,9 @@ impl Compiler {
                     celled,
                 },
             );
+            if matches!(parameter.pattern, Pattern::WithDefault { .. }) {
+                defaulted_identifiers.push((slot, celled, &parameter.pattern, parameter.span));
+            }
         }
 
         let parameter_count = function.parameters.len() as u32;
@@ -4320,6 +4642,14 @@ impl Compiler {
         for (slot, pattern, span) in destructured {
             self.code.push(Instruction::LoadLocal(slot));
             self.bind_pattern(VariableKind::Let, pattern, span);
+        }
+        for (slot, celled, pattern, span) in defaulted_identifiers {
+            self.code.push(if celled {
+                Instruction::LoadCell(slot)
+            } else {
+                Instruction::LoadLocal(slot)
+            });
+            self.assign_pattern(pattern, span);
         }
 
         // `...rest` is the arguments beyond the declared parameters. Taken from the call rather
@@ -4433,6 +4763,65 @@ impl Compiler {
     /// The two forms differ only in when the value is duplicated: a prefix update yields the new
     /// value, a postfix one the old. That is the whole reason this is not lowered to `x = x + 1`.
     fn update(&mut self, increment: bool, prefix: bool, target: &str, span: Span) {
+        let scopes = self.with_scopes_for(target);
+        if !scopes.is_empty() {
+            self.with_update(&scopes, increment, prefix, target, span);
+            return;
+        }
+        self.update_lexically(increment, prefix, target, span);
+    }
+
+    /// `name++` inside a `with`, updating the innermost object that has the name.
+    ///
+    /// The old value is spilled into a hidden binding rather than juggled on the stack: the
+    /// object has to sit beneath the new value for the store, and the old one has to survive
+    /// past it for a postfix update, which is one value too many to keep in order otherwise.
+    fn with_update(
+        &mut self,
+        scopes: &[WithScope],
+        increment: bool,
+        prefix: bool,
+        target: &str,
+        span: Span,
+    ) {
+        let key = self.constant_index(Constant::String(target.to_owned()));
+        let held = format!("%update{}", self.hidden_bindings);
+        self.hidden_bindings += 1;
+        let mut found = Vec::with_capacity(scopes.len());
+        for with in scopes {
+            self.load_with_object(with);
+            self.code.push(Instruction::WithHas(key));
+            let miss = self.emit_jump(Instruction::JumpIfFalse(0));
+            self.load_with_object(with);
+            self.code.push(Instruction::GetProperty(key));
+            // `ToNumber` first, for the same reason the lexical form does it: `x++` where `x` is
+            // "5" is 5 then 6, not "5" then "51".
+            self.code.push(Instruction::Unary(UnaryOp::Plus));
+            self.declare_hidden(&held, span);
+            self.load_with_object(with);
+            self.load_hidden(&held);
+            self.push_constant(Constant::Number(1.0f64.to_bits()));
+            self.code.push(Instruction::Binary(if increment {
+                BinaryOp::Add
+            } else {
+                BinaryOp::Subtract
+            }));
+            self.code.push(Instruction::SetProperty(key));
+            if !prefix {
+                self.code.push(Instruction::Pop);
+                self.load_hidden(&held);
+            }
+            found.push(self.emit_jump(Instruction::Jump(0)));
+            self.patch_jump(miss);
+        }
+        self.update_lexically(increment, prefix, target, span);
+        for jump in found {
+            self.patch_jump(jump);
+        }
+    }
+
+    /// `name++` against the bindings around it, ignoring any `with` object.
+    fn update_lexically(&mut self, increment: bool, prefix: bool, target: &str, span: Span) {
         let (load, store) = match self.resolve_or_capture(target) {
             Resolution::Local(local) if local.celled => (
                 Instruction::LoadCell(local.slot),
@@ -4451,8 +4840,16 @@ impl Compiler {
                 Instruction::StoreGlobal(slot),
             ),
             Resolution::Unresolved => {
-                self.error(Some(span), format!("unresolved identifier `{target}`"));
-                self.push_constant(Constant::Undefined);
+                // Inside a `with` the name may be a property of the object and only fail to be
+                // one at run time, so the refusal has to wait until then. Outside one the
+                // compiler already knows, and says so where the mistake is written.
+                if self.with_scopes.is_empty() {
+                    self.error(Some(span), format!("unresolved identifier `{target}`"));
+                    self.push_constant(Constant::Undefined);
+                } else {
+                    let name = self.constant_index(Constant::String(target.to_owned()));
+                    self.code.push(Instruction::ThrowReference(name));
+                }
                 return;
             }
         };
@@ -5397,6 +5794,10 @@ fn collect_assigned_names(statement: &Statement, names: &mut HashSet<String>) {
                 statements.push(body);
             }
             StatementKind::Labelled { body, .. } => statements.push(body),
+            StatementKind::With { object, body } => {
+                expressions.push(object);
+                statements.push(body);
+            }
             StatementKind::Switch {
                 discriminant,
                 cases,
@@ -5530,6 +5931,9 @@ fn statement_contains_direct_eval(statement: &Statement) -> bool {
             expression_contains_direct_eval(object) || statement_contains_direct_eval(body)
         }
         StatementKind::Labelled { body, .. } => statement_contains_direct_eval(body),
+        StatementKind::With { object, body } => {
+            expression_contains_direct_eval(object) || statement_contains_direct_eval(body)
+        }
         StatementKind::Switch {
             discriminant,
             cases,
@@ -5628,6 +6032,12 @@ fn expression_contains_direct_eval(expression: &Expression) -> bool {
         }
         ExpressionKind::Function(function) => function_contains_direct_eval(function),
         ExpressionKind::Class(class) => class_contains_direct_eval(class),
+        ExpressionKind::ImportCall { specifier, options } => {
+            expression_contains_direct_eval(specifier)
+                || options
+                    .as_deref()
+                    .is_some_and(expression_contains_direct_eval)
+        }
         ExpressionKind::Unary { argument, .. }
         | ExpressionKind::Chain {
             expression: argument,
@@ -5777,6 +6187,48 @@ fn collect_pattern_captures(pattern: &Pattern, names: &mut HashSet<String>) {
     }
 }
 
+/// Every identifier evaluated while a pattern is initialised.
+///
+/// Unlike [`collect_pattern_captures`], this starts in collecting mode: the pattern itself is
+/// already inside a nested function relative to its owner. A function parameter default such as
+/// `function f(x = f.value) {}` therefore captures the outer `f` binding even though the
+/// function body never mentions it.
+fn collect_pattern_identifiers(pattern: &Pattern, names: &mut HashSet<String>) {
+    match pattern {
+        Pattern::Identifier(_) => {}
+        Pattern::Member { object, .. } | Pattern::PrivateMember { object, .. } => {
+            collect_identifiers(object, names, true);
+        }
+        Pattern::Computed { object, property } => {
+            collect_identifiers(object, names, true);
+            collect_identifiers(property, names, true);
+        }
+        Pattern::WithDefault { inner, default } => {
+            collect_identifiers(default, names, true);
+            collect_pattern_identifiers(inner, names);
+        }
+        Pattern::Object { properties, rest } => {
+            for property in properties {
+                if let PatternKey::Computed(key) = &property.key {
+                    collect_identifiers(key, names, true);
+                }
+                collect_pattern_identifiers(&property.value, names);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_identifiers(rest, names);
+            }
+        }
+        Pattern::Array { elements, rest } => {
+            for element in elements.iter().flatten() {
+                collect_pattern_identifiers(element, names);
+            }
+            if let Some(rest) = rest {
+                collect_pattern_identifiers(rest, names);
+            }
+        }
+    }
+}
+
 /// Whether a target stores through a property reference rather than binding a name.
 fn stores_through_reference(pattern: &Pattern) -> bool {
     match pattern {
@@ -5793,6 +6245,12 @@ fn collect_nested_function_names(
 ) {
     match &statement.kind {
         StatementKind::Function(function) => {
+            for parameter in &function.parameters {
+                collect_pattern_identifiers(&parameter.pattern, names);
+            }
+            if let Some(rest) = &function.rest {
+                collect_pattern_identifiers(rest, names);
+            }
             for statement in &function.body {
                 collect_nested_function_names(statement, names, true);
             }
@@ -5843,6 +6301,10 @@ fn collect_nested_function_names(
             collect_nested_function_names(body, names, inside_function);
         }
         StatementKind::Labelled { body, .. } => {
+            collect_nested_function_names(body, names, inside_function);
+        }
+        StatementKind::With { object, body } => {
+            collect_identifiers(object, names, inside_function);
             collect_nested_function_names(body, names, inside_function);
         }
         StatementKind::ForIn { object, body, .. } => {
@@ -6094,6 +6556,12 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             }
             collect_identifiers(value, names, collecting);
         }
+        ExpressionKind::ImportCall { specifier, options } => {
+            collect_identifiers(specifier, names, collecting);
+            if let Some(options) = options {
+                collect_identifiers(options, names, collecting);
+            }
+        }
         // Every name the pattern assigns is written by this function, so each is a capture
         // candidate for the same reason a plain assignment target is.
         ExpressionKind::PatternAssignment { pattern, value } => {
@@ -6239,6 +6707,12 @@ fn expression_references(expression: &Expression, name: &str) -> bool {
         }
         ExpressionKind::Assignment { target, value, .. } => {
             target == name || expression_references(value, name)
+        }
+        ExpressionKind::ImportCall { specifier, options } => {
+            expression_references(specifier, name)
+                || options
+                    .as_deref()
+                    .is_some_and(|options| expression_references(options, name))
         }
         ExpressionKind::Conditional {
             test,
@@ -6628,6 +7102,7 @@ mod tests {
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                             key: kiln_hir::ObjectKey::Static("fixed".into()),
                             value: number(1.0),
+                            form: kiln_hir::PropertyForm::KeyValue,
                             span: Span::default(),
                         }),
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
@@ -6640,6 +7115,7 @@ mod tests {
                                 span: Span::default(),
                             }),
                             value: number(3.0),
+                            form: kiln_hir::PropertyForm::KeyValue,
                             span: Span::default(),
                         }),
                     ],
@@ -6895,6 +7371,56 @@ mod tests {
         assert_eq!(proto.code.last(), Some(&Instruction::Return));
     }
 
+    #[test]
+    fn a_captured_defaulted_identifier_parameter_uses_its_positional_cell() {
+        let default = Expression {
+            kind: ExpressionKind::StaticMember {
+                object: Box::new(identifier("factory")),
+                property: "fallback".to_owned(),
+                optional: false,
+            },
+            span: Span::default(),
+        };
+        let function = statement(StatementKind::Function(Box::new(kiln_hir::Function {
+            binds_own_name: false,
+            asynchronous: false,
+            name: Some("factory".to_owned()),
+            arrow: false,
+            generator: false,
+            parameters: vec![kiln_hir::Parameter {
+                pattern: Pattern::WithDefault {
+                    inner: Box::new(Pattern::Identifier("value".to_owned())),
+                    default: Box::new(default),
+                },
+                span: Span::default(),
+            }],
+            rest: None,
+            body: vec![statement(StatementKind::Return(Some(arrow(
+                &[],
+                vec![statement(StatementKind::Return(Some(identifier("value"))))],
+            ))))],
+            span: Span::default(),
+        })));
+        let program = compile(&module(vec![function])).expect("defaulted parameter compiles");
+        let factory = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("factory"))
+            .expect("factory proto");
+        assert!(factory.code.contains(&Instruction::LoadCell(0)));
+        assert!(factory.code.contains(&Instruction::StoreCell(0)));
+        assert_eq!(
+            factory
+                .code
+                .iter()
+                .filter(|instruction| matches!(instruction, Instruction::LoadGlobal(_)))
+                .count(),
+            0,
+            "the function's module binding is captured, never read from the caller's module"
+        );
+        assert!(factory.code.contains(&Instruction::LoadUpvalue(0)));
+    }
+
     /// The binding has to exist before the body is compiled, or a function cannot call itself.
     #[test]
     fn a_function_can_refer_to_itself() {
@@ -6958,6 +7484,188 @@ mod tests {
         );
         // The cell is made at module scope, before anything can capture it.
         assert!(program.code.contains(&Instruction::NewCell(0)));
+    }
+
+    #[test]
+    fn a_class_method_default_captures_its_module_binding() {
+        let method = kiln_hir::Function {
+            binds_own_name: false,
+            asynchronous: false,
+            name: Some("read".to_owned()),
+            arrow: false,
+            generator: false,
+            parameters: vec![kiln_hir::Parameter {
+                pattern: Pattern::WithDefault {
+                    inner: Box::new(Pattern::Identifier("value".to_owned())),
+                    default: Box::new(identifier("shared")),
+                },
+                span: Span::default(),
+            }],
+            rest: None,
+            body: vec![statement(StatementKind::Return(Some(identifier("value"))))],
+            span: Span::default(),
+        };
+        let program = compile(&module(vec![
+            statement(StatementKind::Variable {
+                kind: VariableKind::Let,
+                declarations: vec![kiln_hir::VariableDeclarator {
+                    pattern: Pattern::Identifier("shared".to_owned()),
+                    initializer: Some(number(1.0)),
+                    span: Span::default(),
+                }],
+            }),
+            statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                name: Some("Reader".to_owned()),
+                superclass: None,
+                constructor: None,
+                methods: vec![kiln_hir::ClassMethod {
+                    key: kiln_hir::ObjectKey::Static("read".to_owned()),
+                    function: method,
+                    is_static: false,
+                    kind: kiln_hir::MethodKind::Normal,
+                }],
+                fields: Vec::new(),
+                span: Span::default(),
+            }))),
+        ]))
+        .expect("class method compiles");
+        let read = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("read"))
+            .expect("method proto");
+        assert!(read.code.contains(&Instruction::LoadUpvalue(0)));
+        assert!(
+            !read
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_))),
+            "an exported method must carry its module binding instead of indexing its caller"
+        );
+        assert!(program.code.contains(&Instruction::NewCell(0)));
+    }
+
+    #[test]
+    fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
+        let constructor = kiln_hir::Function {
+            binds_own_name: false,
+            asynchronous: false,
+            name: None,
+            arrow: false,
+            generator: false,
+            parameters: vec![kiln_hir::Parameter {
+                pattern: Pattern::Identifier("value".to_owned()),
+                span: Span::default(),
+            }],
+            rest: None,
+            body: vec![statement(StatementKind::Return(Some(Expression {
+                kind: ExpressionKind::StaticMember {
+                    object: Box::new(identifier("exports")),
+                    property: "IDENTIFIER".to_owned(),
+                    optional: false,
+                },
+                span: Span::default(),
+            })))],
+            span: Span::default(),
+        };
+        let wrapper = kiln_hir::Function {
+            binds_own_name: false,
+            asynchronous: false,
+            name: Some("wrapper".to_owned()),
+            arrow: false,
+            generator: false,
+            parameters: vec![kiln_hir::Parameter {
+                pattern: Pattern::Identifier("exports".to_owned()),
+                span: Span::default(),
+            }],
+            rest: None,
+            body: vec![statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                name: Some("Name".to_owned()),
+                superclass: None,
+                constructor: Some(constructor),
+                methods: Vec::new(),
+                fields: Vec::new(),
+                span: Span::default(),
+            })))],
+            span: Span::default(),
+        };
+        let program = compile(&module(vec![statement(StatementKind::Function(Box::new(
+            wrapper,
+        )))]))
+        .expect("CommonJS-shaped wrapper compiles");
+        let wrapper = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("wrapper"))
+            .expect("wrapper proto");
+        assert!(
+            wrapper.code.contains(&Instruction::NewCell(0)),
+            "the wrapper parameter must be boxed for the nested class constructor"
+        );
+        let constructor = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("Name"))
+            .expect("class constructor proto");
+        assert!(constructor.code.contains(&Instruction::LoadUpvalue(0)));
+        assert!(
+            !constructor
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_))),
+            "the constructor must carry the wrapper binding across module calls"
+        );
+    }
+
+    #[test]
+    fn an_exported_derived_constructor_captures_its_hidden_super_binding() {
+        let program = compile(&module(vec![
+            statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                name: Some("Base".to_owned()),
+                superclass: None,
+                constructor: None,
+                methods: Vec::new(),
+                fields: Vec::new(),
+                span: Span::default(),
+            }))),
+            statement(StatementKind::Class(Box::new(kiln_hir::Class {
+                name: Some("Derived".to_owned()),
+                superclass: Some(identifier("Base")),
+                constructor: Some(kiln_hir::Function {
+                    binds_own_name: false,
+                    asynchronous: false,
+                    name: None,
+                    arrow: false,
+                    generator: false,
+                    parameters: Vec::new(),
+                    rest: None,
+                    body: vec![statement(StatementKind::Expression(Expression {
+                        kind: ExpressionKind::SuperCall {
+                            arguments: Vec::new(),
+                        },
+                        span: Span::default(),
+                    }))],
+                    span: Span::default(),
+                }),
+                methods: Vec::new(),
+                fields: Vec::new(),
+                span: Span::default(),
+            }))),
+        ]))
+        .expect("derived class compiles");
+        let derived = program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("Derived"))
+            .expect("derived constructor proto");
+        assert!(derived.code.contains(&Instruction::LoadUpvalue(0)));
+        assert!(
+            !derived
+                .code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::LoadGlobal(_))),
+            "super must travel with the exported constructor instead of indexing its caller"
+        );
     }
 
     /// Step 1a refused captures outright; 1b compiles them. What must remain true is that a
@@ -7343,11 +8051,13 @@ mod tests {
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                             key: kiln_hir::ObjectKey::Static("a".into()),
                             value: number(1.0),
+                            form: kiln_hir::PropertyForm::KeyValue,
                             span: Span::default(),
                         }),
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                             key: kiln_hir::ObjectKey::Static("b".into()),
                             value: number(2.0),
+                            form: kiln_hir::PropertyForm::KeyValue,
                             span: Span::default(),
                         }),
                     ],
@@ -7378,12 +8088,14 @@ mod tests {
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                             key: kiln_hir::ObjectKey::Static("a".into()),
                             value: number(1.0),
+                            form: kiln_hir::PropertyForm::KeyValue,
                             span: Span::default(),
                         }),
                         kiln_hir::ObjectMember::Spread(number(0.0)),
                         kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                             key: kiln_hir::ObjectKey::Static("b".into()),
                             value: number(2.0),
+                            form: kiln_hir::PropertyForm::KeyValue,
                             span: Span::default(),
                         }),
                     ],
