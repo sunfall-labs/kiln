@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 152
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -360,7 +359,7 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
-#define KILN_C99_METHOD_NODE_NET_CONNECT 336
+#define KILN_C99_METHOD_NODE_NET_CONNECT 338
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -373,7 +372,9 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST 312
 #define KILN_C99_METHOD_TEMPORAL_OP 313
 #define KILN_C99_METHOD_TEMPORAL_OP_LAST 335
-#define KILN_C99_METHOD_TEMPORAL_LAST 335
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS 336
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS 337
+#define KILN_C99_METHOD_TEMPORAL_LAST 337
 #define KILN_C99_METHOD_SET_TIME 177
 #define KILN_C99_METHOD_SET_FULL_YEAR 178
 #define KILN_C99_METHOD_SET_MONTH 179
@@ -510,8 +511,11 @@ int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *rig
 int32_t kiln_bigint_negate(const void *handle, void **out);
 int32_t kiln_bigint_compare(const void *left, const void *right);
 int32_t kiln_bigint_is_zero(const void *handle);
+int32_t kiln_bigint_to_i128(const void *handle, int64_t *out_high, uint64_t *out_low);
 int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
+int32_t kiln_temporal_instant_from_epoch_milliseconds(double milliseconds, void **out_handle);
+int32_t kiln_temporal_instant_from_epoch_nanoseconds(int64_t high, uint64_t low,
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
 int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, const unsigned char *zone,
 void kiln_temporal_free(void *handle);

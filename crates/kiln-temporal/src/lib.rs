@@ -1563,10 +1563,10 @@ impl TemporalValue {
 /// fixed, and there is no path from this crate to `SystemTime::now` to forget to close.
 pub mod now {
     use super::{Error, Kind, Repr, Result, TemporalValue, TimeZone, time_zone_from};
+    use temporal_rs::TemporalResult;
     use temporal_rs::host::{HostClock, HostTimeZone};
     use temporal_rs::provider::TimeZoneProvider;
     use temporal_rs::unix_time::EpochNanoseconds;
-    use temporal_rs::{TemporalResult, UtcOffset};
 
     /// The realm standing in for the host: it answers with the instant it was given and with UTC.
     struct RealmClock {
@@ -1580,11 +1580,19 @@ pub mod now {
     }
 
     impl HostTimeZone for RealmClock {
+        /// The realm's zone is UTC by *name*, not by offset.
+        ///
+        /// The two are not interchangeable in a `Temporal` value: a zone built from a `+00:00`
+        /// offset prints as `2026-08-31T00:00:00+00:00[+00:00]`, and the named one prints
+        /// `[UTC]` -- which is the identifier [`time_zone_id`] already answers, and the one ADR
+        /// 0015 fixes the realm at. An offset zone would have made
+        /// `Temporal.Now.zonedDateTimeISO()` disagree with `Temporal.Now.timeZoneId()` about the
+        /// zone the program is running in.
         fn get_host_time_zone(
             &self,
             _: &(impl TimeZoneProvider + ?Sized),
         ) -> TemporalResult<TimeZone> {
-            Ok(TimeZone::from(UtcOffset::default()))
+            TimeZone::try_from_identifier_str(time_zone_id())
         }
     }
 
@@ -1945,6 +1953,22 @@ mod tests {
 
         let elsewhere = now::read(Kind::PlainDateTime, 0, Some("Asia/Tokyo")).expect("now");
         assert_eq!(iso(&elsewhere), "1970-01-01T09:00:00");
+    }
+
+    #[test]
+    fn an_unqualified_now_names_its_zone_rather_than_describing_its_offset() {
+        // `Temporal.Now.zonedDateTimeISO()` with no argument asks for the zone the program is
+        // running in, and ADR 0015 makes that UTC. A zone built from a `+00:00` offset would name
+        // the same instant and print `[+00:00]`, which is the offset UTC happens to have rather
+        // than the zone `time_zone_id` says the realm is in -- and two readers of one realm
+        // disagreeing about its zone is a wrong answer whichever one a program believes.
+        let zoned = now::read(Kind::ZonedDateTime, 0, None).expect("now");
+        assert_eq!(iso(&zoned), "1970-01-01T00:00:00+00:00[UTC]");
+        assert_eq!(text(&zoned, "timeZoneId"), now::time_zone_id());
+
+        // A zone the program names explicitly is still its own answer, not the realm's.
+        let named = now::read(Kind::ZonedDateTime, 0, Some("Asia/Tokyo")).expect("now");
+        assert_eq!(iso(&named), "1970-01-01T09:00:00+09:00[Asia/Tokyo]");
     }
 
     #[test]
