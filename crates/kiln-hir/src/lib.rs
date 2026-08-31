@@ -397,6 +397,27 @@ pub enum VariableKind {
     Var,
     Let,
     Const,
+    /// `using x = expr`: a `const` binding whose value is disposed when its scope is left.
+    ///
+    /// A kind rather than a flag beside one, because everything else about the binding -- block
+    /// scope, the temporal dead zone, the refusal to reassign -- is exactly `const`, and the
+    /// disposal is the only thing that reads it.
+    Using,
+    /// `await using x = expr`: as [`VariableKind::Using`], disposed asynchronously.
+    AwaitUsing,
+}
+
+impl VariableKind {
+    /// Whether a binding of this kind registers its value for disposal, and whether the disposal
+    /// is awaited.
+    #[must_use]
+    pub fn disposal(self) -> Option<bool> {
+        match self {
+            Self::Using => Some(false),
+            Self::AwaitUsing => Some(true),
+            Self::Var | Self::Let | Self::Const => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
