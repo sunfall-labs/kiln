@@ -9254,31 +9254,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
-                RuntimeHttpClientEvent::Ready { id: _ } => {
-                    let release = unsafe {
-                        ActiveHttpRuntime::release_client_connection(&mut *runtime, resource, true)
-                    };
-                    if let AgentRelease::Dispatch { request } = release {
-                        let queued = self.http_client_request(request).ok_or_else(|| {
-                            ExecutionError::Host {
-                                instruction,
-                                message: "HTTP Agent lost its queued ClientRequest".into(),
-                            }
-                        })?;
-                        self.attach_http_client_request_to_resource(
-                            &queued,
-                            resource,
-                            instruction,
-                        )?;
-                    } else if release == AgentRelease::Retire {
-                        let actions =
-                            unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
-                                .unwrap_or_default();
-                        for action in actions {
-                            self.start_http_stream_action(owner, resource, action, instruction)?;
-                        }
-                    }
-                }
                 RuntimeHttpClientEvent::Drain { id } | RuntimeHttpClientEvent::Finish { id } => {
                     let name = if matches!(event, RuntimeHttpClientEvent::Drain { .. }) {
                         "drain"
@@ -9327,7 +9302,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                     )?;
                 }
-                RuntimeHttpClientEvent::ResponseEnd { id } => {
+                RuntimeHttpClientEvent::ResponseEnd { id, reusable } => {
                     self.dispatch_http_response_event(
                         owner,
                         resource,
@@ -9347,6 +9322,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         stream.response = None;
                     }
                     self.remove_http_client_request(id);
+                    let release = unsafe {
+                        ActiveHttpRuntime::release_client_connection(
+                            &mut *runtime,
+                            resource,
+                            reusable,
+                        )
+                    };
+                    if let AgentRelease::Dispatch { request } = release {
+                        let queued = self.http_client_request(request).ok_or_else(|| {
+                            ExecutionError::Host {
+                                instruction,
+                                message: "HTTP Agent lost its queued ClientRequest".into(),
+                            }
+                        })?;
+                        self.attach_http_client_request_to_resource(
+                            &queued,
+                            resource,
+                            instruction,
+                        )?;
+                    } else if release == AgentRelease::Retire {
+                        let actions =
+                            unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
+                                .unwrap_or_default();
+                        for action in actions {
+                            self.start_http_stream_action(owner, resource, action, instruction)?;
+                        }
+                    }
                 }
                 RuntimeHttpClientEvent::Error { id, message } => {
                     let request = owner
@@ -10801,20 +10803,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if until_module && self.module_outcome().is_some() {
                 return Ok(());
             }
-            let has_pending_adapter_work = self.module_realm.as_ref().map_or_else(
-                || !self.pending_host.is_empty() || !self.pending_node.is_empty(),
-                |realm| {
-                    let realm = realm.borrow();
-                    !realm.pending_host.is_empty() || !realm.pending_node.is_empty()
-                },
-            );
-            let turn = self.with_realm_mut(|realm| {
-                if has_pending_adapter_work {
-                    runtime.next_referenced_turn(realm)
-                } else {
-                    runtime.next_timer(realm).map(RuntimeTurn::Timer)
-                }
-            });
+            // Pending adapter entries are routing metadata, not liveness. Runtime-owned HTTP
+            // keeps reads registered as unreferenced so idle keep-alive sockets can be reused;
+            // treating the mere entry as live work made detached async server mains wait on
+            // cleanup reads forever. The provider is the sole authority for referenced host
+            // resources and requests, while the realm owns timer liveness.
+            let turn = self.with_realm_mut(|realm| runtime.next_referenced_turn(realm));
             let Some(turn) = turn else {
                 return Ok(());
             };

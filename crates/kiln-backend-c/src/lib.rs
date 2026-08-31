@@ -9218,15 +9218,17 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                                   0, exception);
     }
     if (client != NULL && event->kind == 8) {
+        uint64_t next_request_id = 0;
+        int release;
+        int status;
         if (client->response_ended) return KILN_C99_OK;
         client->response_ended = 1;
-        return kiln_c99_node_emit(client->host, client->response, "end",
-                                  kiln_c99_undefined(), 0, 0, exception);
-    }
-    if (event->kind == 11) {
-        uint64_t next_request_id = 0;
-        int release = kiln_realm_http_agent_release_active(
-            socket->resource, 1, &next_request_id);
+        status = kiln_c99_node_emit(client->host, client->response, "end",
+                                    kiln_c99_undefined(), 0, 0, exception);
+        if (status != KILN_C99_OK) return status;
+        release = kiln_realm_http_agent_release_active(socket->resource,
+                                                       event->flags != 0,
+                                                       &next_request_id);
         if (release == KILN_REALM_HTTP_AGENT_DISPATCH) {
             kiln_node_client_request *next =
                 kiln_c99_node_client_for_id(socket, next_request_id);

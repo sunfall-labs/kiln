@@ -42,9 +42,6 @@ pub(crate) struct ClientRequestCommand {
 
 #[derive(Debug)]
 pub(crate) enum ClientEvent {
-    Ready {
-        id: u64,
-    },
     ResponseHead {
         id: u64,
         status: u16,
@@ -57,6 +54,7 @@ pub(crate) enum ClientEvent {
     },
     ResponseEnd {
         id: u64,
+        reusable: bool,
     },
     Error {
         id: u64,
@@ -175,17 +173,17 @@ where
                             });
                         }
                     }
-                    let _ = events.send(ClientEvent::ResponseEnd { id });
-                    if let Err(error) = sender.ready().await {
+                    // `ResponseEnd` is both the Node-visible terminal body event and the Agent's
+                    // reuse decision. Carry the decision in the same event so adapters cannot
+                    // block between two events; a `Connection: close` response still observes
+                    // `end` before the transport's `Closed` notification.
+                    let reusable = sender.ready().await.is_ok();
+                    let _ = events.send(ClientEvent::ResponseEnd { id, reusable });
+                    if !reusable {
                         connection_task.abort();
-                        let _ = events.send(ClientEvent::Error {
-                            id,
-                            message: error.to_string(),
-                        });
                         let _ = events.send(ClientEvent::Closed);
                         return Ok(());
                     }
-                    let _ = events.send(ClientEvent::Ready { id });
                 }
                 Err(error) => {
                     connection_task.abort();
@@ -603,7 +601,10 @@ mod tests {
             ));
             assert!(matches!(
                 client_events.recv().await,
-                Some(ClientEvent::ResponseEnd { id: 1 })
+                Some(ClientEvent::ResponseEnd {
+                    id: 1,
+                    reusable: false
+                })
             ));
             drop(request_sender);
             client
@@ -686,11 +687,7 @@ mod tests {
                 ));
                 assert!(matches!(
                     client_events.recv().await,
-                    Some(ClientEvent::ResponseEnd { id }) if id == request_id
-                ));
-                assert!(matches!(
-                    client_events.recv().await,
-                    Some(ClientEvent::Ready { id }) if id == request_id
+                    Some(ClientEvent::ResponseEnd { id, reusable: true }) if id == request_id
                 ));
             }
 
@@ -954,11 +951,7 @@ mod tests {
                 ));
                 assert!(matches!(
                     client_events.recv().await,
-                    Some(ClientEvent::ResponseEnd { id }) if id == request_id
-                ));
-                assert!(matches!(
-                    client_events.recv().await,
-                    Some(ClientEvent::Ready { id }) if id == request_id
+                    Some(ClientEvent::ResponseEnd { id, reusable: true }) if id == request_id
                 ));
             }
             drop(request_sender);
