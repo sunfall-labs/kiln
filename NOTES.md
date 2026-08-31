@@ -4079,3 +4079,15 @@ rule is not "no paths in generated C" — it is that the *launcher* must not car
 diagnostic wants a module identity, and the logical path already used for module identity would
 give the same diagnostic value while staying root-independent. Diagnosis by `kiln-ac`; recorded
 here for whoever owns `56454ca8`.
+
+**Confirmed by single-commit bisect** (`kiln-ac`, in a clean worktree): `56454ca8^` passes,
+`56454ca8` fails. `0927f4f6` adds 0 launcher-related lines, `56454ca8` adds 7.
+
+And the two of us disagreeing about whether that test failed at `4ff5613a` has an explanation
+worth keeping, because it is the same trap one layer down. The two commits are four minutes
+apart (14:07:11 and 14:11:49), and before 14:07 that work sat **uncommitted** in the shared
+checkout — `M crates/kiln-native/src/lib.rs` was dirty in main most of the day. So when I ran the
+test "at `4ff5613a`" and saw it fail twice, the tree already contained `56454ca8`'s changes,
+either as dirty working-tree state or as a HEAD that had moved under me. Neither of us measured
+wrong; we measured different trees and both called them `4ff5613a`. **A commit name is not a
+description of your working tree.**
