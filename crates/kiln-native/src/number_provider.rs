@@ -414,7 +414,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
         // runtime that now owns native entry as well as interpreted entry.
         OsString::from("--features"),
-        OsString::from("regexp,bigint,temporal,intl"),
+        OsString::from("regexp,bigint,temporal"),
         OsString::from("--release"),
         OsString::from("--target"),
         OsString::from(&rust_target),
