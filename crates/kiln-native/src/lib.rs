@@ -1636,6 +1636,12 @@ fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'s
 exports[0] = constructor;
 exports[1] = constructor;"#,
         ),
+        NodeBuiltin::Net => Some(
+            r#"kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_NET_CREATE_SERVER);
+exports[0] = kiln_c99_undefined();
+exports[1] = kiln_c99_undefined();
+exports[2] = create_server;"#,
+        ),
         _ => None,
     }
 }
@@ -3571,6 +3577,16 @@ mod tests {
         );
         assert!(emitted.source.contains("exports[0] = constructor;"));
         assert!(emitted.source.contains("exports[1] = constructor;"));
+        assert!(native_builtin_body(NodeBuiltin::Http).is_none());
+    }
+
+    #[test]
+    fn node_net_has_one_native_runtime_module_materializer() {
+        use kiln_module_resolver::NodeBuiltin;
+
+        let body = native_builtin_body(NodeBuiltin::Net).expect("net materializes");
+        assert!(body.contains("KILN_C99_METHOD_NODE_NET_CREATE_SERVER"));
+        assert!(body.contains("exports[2] = create_server;"));
         assert!(native_builtin_body(NodeBuiltin::Http).is_none());
     }
 
