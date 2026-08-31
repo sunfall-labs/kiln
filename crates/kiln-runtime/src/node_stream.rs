@@ -258,12 +258,10 @@ impl StreamDriver {
                 .requests
                 .iter()
                 .any(|(_, kind)| matches!(kind, PendingKind::Read)))
-        .then(|| {
-            StreamAction::Start(AsyncHostOp::TcpRead {
-                stream: self.resource,
-                max_bytes: self.read_size,
-            })
-        })
+        .then_some(StreamAction::Start(AsyncHostOp::TcpRead {
+            stream: self.resource,
+            max_bytes: self.read_size,
+        }))
     }
 }
 

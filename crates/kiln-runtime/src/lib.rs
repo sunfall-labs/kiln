@@ -39,20 +39,15 @@ pub enum ClockCapability {
 }
 
 /// How one realm obtains entropy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum EntropyCapability {
     /// SplitMix64 with ADR 0026's fixed seed.
+    #[default]
     Deterministic,
     /// SplitMix64 with a caller-selected seed.
     Seeded(u64),
     /// Entropy supplied explicitly through [`HostOp::EntropyU64`].
     Host,
-}
-
-impl Default for EntropyCapability {
-    fn default() -> Self {
-        Self::Deterministic
-    }
 }
 
 /// How one realm selects local civil time.
@@ -2225,7 +2220,7 @@ mod tests {
             unreachable!()
         };
         let close_request = runtime.start_host_op(close.clone(), false);
-        assert!(server.started(&close, close_request));
+        assert!(server.started(close, close_request));
         assert_eq!(
             server.completed(runtime.next_host_completion().expect("close completes")),
             Some(vec![ServerAction::Close])
