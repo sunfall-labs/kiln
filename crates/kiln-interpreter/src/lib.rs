@@ -12093,12 +12093,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             && matches!(
                 native,
                 Native::ObjectIsFrozen
-                    | Native::ObjectIsExtensible
                     | Native::ObjectIsSealed
                     | Native::ObjectFreeze
                     | Native::ObjectSeal
-                    | Native::ObjectPreventExtensions
-                    | Native::ObjectGetPrototypeOf
                     | Native::ObjectAssign
                     // Serialising walks the value without the machine, so it cannot run a `get`
                     // trap. Unwrapping the outermost proxy makes the common case -- a wrapper
@@ -12843,6 +12840,59 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Ok(Value::String(out))
             }
+            // The operations that reach a proxy's remaining traps. Each has an ordinary pure
+            // implementation that reads a property store; a proxy has none, and answering from
+            // its target would skip the handler entirely.
+            Native::ObjectGetPrototypeOf if matches!(arguments.first(), Some(Value::Proxy(_))) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.proxy_get_prototype_of(&target, instruction)
+            }
+            Native::ObjectSetPrototypeOf if matches!(arguments.first(), Some(Value::Proxy(_))) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let prototype = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                if !matches!(prototype, Value::Null) && !is_reflect_target(&prototype) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Object prototype may only be an Object or null".to_owned(),
+                    });
+                }
+                // `Object.setPrototypeOf` raises where `Reflect.setPrototypeOf` reports: the
+                // refusal is the same one, and only the spelling of the answer differs.
+                if !self.proxy_set_prototype_of(&target, &prototype, instruction)? {
+                    return Err(prototype_change_refused());
+                }
+                Ok(target)
+            }
+            Native::ObjectIsExtensible if matches!(arguments.first(), Some(Value::Proxy(_))) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Boolean(
+                    self.proxy_is_extensible(&target, instruction)?,
+                ))
+            }
+            Native::ObjectPreventExtensions
+                if matches!(arguments.first(), Some(Value::Proxy(_))) =>
+            {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !self.proxy_prevent_extensions(&target, instruction)? {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Object.preventExtensions could not close the object".to_owned(),
+                    });
+                }
+                Ok(target)
+            }
+            // `Object.getOwnPropertyNames` is the `ownKeys` trap too. It lists what is not
+            // enumerated as well, so it cannot be answered from `Object.keys`.
+            Native::ObjectOwnNames if matches!(arguments.first(), Some(Value::Proxy(_))) => {
+                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let keys = self.own_keys(&target, instruction)?;
+                Ok(Value::Array(ArrayData::new(
+                    keys.into_iter()
+                        .filter(|key| {
+                            !key.starts_with(RESERVED_KEY_PREFIX) && !key.starts_with("@@")
+                        })
+                        .map(Value::String)
+                        .collect(),
+                )))
+            }
             // `Object.prototype.hasOwnProperty.call(proxy, k)` is how a library asks a value
             // whether it really holds a key, and on a proxy the answer is a trap: the pure
             // implementation reads a property store and would say no to everything.
@@ -12900,9 +12950,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let descriptor = arguments.get(2).cloned().unwrap_or(Value::Undefined);
                 match self.proxy_trap(&proxy, "defineProperty", instruction)? {
                     Some(trap) => {
+                        // Read before the trap runs, which is the order the specification
+                        // gives: a handler that mutates the descriptor object cannot change
+                        // what it is checked against afterwards.
+                        let described = self.read_descriptor(&descriptor, instruction)?;
                         let handler = proxy.handler.clone();
-                        let list = vec![inner, Self::trap_key(&key), descriptor];
-                        self.call_value(&trap, handler, list, instruction)?;
+                        let list = vec![inner.clone(), Self::trap_key(&key), descriptor];
+                        let answered = self.call_value(&trap, handler, list, instruction)?;
+                        if !answered.is_truthy() {
+                            if matches!(native, Native::ReflectDefineProperty) {
+                                return Ok(Value::Boolean(false));
+                            }
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "proxy defineProperty refused the definition".to_owned(),
+                            });
+                        }
+                        self.check_define_invariant(&inner, &key, &described, instruction)?;
                     }
                     None => {
                         self.dispatch_native(
@@ -13159,11 +13222,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ReflectGetPrototypeOf => {
                 let target = self.reflect_target(arguments.first(), "getPrototypeOf")?;
+                if matches!(target, Value::Proxy(_)) {
+                    return self.proxy_get_prototype_of(&target, instruction);
+                }
                 Ok(prototype_of(&target))
             }
             Native::ReflectSetPrototypeOf => {
                 let target = self.reflect_target(arguments.first(), "setPrototypeOf")?;
                 let prototype = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                if matches!(target, Value::Proxy(_)) {
+                    if !matches!(prototype, Value::Null) && !is_reflect_target(&prototype) {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "Object prototype may only be an Object or null".to_owned(),
+                        });
+                    }
+                    return Ok(Value::Boolean(self.proxy_set_prototype_of(
+                        &target,
+                        &prototype,
+                        instruction,
+                    )?));
+                }
                 // A prototype must be an object or null; anything else is refused rather than
                 // silently ignored, and the refusal is this operation's `false`.
                 if !matches!(prototype, Value::Null) && !is_reflect_target(&prototype) {
@@ -13206,6 +13284,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::ReflectDeleteProperty => {
                 let target = self.reflect_target(arguments.first(), "deleteProperty")?;
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                if matches!(target, Value::Proxy(_)) {
+                    return Ok(Value::Boolean(self.delete(&target, &key, instruction)?));
+                }
                 Ok(Value::Boolean(delete_property(
                     &self.intrinsics,
                     &target,
@@ -13214,6 +13295,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ReflectIsExtensible => {
                 let target = self.reflect_target(arguments.first(), "isExtensible")?;
+                if matches!(target, Value::Proxy(_)) {
+                    return Ok(Value::Boolean(
+                        self.proxy_is_extensible(&target, instruction)?,
+                    ));
+                }
                 Ok(Value::Boolean(is_extensible_target(
                     &self.intrinsics,
                     &target,
@@ -13221,6 +13307,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ReflectPreventExtensions => {
                 let target = self.reflect_target(arguments.first(), "preventExtensions")?;
+                if matches!(target, Value::Proxy(_)) {
+                    return Ok(Value::Boolean(
+                        self.proxy_prevent_extensions(&target, instruction)?,
+                    ));
+                }
                 let closed = match &target {
                     Value::Object(object) => {
                         object.borrow_mut().prevent_extensions();
@@ -18555,13 +18646,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return match self.proxy_trap(&proxy, "set", instruction)? {
                 Some(trap) => {
                     let handler = proxy.handler.clone();
-                    let arguments = vec![inner, Self::trap_key(key), value, target.clone()];
+                    let arguments = vec![
+                        inner.clone(),
+                        Self::trap_key(key),
+                        value.clone(),
+                        target.clone(),
+                    ];
                     let answered = self.call_value(&trap, handler, arguments, instruction)?;
-                    if answered.is_truthy() {
-                        Ok(())
-                    } else {
-                        Err(Self::write_refused(key))
+                    if !answered.is_truthy() {
+                        return Err(Self::write_refused(key));
                     }
+                    self.check_set_invariant(&inner, key, &value, instruction)
                 }
                 None => self.set_or_throw(&inner, key, value, instruction),
             };
@@ -20272,6 +20367,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(Native::ProxyConstructor) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let handler = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                // Both have to be objects: every operation on a proxy asks one of them a
+                // question, and a primitive has no answer to give. Refused where the proxy is
+                // made rather than at the first read that finds nothing.
+                if !is_an_object(&target) || !is_an_object(&handler) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Cannot create proxy with a non-object as target or handler"
+                            .to_owned(),
+                    });
+                }
                 self.stack.push(Value::Proxy(Rc::new(ProxyData {
                     target,
                     handler,
@@ -20287,9 +20391,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let built = self.call_value(
                             &trap,
                             handler,
-                            vec![inner, list, Value::Proxy(Rc::clone(&proxy))],
+                            vec![inner, list, new_target.clone()],
                             current,
                         )?;
+                        // `new` produces an object, so a `construct` trap that answered with
+                        // anything else has produced something `new` cannot mean.
+                        if !is_an_object(&built) {
+                            return Err(Self::proxy_invariant("construct must report an object"));
+                        }
                         self.stack.push(built);
                     }
                     None => return self.construct_as(inner, arguments, new_target, current),
@@ -21674,14 +21783,77 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        match self.proxy_trap(&proxy, "getOwnPropertyDescriptor", instruction)? {
-            Some(trap) => {
-                let handler = proxy.handler.clone();
-                let list = vec![inner, Self::trap_key(key)];
-                self.call_value(&trap, handler, list, instruction)
-            }
-            None => self.proxy_descriptor(&inner, key, instruction),
+        let Some(trap) = self.proxy_trap(&proxy, "getOwnPropertyDescriptor", instruction)? else {
+            return self.proxy_descriptor(&inner, key, instruction);
+        };
+        let handler = proxy.handler.clone();
+        let list = vec![inner.clone(), Self::trap_key(key)];
+        let answered = self.call_value(&trap, handler, list, instruction)?;
+        if !is_an_object(&answered) && !matches!(answered, Value::Undefined) {
+            return Err(Self::proxy_invariant(
+                "getOwnPropertyDescriptor must report an object or undefined",
+            ));
         }
+        let held = self.own_state(&inner, key, instruction)?;
+        let extensible = self.target_extensible(&inner, instruction)?;
+        if matches!(answered, Value::Undefined) {
+            // Denying a property the target really has is only allowed if the target could
+            // still lose it: a non-configurable one it cannot, and a non-extensible target
+            // cannot gain the one it is being told it has instead.
+            match &held {
+                Some((_, attributes)) if !attributes.configurable => {
+                    return Err(Self::proxy_invariant(
+                        "getOwnPropertyDescriptor cannot report a non-configurable property of \
+                         the target as absent",
+                    ));
+                }
+                Some(_) if !extensible => {
+                    return Err(Self::proxy_invariant(
+                        "getOwnPropertyDescriptor cannot report a property of a non-extensible \
+                         target as absent",
+                    ));
+                }
+                _ => {}
+            }
+            return Ok(Value::Undefined);
+        }
+        if held.is_none() && !extensible {
+            return Err(Self::proxy_invariant(
+                "getOwnPropertyDescriptor cannot report a property a non-extensible target does \
+                 not have",
+            ));
+        }
+        let described = self.read_descriptor(&answered, instruction)?;
+        if described.configurable == Some(false) {
+            match &held {
+                // Claiming a property is locked when the target's is not, or has none at all,
+                // is the lie the invariant exists to catch: a caller may rely on the claim.
+                None => {
+                    return Err(Self::proxy_invariant(
+                        "getOwnPropertyDescriptor cannot report a non-configurable property the \
+                         target does not have",
+                    ));
+                }
+                Some((_, attributes)) if attributes.configurable => {
+                    return Err(Self::proxy_invariant(
+                        "getOwnPropertyDescriptor cannot report a configurable property of the \
+                         target as non-configurable",
+                    ));
+                }
+                Some((Property::Value(_), attributes))
+                    if described.writable == Some(false) && attributes.writable =>
+                {
+                    return Err(Self::proxy_invariant(
+                        "getOwnPropertyDescriptor cannot report a writable property of the \
+                         target as non-writable",
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
+        // Completed, which is what `[[GetOwnProperty]]` answers with: a trap may report only
+        // `value`, and every caller after this reads all six fields.
+        Ok(Self::completed_descriptor(&described))
     }
 
     /// Run a mutating array method against a proxy, writing the result back through its traps.
@@ -21773,6 +21945,404 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// A `TypeError` naming the invariant a handler broke.
+    ///
+    /// Every one of these says the same thing in a different place: a trap may lie about
+    /// anything the target has not already promised, and nothing it has. The specification calls
+    /// them the essential internal method invariants, and they are what makes a proxy safe to
+    /// hand to code that has not been told it is one.
+    fn proxy_invariant(what: &str) -> ExecutionError {
+        ExecutionError::TypeErrorMessage {
+            message: format!("proxy {what}"),
+        }
+    }
+
+    /// `target.[[GetOwnProperty]](key)`: what the target really holds, for a check against what
+    /// the trap claimed.
+    ///
+    /// A proxy may itself be a proxy's target, and then the question is another trap rather than
+    /// a store -- so this asks the operation, not the object.
+    fn own_state(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<Option<(Property, Attributes)>, ExecutionError> {
+        if matches!(target, Value::Proxy(_)) {
+            let described = self.proxy_descriptor(target, key, instruction)?;
+            if !is_an_object(&described) {
+                return Ok(None);
+            }
+            let descriptor = self.read_descriptor(&described, instruction)?;
+            let attributes = Attributes {
+                writable: descriptor.writable.unwrap_or(false),
+                enumerable: descriptor.enumerable.unwrap_or(false),
+                configurable: descriptor.configurable.unwrap_or(false),
+            };
+            let property = if descriptor.is_accessor() {
+                Property::Accessor {
+                    get: descriptor
+                        .get
+                        .filter(|half| !matches!(half, Value::Undefined)),
+                    set: descriptor
+                        .set
+                        .filter(|half| !matches!(half, Value::Undefined)),
+                }
+            } else {
+                Property::Value(descriptor.value.unwrap_or(Value::Undefined))
+            };
+            return Ok(Some((property, attributes)));
+        }
+        Ok(own_property_state(
+            &self.intrinsics,
+            target,
+            &key.property_key(),
+        ))
+    }
+
+    /// `target.[[IsExtensible]]()`, which is a trap when the target is itself a proxy.
+    fn target_extensible(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        if matches!(target, Value::Proxy(_)) {
+            return self.proxy_is_extensible(target, instruction);
+        }
+        Ok(is_extensible_target(&self.intrinsics, target))
+    }
+
+    /// `target.[[GetPrototypeOf]]()`, which is a trap when the target is itself a proxy.
+    fn target_prototype(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        if matches!(target, Value::Proxy(_)) {
+            return self.proxy_get_prototype_of(target, instruction);
+        }
+        Ok(prototype_of(target))
+    }
+
+    /// `proxy.[[IsExtensible]]()`.
+    ///
+    /// The trap may not disagree with the target at all -- unlike almost every other one, there
+    /// is no room here for a handler to invent an answer, because extensibility is what every
+    /// other invariant is checked against.
+    fn proxy_is_extensible(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return Ok(is_extensible_target(&self.intrinsics, target));
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        let Some(trap) = self.proxy_trap(&proxy, "isExtensible", instruction)? else {
+            return self.target_extensible(&inner, instruction);
+        };
+        let handler = proxy.handler.clone();
+        let answered = self
+            .call_value(&trap, handler, vec![inner.clone()], instruction)?
+            .is_truthy();
+        if answered != self.target_extensible(&inner, instruction)? {
+            return Err(Self::proxy_invariant(
+                "isExtensible must report what the target reports",
+            ));
+        }
+        Ok(answered)
+    }
+
+    /// `proxy.[[PreventExtensions]]()`.
+    fn proxy_prevent_extensions(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return Ok(true);
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        let Some(trap) = self.proxy_trap(&proxy, "preventExtensions", instruction)? else {
+            return Ok(self
+                .dispatch_native(
+                    Native::ReflectPreventExtensions,
+                    &Value::Undefined,
+                    &[inner],
+                    instruction,
+                )?
+                .is_truthy());
+        };
+        let handler = proxy.handler.clone();
+        let answered = self
+            .call_value(&trap, handler, vec![inner.clone()], instruction)?
+            .is_truthy();
+        // A handler may refuse, and then the answer is simply false. What it may not do is
+        // report success while the target is still open: every later invariant would then be
+        // checked against a promise nothing kept.
+        if answered && self.target_extensible(&inner, instruction)? {
+            return Err(Self::proxy_invariant(
+                "preventExtensions cannot report success while the target is still extensible",
+            ));
+        }
+        Ok(answered)
+    }
+
+    /// `proxy.[[GetPrototypeOf]]()`.
+    fn proxy_get_prototype_of(
+        &mut self,
+        target: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return Ok(prototype_of(target));
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        let Some(trap) = self.proxy_trap(&proxy, "getPrototypeOf", instruction)? else {
+            return self.target_prototype(&inner, instruction);
+        };
+        let handler = proxy.handler.clone();
+        let answered = self.call_value(&trap, handler, vec![inner.clone()], instruction)?;
+        if !is_an_object(&answered) && !matches!(answered, Value::Null) {
+            return Err(Self::proxy_invariant(
+                "getPrototypeOf must report an object or null",
+            ));
+        }
+        // An extensible target's prototype can still be changed, so a trap may answer anything.
+        // A non-extensible one's cannot, and the answer has to be the truth.
+        if self.target_extensible(&inner, instruction)? {
+            return Ok(answered);
+        }
+        let actual = self.target_prototype(&inner, instruction)?;
+        if !same_value(&answered, &actual) {
+            return Err(Self::proxy_invariant(
+                "getPrototypeOf must report the target's prototype once the target is not \
+                 extensible",
+            ));
+        }
+        Ok(answered)
+    }
+
+    /// `proxy.[[SetPrototypeOf]](value)`.
+    fn proxy_set_prototype_of(
+        &mut self,
+        target: &Value,
+        prototype: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let Value::Proxy(proxy) = target else {
+            return Ok(true);
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        let Some(trap) = self.proxy_trap(&proxy, "setPrototypeOf", instruction)? else {
+            return Ok(self
+                .dispatch_native(
+                    Native::ReflectSetPrototypeOf,
+                    &Value::Undefined,
+                    &[inner, prototype.clone()],
+                    instruction,
+                )?
+                .is_truthy());
+        };
+        let handler = proxy.handler.clone();
+        let answered = self
+            .call_value(
+                &trap,
+                handler,
+                vec![inner.clone(), prototype.clone()],
+                instruction,
+            )?
+            .is_truthy();
+        if !answered {
+            return Ok(false);
+        }
+        if self.target_extensible(&inner, instruction)? {
+            return Ok(true);
+        }
+        let actual = self.target_prototype(&inner, instruction)?;
+        if !same_value(prototype, &actual) {
+            return Err(Self::proxy_invariant(
+                "setPrototypeOf cannot report success for a prototype the non-extensible target \
+                 does not have",
+            ));
+        }
+        Ok(true)
+    }
+
+    /// What a `set` trap that answered truthily may not have claimed.
+    ///
+    /// A handler is free to route a write anywhere it likes -- that is the point of the trap --
+    /// but not to report success for a write the target itself would have refused and whose
+    /// refusal the target has promised to keep.
+    fn check_set_invariant(
+        &mut self,
+        inner: &Value,
+        key: &Value,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match self.own_state(inner, key, instruction)? {
+            Some((Property::Value(held), attributes))
+                if !attributes.configurable && !attributes.writable =>
+            {
+                if same_value(value, &held) {
+                    Ok(())
+                } else {
+                    Err(Self::proxy_invariant(
+                        "set cannot report a write to a non-writable, non-configurable property \
+                         of the target",
+                    ))
+                }
+            }
+            Some((Property::Accessor { set: None, .. }, attributes))
+                if !attributes.configurable =>
+            {
+                Err(Self::proxy_invariant(
+                    "set cannot report a write through a non-configurable accessor with no setter",
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// What a `defineProperty` trap that answered truthily may not have claimed.
+    ///
+    /// Adding to a closed target, or claiming a lock the target does not have, are the two ways
+    /// a handler can report a definition the target would not have made -- and both leave a
+    /// caller believing something about the target that is not true.
+    fn check_define_invariant(
+        &mut self,
+        inner: &Value,
+        key: &Value,
+        described: &Descriptor,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let held = self.own_state(inner, key, instruction)?;
+        let extensible = self.target_extensible(inner, instruction)?;
+        let locking = described.configurable == Some(false);
+        let Some((property, attributes)) = held else {
+            if !extensible {
+                return Err(Self::proxy_invariant(
+                    "defineProperty cannot add a property to a non-extensible target",
+                ));
+            }
+            if locking {
+                return Err(Self::proxy_invariant(
+                    "defineProperty cannot report a non-configurable property the target does \
+                     not have",
+                ));
+            }
+            return Ok(());
+        };
+        if !Self::descriptor_is_compatible(described, &property, attributes) {
+            return Err(Self::proxy_invariant(
+                "defineProperty cannot report a definition the target would have refused",
+            ));
+        }
+        if locking && attributes.configurable {
+            return Err(Self::proxy_invariant(
+                "defineProperty cannot lock down a property the target left configurable",
+            ));
+        }
+        // A target property that is non-configurable but still *writable* has not promised its
+        // value, so a trap may not report it frozen either.
+        if matches!(property, Property::Value(_))
+            && !attributes.configurable
+            && attributes.writable
+            && described.writable == Some(false)
+        {
+            return Err(Self::proxy_invariant(
+                "defineProperty cannot report a writable, non-configurable property of the \
+                 target made non-writable",
+            ));
+        }
+        Ok(())
+    }
+
+    /// `IsCompatiblePropertyDescriptor`: whether an ordinary object would have accepted this
+    /// redefinition of a property it already has.
+    ///
+    /// A configurable property may be redefined into anything at all, which is what configurable
+    /// means. Everything below is what a *non*-configurable one still guarantees: its kind, its
+    /// enumerability, and -- once it is also non-writable -- its value.
+    fn descriptor_is_compatible(
+        described: &Descriptor,
+        property: &Property,
+        attributes: Attributes,
+    ) -> bool {
+        if attributes.configurable {
+            return true;
+        }
+        if described.configurable == Some(true) {
+            return false;
+        }
+        if described
+            .enumerable
+            .is_some_and(|wanted| wanted != attributes.enumerable)
+        {
+            return false;
+        }
+        if described.is_generic() {
+            return true;
+        }
+        match property {
+            Property::Value(held) => {
+                if described.is_accessor() {
+                    return false;
+                }
+                if attributes.writable {
+                    return true;
+                }
+                if described.writable == Some(true) {
+                    return false;
+                }
+                described
+                    .value
+                    .as_ref()
+                    .is_none_or(|wanted| same_value(wanted, held))
+            }
+            Property::Accessor { get, set } => {
+                if described.is_data() {
+                    return false;
+                }
+                let half = |wanted: Option<&Value>, held: Option<&Value>| {
+                    wanted
+                        .is_none_or(|wanted| same_value(wanted, held.unwrap_or(&Value::Undefined)))
+                };
+                half(described.get.as_ref(), get.as_ref())
+                    && half(described.set.as_ref(), set.as_ref())
+            }
+        }
+    }
+
+    /// `FromPropertyDescriptor(ToPropertyDescriptor(x))`: every field spelled out.
+    fn completed_descriptor(described: &Descriptor) -> Value {
+        let mut data = ObjectData::default();
+        if described.is_accessor() {
+            data.set("get", described.get.clone().unwrap_or(Value::Undefined));
+            data.set("set", described.set.clone().unwrap_or(Value::Undefined));
+        } else {
+            data.set("value", described.value.clone().unwrap_or(Value::Undefined));
+            data.set(
+                "writable",
+                Value::Boolean(described.writable.unwrap_or(false)),
+            );
+        }
+        data.set(
+            "enumerable",
+            Value::Boolean(described.enumerable.unwrap_or(false)),
+        );
+        data.set(
+            "configurable",
+            Value::Boolean(described.configurable.unwrap_or(false)),
+        );
+        Value::Object(Rc::new(RefCell::new(data)))
+    }
+
     /// The trap `name` names on a proxy's handler, or `None` when the handler does not have one.
     ///
     /// A missing trap means the operation falls through to the target, which is what makes a
@@ -21787,7 +22357,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(ExecutionError::RevokedProxy);
         }
         let trap = self.read_property(&proxy.handler, name, instruction)?;
-        Ok(is_callable(&trap).then_some(trap))
+        // `GetMethod`: only `undefined` and `null` mean "no trap". Anything else that is not
+        // callable is a handler the program got wrong, and quietly falling through to the target
+        // would run the operation the handler was written to intercept.
+        if trap.is_nullish() {
+            return Ok(None);
+        }
+        if !is_callable(&trap) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("proxy handler's `{name}` trap is not callable"),
+            });
+        }
+        Ok(Some(trap))
     }
 
     /// What the *stores* say about one name: the own property, or the nearest one up the chain.
@@ -22729,14 +23310,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        match self.proxy_trap(&proxy, "deleteProperty", instruction)? {
-            Some(trap) => {
-                let handler = proxy.handler.clone();
-                let arguments = vec![inner, Self::trap_key(key)];
-                let answered = self.call_value(&trap, handler, arguments, instruction)?;
-                Ok(answered.is_truthy())
-            }
-            None => self.delete(&inner, key, instruction),
+        let Some(trap) = self.proxy_trap(&proxy, "deleteProperty", instruction)? else {
+            return self.delete(&inner, key, instruction);
+        };
+        let handler = proxy.handler.clone();
+        let arguments = vec![inner.clone(), Self::trap_key(key)];
+        let answered = self
+            .call_value(&trap, handler, arguments, instruction)?
+            .is_truthy();
+        if !answered {
+            return Ok(false);
+        }
+        // Reporting a removal that did not happen is the lie here, and it is only a lie about a
+        // property the target still has and could not have given up.
+        match self.own_state(&inner, key, instruction)? {
+            Some((_, attributes)) if !attributes.configurable => Err(Self::proxy_invariant(
+                "deleteProperty cannot report a non-configurable property of the target removed",
+            )),
+            Some(_) if !self.target_extensible(&inner, instruction)? => Err(Self::proxy_invariant(
+                "deleteProperty cannot report a property of a non-extensible target removed",
+            )),
+            _ => Ok(true),
         }
     }
 
@@ -22751,20 +23345,55 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        match self.proxy_trap(&proxy, "ownKeys", instruction)? {
-            Some(trap) => {
-                let handler = proxy.handler.clone();
-                let listed = self.call_value(&trap, handler, vec![inner], instruction)?;
-                Ok(match listed {
-                    Value::Array(items) => dense_items(&items.borrow())
-                        .into_iter()
-                        .map(|key| key.property_key())
-                        .collect(),
-                    _ => Vec::new(),
-                })
+        let Some(trap) = self.proxy_trap(&proxy, "ownKeys", instruction)? else {
+            return self.own_keys(&inner, instruction);
+        };
+        let handler = proxy.handler.clone();
+        let listed = self.call_value(&trap, handler, vec![inner.clone()], instruction)?;
+        // `CreateListFromArrayLike(trapResult, « String, Symbol »)`: a list of keys, and only
+        // keys. Anything else -- a number, an object, a hole -- is not a property name, and a
+        // caller that took one for a name would ask the target about a property nothing has.
+        let Value::Array(items) = &listed else {
+            return Err(Self::proxy_invariant("ownKeys must report a list of keys"));
+        };
+        let mut keys: Vec<String> = Vec::new();
+        for entry in dense_items(&items.borrow()) {
+            if !matches!(entry, Value::String(_) | Value::Symbol(_)) {
+                return Err(Self::proxy_invariant(
+                    "ownKeys must report strings and symbols only",
+                ));
             }
-            None => self.own_keys(&inner, instruction),
+            let key = entry.property_key();
+            if keys.contains(&key) {
+                return Err(Self::proxy_invariant("ownKeys must not repeat a key"));
+            }
+            keys.push(key);
         }
+        let held = own_property_keys_including_symbols(&self.intrinsics, &inner);
+        let extensible = self.target_extensible(&inner, instruction)?;
+        for key in &held {
+            let locked = self
+                .own_state(&inner, &Value::String(key.clone()), instruction)?
+                .is_some_and(|(_, attributes)| !attributes.configurable);
+            // A non-configurable key cannot be taken away, so a list that leaves it out is
+            // describing an object the target is not. On a target that cannot grow or shrink
+            // either, the same is true of *every* key it has.
+            if (locked || !extensible) && !keys.contains(key) {
+                return Err(Self::proxy_invariant(
+                    "ownKeys must report every own key the target cannot lose",
+                ));
+            }
+        }
+        if !extensible {
+            for key in &keys {
+                if !held.contains(key) {
+                    return Err(Self::proxy_invariant(
+                        "ownKeys cannot report a key a non-extensible target does not have",
+                    ));
+                }
+            }
+        }
+        Ok(keys)
     }
 
     /// Does `target` have `key`, running a proxy's `has` trap.
@@ -22779,14 +23408,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        match self.proxy_trap(&proxy, "has", instruction)? {
-            Some(trap) => {
-                let handler = proxy.handler.clone();
-                let arguments = vec![inner, Self::trap_key(key)];
-                let answered = self.call_value(&trap, handler, arguments, instruction)?;
-                Ok(answered.is_truthy())
-            }
-            None => self.has(&inner, key, instruction),
+        let Some(trap) = self.proxy_trap(&proxy, "has", instruction)? else {
+            return self.has(&inner, key, instruction);
+        };
+        let handler = proxy.handler.clone();
+        let arguments = vec![inner.clone(), Self::trap_key(key)];
+        let answered = self
+            .call_value(&trap, handler, arguments, instruction)?
+            .is_truthy();
+        if answered {
+            return Ok(true);
+        }
+        // Denying a property is a lie only when the target could not have lost it.
+        match self.own_state(&inner, key, instruction)? {
+            Some((_, attributes)) if !attributes.configurable => Err(Self::proxy_invariant(
+                "has cannot deny a non-configurable property of the target",
+            )),
+            Some(_) if !self.target_extensible(&inner, instruction)? => Err(Self::proxy_invariant(
+                "has cannot deny a property of a non-extensible target",
+            )),
+            _ => Ok(false),
         }
     }
 
@@ -22872,14 +23513,35 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
-        match self.proxy_trap(&proxy, "get", instruction)? {
-            Some(trap) => {
-                let handler = proxy.handler.clone();
-                let arguments = vec![inner, Self::trap_key(key), receiver.clone()];
-                self.call_value(&trap, handler, arguments, instruction)
+        let Some(trap) = self.proxy_trap(&proxy, "get", instruction)? else {
+            return self.read_computed_with_receiver(&inner, key, receiver, instruction);
+        };
+        let handler = proxy.handler.clone();
+        let arguments = vec![inner.clone(), Self::trap_key(key), receiver.clone()];
+        let answered = self.call_value(&trap, handler, arguments, instruction)?;
+        // A property the target has promised never to change is the one thing a `get` trap may
+        // not invent an answer for: a caller that read it once may hold the value forever.
+        match self.own_state(&inner, key, instruction)? {
+            Some((Property::Value(held), attributes))
+                if !attributes.configurable && !attributes.writable =>
+            {
+                if !same_value(&answered, &held) {
+                    return Err(Self::proxy_invariant(
+                        "get must report the target's value for a non-writable, \
+                         non-configurable property",
+                    ));
+                }
             }
-            None => self.read_computed_with_receiver(&inner, key, receiver, instruction),
+            Some((Property::Accessor { get: None, .. }, attributes))
+                if !attributes.configurable && !matches!(answered, Value::Undefined) =>
+            {
+                return Err(Self::proxy_invariant(
+                    "get must report undefined for a non-configurable accessor with no getter",
+                ));
+            }
+            _ => {}
         }
+        Ok(answered)
     }
 
     /// `PutValue` for an assignment the program wrote: `Set(O, P, V, strict)`.
@@ -22976,9 +23638,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return match self.proxy_trap(&proxy, "set", instruction)? {
                 Some(trap) => {
                     let handler = proxy.handler.clone();
-                    let arguments = vec![inner, Self::trap_key(key), value, target.clone()];
-                    self.call_value(&trap, handler, arguments, instruction)?;
-                    Ok(())
+                    let arguments = vec![
+                        inner.clone(),
+                        Self::trap_key(key),
+                        value.clone(),
+                        target.clone(),
+                    ];
+                    // Sloppy code discards a refusal, so the answer is not consulted for a
+                    // throw -- but a *truthy* answer still has to be true, and that is a
+                    // different question the invariant asks whatever the strictness.
+                    let answered = self.call_value(&trap, handler, arguments, instruction)?;
+                    if !answered.is_truthy() {
+                        return Ok(());
+                    }
+                    self.check_set_invariant(&inner, key, &value, instruction)
                 }
                 None => self.set_computed(&inner, key, value, instruction),
             };
@@ -23234,9 +23907,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return match self.proxy_trap(&proxy, "set", instruction)? {
                 Some(trap) => {
                     let handler = proxy.handler.clone();
-                    let arguments = vec![inner, Self::trap_key(key), value, target.clone()];
+                    let arguments = vec![
+                        inner.clone(),
+                        Self::trap_key(key),
+                        value.clone(),
+                        target.clone(),
+                    ];
                     let answered = self.call_value(&trap, handler, arguments, instruction)?;
-                    Ok(answered.is_truthy())
+                    if !answered.is_truthy() {
+                        // Reported rather than thrown: answering whether the write happened is
+                        // what this spelling of the operation exists for.
+                        return Ok(false);
+                    }
+                    self.check_set_invariant(&inner, key, &value, instruction)?;
+                    Ok(true)
                 }
                 None => self.set_reflect(&inner, key, value, instruction),
             };
@@ -25186,9 +25870,17 @@ fn call_native(
         // to return either way.
         Native::ProxyConstructor => Value::Undefined,
         Native::ProxyRevocable => {
+            let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+            let handler = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+            if !is_an_object(&target) || !is_an_object(&handler) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Cannot create proxy with a non-object as target or handler"
+                        .to_owned(),
+                });
+            }
             let proxy = Value::Proxy(Rc::new(ProxyData {
-                target: arguments.first().cloned().unwrap_or(Value::Undefined),
-                handler: arguments.get(1).cloned().unwrap_or(Value::Undefined),
+                target,
+                handler,
                 revoked: std::cell::Cell::new(false),
             }));
             let mut pair = ObjectData::default();
