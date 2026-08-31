@@ -55,6 +55,32 @@ pub enum EmissionStringPolicy {
 const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
 const _: () = assert!(NUMBER_PARSE_VERSION == 1);
 
+// Keep this declaration beside the provider ABI row rather than maintaining a second C-only
+// spelling in the header below. The callback deliberately emits only the one provider entry that
+// needs a C declaration here; all other private provider declarations are either not used by this
+// backend's generated C or are declared in their feature-specific sections.
+macro_rules! provider_http_close_c_declaration {
+    ($(($group:ident, $name:ident, $signature:ident);)*) => {
+        concat!($(provider_http_close_c_declaration!($group, $name, $signature)),*)
+    };
+    (realm, kiln_realm_http_server_close_active, realm_http_close_mode) => {
+        "int kiln_realm_http_server_close_active(uint64_t resource, int mode);"
+    };
+    ($group:ident, $name:ident, $signature:ident) => { "" };
+}
+
+macro_rules! provider_http_close_contract_count {
+    ($(($group:ident, $name:ident, $signature:ident);)*) => {
+        0usize $(+ provider_http_close_contract_count!($group, $name, $signature))*
+    };
+    (realm, kiln_realm_http_server_close_active, realm_http_close_mode) => { 1usize };
+    ($group:ident, $name:ident, $signature:ident) => { 0usize };
+}
+
+const _: () = assert!(
+    kiln_native_number_abi::provider_abi_registry!(provider_http_close_contract_count) == 1
+);
+
 /// A generated C99 translation unit and its deterministic exported entry point.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CModule {
@@ -2613,7 +2639,9 @@ int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_even
 int kiln_realm_http_server_attach_with_options_active(
     uint64_t resource, int allow_half_close, kiln_realm_http_event_fn run,
     kiln_realm_drop_fn drop, void *work);
-int kiln_realm_http_server_close_active(uint64_t resource, int mode);
+"#,
+    kiln_native_number_abi::provider_abi_registry!(provider_http_close_c_declaration),
+    r#"
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
 int kiln_realm_http_client_request_id_active(uint64_t *out_id);

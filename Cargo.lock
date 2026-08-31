@@ -982,6 +982,7 @@ dependencies = [
  "kiln-host-abi",
  "kiln-ir",
  "kiln-native-number",
+ "kiln-native-number-abi",
 ]
 
 [[package]]

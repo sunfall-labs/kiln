@@ -37,7 +37,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_cancel_active_request, realm_cancel_active_request);
             (realm, kiln_realm_http_server_attach_active, realm_http_attach);
             (realm, kiln_realm_http_server_attach_with_options_active, realm_http_attach_options);
-            (realm, kiln_realm_http_server_close_active, realm_http_close);
+            (realm, kiln_realm_http_server_close_active, realm_http_close_mode);
             (realm, kiln_realm_http_client_attach_active, realm_http_attach);
             (realm, kiln_realm_http_client_request_id_active, realm_http_request_id);
             (realm, kiln_realm_http_agent_acquire_active, realm_http_agent_acquire);
