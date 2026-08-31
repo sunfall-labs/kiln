@@ -45,41 +45,50 @@ pub enum AgentFailure {
     Connect { request: u64 },
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct HttpAgent {
+    max_sockets: usize,
     origins: BTreeMap<HttpOrigin, OriginPool>,
     resources: BTreeMap<ResourceId, HttpOrigin>,
 }
 
 #[derive(Debug, Default)]
 struct OriginPool {
-    connecting: bool,
+    connecting: usize,
     idle: VecDeque<ResourceId>,
     busy: BTreeMap<ResourceId, u64>,
     waiting: VecDeque<u64>,
 }
 
 impl HttpAgent {
+    pub fn new(max_sockets: usize) -> Self {
+        Self {
+            max_sockets: max_sockets.max(1),
+            origins: BTreeMap::new(),
+            resources: BTreeMap::new(),
+        }
+    }
+
     pub fn acquire(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
         let pool = self.origins.entry(origin).or_default();
         if let Some(resource) = pool.idle.pop_front() {
             pool.busy.insert(resource, request);
             return AgentDecision::Reuse(resource);
         }
-        if pool.connecting || !pool.busy.is_empty() {
+        if pool.connecting.saturating_add(pool.busy.len()) >= self.max_sockets {
             pool.waiting.push_back(request);
             return AgentDecision::Queued;
         }
-        pool.connecting = true;
+        pool.connecting += 1;
         AgentDecision::Connect
     }
 
     pub fn connected(&mut self, origin: HttpOrigin, resource: ResourceId, request: u64) -> bool {
         let pool = self.origins.entry(origin.clone()).or_default();
-        if !pool.connecting || self.resources.contains_key(&resource) {
+        if pool.connecting == 0 || self.resources.contains_key(&resource) {
             return false;
         }
-        pool.connecting = false;
+        pool.connecting -= 1;
         pool.busy.insert(resource, request);
         self.resources.insert(resource, origin);
         true
@@ -109,11 +118,11 @@ impl HttpAgent {
         let Some(pool) = self.origins.get_mut(origin) else {
             return AgentFailure::Empty;
         };
-        pool.connecting = false;
+        pool.connecting = pool.connecting.saturating_sub(1);
         let Some(request) = pool.waiting.pop_front() else {
             return AgentFailure::Empty;
         };
-        pool.connecting = true;
+        pool.connecting += 1;
         AgentFailure::Connect { request }
     }
 
@@ -126,13 +135,19 @@ impl HttpAgent {
     }
 }
 
+impl Default for HttpAgent {
+    fn default() -> Self {
+        Self::new(usize::MAX)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn one_origin_reuses_idle_connections_and_preserves_waiter_order() {
-        let mut agent = HttpAgent::default();
+        let mut agent = HttpAgent::new(1);
         let origin = HttpOrigin::http("EXAMPLE.com", 80);
         let resource = ResourceId::new(7);
 
@@ -149,7 +164,7 @@ mod tests {
 
     #[test]
     fn origins_never_share_connections() {
-        let mut agent = HttpAgent::default();
+        let mut agent = HttpAgent::new(1);
         let first = HttpOrigin::http("a.example", 80);
         let second = HttpOrigin::http("b.example", 80);
         let resource = ResourceId::new(9);
@@ -161,7 +176,7 @@ mod tests {
 
     #[test]
     fn non_reusable_and_closed_connections_are_retired() {
-        let mut agent = HttpAgent::default();
+        let mut agent = HttpAgent::new(1);
         let origin = HttpOrigin::http("example.com", 80);
         let resource = ResourceId::new(11);
         assert_eq!(agent.acquire(origin.clone(), 1), AgentDecision::Connect);
@@ -173,7 +188,7 @@ mod tests {
 
     #[test]
     fn a_failed_connect_promotes_the_oldest_waiter_to_retry() {
-        let mut agent = HttpAgent::default();
+        let mut agent = HttpAgent::new(1);
         let origin = HttpOrigin::http("example.com", 80);
         assert_eq!(agent.acquire(origin.clone(), 1), AgentDecision::Connect);
         assert_eq!(agent.acquire(origin.clone(), 2), AgentDecision::Queued);
@@ -183,5 +198,14 @@ mod tests {
             AgentFailure::Connect { request: 2 }
         );
         assert_eq!(agent.acquire(origin, 4), AgentDecision::Queued);
+    }
+
+    #[test]
+    fn capacity_allows_parallel_connects_before_queueing() {
+        let mut agent = HttpAgent::new(2);
+        let origin = HttpOrigin::http("example.com", 80);
+        assert_eq!(agent.acquire(origin.clone(), 1), AgentDecision::Connect);
+        assert_eq!(agent.acquire(origin.clone(), 2), AgentDecision::Connect);
+        assert_eq!(agent.acquire(origin, 3), AgentDecision::Queued);
     }
 }
