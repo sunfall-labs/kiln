@@ -18899,6 +18899,17 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
             if (status != KILN_C99_OK) {
                 return status;
             }
+            /* `ToNumeric(lhs)` completes before the right operand is reduced at all, for the
+             * operators with no string reading to choose first: `Symbol() * f()` refuses here
+             * rather than after calling `f`'s `valueOf`, which is one observable call the
+             * language says does not happen. `+` and the four relational operators are absent
+             * deliberately -- each decides between a string and a numeric reading, and cannot
+             * know which conversion it is performing until both sides are reduced. */
+            if (left.tag == KILN_VALUE_SYMBOL &&
+                ((operation >= 2 && operation <= 6) || (operation >= 17 && operation <= 22))) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert a Symbol value to a number");
+            }
             status = kiln_c99_to_primitive(host, right, 0, &right, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
