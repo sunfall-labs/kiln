@@ -22,8 +22,9 @@ kiln_block <<'EOF'
 | Incremental Rust build after leaf edit | `Incremental rebuilds` job |
 | Incremental Rust build after IR edit | `Incremental rebuilds` job, editing `kiln-hir` |
 | Compiler daemon startup | `kiln-bench` |
+| Warm daemon request (unchanged run and body edit) | `kiln-bench`, persistent daemon/client connection |
 | Warm parse/lower latency | `kiln-bench` |
-| Cache hit rate | `kiln-bench`, from the recompute counters in `kiln_proto::Stats` |
+| Cache hit rate and graph-cache state | `kiln-bench`, from query and daemon counters in `kiln_proto::Stats` |
 | Warm interpreted execution latency | `kiln-bench`, including warm parse, IR rebuild and VM launch |
 | Warm native object rebuild | `kiln-bench`, validating all generated-source/object/link cache layers |
 | Link latency | `kiln-bench`, repeated links over warm native objects |

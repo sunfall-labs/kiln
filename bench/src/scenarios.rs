@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use kiln_db::{FileId, MemoEngine, QueryEngine, Stats as DbStats};
@@ -18,6 +19,7 @@ use kiln_ir::{
 use kiln_module_graph::ModuleGraph;
 use kiln_native::{NativeBuildOptions, NativeBuilder, NativeProfile};
 use kiln_native_toolchain::{Toolchain, ToolchainError};
+use kiln_proto::{Request, Response, RunSummary, SourceView, Stats};
 
 use crate::report::{Measurement, NativeArtifactInfo, Scenario};
 use crate::timing::Samples;
@@ -29,8 +31,7 @@ fn new_engine() -> impl QueryEngine {
 
 /// What one warm iteration does. Named here because the human report prints it: a latency
 /// number is meaningless without saying which work it covers.
-pub const WARM_PIPELINE: &str =
-    "warm edit -> memoized queries -> project, scalar interpreter, or fresh linked graph";
+pub const WARM_PIPELINE: &str = "warm edit -> memoized queries -> project, scalar interpreter, persistent daemon request, or fresh linked graph";
 
 /// Iteration budgets. Warm edits are cheap and noisy, so they get more samples; the cold
 /// scenarios rebuild the whole project every iteration and get fewer.
@@ -106,6 +107,379 @@ pub fn daemon_startup(kiln: &Path, budget: Budget) -> Result<Measurement, String
         DbStats::default(),
         true,
     ))
+}
+
+/// Measure a resident daemon's request path after startup and source synchronization are done.
+///
+/// The unchanged row proves that a second `Run` over the same source snapshot hits the daemon's
+/// entry-rooted graph cache. The body-edit row proves that a reachable source edit advances the
+/// source view, misses the old graph snapshot, and still reuses the unchanged module's queries.
+/// Neither startup, source setup, nor shutdown is inside either timed loop.
+pub fn daemon_warm(budget: Budget) -> Result<Vec<Measurement>, String> {
+    let mut fixture = WarmDaemonFixture::new()?;
+    fixture.install_sources()?;
+    let source_view = fixture.source_view;
+    let primed = fixture.run(source_view)?;
+    assert_run_stdout(&primed, "42\n", "initial daemon graph run")?;
+    fixture.reset_stats()?;
+
+    let (warmup, iterations) = budget.apply(WARM_WARMUP, WARM_ITERS);
+    let mut unchanged = DaemonAccumulator::new(warmup, iterations);
+    for _ in 0..warmup + iterations {
+        let started = Instant::now();
+        let run = fixture.run(source_view)?;
+        let elapsed = started.elapsed();
+        assert_run_stdout(&run, "42\n", "unchanged daemon graph run")?;
+        let stats = fixture.stats()?;
+        assert_graph_stats(
+            &stats,
+            GraphExpectation {
+                hits: 1,
+                misses: 0,
+                evictions: 0,
+                invalidations: 0,
+                entries: 1,
+                modules: 2,
+            },
+            "unchanged daemon graph run",
+        )?;
+        unchanged.push(elapsed, stats);
+        fixture.reset_stats()?;
+    }
+
+    let mut body_edit = DaemonAccumulator::new(warmup, iterations);
+    let dependency = fixture.dependency.clone();
+    let mut view = source_view;
+    for index in 0..warmup + iterations {
+        let value = 43 + (index % 2) as u32;
+        let started = Instant::now();
+        view = fixture.set_source(
+            &dependency,
+            format!("export const value = {value};\n"),
+            view,
+        )?;
+        let run = fixture.run(view)?;
+        let elapsed = started.elapsed();
+        assert_run_stdout(&run, &format!("{value}\n"), "daemon body-edit graph run")?;
+        let stats = fixture.stats()?;
+        assert_graph_stats(
+            &stats,
+            GraphExpectation {
+                hits: 0,
+                misses: 1,
+                evictions: 1,
+                invalidations: 0,
+                entries: 1,
+                modules: 2,
+            },
+            "daemon body-edit graph run",
+        )?;
+        body_edit.push(elapsed, stats);
+        fixture.reset_stats()?;
+    }
+
+    Ok(vec![
+        unchanged.finish("warm-run", "warm unchanged daemon Run request", None),
+        body_edit.finish(
+            "warm-edit-run",
+            "warm daemon SetSource + Run body edit",
+            Some(200.0),
+        ),
+    ])
+}
+
+struct WarmDaemonFixture {
+    root: PathBuf,
+    dependency: String,
+    entry: String,
+    project_root: String,
+    source_view: SourceView,
+    client: Option<kiln_daemon::Client>,
+    stop: Option<kiln_daemon::ShutdownHandle>,
+    serving: Option<JoinHandle<()>>,
+}
+
+impl WarmDaemonFixture {
+    fn new() -> Result<Self, String> {
+        let root = reserve_daemon_root("warm")?;
+        let socket = root.join("daemon.sock");
+        let dependency_path = root.join("dep.js");
+        let entry_path = root.join("main.js");
+        fs::write(&dependency_path, "export const value = 42;\n")
+            .and_then(|_| {
+                fs::write(
+                    &entry_path,
+                    "import { value } from './dep.js';\nconsole.log(value);\n",
+                )
+            })
+            .map_err(|error| format!("writing warm daemon fixture: {error}"))?;
+        let root = fs::canonicalize(&root)
+            .map_err(|error| format!("canonicalizing warm daemon fixture: {error}"))?;
+        let socket = root.join("daemon.sock");
+        let dependency = fs::canonicalize(root.join("dep.js"))
+            .map_err(|error| format!("canonicalizing warm daemon dependency: {error}"))?
+            .display()
+            .to_string();
+        let entry = fs::canonicalize(root.join("main.js"))
+            .map_err(|error| format!("canonicalizing warm daemon entry: {error}"))?
+            .display()
+            .to_string();
+        let project_root = root.display().to_string();
+        let daemon = kiln_daemon::Daemon::bind(&socket)
+            .map_err(|error| format!("binding warm daemon fixture: {error}"))?;
+        let stop = daemon.shutdown_handle();
+        let serving = std::thread::Builder::new()
+            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
+            .spawn(move || daemon.serve())
+            .map_err(|error| format!("spawning warm daemon fixture: {error}"))?;
+        let mut client = kiln_daemon::Client::connect(&socket)
+            .map_err(|error| format!("connecting warm daemon fixture: {error}"))?;
+        client
+            .handshake()
+            .map_err(|error| format!("handshaking warm daemon fixture: {error}"))?;
+        Ok(Self {
+            root,
+            dependency,
+            entry,
+            project_root,
+            source_view: SourceView(0),
+            client: Some(client),
+            stop: Some(stop),
+            serving: Some(serving),
+        })
+    }
+
+    fn install_sources(&mut self) -> Result<(), String> {
+        let dependency = self.dependency.clone();
+        let entry = self.entry.clone();
+        let dependency_text = "export const value = 42;\n".to_owned();
+        let entry_text = "import { value } from './dep.js';\nconsole.log(value);\n".to_owned();
+        self.source_view = self.set_source(&dependency, dependency_text, self.source_view)?;
+        self.source_view = self.set_source(&entry, entry_text, self.source_view)?;
+        Ok(())
+    }
+
+    fn client(&mut self) -> Result<&mut kiln_daemon::Client, String> {
+        self.client
+            .as_mut()
+            .ok_or_else(|| "warm daemon client is unavailable".to_owned())
+    }
+
+    fn set_source(
+        &mut self,
+        path: &str,
+        text: String,
+        source_view: SourceView,
+    ) -> Result<SourceView, String> {
+        let response = self
+            .client()?
+            .request(&Request::SetSource {
+                path: path.to_owned(),
+                text,
+                source_view,
+            })
+            .map_err(|error| format!("warm daemon SetSource: {error}"))?;
+        match response {
+            Response::SourceUpdated {
+                source_view: next_view,
+            } => {
+                let expected = source_view
+                    .0
+                    .checked_add(1)
+                    .map(SourceView)
+                    .ok_or_else(|| "warm daemon source view exhausted".to_owned())?;
+                if next_view != expected {
+                    return Err(format!(
+                        "warm daemon SetSource advanced source view unexpectedly from {} to {}",
+                        source_view.0, next_view.0
+                    ));
+                }
+                Ok(next_view)
+            }
+            other => Err(format!("warm daemon SetSource returned {other:?}")),
+        }
+    }
+
+    fn run(&mut self, source_view: SourceView) -> Result<RunSummary, String> {
+        let path = self.entry.clone();
+        let project_root = self.project_root.clone();
+        let response = self
+            .client()?
+            .request(&Request::Run {
+                path,
+                project_root,
+                node: false,
+                source_view,
+            })
+            .map_err(|error| format!("warm daemon Run: {error}"))?;
+        match response {
+            Response::Ran(summary) => Ok(summary),
+            other => Err(format!("warm daemon Run returned {other:?}")),
+        }
+    }
+
+    fn stats(&mut self) -> Result<Stats, String> {
+        let response = self
+            .client()?
+            .request(&Request::Stats)
+            .map_err(|error| format!("warm daemon Stats: {error}"))?;
+        match response {
+            Response::Stats(stats) => Ok(stats),
+            other => Err(format!("warm daemon Stats returned {other:?}")),
+        }
+    }
+
+    fn reset_stats(&mut self) -> Result<(), String> {
+        let response = self
+            .client()?
+            .request(&Request::ResetStats)
+            .map_err(|error| format!("warm daemon ResetStats: {error}"))?;
+        if matches!(response, Response::Ok) {
+            Ok(())
+        } else {
+            Err(format!("warm daemon ResetStats returned {response:?}"))
+        }
+    }
+}
+
+impl Drop for WarmDaemonFixture {
+    fn drop(&mut self) {
+        self.client.take();
+        if let Some(stop) = self.stop.take() {
+            stop.shutdown();
+        }
+        if let Some(serving) = self.serving.take() {
+            let _ = serving.join();
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+fn reserve_daemon_root(label: &str) -> Result<PathBuf, String> {
+    for _ in 0..128 {
+        let sequence = DAEMON_FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let candidate =
+            std::env::temp_dir().join(format!("kb-{label}-{}-{sequence}", std::process::id()));
+        match fs::create_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "creating daemon benchmark directory {}: {error}",
+                    candidate.display()
+                ));
+            }
+        }
+    }
+    Err("could not reserve a unique daemon benchmark directory after 128 attempts".to_owned())
+}
+
+fn assert_run_stdout(summary: &RunSummary, expected: &str, label: &str) -> Result<(), String> {
+    if summary.succeeded && summary.stdout == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "{label} produced {:?}, expected {expected:?}",
+        summary.stdout
+    ))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GraphExpectation {
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    invalidations: u64,
+    entries: u64,
+    modules: u64,
+}
+
+fn assert_graph_stats(
+    stats: &Stats,
+    expected: GraphExpectation,
+    label: &str,
+) -> Result<(), String> {
+    let actual = GraphExpectation {
+        hits: stats.graph_cache_hits,
+        misses: stats.graph_cache_misses,
+        evictions: stats.graph_cache_evictions,
+        invalidations: stats.graph_cache_invalidations,
+        entries: stats.graph_cache_entries,
+        modules: stats.graph_cache_modules,
+    };
+    if actual == expected {
+        return Ok(());
+    }
+    Err(format!(
+        "{label} graph cache stats were {actual:?}, expected {expected:?}"
+    ))
+}
+
+struct DaemonAccumulator {
+    warmup: usize,
+    seen: usize,
+    durations: Vec<Duration>,
+    stats: Vec<Stats>,
+}
+
+impl DaemonAccumulator {
+    fn new(warmup: usize, iterations: usize) -> Self {
+        Self {
+            warmup,
+            seen: 0,
+            durations: Vec::with_capacity(iterations),
+            stats: Vec::with_capacity(iterations),
+        }
+    }
+
+    fn push(&mut self, elapsed: Duration, stats: Stats) {
+        self.seen += 1;
+        if self.seen > self.warmup {
+            self.durations.push(elapsed);
+            self.stats.push(stats);
+        }
+    }
+
+    fn finish(
+        self,
+        slug: &'static str,
+        operation: &'static str,
+        goal_ms: Option<f64>,
+    ) -> Measurement {
+        let steady = self
+            .stats
+            .windows(2)
+            .all(|pair| daemon_recompute_counters(&pair[0]) == daemon_recompute_counters(&pair[1]));
+        Measurement::new_with_proto_stats(
+            Scenario {
+                workload: "daemon",
+                slug,
+                operation,
+                goal_ms,
+            },
+            self.warmup,
+            Samples::from(&self.durations),
+            self.stats[0].clone(),
+            steady,
+        )
+    }
+}
+
+fn daemon_recompute_counters(stats: &Stats) -> [u64; 12] {
+    [
+        stats.parse_computed,
+        stats.ir_computed,
+        stats.interface_computed,
+        stats.project_computed,
+        stats.validated,
+        stats.early_cutoff,
+        stats.graph_cache_hits,
+        stats.graph_cache_misses,
+        stats.graph_cache_evictions,
+        stats.graph_cache_invalidations,
+        stats.graph_cache_entries,
+        stats.graph_cache_modules,
+    ]
 }
 
 struct DaemonFixture {
@@ -1144,6 +1518,34 @@ esac
         );
         assert_eq!(measurement.iterations, 1);
         assert_eq!(measurement.stats, kiln_proto::Stats::default());
+    }
+
+    #[test]
+    fn warm_daemon_rows_prove_hit_and_body_edit_graph_paths() {
+        let rows = daemon_warm(Budget {
+            warmup: Some(0),
+            iterations: Some(2),
+        })
+        .expect("measure warm daemon requests");
+        assert_eq!(
+            rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+            ["daemon/warm-run", "daemon/warm-edit-run",]
+        );
+
+        let unchanged = &rows[0];
+        assert_eq!(unchanged.stats.graph_cache_hits, 1);
+        assert_eq!(unchanged.stats.graph_cache_misses, 0);
+        assert_eq!(unchanged.stats.graph_cache_entries, 1);
+        assert_eq!(unchanged.stats.graph_cache_modules, 2);
+        assert!(unchanged.steady_state);
+
+        let edited = &rows[1];
+        assert_eq!(edited.stats.graph_cache_hits, 0);
+        assert_eq!(edited.stats.graph_cache_misses, 1);
+        assert_eq!(edited.stats.graph_cache_evictions, 1);
+        assert_eq!(edited.stats.graph_cache_entries, 1);
+        assert_eq!(edited.stats.graph_cache_modules, 2);
+        assert!(edited.steady_state);
     }
 
     #[test]
