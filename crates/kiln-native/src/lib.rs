@@ -1915,8 +1915,11 @@ fn native_builtin_supports_export(
     export_name: &str,
 ) -> bool {
     use kiln_module_resolver::NodeBuiltin;
+    if let Some(abi) = kiln_node_abi::builtin_abi(builtin.specifier()) {
+        return abi.exports.contains(&export_name);
+    }
     match builtin {
-        NodeBuiltin::Events => matches!(export_name, "EventEmitter" | "default"),
+        NodeBuiltin::Events => unreachable!("events is declared in kiln-node-abi"),
         NodeBuiltin::Net => matches!(
             export_name,
             "connect" | "createConnection" | "createServer" | "default"
@@ -2003,6 +2006,10 @@ fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'s
     match builtin {
         NodeBuiltin::Events => Some(
             r#"kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER);
+int status = kiln_c99_define_method(constructor, "EventEmitter", 12, constructor);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_define_method(constructor, "default", 7, constructor);
+if (status != KILN_C99_OK) return status;
 exports[0] = constructor;
 exports[1] = constructor;"#,
         ),
@@ -2737,6 +2744,20 @@ fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
 /// positional table beside `node_builtin_export_names`.
 fn native_builtin_commonjs_export_index(node: &kiln_module_graph::ModuleNode) -> Option<usize> {
     matches!(node.source, ModuleSource::NodeBuiltin(_)).then(|| {
+        if let ModuleSource::NodeBuiltin(builtin) = node.source {
+            if let Some(abi) = kiln_node_abi::builtin_abi(builtin.specifier()) {
+                let export = match abi.commonjs {
+                    kiln_node_abi::CommonJsProjection::Namespace => "default",
+                    kiln_node_abi::CommonJsProjection::Callable { export, .. } => export,
+                };
+                return node
+                    .program
+                    .exports
+                    .iter()
+                    .position(|binding| binding.exported == export)
+                    .expect("manifest CommonJS export is declared by the builtin");
+            }
+        }
         node.program
             .exports
             .iter()

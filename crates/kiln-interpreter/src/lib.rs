@@ -5288,6 +5288,9 @@ pub enum Value {
 /// and `process.getBuiltinModule`, so the two access paths cannot acquire different native
 /// implementations.
 pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static str]> {
+    if let Some(builtin) = kiln_node_abi::builtin_abi(specifier) {
+        return Some(builtin.exports);
+    }
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
         "assert" | "assert/strict" => &["default", "ok", "strict"],
         "buffer" => &["Buffer", "constants", "default"],
@@ -5295,7 +5298,6 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "crypto" => &["createHash", "default", "randomUUID"],
         "diagnostics_channel" => &["channel", "default", "hasSubscribers", "tracingChannel"],
         "dns" => &["default", "lookup"],
-        "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
         "fs" => &["default", "existsSync", "promises"],
         "net" => &["connect", "createConnection", "createServer", "default"],
@@ -5416,13 +5418,19 @@ pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
     let Value::Native(native) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
+    if let Some(abi) = kiln_node_abi::builtin_abi(specifier) {
+        return match abi.commonjs {
+            kiln_node_abi::CommonJsProjection::Namespace => Some(Value::Native(native)),
+            kiln_node_abi::CommonJsProjection::Callable { export, .. } => native.property(export),
+        };
+    }
     // Only Node's historically callable CommonJS modules project their default binding as
     // `module.exports`. Namespace modules must retain the namespace: for example,
     // `require('node:async_hooks').AsyncResource` is a named property, not a property on the
     // AsyncResource constructor. Keeping this choice explicit prevents a newly-added `default`
     // export from silently changing the CommonJS shape of a builtin.
     match specifier.strip_prefix("node:").unwrap_or(specifier) {
-        "assert" | "assert/strict" | "events" => {
+        "assert" | "assert/strict" => {
             Some(native.property("default").unwrap_or(Value::Native(native)))
         }
         _ => Some(Value::Native(native)),

@@ -16,6 +16,7 @@ kiln-native-number = { workspace = true }
 kiln-native-number-abi = { workspace = true }
 kiln-native-runtime = { workspace = true }
 kiln-native-toolchain = { workspace = true }
+kiln-node-abi = { workspace = true }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
