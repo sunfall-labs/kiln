@@ -3306,6 +3306,18 @@ mod tests {
     };
     use std::sync::{Arc, Barrier};
 
+    struct OxcFrontend;
+
+    impl kiln_module_graph::Frontend for OxcFrontend {
+        fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+            frontend_oxc::parse(path, source)
+        }
+
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+            frontend_oxc::parse_commonjs(path, source)
+        }
+    }
+
     struct TestDirectory {
         path: PathBuf,
     }
@@ -3588,6 +3600,99 @@ mod tests {
         assert!(body.contains("KILN_C99_METHOD_NODE_NET_CREATE_SERVER"));
         assert!(body.contains("exports[2] = create_server;"));
         assert!(native_builtin_body(NodeBuiltin::Http).is_none());
+    }
+
+    #[test]
+    fn native_node_net_source_graph_builds_through_the_production_frontend() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:net integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-node-net-source");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { createServer } from "node:net";
+const server = createServer((socket) => {
+  socket.on("data", (chunk) => {
+    console.log(chunk);
+    socket.end();
+    server.close();
+  });
+});
+server.listen(0, "127.0.0.1", () => console.log(server.address().port));
+"#,
+        )
+        .expect("write node:net fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        assert!(graph.modules().any(|node| matches!(
+            node.source,
+            ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Net)
+        )));
+        let builder = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain);
+        let report = builder
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                },
+            )
+            .expect("native node:net graph builds");
+        assert!(report.output.exists());
+
+        use std::io::{BufRead, Read, Write};
+        use std::net::TcpStream;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("start native node:net server");
+        let stdout = child.stdout.take().expect("capture server stdout");
+        let mut stdout = std::io::BufReader::new(stdout);
+        let mut listening = String::new();
+        stdout
+            .read_line(&mut listening)
+            .expect("read ephemeral listening port");
+        let port: u16 = listening
+            .trim()
+            .parse()
+            .expect("server prints numeric port");
+        assert_ne!(port, 0);
+        let mut client = TcpStream::connect(("127.0.0.1", port)).expect("connect loopback client");
+        client
+            .write_all(b"native loopback")
+            .expect("write client bytes");
+        client
+            .shutdown(std::net::Shutdown::Write)
+            .expect("finish client write");
+        let mut ignored = Vec::new();
+        client
+            .read_to_end(&mut ignored)
+            .expect("server closes client");
+        let status = child.wait().expect("server exits after close");
+        let mut rest = String::new();
+        stdout
+            .read_to_string(&mut rest)
+            .expect("read callback output");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture stderr")
+            .read_to_string(&mut stderr)
+            .expect("read stderr");
+        assert!(status.success(), "server failed: {stderr}");
+        assert_eq!(rest, "native loopback\n");
     }
 
     #[test]
