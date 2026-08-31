@@ -54,9 +54,22 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js; do
 		matched=$((matched + 1))
 		continue
 	fi
-	if [[ $native == kiln:* ]]; then
-		# The first line carries the reason; the path prefix in it is noise here.
-		REFUSALS+=("$name	$(printf '%s' "$native" | head -1 | sed 's/^kiln: [^:]*: //')")
+	# A refusal is a refusal wherever it appears. It used to have to be on the *first* line,
+	# which quietly turned every probe that printed something before reaching an unimplemented
+	# operation into a reported divergence -- `conformance/native/temporal.ts` says in its own
+	# header that this is the trap, and then fell into it anyway when the backend stopped
+	# carrying one of the members it exercises. A divergence is the two engines disagreeing
+	# about an answer; a backend that stops and says which operation it lacks has not given one.
+	refusal="$(printf '%s\n' "$native" | grep -m1 '^kiln: native ' || true)"
+	if [[ -n $refusal ]]; then
+		reason="$(printf '%s' "$refusal" | sed 's/^kiln: //; s/ module=[^ ]*//')"
+		# Whether anything ran first is worth saying: a probe refused on its first operation is
+		# a missing feature, and one refused half way through is a missing feature plus a probe
+		# that is no longer measuring what it was written to measure.
+		if [[ $native != kiln:* ]]; then
+			reason="$reason (after $(printf '%s\n' "$native" | grep -c -v '^kiln: native ') line(s) of output)"
+		fi
+		REFUSALS+=("$name	$reason")
 		continue
 	fi
 	diverged=$((diverged + 1))

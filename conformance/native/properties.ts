@@ -40,3 +40,11 @@ console.log(tagged("x", 1, 2, 3), tagged("y"), tagged("z", ...two()));
 class Base { method(): number { return 1; } }
 const instance = new Base();
 console.log("method" in instance, Object.hasOwn(instance, "method"), "nope" in instance);
+
+// `GetV` boxes every non-null primitive before looking up a property. An unknown name is absent
+// and therefore reads as undefined; it is not a native-backend refusal. This matters especially
+// for recursive package code using `node.value?.member`, where `value` can legitimately be a
+// number on one branch and an object on another.
+console.log((97 as any).missing, (true as any).missing, (1n as any).missing);
+const primitiveNode: any = { value: 97 };
+console.log(primitiveNode.value?.stack, primitiveNode.value?.stack?.length);
