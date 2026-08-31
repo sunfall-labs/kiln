@@ -13012,6 +13012,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::ObjectEntries | Native::ObjectValues | Native::ReflectOwnKeys => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 if matches!(native, Native::ReflectOwnKeys) {
+                    let source = self.reflect_target(Some(&source), "ownKeys")?;
                     let items = self
                         .own_keys(&source, instruction)?
                         .into_iter()
@@ -13468,23 +13469,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.read_computed_with_receiver(&target, &key, &receiver, instruction)
             }
             Native::ReflectSet => {
-                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let target = self.reflect_target(arguments.first(), "set")?;
                 let key = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let value = arguments.get(2).cloned().unwrap_or(Value::Undefined);
                 let receiver = arguments.get(3).cloned().unwrap_or_else(|| target.clone());
-                // A typed array's `[[Set]]` writes *through itself*: handed a different
-                // receiver and an index the view does not have, the specification returns true
-                // without even coercing the value, because there is no slot to convert it for.
-                // An ordinary assignment always passes the view as its own receiver, so
-                // `Reflect.set` is the only place this is reachable -- and the only place the
-                // skipped `valueOf` can be seen.
-                if let Some(Value::TypedArray(view)) = arguments.first()
-                    && let Some(receiver) = arguments.get(3)
-                    && !same_value(receiver, &target)
-                    && array_index(&key).is_some_and(|index| index >= view.len())
-                {
-                    return Ok(Value::Boolean(true));
-                }
                 let accepted = self.set_reflect(&target, &key, value, &receiver, instruction)?;
                 Ok(Value::Boolean(accepted))
             }
@@ -24893,6 +24881,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
         }
         let name = key.property_key();
+        // An integer-indexed exotic object answers `[[Set]]` for every *canonical numeric* name
+        // itself, whether or not the view has such an element, so the prototype chain is never
+        // consulted for one: a setter installed on `%TypedArray%.prototype["0"]` stays
+        // unreachable, and `ta["1.5"] = v` is discarded rather than stored under that name.
+        if let Value::TypedArray(view) = target
+            && let Some(index) = canonical_numeric_index(&name)
+        {
+            let view = Rc::clone(view);
+            if same_value(target, receiver) {
+                // `TypedArraySetElement`: the conversion runs first and is observable even when
+                // the slot it was aimed at is out of bounds, or was detached by the conversion.
+                let element = self.as_element(view.kind, &value, instruction)?;
+                if let Some(at) = valid_integer_index(&view, index) {
+                    view.set(at, &element)?;
+                }
+                return Ok(true);
+            }
+            // A different receiver and an index the view does not have: accepted without even
+            // coercing the value, because there is no slot to convert it for.
+            if valid_integer_index(&view, index).is_none() {
+                return Ok(true);
+            }
+        }
         self.ordinary_set_reflect(target, &name, value, receiver, instruction)
     }
 
@@ -30461,6 +30472,35 @@ fn canonical_index(name: &str) -> Option<usize> {
 /// A typed array integer index, accepting a numeric key or its canonical decimal spelling.
 fn typed_array_index(key: &Value) -> Option<usize> {
     array_index(key)
+}
+
+/// `CanonicalNumericIndexString(P)`: the number a property name spells, when the name is exactly
+/// what that number stringifies back to.
+///
+/// This is the line an integer-indexed exotic object draws between an *element* key and an
+/// ordinary named one, and it is wider than "an index": `"1.5"`, `"-1"`, `"NaN"` and `"Infinity"`
+/// are all element keys that reach no slot, so a typed array refuses them rather than storing
+/// them, while `"01"` and `"1e2"` are ordinary names and are stored. `"-0"` is the one name the
+/// specification admits by hand, because its round trip through `String` comes back as `"0"`.
+fn canonical_numeric_index(name: &str) -> Option<f64> {
+    if name == "-0" {
+        return Some(-0.0);
+    }
+    let number = parse_number(name);
+    (number_string(number) == name).then_some(number)
+}
+
+/// `IsValidIntegerIndex(O, index)`: the element this number reaches in a live view, if any.
+///
+/// Negative zero is refused along with the negatives it sorts with, and a view whose buffer was
+/// detached or shrunk out from under it has no valid index at all.
+fn valid_integer_index(view: &TypedArrayData, index: f64) -> Option<usize> {
+    if view.out_of_bounds() || index.is_sign_negative() || index.fract() != 0.0 {
+        return None;
+    }
+    #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let at = index as usize;
+    (at < view.len()).then_some(at)
 }
 
 /// `Array.prototype.join` semantics: null and undefined become empty, everything else stringifies.
@@ -37620,6 +37660,29 @@ mod tests {
         // 2^32 - 1 is the length, never an index.
         assert_eq!(index_key("4294967295"), None);
         assert_eq!(index_key("4294967294"), Some(4_294_967_294));
+    }
+
+    #[test]
+    fn an_element_key_is_wider_than_an_index() {
+        // What separates a typed array's element keys from its named ones. Every name that is
+        // the canonical spelling of *some* number is an element key -- even one no view can
+        // hold -- and a typed array refuses those rather than storing them, which is why the
+        // set is asked about by name and not by whether an index came back.
+        assert_eq!(canonical_numeric_index("0"), Some(0.0));
+        assert_eq!(canonical_numeric_index("1.5"), Some(1.5));
+        assert_eq!(canonical_numeric_index("-1"), Some(-1.0));
+        assert_eq!(canonical_numeric_index("NaN").map(f64::is_nan), Some(true));
+        assert_eq!(canonical_numeric_index("Infinity"), Some(f64::INFINITY));
+        // The one name the specification admits by hand: `String(-0)` is `"0"`.
+        assert_eq!(canonical_numeric_index("-0"), Some(-0.0));
+        assert!(canonical_numeric_index("-0").is_some_and(f64::is_sign_negative));
+        // Ordinary names, stored under themselves.
+        assert_eq!(canonical_numeric_index("01"), None);
+        assert_eq!(canonical_numeric_index("1e2"), None);
+        assert_eq!(canonical_numeric_index("1.0"), None);
+        assert_eq!(canonical_numeric_index(" 1"), None);
+        assert_eq!(canonical_numeric_index("length"), None);
+        assert_eq!(canonical_numeric_index(""), None);
     }
 
     #[test]
