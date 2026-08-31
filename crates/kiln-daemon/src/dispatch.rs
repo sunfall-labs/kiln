@@ -574,6 +574,14 @@ fn build_graph<E: QueryEngine>(
                 message: "source is not synchronized".to_owned(),
             });
         }
+        if source_kind == kiln_module_graph::ModuleSource::Json {
+            return Ok(kiln_module_graph::ModulePayload::JsonText(
+                engine
+                    .source(module_file)
+                    .expect("source checked above")
+                    .to_owned(),
+            ));
+        }
         if source_kind == kiln_module_graph::ModuleSource::CommonJs {
             let source = engine.source(module_file).expect("source checked above");
             let hir = frontend_oxc::parse_commonjs(module_path_string, source);
@@ -584,14 +592,15 @@ fn build_graph<E: QueryEngine>(
                 }
             })?;
             program.dependencies = kiln_hir::commonjs_literal_requires(&hir);
-            return Ok(program);
+            return Ok(kiln_module_graph::ModulePayload::Program(program));
         }
-        engine.module_ir(module_file).map_err(|diagnostics| {
-            kiln_module_graph::ModuleGraphError::Compile {
+        engine
+            .module_ir(module_file)
+            .map(kiln_module_graph::ModulePayload::Program)
+            .map_err(|diagnostics| kiln_module_graph::ModuleGraphError::Compile {
                 path: module_path.to_path_buf(),
                 diagnostics,
-            }
-        })
+            })
     };
     let resolver = if node {
         kiln_module_resolver::PinnedPackageResolver::new_with_node_builtins(project_root, entries)
