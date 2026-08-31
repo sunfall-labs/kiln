@@ -3913,11 +3913,19 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             &entry,
             format!(
                 r#"import {{ connect }} from "node:net";
-const socket = connect({port}, "127.0.0.1", () => socket.end("final bytes"));
+const socket = connect({port}, "127.0.0.1", () => {{
+  if (socket.readyState !== "open") throw new Error("socket was not open");
+  socket.end("final bytes");
+  if (socket.readyState !== "readOnly") throw new Error("socket was not read-only");
+}});
 let reply = "";
 socket.setEncoding("utf8");
 socket.on("data", chunk => reply += chunk);
-socket.on("end", () => console.log(reply));
+socket.on("end", () => {{}});
+socket.on("close", () => {{
+  if (socket.readyState !== "closed") throw new Error("socket was not closed");
+  console.log(reply);
+}});
 "#
             ),
         )

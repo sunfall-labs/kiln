@@ -24,6 +24,26 @@ pub enum StreamEvent {
     Close,
 }
 
+/// Node's public `net.Socket.readyState`, projected from the duplex state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadyState {
+    Open,
+    ReadOnly,
+    WriteOnly,
+    Closed,
+}
+
+impl ReadyState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::ReadOnly => "readOnly",
+            Self::WriteOnly => "writeOnly",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 /// One side effect selected by [`StreamDriver`].
 ///
 /// The caller performs host operations and publishes language events. That inversion is what
@@ -396,6 +416,19 @@ impl<T> DuplexState<T> {
         self.resource_closed
     }
 
+    /// Derive the language-visible duplex state from the authoritative close bits.
+    pub const fn ready_state(&self) -> ReadyState {
+        if self.resource_closed || (self.read_closed && self.write_closed) {
+            ReadyState::Closed
+        } else if self.write_closed || self.end_requested {
+            ReadyState::ReadOnly
+        } else if self.read_closed {
+            ReadyState::WriteOnly
+        } else {
+            ReadyState::Open
+        }
+    }
+
     /// Queue one write. The adapter submits only the queue head and calls [`Self::write_started`]
     /// with its request identity; subsequent writes remain ordered without serialising Tokio's
     /// unrelated work.
@@ -750,15 +783,29 @@ mod tests {
     #[test]
     fn natural_duplex_close_orders_end_finish_close() {
         let mut stream = DuplexState::<Vec<u8>>::default();
+        assert_eq!(stream.ready_state(), ReadyState::Open);
         assert!(stream.request_end());
+        assert_eq!(stream.ready_state(), ReadyState::ReadOnly);
         assert_eq!(stream.read_eof(), vec![StreamEvent::End]);
         assert_eq!(
             stream.shutdown_completed(),
             vec![StreamEvent::Finish, StreamEvent::Close]
         );
+        assert_eq!(stream.ready_state(), ReadyState::Closed);
         assert!(stream.read_closed());
         assert!(stream.write_closed());
         assert!(stream.resource_closed());
+    }
+
+    #[test]
+    fn ready_state_projects_each_duplex_half_without_adapter_mirrors() {
+        let mut read_closed = DuplexState::<Vec<u8>>::default();
+        assert_eq!(read_closed.read_eof(), vec![StreamEvent::End]);
+        assert_eq!(read_closed.ready_state(), ReadyState::WriteOnly);
+
+        let mut destroyed = DuplexState::<Vec<u8>>::default();
+        assert_eq!(destroyed.close_resource(), vec![StreamEvent::Close]);
+        assert_eq!(destroyed.ready_state(), ReadyState::Closed);
     }
 
     #[test]
