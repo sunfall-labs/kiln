@@ -949,10 +949,9 @@ and the resulting executable serves the recorded bytes, at 8ms to first response
 resident and 4.6 MiB on disk - against 24ms/24.4/60.9 for `bun build --compile` and \
 27ms/34.7/64.3 for `deno compile`, measured by scripts/server-baseline.sh on the same file.
 
-Two of the other three now refuse with named backlog entries rather than a generic control error, \
+The remaining server probe refuses with a named backlog entry rather than a generic control error, \
 which is the distribution doing its job:
 
-    s03  unsupported native emission: the `Buffer` builtin in the native backend
     s04  native Node execution does not yet materialize the `node:util` builtin
 
 `s02` now builds and passes through the same public standalone path as `s01`. Its three requests \
@@ -960,6 +959,11 @@ exercise async routing, the native WHATWG URL constructor and URLSearchParams lo
 responses, loopback HTTP client/server operation, and orderly shutdown. The URL implementation \
 uses ordinary runtime objects and the existing percent-decoder; it adds no value tag, ABI type, \
 executor, or transport path. \
+
+`s03` also passes both public native paths. Incoming HTTP body chunks are Buffer views over the \
+existing Uint8Array storage, so `Buffer.concat`, byte length, and UTF-8 decoding add no second \
+byte container or ABI type. The native-run and standalone gates copy the canonical corpus file \
+and require the same recorded JSON as interpreted mode. \
 
 Getting `s01` there needed one fix, recorded because the shape of it will recur. The native \
 `node:http` materializer writes `exports[]` by position, and the positions are declared by \
