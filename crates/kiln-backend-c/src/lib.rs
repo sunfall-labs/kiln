@@ -17,6 +17,13 @@ use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 /// Version of the generated C ABI.  This is independent from the bytecode and HostOps versions.
 pub const C_ABI_VERSION: u32 = 1;
 
+/// Revision of the complete generated translation-unit format.
+///
+/// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
+/// can change emitted object bytes without changing the public embedding layout. Native artifact
+/// keys include this revision so those objects are never reused across generator changes.
+pub const C_GENERATOR_VERSION: u32 = 2;
+
 /// Realm policy that changes observable native execution.
 ///
 /// The default deliberately preserves every pre-ADR-0031 artifact. Host-backed values are never
