@@ -32,6 +32,7 @@ pub(crate) struct ResponseCommand {
 }
 
 pub(crate) struct ClientRequestCommand {
+    pub(crate) id: u64,
     pub(crate) method: String,
     pub(crate) target: String,
     pub(crate) headers: Vec<(String, String)>,
@@ -41,12 +42,18 @@ pub(crate) struct ClientRequestCommand {
 #[derive(Debug)]
 pub(crate) enum ClientEvent {
     ResponseHead {
+        id: u64,
         status: u16,
         reason: String,
         headers: Vec<(String, String)>,
     },
-    ResponseData(Vec<u8>),
-    ResponseEnd,
+    ResponseData {
+        id: u64,
+        data: Vec<u8>,
+    },
+    ResponseEnd {
+        id: u64,
+    },
     Error(String),
     Closed,
 }
@@ -63,7 +70,8 @@ where
         let (mut sender, connection) =
             hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
         let connection_task = tokio::task::spawn_local(connection);
-        if let Some(command) = requests.recv().await {
+        while let Some(command) = requests.recv().await {
+            let id = command.id;
             let mut builder = Request::builder()
                 .method(command.method.as_str())
                 .uri(command.target.as_str());
@@ -91,6 +99,7 @@ where
                         })
                         .collect();
                     let _ = events.send(ClientEvent::ResponseHead {
+                        id,
                         status: status.as_u16(),
                         reason: status.canonical_reason().unwrap_or_default().to_owned(),
                         headers,
@@ -100,10 +109,13 @@ where
                         if let Ok(data) = frame.into_data()
                             && !data.is_empty()
                         {
-                            let _ = events.send(ClientEvent::ResponseData(data.to_vec()));
+                            let _ = events.send(ClientEvent::ResponseData {
+                                id,
+                                data: data.to_vec(),
+                            });
                         }
                     }
-                    let _ = events.send(ClientEvent::ResponseEnd);
+                    let _ = events.send(ClientEvent::ResponseEnd { id });
                 }
                 Err(error) => {
                     let _ = events.send(ClientEvent::Error(error.to_string()));
@@ -424,6 +436,7 @@ mod tests {
             let (body_event_sender, _body_events) = tokio::sync::mpsc::unbounded_channel();
             request_sender
                 .send(ClientRequestCommand {
+                    id: 1,
                     method: "POST".into(),
                     target: "/upload".into(),
                     headers: vec![("content-type".into(), "text/plain".into())],
@@ -484,17 +497,106 @@ mod tests {
             ));
             assert!(matches!(
                 client_events.recv().await,
-                Some(ClientEvent::ResponseData(data)) if data == b"ok"
+                Some(ClientEvent::ResponseData { id: 1, data }) if data == b"ok"
             ));
             assert!(matches!(
                 client_events.recv().await,
-                Some(ClientEvent::ResponseEnd)
+                Some(ClientEvent::ResponseEnd { id: 1 })
             ));
             drop(request_sender);
             client
                 .await
                 .expect("client task joins")
                 .expect("client succeeds");
+            server
+                .await
+                .expect("server task joins")
+                .expect("server succeeds");
+        });
+    }
+
+    #[test]
+    fn client_connection_reuses_one_http1_socket_for_sequential_requests() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("Tokio runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (client_io, server_io) = duplex(8192);
+            let (request_sender, request_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (client_event_sender, mut client_events) = tokio::sync::mpsc::unbounded_channel();
+            let client = tokio::task::spawn_local(client_connection(
+                client_io,
+                request_receiver,
+                client_event_sender,
+            ));
+            let (server_event_sender, mut server_events) = tokio::sync::mpsc::unbounded_channel();
+            let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::task::spawn_local(event_connection(
+                server_io,
+                server_event_sender,
+                response_receiver,
+            ));
+
+            for request_id in 1..=2 {
+                let mut body = crate::http_body::ResponseBodyDriver::default();
+                body.end(Vec::new());
+                let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
+                request_sender
+                    .send(ClientRequestCommand {
+                        id: request_id,
+                        method: "GET".into(),
+                        target: format!("/{request_id}"),
+                        headers: vec![("host".into(), "kiln".into())],
+                        body: body.body(body_events),
+                    })
+                    .expect("request command sends");
+                let EngineEvent::RequestHead { id, request } =
+                    server_events.recv().await.expect("request head arrives")
+                else {
+                    panic!("expected request head")
+                };
+                assert_eq!(request.target, format!("/{request_id}"));
+                assert!(matches!(
+                    server_events.recv().await,
+                    Some(EngineEvent::RequestEnd { id: end_id }) if end_id == id
+                ));
+                let mut response_body = crate::http_body::ResponseBodyDriver::default();
+                response_body.end(request_id.to_string().into_bytes());
+                let (response_events, _) = tokio::sync::mpsc::unbounded_channel();
+                response_sender
+                    .send(ResponseCommand {
+                        id,
+                        status: 200,
+                        headers: Vec::new(),
+                        body: response_body.body(response_events),
+                    })
+                    .expect("response sends");
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::ResponseHead { id, status: 200, .. }) if id == request_id
+                ));
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::ResponseData { id, data })
+                        if id == request_id && data == request_id.to_string().as_bytes()
+                ));
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::ResponseEnd { id }) if id == request_id
+                ));
+                assert!(client_events.try_recv().is_err());
+            }
+
+            drop(request_sender);
+            client
+                .await
+                .expect("client task joins")
+                .expect("client succeeds");
+            assert!(matches!(
+                client_events.recv().await,
+                Some(ClientEvent::Closed)
+            ));
             server
                 .await
                 .expect("server task joins")

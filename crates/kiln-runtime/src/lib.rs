@@ -70,15 +70,25 @@ pub struct RuntimeHttpClientRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeHttpClientEvent {
-    Drain,
-    Finish,
+    Drain {
+        id: u64,
+    },
+    Finish {
+        id: u64,
+    },
     ResponseHead {
+        id: u64,
         status: u16,
         reason: String,
         headers: Vec<(String, String)>,
     },
-    ResponseData(Vec<u8>),
-    ResponseEnd,
+    ResponseData {
+        id: u64,
+        data: Vec<u8>,
+    },
+    ResponseEnd {
+        id: u64,
+    },
     Error(String),
     Closed,
 }
@@ -131,16 +141,19 @@ pub trait ActiveHttpRuntime {
         &mut self,
         resource: ResourceId,
         request: RuntimeHttpClientRequest,
+        id: u64,
         high_water_mark: usize,
     ) -> bool;
     fn write_client_request(
         &mut self,
         resource: ResourceId,
+        id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition>;
     fn end_client_request(
         &mut self,
         resource: ResourceId,
+        id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition>;
     fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent>;
@@ -674,8 +687,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 close_after_response: HashSet::new(),
                 client_requests: None,
                 client_events: None,
-                client_body: None,
-                client_body_events: None,
+                client_bodies: BTreeMap::new(),
+                client_body_events: BTreeMap::new(),
             },
         );
         actions
@@ -706,8 +719,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 close_after_response: HashSet::new(),
                 client_requests: Some(request_sender),
                 client_events: Some(event_receiver),
-                client_body: None,
-                client_body_events: None,
+                client_bodies: BTreeMap::new(),
+                client_body_events: BTreeMap::new(),
             },
         );
         actions
@@ -925,17 +938,19 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         request: RuntimeHttpClientRequest,
+        id: u64,
         high_water_mark: usize,
     ) -> bool {
         let Some(connection) = self.http_connections.get_mut(&resource) else {
             return false;
         };
-        if connection.client_body.is_some() {
+        if connection.client_bodies.contains_key(&id) {
             return false;
         }
         let body = ResponseBodyDriver::new(high_water_mark);
         let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
         let command = hyper_http::ClientRequestCommand {
+            id,
             method: request.method,
             target: request.target,
             headers: request.headers,
@@ -948,32 +963,36 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         {
             return false;
         }
-        connection.client_body = Some(body);
-        connection.client_body_events = Some(body_event_receiver);
+        connection.client_bodies.insert(id, body);
+        connection
+            .client_body_events
+            .insert(id, body_event_receiver);
         true
     }
 
     pub fn write_http1_client_request(
         &mut self,
         resource: ResourceId,
+        id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
         self.http_connections
             .get_mut(&resource)?
-            .client_body
-            .as_mut()
+            .client_bodies
+            .get_mut(&id)
             .map(|body| body.write(data))
     }
 
     pub fn end_http1_client_request(
         &mut self,
         resource: ResourceId,
+        id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
         self.http_connections
             .get_mut(&resource)?
-            .client_body
-            .as_mut()
+            .client_bodies
+            .get_mut(&id)
             .map(|body| body.end(data))
     }
 
@@ -990,17 +1009,25 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return Vec::new();
         }
         let mut events = Vec::new();
-        if let Some(receiver) = self
+        let connection = self
             .http_connections
             .get_mut(&resource)
-            .and_then(|connection| connection.client_body_events.as_mut())
-        {
+            .expect("checked above");
+        let mut finished_bodies = Vec::new();
+        for (&id, receiver) in &mut connection.client_body_events {
             while let Ok(event) = receiver.try_recv() {
+                if event == BodyEvent::Finish {
+                    finished_bodies.push(id);
+                }
                 events.push(match event {
-                    BodyEvent::Drain => RuntimeHttpClientEvent::Drain,
-                    BodyEvent::Finish => RuntimeHttpClientEvent::Finish,
+                    BodyEvent::Drain => RuntimeHttpClientEvent::Drain { id },
+                    BodyEvent::Finish => RuntimeHttpClientEvent::Finish { id },
                 });
             }
+        }
+        for id in finished_bodies {
+            connection.client_bodies.remove(&id);
+            connection.client_body_events.remove(&id);
         }
         let Some(receiver) = self
             .http_connections
@@ -1012,18 +1039,22 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         while let Ok(event) = receiver.try_recv() {
             events.push(match event {
                 hyper_http::ClientEvent::ResponseHead {
+                    id,
                     status,
                     reason,
                     headers,
                 } => RuntimeHttpClientEvent::ResponseHead {
+                    id,
                     status,
                     reason,
                     headers,
                 },
-                hyper_http::ClientEvent::ResponseData(data) => {
-                    RuntimeHttpClientEvent::ResponseData(data)
+                hyper_http::ClientEvent::ResponseData { id, data } => {
+                    RuntimeHttpClientEvent::ResponseData { id, data }
                 }
-                hyper_http::ClientEvent::ResponseEnd => RuntimeHttpClientEvent::ResponseEnd,
+                hyper_http::ClientEvent::ResponseEnd { id } => {
+                    RuntimeHttpClientEvent::ResponseEnd { id }
+                }
                 hyper_http::ClientEvent::Error(message) => RuntimeHttpClientEvent::Error(message),
                 hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
             });
@@ -1089,8 +1120,8 @@ struct RuntimeHttpConnection {
     close_after_response: HashSet<u64>,
     client_requests: Option<mpsc::UnboundedSender<hyper_http::ClientRequestCommand>>,
     client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
-    client_body: Option<ResponseBodyDriver>,
-    client_body_events: Option<mpsc::UnboundedReceiver<BodyEvent>>,
+    client_bodies: BTreeMap<u64, ResponseBodyDriver>,
+    client_body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
@@ -1167,25 +1198,28 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         request: RuntimeHttpClientRequest,
+        id: u64,
         high_water_mark: usize,
     ) -> bool {
-        self.send_http1_client_request(resource, request, high_water_mark)
+        self.send_http1_client_request(resource, request, id, high_water_mark)
     }
 
     fn write_client_request(
         &mut self,
         resource: ResourceId,
+        id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.write_http1_client_request(resource, data)
+        self.write_http1_client_request(resource, id, data)
     }
 
     fn end_client_request(
         &mut self,
         resource: ResourceId,
+        id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.end_http1_client_request(resource, data)
+        self.end_http1_client_request(resource, id, data)
     }
 
     fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent> {
