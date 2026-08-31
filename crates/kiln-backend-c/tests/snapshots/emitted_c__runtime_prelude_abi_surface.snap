@@ -910,6 +910,7 @@ static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t a
 static void kiln_c99_node_cancel_request(uint64_t *request) {
 static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
+static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
