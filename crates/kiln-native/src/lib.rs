@@ -3354,6 +3354,29 @@ typedef struct kiln_commonjs_graph_context {
     kiln_value **exports;
     size_t module_count;
 } kiln_commonjs_graph_context;
+
+static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *result,
+                                    kiln_value *thrown) {
+    int status;
+    if (context == NULL || result == NULL || context->exports == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (context->state != 0) {
+        *result = context->exports[0];
+        return KILN_C99_OK;
+    }
+    context->state = 1;
+    status = context->module(context->host, result, context->imports, context->import_count,
+                             context->exports, (size_t)1);
+    if (status != KILN_C99_OK) {
+        context->state = 0;
+        if (thrown != NULL) *thrown = *result;
+        return status;
+    }
+    context->state = 2;
+    *result = context->exports[0];
+    return KILN_C99_OK;
+}
 "#,
     );
     for (node, module) in modules {
