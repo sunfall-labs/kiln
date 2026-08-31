@@ -15,6 +15,9 @@ use kiln_proto::{
 use kiln_test_selector::{ChangeSet, FailureState, TestId, TestMetadata, TestTier, select};
 use rayon::prelude::*;
 
+const MODULE_GRAPH_FEATURES: &[&str] = &["modules", "module-graph"];
+const MODULE_RESOLVER_FEATURES: &[&str] = &["builtin-modules", "node-packages", "node-resolution"];
+
 pub fn run(
     root: &str,
     mode: TestMode,
@@ -158,6 +161,12 @@ fn selector_metadata(test: &ConformanceTest, mode: TestMode) -> TestMetadata {
         for compiler_crate in ["kiln-ir", "kiln-interpreter", "kiln-runtime"] {
             metadata.add_compiler_crate(compiler_crate);
         }
+        if has_any_feature(test, MODULE_GRAPH_FEATURES) {
+            metadata.add_compiler_crate("kiln-module-graph");
+        }
+        if has_any_feature(test, MODULE_RESOLVER_FEATURES) {
+            metadata.add_compiler_crate("kiln-module-resolver");
+        }
     }
     for feature in test.features() {
         metadata.add_feature(feature);
@@ -169,6 +178,12 @@ fn selector_metadata(test: &ConformanceTest, mode: TestMode) -> TestMetadata {
         }
     }
     metadata
+}
+
+fn has_any_feature(test: &ConformanceTest, features: &[&str]) -> bool {
+    test.features()
+        .iter()
+        .any(|feature| features.contains(&feature.as_str()))
 }
 
 fn change_set_for_tests<'a, I>(paths: &[String], tests: I) -> ChangeSet
@@ -424,6 +439,84 @@ expected_stdout = "bundle\n"
         );
         assert!(!proto_changes.full_run);
         assert!(proto_changes.compiler_crates.contains("kiln-proto"));
+    }
+
+    #[test]
+    fn changed_module_graph_selects_module_cases_without_a_full_run() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let discovered =
+            kiln_conformance::discover(&repo.join("conformance")).expect("fixture corpus is valid");
+        let metadata = discovered
+            .iter()
+            .map(|test| selector_metadata(test, TestMode::Interpreter))
+            .collect::<Vec<_>>();
+        let expected = metadata
+            .iter()
+            .filter(|test| {
+                test.features
+                    .iter()
+                    .any(|feature| MODULE_GRAPH_FEATURES.contains(&feature.as_str()))
+            })
+            .map(|test| test.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!expected.is_empty(), "fixture corpus has module cases");
+
+        let changes = change_set_for_tests(
+            &["crates/kiln-module-graph/src/lib.rs".to_owned()],
+            discovered.iter(),
+        );
+        assert!(!changes.full_run);
+        let selection = select(&metadata, &changes, &FailureState::new());
+        let selected = selection
+            .ids()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(selected, expected);
+        assert!(selection.tests.iter().all(|test| {
+            test.has_reason(&kiln_test_selector::SelectionReason::ModifiedCompilerCrate(
+                "kiln-module-graph".to_owned(),
+            ))
+        }));
+    }
+
+    #[test]
+    fn changed_module_resolver_selects_resolution_cases_without_a_full_run() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let discovered =
+            kiln_conformance::discover(&repo.join("conformance")).expect("fixture corpus is valid");
+        let metadata = discovered
+            .iter()
+            .map(|test| selector_metadata(test, TestMode::Interpreter))
+            .collect::<Vec<_>>();
+        let expected = metadata
+            .iter()
+            .filter(|test| {
+                test.features
+                    .iter()
+                    .any(|feature| MODULE_RESOLVER_FEATURES.contains(&feature.as_str()))
+            })
+            .map(|test| test.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!expected.is_empty(), "fixture corpus has resolution cases");
+
+        let changes = change_set_for_tests(
+            &["crates/kiln-module-resolver/src/lib.rs".to_owned()],
+            discovered.iter(),
+        );
+        assert!(!changes.full_run);
+        let selection = select(&metadata, &changes, &FailureState::new());
+        let selected = selection
+            .ids()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(selected, expected);
+        assert!(selection.tests.iter().all(|test| {
+            test.has_reason(&kiln_test_selector::SelectionReason::ModifiedCompilerCrate(
+                "kiln-module-resolver".to_owned(),
+            ))
+        }));
     }
 
     /// The point of the index-keyed collection: the summary must not be able to observe which
