@@ -249,7 +249,11 @@ fn assert_numeric_id_invariants(prelude: &str) {
     // So when the two collide: shift the equality-matched block, never the range-matched one.
     let temporal_ids: Vec<u64> = methods
         .iter()
-        .filter(|(_, names)| names.iter().all(|n| n.starts_with("KILN_C99_METHOD_TEMPORAL_")))
+        .filter(|(_, names)| {
+            names
+                .iter()
+                .all(|n| n.starts_with("KILN_C99_METHOD_TEMPORAL_"))
+        })
         .map(|(value, _)| *value)
         .collect();
     let temporal_low = *temporal_ids.iter().min().expect("Temporal methods exist");
@@ -257,7 +261,9 @@ fn assert_numeric_id_invariants(prelude: &str) {
     for (value, names) in &methods {
         if *value >= temporal_low && *value <= temporal_high {
             assert!(
-                names.iter().all(|n| n.starts_with("KILN_C99_METHOD_TEMPORAL_")),
+                names
+                    .iter()
+                    .all(|n| n.starts_with("KILN_C99_METHOD_TEMPORAL_")),
                 "method ID {value} ({}) sits inside the Temporal range {temporal_low}..={temporal_high}, \
                  which is dispatched by range and must stay contiguous. Renumber this one upward \
                  instead -- it is matched by equality, so its value does not matter.",
@@ -776,12 +782,13 @@ fn module_symbol_under_a_logical_path() {
         by_path.program_hash, by_content.program_hash,
         "the logical path names the unit; it does not change what the bytecode hashes to"
     );
+    let expected_path_source = by_content
+        .source
+        .replace(&by_content.symbol, &by_path.symbol)
+        .replace(&format!("\"{}\"", by_path.symbol), "\"src/app/main.js\"");
     assert_eq!(
-        by_path.source,
-        by_content
-            .source
-            .replace(&by_content.symbol, &by_path.symbol),
-        "the two spellings must differ only in the exported symbol"
+        by_path.source, expected_path_source,
+        "the two spellings must differ only in the exported symbol and diagnostic site"
     );
 
     insta::assert_snapshot!(format!(

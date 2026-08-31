@@ -19,6 +19,7 @@ expression: abi_surface(prelude)
 #define KILN_C99_UNINITIALIZED_ERROR (-6)
 #define KILN_C99_THROWN (-7)
 static const char *kiln_c99_diagnostic_site = NULL;
+static const char *kiln_c99_diagnostic_operation = NULL;
 static size_t kiln_c99_diagnostic_instruction = 0;
 static uint64_t kiln_c99_diagnostic_method = 0;
 static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
@@ -312,6 +313,8 @@ KILN_VALUE_COMMONJS_REQUIRE = 26
 #define KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES 157
 #define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR 158
 #define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS 159
+#define KILN_C99_METHOD_SYMBOL_FOR 409
+#define KILN_C99_METHOD_SYMBOL_KEY_FOR 410
 #define KILN_C99_METHOD_OBJECT_IS 185
 #define KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE 186
 #define KILN_C99_METHOD_REFLECT_OWN_KEYS 187
@@ -542,6 +545,8 @@ int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
+int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
+int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds);
@@ -921,6 +926,8 @@ static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
 static const kiln_symbol kiln_c99_well_known[] = {
 static kiln_value kiln_c99_property_key(kiln_value key) {
 static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
+static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
+static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
 static uint64_t kiln_c99_callable_method(const char *key, size_t key_len) {
 static int kiln_c99_is_namespace(uint64_t builtin) {
 static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t first,

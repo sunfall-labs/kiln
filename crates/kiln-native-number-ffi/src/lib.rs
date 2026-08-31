@@ -571,6 +571,8 @@ mod realm {
         next_http_client_request_id: Cell<u64>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
+        symbols: RefCell<HashMap<Vec<u8>, u64>>,
+        symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         entered: Cell<bool>,
     }
 
@@ -585,6 +587,8 @@ mod realm {
                 next_http_client_request_id: Cell::new(1),
                 cancelled: Rc::new(RefCell::new(HashSet::new())),
                 queued: Rc::new(RefCell::new(HashSet::new())),
+                symbols: RefCell::new(HashMap::new()),
+                symbol_keys: RefCell::new(HashMap::new()),
                 entered: Cell::new(false),
             })
         }
@@ -623,6 +627,7 @@ mod realm {
     }
 
     static NEXT_REALM: AtomicU64 = AtomicU64::new(1);
+    static NEXT_SYMBOL: AtomicU64 = AtomicU64::new(1);
 
     std::thread_local! {
         static REALMS: RefCell<HashMap<u64, Rc<NativeRealm>>> = RefCell::new(HashMap::new());
@@ -1371,6 +1376,68 @@ mod realm {
     #[unsafe(no_mangle)]
     pub extern "C" fn kiln_realm_is_active() -> i32 {
         i32::from(ACTIVE_REALM.with(|active| active.get() != 0))
+    }
+
+    /// Interns a registered-symbol key in the active Realm. The returned identity is stable for
+    /// that Realm and deliberately meaningless outside it; generated modules never own registry
+    /// state independently.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_symbol_for(
+        key: *const u8,
+        key_len: u64,
+        out_id: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_id.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(key) = (unsafe { borrowed_bytes(key, key_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            if let Some(id) = realm.symbols.borrow().get(key).copied() {
+                unsafe { out_id.write(id) };
+                return 0;
+            }
+            let Ok(id) = NEXT_SYMBOL.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |next| {
+                next.checked_add(1)
+            }) else {
+                return RUNTIME_ERROR;
+            };
+            let owned = key.to_vec();
+            realm.symbols.borrow_mut().insert(owned.clone(), id);
+            realm.symbol_keys.borrow_mut().insert(id, owned);
+            unsafe { out_id.write(id) };
+            0
+        })
+    }
+
+    /// Borrows a registered-symbol key from the active Realm for the duration of this call.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_symbol_key_for(
+        id: u64,
+        out_key: *mut *const u8,
+        out_key_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_key.is_null() || out_key_len.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let keys = realm.symbol_keys.borrow();
+            let Some(key) = keys.get(&id) else {
+                return INVALID_ARGUMENT;
+            };
+            unsafe {
+                out_key.write(key.as_ptr());
+                out_key_len.write(key.len() as u64);
+            }
+            0
+        })
     }
 
     /// Writes the active Realm's deterministic clock in ECMAScript milliseconds.
@@ -2173,6 +2240,66 @@ mod realm {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        unsafe extern "C" fn exercises_symbol_registry(context: *mut c_void) -> i32 {
+            let output = unsafe { &mut *context.cast::<[u64; 3]>() };
+            let key = b"fastify-error-generic";
+            let mut first = 0;
+            let mut second = 0;
+            let mut borrowed = std::ptr::null();
+            let mut borrowed_len = 0;
+            if unsafe { kiln_realm_symbol_for(key.as_ptr(), key.len() as u64, &raw mut first) } != 0
+                || unsafe { kiln_realm_symbol_for(key.as_ptr(), key.len() as u64, &raw mut second) }
+                    != 0
+                || first != second
+                || unsafe {
+                    kiln_realm_symbol_key_for(first, &raw mut borrowed, &raw mut borrowed_len)
+                } != 0
+            {
+                return RUNTIME_ERROR;
+            }
+            output[0] = first;
+            output[1] = second;
+            output[2] = borrowed_len;
+            0
+        }
+
+        #[test]
+        fn registered_symbols_are_realm_owned_and_stable() {
+            let mut first_realm = 0;
+            let mut second_realm = 0;
+            let mut first = [0; 3];
+            let mut second = [0; 3];
+            assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
+            assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        first_realm,
+                        Some(exercises_symbol_registry),
+                        (&raw mut first).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        second_realm,
+                        Some(exercises_symbol_registry),
+                        (&raw mut second).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(first[0], first[1]);
+            assert_eq!(second[0], second[1]);
+            assert_ne!(first[0], second[0]);
+            assert_eq!(first[2], b"fastify-error-generic".len() as u64);
+            assert_eq!(second[2], b"fastify-error-generic".len() as u64);
+            assert_eq!(kiln_realm_destroy(first_realm), 0);
+            assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
 
         struct RecordedWork {
             value: u8,

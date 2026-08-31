@@ -139,7 +139,7 @@ pub fn emit_module_with_policy(
     validate_module(module)?;
     let (program_hash, symbol_hash) = hash_module_pair_with_policy(module, &policy);
     let symbol = format!("kiln_module_{program_hash:016x}{symbol_hash:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, false);
+    let source = render_module(module, program_hash, &symbol, &policy, false, &symbol);
     Ok(CModule {
         symbol,
         source,
@@ -172,7 +172,7 @@ pub fn emit_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, false);
+    let source = render_module(module, program_hash, &symbol, &policy, false, logical_path);
     Ok(CModule {
         symbol,
         source,
@@ -200,7 +200,7 @@ pub fn emit_commonjs_module_with_logical_path_and_policy(
     let (program_hash, _) = hash_module_pair_with_policy(module, &policy);
     let (path_hash, path_hash_seeded) = hash_logical_path_pair(logical_path);
     let symbol = format!("kiln_module_path_{path_hash:016x}{path_hash_seeded:016x}");
-    let source = render_module(module, program_hash, &symbol, &policy, true);
+    let source = render_module(module, program_hash, &symbol, &policy, true, logical_path);
     Ok(CModule {
         symbol,
         source,
@@ -296,6 +296,7 @@ const HEADER: &str = r#"/* Kiln C99 backend: deterministic scalar unit. */
  * unwinds.  The entry boundary renders this into its ordinary scalar result, so no private
  * runtime pointer or new public ABI type escapes. */
 static const char *kiln_c99_diagnostic_site = NULL;
+static const char *kiln_c99_diagnostic_operation = NULL;
 static size_t kiln_c99_diagnostic_instruction = 0;
 static uint64_t kiln_c99_diagnostic_method = 0;
 static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
@@ -1353,13 +1354,6 @@ typedef struct kiln_symbol {
     size_t description_len;
 } kiln_symbol;
 
-typedef struct kiln_registered_symbol {
-    kiln_symbol *symbol;
-    struct kiln_registered_symbol *next;
-} kiln_registered_symbol;
-
-static kiln_registered_symbol *kiln_c99_symbol_registry;
-
 typedef struct kiln_bound {
     kiln_value target;
     kiln_value receiver;
@@ -1604,6 +1598,8 @@ int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
+int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
+int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
  * portable 128-bit integer. `Temporal` measures instants in nanoseconds, and rounding the realm's
@@ -5062,7 +5058,7 @@ static int kiln_c99_regexp_find(kiln_regexp *regexp, const uint16_t *units, size
 }
 
 static kiln_symbol *kiln_c99_symbol_of(kiln_value value) {
-    return (kiln_symbol *)(uintptr_t)value.bits;
+    return (kiln_symbol *)(uintptr_t)value.ptr;
 }
 
 /* The specification's own symbols. One instance each, so equality is the pointer's exactly as it
@@ -5123,42 +5119,49 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         symbol->description = text.ptr;
         symbol->description_len = text.len;
     }
-    *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)symbol, NULL, 0);
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)symbol,
+                          (const char *)(uintptr_t)symbol, 0);
     return KILN_C99_OK;
 }
 
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     kiln_value text = kiln_c99_text(key);
-    kiln_registered_symbol *entry;
-    int status;
+    kiln_symbol *symbol;
+    const uint8_t *registered_key;
+    uint64_t registered_key_len;
+    char *property_key;
+    static const char property_prefix[] = "@@symbol-for:";
+    uint64_t id;
     if (text.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
-    for (entry = kiln_c99_symbol_registry; entry != NULL; entry = entry->next) {
-        if (entry->symbol->description_len == text.len &&
-            (text.len == 0 || memcmp(entry->symbol->description, text.ptr, text.len) == 0)) {
-            *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)entry->symbol, NULL, 0);
-            return KILN_C99_OK;
-        }
+    if (kiln_realm_symbol_for((const uint8_t *)text.ptr, (uint64_t)text.len, &id) != KILN_C99_OK)
+        return KILN_C99_CONTROL_ERROR;
+    if (kiln_realm_symbol_key_for(id, &registered_key, &registered_key_len) != KILN_C99_OK ||
+        registered_key_len > SIZE_MAX)
+        return KILN_C99_CONTROL_ERROR;
+    symbol = (kiln_symbol *)malloc(sizeof *symbol);
+    if (symbol == NULL) return KILN_C99_OUT_OF_MEMORY;
+    property_key = (char *)malloc((sizeof property_prefix - 1) + sizeof id);
+    if (property_key == NULL) {
+        free(symbol);
+        return KILN_C99_OUT_OF_MEMORY;
     }
-    status = kiln_c99_new_symbol(out, text);
-    if (status != KILN_C99_OK) return status;
-    entry = (kiln_registered_symbol *)malloc(sizeof *entry);
-    if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
-    entry->symbol = kiln_c99_symbol_of(*out);
-    entry->next = kiln_c99_symbol_registry;
-    kiln_c99_symbol_registry = entry;
+    memcpy(property_key, property_prefix, sizeof property_prefix - 1);
+    memcpy(property_key + sizeof property_prefix - 1, &id, sizeof id);
+    symbol->key = property_key;
+    symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
+    symbol->description = (const char *)registered_key;
+    symbol->description_len = (size_t)registered_key_len;
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, id, (const char *)(uintptr_t)symbol, 0);
     return KILN_C99_OK;
 }
 
 static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
-    kiln_registered_symbol *entry;
+    const uint8_t *key;
+    uint64_t key_len;
     if (value.tag != KILN_VALUE_SYMBOL) return kiln_c99_undefined();
-    for (entry = kiln_c99_symbol_registry; entry != NULL; entry = entry->next) {
-        if (entry->symbol == kiln_c99_symbol_of(value)) {
-            return kiln_c99_copy_text(entry->symbol->description,
-                                      entry->symbol->description_len);
-        }
-    }
-    return kiln_c99_undefined();
+    if (kiln_realm_symbol_key_for(value.bits, &key, &key_len) != KILN_C99_OK)
+        return kiln_c99_undefined();
+    return kiln_c99_copy_text((const char *)key, (size_t)key_len);
 }
 
 /* `call`, `apply` and `bind`, which every callable answers to whatever kind of callable it is.
@@ -6186,6 +6189,10 @@ static kiln_value kiln_c99_control_diagnostic(void) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_instruction);
         (void)kiln_c99_text_append_c(&text, " instruction=");
         (void)kiln_c99_text_append(&text, number, written);
+    }
+    if (kiln_c99_diagnostic_operation != NULL) {
+        (void)kiln_c99_text_append_c(&text, " operation=");
+        (void)kiln_c99_text_append_c(&text, kiln_c99_diagnostic_operation);
     }
     if (kiln_c99_diagnostic_has_method) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_method);
@@ -8055,8 +8062,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             for (index = 0; index < sizeof names / sizeof *names; ++index) {
                 if (kiln_c99_same_name(key, key_len, names[index])) {
                     *out = kiln_c99_value(KILN_VALUE_SYMBOL,
-                                          (uint64_t)(uintptr_t)&kiln_c99_well_known[index], NULL,
-                                          0);
+                                          (uint64_t)(uintptr_t)&kiln_c99_well_known[index],
+                                          (const char *)(uintptr_t)&kiln_c99_well_known[index], 0);
                     return KILN_C99_OK;
                 }
             }
@@ -12594,7 +12601,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         return KILN_C99_OK;
     }
     if ((code >= KILN_C99_METHOD_MATH_FLOOR && code < KILN_C99_METHOD_ARRAY_AT) ||
-        code == KILN_C99_METHOD_SYMBOL_FOR || code == KILN_C99_METHOD_SYMBOL_KEY_FOR) {
+        (code >= KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY &&
+         code <= KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS) ||
+        code == KILN_C99_METHOD_OBJECT_IS || code == KILN_C99_METHOD_SYMBOL_FOR ||
+        code == KILN_C99_METHOD_SYMBOL_KEY_FOR) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
          * the way the function was reached. */
         double first = 0.0 / 0.0;
@@ -21707,7 +21717,13 @@ fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
 
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
 /// rendered can still point at it.
-fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, symbol: &str) {
+fn render_functions(
+    output: &mut String,
+    program: &Program,
+    plan: &StackPlan,
+    symbol: &str,
+    diagnostic_site: &str,
+) {
     for index in 0..program.functions.len() {
         writeln!(
             output,
@@ -21734,6 +21750,7 @@ fn render_functions(output: &mut String, program: &Program, plan: &StackPlan, sy
             plan.functions[index],
             index,
             symbol,
+            diagnostic_site,
         );
     }
 }
@@ -21810,6 +21827,7 @@ fn render_function(
     max_stack: usize,
     index: usize,
     symbol: &str,
+    diagnostic_site: &str,
 ) {
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
     // Only when the name is already a C identifier: it goes into a comment, and a name is
@@ -21921,6 +21939,7 @@ fn render_function(
         frame_stacks,
         functions: &program.functions,
         symbol,
+        diagnostic_site,
         callables: produces_references(program),
         handlers,
         site: ReturnSite::Body,
@@ -22115,7 +22134,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol);
+    render_functions(&mut output, program, &plan, symbol, symbol);
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result) {{",
@@ -22162,6 +22181,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
+        diagnostic_site: symbol,
         callables,
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
@@ -22191,6 +22211,7 @@ fn render_module(
     symbol: &str,
     policy: &EmissionPolicy,
     commonjs: bool,
+    diagnostic_site: &str,
 ) -> String {
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
@@ -22220,7 +22241,7 @@ fn render_module(
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol);
+    render_functions(&mut output, program, &plan, symbol, diagnostic_site);
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{",
@@ -22295,6 +22316,7 @@ fn render_module(
         frame_stacks: &plan.functions,
         functions: &program.functions,
         symbol,
+        diagnostic_site,
         callables,
         handlers: handler_targets(&program.code),
         site: ReturnSite::Entry {
@@ -22388,6 +22410,7 @@ struct Emitter<'a> {
     handlers: Vec<u32>,
     functions: &'a [FunctionProto],
     symbol: &'a str,
+    diagnostic_site: &'a str,
     /// Whether a value reaching the embedding boundary could be a callable and so has to be
     /// converted first. False for a scalar program, whose emitted bytes must not change.
     callables: bool,
@@ -22416,6 +22439,7 @@ fn emit_instruction(
         frame_stacks,
         functions,
         symbol,
+        diagnostic_site,
         callables,
         handlers,
         site,
@@ -22424,7 +22448,9 @@ fn emit_instruction(
     let before = output.len();
     writeln!(
         output,
-        "    kiln_c99_diagnostic_site = \"{symbol}\"; kiln_c99_diagnostic_instruction = (size_t){index};"
+        "    kiln_c99_diagnostic_site = {}; kiln_c99_diagnostic_instruction = (size_t){index}; kiln_c99_diagnostic_operation = \"{}\";",
+        c_string(diagnostic_site),
+        instruction_diagnostic(instruction, constants)
     )
     .unwrap();
     output.push_str("    kiln_c99_diagnostic_has_method = 0;\n");
@@ -23317,6 +23343,32 @@ fn emit_instruction(
         output.truncate(before);
         output.push_str(&replaced);
     }
+}
+
+fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> String {
+    let debug = format!("{instruction:?}");
+    let mut operation = debug
+        .split([' ', '(', '{'])
+        .next()
+        .unwrap_or("Instruction")
+        .to_owned();
+    let named = match instruction {
+        Instruction::CallMethod { name, .. }
+        | Instruction::GetProperty(name)
+        | Instruction::SetProperty(name) => constants.get(*name as usize),
+        Instruction::SetPropertyStrict { name, .. } => constants.get(*name as usize),
+        _ => None,
+    };
+    if let Some(Constant::String(name)) = named {
+        operation.push('(');
+        operation.push_str(name);
+        operation.push(')');
+    }
+    operation
+        .bytes()
+        .filter(|byte| byte.is_ascii_alphanumeric() || b"_.$:-()".contains(byte))
+        .map(char::from)
+        .collect()
 }
 
 fn c_string(value: &str) -> String {
@@ -24233,11 +24285,14 @@ int main(void) {{
         let wrapper = format!(
             r#"
 int main(void) {{
+    uint64_t realm;
     kiln_value key = kiln_c99_copy_text("fastify-error-generic", 21);
     kiln_value first;
     kiln_value second;
     kiln_value unique;
     kiln_value recovered;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_symbol_for(&first, key) != KILN_C99_OK) return 1;
     if (kiln_c99_symbol_for(&second, key) != KILN_C99_OK) return 2;
     if (!kiln_c99_strict_equal(first, second)) return 3;
@@ -24247,7 +24302,12 @@ int main(void) {{
     if (kiln_c99_new_symbol(&unique, key) != KILN_C99_OK) return 5;
     if (kiln_c99_strict_equal(first, unique)) return 6;
     if (kiln_c99_symbol_key_for(unique).tag != KILN_VALUE_UNDEFINED) return 7;
-    return 0;
+    if (kiln_c99_property_key(first).len == key.len &&
+        memcmp(kiln_c99_property_key(first).ptr, key.ptr, key.len) == 0) return 8;
+    if (kiln_c99_text(first).len != 29 ||
+        memcmp(kiln_c99_text(first).ptr, "Symbol(fastify-error-generic)", 29) != 0) return 9;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
 }}
 "#
         );
@@ -24412,6 +24472,9 @@ int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_
     const REALM_FIXTURE: &str = r#"
 static uint64_t kiln_test_next_timer_id = 1;
 static int kiln_test_realm_active = 0;
+static uint64_t kiln_test_symbol_id = 1;
+static char kiln_test_symbol_key[256];
+static uint64_t kiln_test_symbol_key_len = 0;
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -24440,6 +24503,31 @@ int kiln_realm_destroy(uint64_t realm) {
  * prelude declares and this fixture is the first text that follows the prelude. */
 int32_t kiln_temporal_invoke(const kiln_temporal_call *call) { (void)call; return -1; }
 int kiln_realm_is_active(void) { return kiln_test_realm_active; }
+int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id) {
+    if (!kiln_test_realm_active || out_id == NULL || key_len > sizeof kiln_test_symbol_key) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (kiln_test_symbol_key_len == 0) {
+        memcpy(kiln_test_symbol_key, key, (size_t)key_len);
+        kiln_test_symbol_key_len = key_len;
+    } else if (key_len != kiln_test_symbol_key_len ||
+               memcmp(kiln_test_symbol_key, key, (size_t)key_len) != 0) {
+        ++kiln_test_symbol_id;
+        memcpy(kiln_test_symbol_key, key, (size_t)key_len);
+        kiln_test_symbol_key_len = key_len;
+    }
+    *out_id = kiln_test_symbol_id;
+    return KILN_C99_OK;
+}
+int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len) {
+    if (!kiln_test_realm_active || id != kiln_test_symbol_id || out_key == NULL ||
+        out_key_len == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    *out_key = (const uint8_t *)kiln_test_symbol_key;
+    *out_key_len = kiln_test_symbol_key_len;
+    return KILN_C99_OK;
+}
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
         return KILN_C99_INVALID_ARGUMENT;
