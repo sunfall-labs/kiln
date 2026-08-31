@@ -52,9 +52,11 @@ the same compare-and-swap update path as project dependencies.
 The client records every package edge selected by `oxc_resolver`, the exact `package.json` path and
 its content digest in the staged `ResolutionMap`. Commit publishes that map atomically with source
 bytes and `SourceView`. Daemon graph construction uses `PinnedPackageResolver`: explicit paths keep
-the exact filesystem policy, while package requests are pure `(importer, specifier)` lookups. The
-daemon therefore cannot observe a different manifest generation from the client that produced the
-view. Resolution-map identity includes the manifest digest.
+the exact filesystem policy, while package requests select targets by pure `(importer, specifier)`
+lookup and then canonicalize and revalidate that target's containment, file kind and extension.
+The daemon therefore cannot observe a different manifest generation from the client that produced
+the view or admit a mapped symlink that escapes the project. Resolution-map identity includes the
+manifest digest.
 
 Alternative install layouts such as Plug'n'Play and packages outside the canonical project root
 still require explicit policy additions.

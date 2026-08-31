@@ -432,7 +432,8 @@ impl ResolutionPolicy for NodePackageResolver {
 /// Replays package decisions captured by a client-side [`NodePackageResolver`].
 ///
 /// Explicit paths retain [`ModuleResolver`]'s exact filesystem policy. Bare package requests are
-/// pure lookups: graph construction never rereads `package.json` or reruns Node resolution.
+/// keyed lookups: graph construction never rereads `package.json` or reruns Node resolution, but
+/// it still canonicalizes and validates the pinned target before admitting it to the graph.
 #[derive(Debug, Clone)]
 pub struct PinnedPackageResolver {
     explicit: ModuleResolver,
@@ -483,17 +484,29 @@ impl PinnedPackageResolver {
                 importer: canonical_importer,
                 message: "request is absent from the synchronized resolution map".to_owned(),
             })?;
-        ensure_utf8(&target, PathRole::Target)?;
-        if !target.starts_with(self.project_root()) {
+        let canonical_target = canonical_path(&target, PathRole::Target)?;
+        ensure_utf8(&canonical_target, PathRole::Target)?;
+        if !canonical_target.starts_with(self.project_root()) {
             return Err(ResolveError::OutsideProject {
-                path: target,
+                path: canonical_target,
                 project_root: self.project_root().to_path_buf(),
             });
         }
-        if !has_supported_extension(&target) {
-            return Err(ResolveError::UnsupportedExtension { path: target });
+        if !metadata_is_regular_file(&canonical_target, PathRole::Target)? {
+            return Err(ResolveError::NotRegularFile {
+                role: PathRole::Target,
+                path: canonical_target,
+            });
         }
-        Ok(ResolvedModule::new(target, ResolutionKind::Package))
+        if !has_supported_extension(&canonical_target) {
+            return Err(ResolveError::UnsupportedExtension {
+                path: canonical_target,
+            });
+        }
+        Ok(ResolvedModule::new(
+            canonical_target,
+            ResolutionKind::Package,
+        ))
     }
 }
 
@@ -1072,6 +1085,42 @@ mod tests {
         assert!(matches!(
             resolver.resolve("data", &importer),
             Err(ResolveError::UnsupportedExtension { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pinned_package_targets_are_canonical_and_cannot_escape_through_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let canonical_importer = fs::canonicalize(&importer).expect("canonical importer");
+        let target = project.write("node_modules/inside/target.js", "");
+        let inside_link = project.root.join("node_modules/inside/link.js");
+        symlink(&target, &inside_link).expect("write in-project package symlink");
+
+        let outside = project.outside.join("escape.js");
+        fs::write(&outside, "").expect("write outside target");
+        let escaping_link = project.root.join("node_modules/escape.js");
+        symlink(&outside, &escaping_link).expect("write escaping package symlink");
+
+        let pinned = PinnedPackageResolver::new(
+            &project.root,
+            [
+                (canonical_importer.clone(), "inside".to_owned(), inside_link),
+                (canonical_importer, "escape".to_owned(), escaping_link),
+            ],
+        )
+        .expect("construct pinned resolver");
+
+        assert_eq!(
+            pinned.resolve("inside", &importer).unwrap().path,
+            fs::canonicalize(target).expect("canonical target")
+        );
+        assert!(matches!(
+            pinned.resolve("escape", &importer),
+            Err(ResolveError::OutsideProject { .. })
         ));
     }
 
