@@ -344,6 +344,29 @@ fn runtime_prelude_abi_surface() {
 }
 
 #[test]
+fn emitted_http_socket_close_is_runtime_owned_and_modeled() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let source = unit.source;
+    assert!(source.contains("#define KILN_REALM_HTTP_CLOSE_GRACEFUL 0"));
+    assert!(source.contains("#define KILN_REALM_HTTP_CLOSE_ABORT 1"));
+    assert!(
+        source.contains("int kiln_realm_http_server_close_active(uint64_t resource, int mode);")
+    );
+
+    let branch_start = source
+        .find("if (socket->server != NULL && socket->server->protocol_http)")
+        .expect("HTTP socket close branch is emitted");
+    let generic_start = source[branch_start..]
+        .find("    kiln_c99_node_cancel_request(&socket->write_request")
+        .map(|offset| branch_start + offset)
+        .expect("generic node:net close branch follows HTTP branch");
+    let http_branch = &source[branch_start..generic_start];
+    assert!(http_branch.contains("kiln_realm_http_server_close_active("));
+    assert!(http_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
+    assert!(!http_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
+}
+
+#[test]
 fn numeric_id_parser_rejects_malformed_definitions() {
     for source in [
         "#define KILN_C99_METHOD_BROKEN\n",

@@ -574,6 +574,8 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_TCP_READ 10
 #define KILN_REALM_OP_TCP_WRITE 11
 #define KILN_REALM_OP_TCP_SHUTDOWN 12
+#define KILN_REALM_HTTP_CLOSE_GRACEFUL 0
+#define KILN_REALM_HTTP_CLOSE_ABORT 1
 typedef struct kiln_async_host_op {
 typedef struct kiln_async_completion {
 typedef int (*kiln_realm_completion_fn)(void *work, const kiln_async_completion *completion,
@@ -604,7 +606,7 @@ typedef struct kiln_realm_http_response {
 typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
 int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
 int kiln_realm_http_server_attach_with_options_active(
-int kiln_realm_http_server_close_active(uint64_t resource);
+int kiln_realm_http_server_close_active(uint64_t resource, int mode);
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
 int kiln_realm_http_client_request_id_active(uint64_t *out_id);
 #define KILN_REALM_HTTP_AGENT_CONNECT 1

@@ -2497,6 +2497,8 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_TCP_READ 10
 #define KILN_REALM_OP_TCP_WRITE 11
 #define KILN_REALM_OP_TCP_SHUTDOWN 12
+#define KILN_REALM_HTTP_CLOSE_GRACEFUL 0
+#define KILN_REALM_HTTP_CLOSE_ABORT 1
 typedef struct kiln_async_host_op {
     uint32_t operation;
     uint32_t flags;
@@ -2611,7 +2613,7 @@ int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_even
 int kiln_realm_http_server_attach_with_options_active(
     uint64_t resource, int allow_half_close, kiln_realm_http_event_fn run,
     kiln_realm_drop_fn drop, void *work);
-int kiln_realm_http_server_close_active(uint64_t resource);
+int kiln_realm_http_server_close_active(uint64_t resource, int mode);
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
 int kiln_realm_http_client_request_id_active(uint64_t *out_id);
@@ -11341,23 +11343,23 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     socket->closing = 1;
     kiln_c99_node_cancel_request(&socket->connect_request);
     kiln_c99_node_cancel_request(&socket->read_request);
-    if (!force && socket->server != NULL && socket->server->protocol_http) {
+    if (socket->server != NULL && socket->server->protocol_http) {
         // The C adapter registers a response before invoking the JavaScript listener, while the
         // realm only registers its Hyper body when response.start/end reaches the runtime. A
         // same-turn server.close() must therefore wait on C's response list before asking the
         // runtime to close; otherwise an idle runtime transport can tear down the socket before
         // the delayed response command is observed.
-        if (kiln_c99_node_has_unended_response(socket)) {
+        if (!force && kiln_c99_node_has_unended_response(socket)) {
             socket->close_after_responses = 1;
             return KILN_C99_OK;
         }
-        int status = kiln_realm_http_server_close_active(socket->resource);
-        if (status != KILN_C99_INVALID_ARGUMENT) return status;
-    }
-    if (!force && socket->server != NULL && socket->server->protocol_http &&
-        socket->write_request != 0) {
-        socket->close_after_write = 1;
-        return KILN_C99_OK;
+        if (!force && socket->write_request != 0) {
+            socket->close_after_write = 1;
+            return KILN_C99_OK;
+        }
+        return kiln_realm_http_server_close_active(
+            socket->resource,
+            force ? KILN_REALM_HTTP_CLOSE_ABORT : KILN_REALM_HTTP_CLOSE_GRACEFUL);
     }
     kiln_c99_node_cancel_request(&socket->write_request);
     kiln_c99_node_cancel_request(&socket->shutdown_request);
@@ -12791,7 +12793,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         if (response->socket->close_after_responses &&
             !kiln_c99_node_has_unended_response(response->socket)) {
             response->socket->close_after_responses = 0;
-            status = kiln_realm_http_server_close_active(response->socket->resource);
+            status = kiln_realm_http_server_close_active(
+                response->socket->resource, KILN_REALM_HTTP_CLOSE_GRACEFUL);
             if (status != KILN_C99_OK) return status;
         }
         *result = receiver;
@@ -26427,8 +26430,8 @@ int kiln_realm_http_server_attach_with_options_active(
     (void)allow_half_close;
     return kiln_realm_http_server_attach_active(resource, run, drop, work);
 }
-int kiln_realm_http_server_close_active(uint64_t resource) {
-    (void)resource;
+int kiln_realm_http_server_close_active(uint64_t resource, int mode) {
+    (void)resource; (void)mode;
     return KILN_C99_INVALID_ARGUMENT;
 }
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
