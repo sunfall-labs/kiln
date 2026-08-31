@@ -193,3 +193,17 @@ source = "../server/s02-routing-json.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "url", "url-search-params", "async-await", "microtask-checkpoint", "json", "routing"]
 expected_stdout = "200 {\"ok\":true}\n200 {\"path\":\"/echo\",\"q\":\"1\"}\n404 {\"error\":\"not found\"}\n"
+
+[[test]]
+id = "node-v24.7.0/builtins/server-support"
+source = "upstream-adapted/node-builtins-server-support.mjs"
+status = "runnable"
+features = ["node:diagnostics_channel", "node:util", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/commonjs/extensionless-require"
+source = "upstream-adapted/commonjs-extensionless-entry.cjs"
+status = "runnable"
+features = ["commonjs", "node-resolution", "extension-search"]
+expected_stdout = "pass\n"
