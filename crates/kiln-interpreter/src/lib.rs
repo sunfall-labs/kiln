@@ -22668,12 +22668,31 @@ fn call_native(
                 Native::StringIncludes => Value::Boolean(text.contains(&argument(0))),
                 Native::StringStartsWith => Value::Boolean(text.starts_with(&argument(0))),
                 Native::StringEndsWith => Value::Boolean(text.ends_with(&argument(0))),
-                Native::StringIndexOf => Value::Number(
-                    // Byte offsets are not character offsets; the index has to be counted in
-                    // the same units `length` reports, which is UTF-16.
-                    text.find(&argument(0))
-                        .map_or(-1.0, |byte| text[..byte].encode_utf16().count() as f64),
-                ),
+                Native::StringIndexOf => {
+                    // Both the position and result are UTF-16 code-unit offsets. Slicing Rust
+                    // strings by bytes made the optional start unusable and would split astral
+                    // characters; searching encoded units keeps all three quantities in the
+                    // unit JavaScript specifies.
+                    let haystack: Vec<u16> = text.encode_utf16().collect();
+                    let needle: Vec<u16> = argument(0).encode_utf16().collect();
+                    let raw_start = arguments.get(1).map_or(0.0, Value::as_number);
+                    let start = if raw_start.is_nan() || raw_start <= 0.0 {
+                        0
+                    } else if !raw_start.is_finite() {
+                        haystack.len()
+                    } else {
+                        (raw_start.trunc() as usize).min(haystack.len())
+                    };
+                    let found = if needle.is_empty() {
+                        Some(start)
+                    } else {
+                        haystack[start..]
+                            .windows(needle.len())
+                            .position(|window| window == needle)
+                            .map(|offset| start + offset)
+                    };
+                    Value::Number(found.map_or(-1.0, |index| index as f64))
+                }
                 Native::StringRepeat => {
                     let count = arguments.first().map_or(0.0, Value::as_number);
                     if count < 0.0 || !count.is_finite() {
@@ -28933,6 +28952,23 @@ fn number_string(value: f64) -> String {
 #[cfg(test)]
 mod tests {
 
+    fn string_index_of(text: &str, needle: &str, start: Option<f64>) -> f64 {
+        let mut arguments = vec![Value::String(needle.to_owned())];
+        if let Some(start) = start {
+            arguments.push(Value::Number(start));
+        }
+        let Value::Number(index) = call_native(
+            &Intrinsics::default(),
+            Native::StringIndexOf,
+            &Value::String(text.to_owned()),
+            &arguments,
+        )
+        .expect("String.prototype.indexOf returns a number") else {
+            panic!("String.prototype.indexOf returns a number");
+        };
+        index
+    }
+
     /// Every native the machine must dispatch has a route to it.
     ///
     /// `call_native` is a free function with no VM, so a built-in that can run program code --
@@ -31108,6 +31144,29 @@ mod tests {
         assert_eq!(number_in_radix(0.5, 2), "0.1");
         assert_eq!(number_in_radix(-10.25, 4), "-22.1");
         assert_eq!(number_in_radix(0.0, 8), "0");
+    }
+
+    #[test]
+    fn string_index_of_counts_utf16_units_and_honors_start() {
+        // The astral character occupies two JavaScript string positions, even though Rust sees
+        // it as one scalar value.
+        assert_eq!(string_index_of("a😀b", "b", None), 3.0);
+        assert_eq!(string_index_of("a😀b", "b", Some(3.0)), 3.0);
+        assert_eq!(string_index_of("a😀b", "b", Some(4.0)), -1.0);
+    }
+
+    #[test]
+    fn string_index_of_empty_needle_uses_the_clamped_start() {
+        assert_eq!(string_index_of("abc", "", None), 0.0);
+        assert_eq!(string_index_of("abc", "", Some(2.0)), 2.0);
+        assert_eq!(string_index_of("abc", "", Some(99.0)), 3.0);
+    }
+
+    #[test]
+    fn string_index_of_nan_and_infinity_start_follow_to_integer_or_length() {
+        assert_eq!(string_index_of("abc", "b", Some(f64::NAN)), 1.0);
+        assert_eq!(string_index_of("abc", "b", Some(f64::INFINITY)), -1.0);
+        assert_eq!(string_index_of("abc", "", Some(f64::INFINITY)), 3.0);
     }
 
     /// Run a program and return what it wrote to stdout, event loop included.
