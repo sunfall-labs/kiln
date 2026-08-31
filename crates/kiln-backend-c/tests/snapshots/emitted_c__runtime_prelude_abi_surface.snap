@@ -386,6 +386,22 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_NODE_DNS_LOOKUP 357
 #define KILN_C99_METHOD_NODE_OS_HOSTNAME 358
 #define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 359
+#define KILN_C99_METHOD_NODE_STREAM 360
+#define KILN_C99_METHOD_NODE_READABLE 361
+#define KILN_C99_METHOD_NODE_WRITABLE 362
+#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 363
+#define KILN_C99_METHOD_NODE_STREAM_FINISHED 364
+#define KILN_C99_METHOD_NODE_READABLE_PUSH 365
+#define KILN_C99_METHOD_NODE_READABLE_READ 366
+#define KILN_C99_METHOD_NODE_READABLE_DESTROY 367
+#define KILN_C99_METHOD_NODE_READABLE_PAUSE 368
+#define KILN_C99_METHOD_NODE_READABLE_RESUME 369
+#define KILN_C99_METHOD_NODE_READABLE_PIPE 370
+#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 371
+#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 372
+#define KILN_C99_METHOD_NODE_WRITABLE_END 373
+#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 374
+#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 375
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -669,6 +685,7 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
 static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
 static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
 static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -752,6 +769,7 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
 static kiln_array *kiln_c99_array_of(kiln_value value) {
