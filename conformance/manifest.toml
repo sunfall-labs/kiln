@@ -944,16 +944,14 @@ which means ADR 0027's NodePackageResolver already resolves the bare specifier t
 on disk: the gap there is CommonJS interop, not package resolution.\
 """
 extension_finding = """
-The probes are `.mjs` rather than `.js`, and that is a finding rather than a preference. The \
-runner parsed every program under the Script goal, so the first draft of these four - written \
-as `.js` - refused with `Cannot use import statement outside a module`: a harness-shaped answer \
-naming the runner's own default instead of kiln's server gap. kiln-conformance now takes the \
-goal from the extension, `.js` staying a Script so the rest of the corpus keeps the guarantee \
-that comment was protecting. Node decides the same question from the nearest package.json `type` field, \
-which nothing here consults; `conformance/server/packages/package.json` sets `"type": "module"` \
-and has no effect. Ordinary Node applications are overwhelmingly `.js`-plus-`type`, so this is \
-a real item for the step 10 graft, and the extension chosen here sidesteps it deliberately so \
-that these four probes measure the thing they were written to measure.\
+The probes are `.mjs` rather than `.js`, and that exposed a real harness boundary. The first \
+draft used `.js` and was parsed as Script, refusing with `Cannot use import statement outside a \
+module`: a harness-shaped answer naming the runner's own default instead of kiln's server gap. \
+Node-mode conformance now uses the production format policy: `.mjs` is ESM, `.cjs` is CommonJS, \
+and `.js` follows the nearest package.json `type`; deleting the manifest reclassifies the next \
+run. Ordinary non-Node corpus programs retain their explicit extension/Script behavior. These \
+four remain `.mjs` so their format is self-contained, while `.js`-plus-`type` is now covered by \
+the runner's focused regression tests rather than left as a step 10 backlog item.\
 """
 
 [[test]]
