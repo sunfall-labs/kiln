@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 152
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -415,6 +416,7 @@ typedef struct kiln_node_socket kiln_node_socket;
 struct kiln_node_server {
 struct kiln_node_socket {
 typedef struct kiln_node_client_request {
+static int kiln_c99_node_client_try_start(kiln_node_client_request *request);
 typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
 typedef struct kiln_node_completion {
@@ -467,7 +469,9 @@ typedef struct kiln_realm_http_response {
 typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
 int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
-int kiln_realm_http_client_send_active(uint64_t resource,
+int kiln_realm_http_client_start_active(uint64_t resource,
+int kiln_realm_http_client_write_active(uint64_t resource,
+int kiln_realm_http_client_end_active(uint64_t resource,
 int kiln_realm_http_response_start_active(uint64_t resource, uint64_t id,
 int kiln_realm_http_response_write_active(uint64_t resource, uint64_t id,
 int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
@@ -493,7 +497,7 @@ void kiln_temporal_free(void *handle);
 int32_t kiln_temporal_kind(const void *handle);
 int32_t kiln_temporal_get(const void *handle, const unsigned char *name, size_t name_len,
 int32_t kiln_temporal_to_string(const void *handle, unsigned char *buffer, size_t capacity);
-int32_t kiln_temporal_compare(const void *left, const void *right, int32_t *out_order);
+int32_t kiln_temporal_compare(const void *left, const void *right, const void *relative_to,
 typedef struct kiln_temporal_call {
 int32_t kiln_temporal_invoke(const kiln_temporal_call *call);
 int32_t kiln_temporal_to_kind(const void *handle, uint32_t kind, void **out_handle);
@@ -850,6 +854,7 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
 static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len) {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
+static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
 static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }

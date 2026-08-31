@@ -66,11 +66,12 @@ pub struct RuntimeHttpClientRequest {
     pub method: String,
     pub target: String,
     pub headers: Vec<(String, String)>,
-    pub body: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeHttpClientEvent {
+    Drain,
+    Finish,
     ResponseHead {
         status: u16,
         reason: String,
@@ -130,7 +131,18 @@ pub trait ActiveHttpRuntime {
         &mut self,
         resource: ResourceId,
         request: RuntimeHttpClientRequest,
+        high_water_mark: usize,
     ) -> bool;
+    fn write_client_request(
+        &mut self,
+        resource: ResourceId,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition>;
+    fn end_client_request(
+        &mut self,
+        resource: ResourceId,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition>;
     fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent>;
 }
 
@@ -662,6 +674,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 close_after_response: HashSet::new(),
                 client_requests: None,
                 client_events: None,
+                client_body: None,
+                client_body_events: None,
             },
         );
         actions
@@ -692,6 +706,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 close_after_response: HashSet::new(),
                 client_requests: Some(request_sender),
                 client_events: Some(event_receiver),
+                client_body: None,
+                client_body_events: None,
             },
         );
         actions
@@ -909,34 +925,90 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         request: RuntimeHttpClientRequest,
+        high_water_mark: usize,
     ) -> bool {
+        let Some(connection) = self.http_connections.get_mut(&resource) else {
+            return false;
+        };
+        if connection.client_body.is_some() {
+            return false;
+        }
+        let body = ResponseBodyDriver::new(high_water_mark);
+        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
+        let command = hyper_http::ClientRequestCommand {
+            method: request.method,
+            target: request.target,
+            headers: request.headers,
+            body: body.body(body_event_sender),
+        };
+        if connection
+            .client_requests
+            .as_ref()
+            .is_none_or(|requests| requests.send(command).is_err())
+        {
+            return false;
+        }
+        connection.client_body = Some(body);
+        connection.client_body_events = Some(body_event_receiver);
+        true
+    }
+
+    pub fn write_http1_client_request(
+        &mut self,
+        resource: ResourceId,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
         self.http_connections
-            .get_mut(&resource)
-            .and_then(|connection| connection.client_requests.as_ref())
-            .is_some_and(|requests| {
-                requests
-                    .send(hyper_http::ClientRequestCommand {
-                        method: request.method,
-                        target: request.target,
-                        headers: request.headers,
-                        body: request.body,
-                    })
-                    .is_ok()
-            })
+            .get_mut(&resource)?
+            .client_body
+            .as_mut()
+            .map(|body| body.write(data))
+    }
+
+    pub fn end_http1_client_request(
+        &mut self,
+        resource: ResourceId,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
+        self.http_connections
+            .get_mut(&resource)?
+            .client_body
+            .as_mut()
+            .map(|body| body.end(data))
     }
 
     pub fn take_http1_client_events(
         &mut self,
         resource: ResourceId,
     ) -> Vec<RuntimeHttpClientEvent> {
+        if self
+            .http_connections
+            .get(&resource)
+            .and_then(|connection| connection.client_events.as_ref())
+            .is_none()
+        {
+            return Vec::new();
+        }
+        let mut events = Vec::new();
+        if let Some(receiver) = self
+            .http_connections
+            .get_mut(&resource)
+            .and_then(|connection| connection.client_body_events.as_mut())
+        {
+            while let Ok(event) = receiver.try_recv() {
+                events.push(match event {
+                    BodyEvent::Drain => RuntimeHttpClientEvent::Drain,
+                    BodyEvent::Finish => RuntimeHttpClientEvent::Finish,
+                });
+            }
+        }
         let Some(receiver) = self
             .http_connections
             .get_mut(&resource)
             .and_then(|connection| connection.client_events.as_mut())
         else {
-            return Vec::new();
+            return events;
         };
-        let mut events = Vec::new();
         while let Ok(event) = receiver.try_recv() {
             events.push(match event {
                 hyper_http::ClientEvent::ResponseHead {
@@ -1017,6 +1089,8 @@ struct RuntimeHttpConnection {
     close_after_response: HashSet<u64>,
     client_requests: Option<mpsc::UnboundedSender<hyper_http::ClientRequestCommand>>,
     client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
+    client_body: Option<ResponseBodyDriver>,
+    client_body_events: Option<mpsc::UnboundedReceiver<BodyEvent>>,
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
@@ -1093,8 +1167,25 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         request: RuntimeHttpClientRequest,
+        high_water_mark: usize,
     ) -> bool {
-        self.send_http1_client_request(resource, request)
+        self.send_http1_client_request(resource, request, high_water_mark)
+    }
+
+    fn write_client_request(
+        &mut self,
+        resource: ResourceId,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
+        self.write_http1_client_request(resource, data)
+    }
+
+    fn end_client_request(
+        &mut self,
+        resource: ResourceId,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
+        self.end_http1_client_request(resource, data)
     }
 
     fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent> {

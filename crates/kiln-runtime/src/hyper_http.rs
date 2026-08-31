@@ -7,8 +7,7 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::{Request, Response, body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -32,12 +31,11 @@ pub(crate) struct ResponseCommand {
     pub(crate) body: ResponseBody,
 }
 
-#[derive(Debug)]
 pub(crate) struct ClientRequestCommand {
     pub(crate) method: String,
     pub(crate) target: String,
     pub(crate) headers: Vec<(String, String)>,
-    pub(crate) body: Vec<u8>,
+    pub(crate) body: ResponseBody,
 }
 
 #[derive(Debug)]
@@ -72,7 +70,7 @@ where
             for (name, value) in command.headers {
                 builder = builder.header(name, value);
             }
-            let request = match builder.body(Full::new(Bytes::from(command.body))) {
+            let request = match builder.body(command.body) {
                 Ok(request) => request,
                 Err(error) => {
                     let _ = events.send(ClientEvent::Error(error.to_string()));
@@ -395,6 +393,112 @@ mod tests {
             );
             assert!(response.ends_with("4\r\nkiln\r\n0\r\n\r\n"));
             assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
+        });
+    }
+
+    #[test]
+    fn client_request_body_streams_ordered_chunks_before_end() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("Tokio runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (client_io, server_io) = duplex(4096);
+            let (request_sender, request_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (client_event_sender, mut client_events) = tokio::sync::mpsc::unbounded_channel();
+            let client = tokio::task::spawn_local(client_connection(
+                client_io,
+                request_receiver,
+                client_event_sender,
+            ));
+
+            let (server_event_sender, mut server_events) = tokio::sync::mpsc::unbounded_channel();
+            let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::task::spawn_local(event_connection(
+                server_io,
+                server_event_sender,
+                response_receiver,
+            ));
+
+            let mut body = crate::http_body::ResponseBodyDriver::new(8);
+            let (body_event_sender, _body_events) = tokio::sync::mpsc::unbounded_channel();
+            request_sender
+                .send(ClientRequestCommand {
+                    method: "POST".into(),
+                    target: "/upload".into(),
+                    headers: vec![("content-type".into(), "text/plain".into())],
+                    body: body.body(body_event_sender),
+                })
+                .expect("request start sends");
+
+            assert!(body.write(b"kiln ".to_vec()).ready);
+            let EngineEvent::RequestHead { id, request } =
+                server_events.recv().await.expect("request head arrives")
+            else {
+                panic!("expected request head")
+            };
+            assert_eq!(request.method, "POST");
+            assert!(
+                request
+                    .headers
+                    .iter()
+                    .any(|(name, value)| { name == "content-type" && value == "text/plain" })
+            );
+            assert!(
+                request
+                    .headers
+                    .iter()
+                    .any(|(name, value)| { name == "transfer-encoding" && value == "chunked" })
+            );
+            assert!(matches!(
+                server_events.recv().await,
+                Some(EngineEvent::RequestData { id: data_id, data })
+                    if data_id == id && data == b"kiln "
+            ));
+
+            assert!(body.write(b"streams".to_vec()).ready);
+            assert!(matches!(
+                server_events.recv().await,
+                Some(EngineEvent::RequestData { id: data_id, data })
+                    if data_id == id && data == b"streams"
+            ));
+            body.end(Vec::new());
+            assert!(matches!(
+                server_events.recv().await,
+                Some(EngineEvent::RequestEnd { id: end_id }) if end_id == id
+            ));
+            let mut response_body = crate::http_body::ResponseBodyDriver::default();
+            response_body.end(b"ok".to_vec());
+            let (response_body_events, _) = tokio::sync::mpsc::unbounded_channel();
+            response_sender
+                .send(ResponseCommand {
+                    id,
+                    status: 200,
+                    headers: vec![("connection".into(), "close".into())],
+                    body: response_body.body(response_body_events),
+                })
+                .expect("response sends");
+            assert!(matches!(
+                client_events.recv().await,
+                Some(ClientEvent::ResponseHead { status: 200, .. })
+            ));
+            assert!(matches!(
+                client_events.recv().await,
+                Some(ClientEvent::ResponseData(data)) if data == b"ok"
+            ));
+            assert!(matches!(
+                client_events.recv().await,
+                Some(ClientEvent::ResponseEnd)
+            ));
+            drop(request_sender);
+            client
+                .await
+                .expect("client task joins")
+                .expect("client succeeds");
+            server
+                .await
+                .expect("server task joins")
+                .expect("server succeeds");
         });
     }
 }

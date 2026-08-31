@@ -786,6 +786,49 @@ pub struct CompileOptions {
     pub strict: bool,
 }
 
+/// Which compiled bodies run as strict code.
+///
+/// Beside the [`Program`] rather than inside it, because it answers a question only the
+/// interpreter asks -- whether a refused write throws or is discarded -- while a `Program` is
+/// bytecode two backends read. `functions[i]` describes `Program::functions[i]`, in the same
+/// order, and is the *effective* strictness: a body inside strict code is strict whether or not
+/// it said so.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Strictness {
+    /// The top-level body: the module body, the script, or the eval program.
+    pub body: bool,
+    pub functions: Vec<bool>,
+}
+
+impl Strictness {
+    /// Nothing is strict -- the answer for a caller that compiled without asking.
+    #[must_use]
+    pub fn sloppy(program: &Program) -> Self {
+        Self {
+            body: false,
+            functions: vec![false; program.functions.len()],
+        }
+    }
+
+    /// Everything is strict, which is what a Module goal means: strict whatever its text says,
+    /// and so is every function written in it.
+    #[must_use]
+    pub fn always(program: &Program) -> Self {
+        Self {
+            body: true,
+            functions: vec![true; program.functions.len()],
+        }
+    }
+
+    /// Whether `Program::functions[index]` is strict. Out of range answers sloppy rather than
+    /// panicking: a function value that crossed a module boundary is indexed against its own
+    /// program, and a mismatch is a bug to survive rather than to abort a program over.
+    #[must_use]
+    pub fn function(&self, index: u32) -> bool {
+        self.functions.get(index as usize).copied().unwrap_or(false)
+    }
+}
+
 /// Compile owned HIR into stack bytecode.
 pub fn compile(module: &Module) -> Result<Program, Vec<CompileDiagnostic>> {
     compile_with_options(module, CompileOptions::default())
@@ -796,8 +839,21 @@ pub fn compile_with_options(
     module: &Module,
     options: CompileOptions,
 ) -> Result<Program, Vec<CompileDiagnostic>> {
+    Ok(compile_with_strictness(module, options)?.0)
+}
+
+/// [`compile_with_options`], also reporting which bodies came out strict.
+///
+/// A second entry point rather than a wider return type, because only the interpreter needs the
+/// answer and every other caller of `compile` would have to thread a value it never reads.
+pub fn compile_with_strictness(
+    module: &Module,
+    options: CompileOptions,
+) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
-    compiler.strict = options.strict;
+    // Either the caller knows -- a Test262 strict variant, a `Function` body -- or the source
+    // opened with the directive itself.
+    compiler.strict = options.strict || module.strict;
     // The module body has nested functions too, so its own block bindings can be captured.
 
     for requested in module.runtime_requested_modules() {
@@ -831,7 +887,7 @@ pub fn compile_with_options(
     }
 
     compiler.compile_body(module);
-    compiler.finish()
+    compiler.finish_with_strictness()
 }
 
 /// One binding an eval program borrows from the frame that called it.
@@ -865,8 +921,16 @@ pub fn compile_eval(
     module: &Module,
     options: &EvalOptions,
 ) -> Result<Program, Vec<CompileDiagnostic>> {
+    Ok(compile_eval_with_strictness(module, options)?.0)
+}
+
+/// [`compile_eval`], also reporting which bodies came out strict.
+pub fn compile_eval_with_strictness(
+    module: &Module,
+    options: &EvalOptions,
+) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
-    compiler.strict = options.strict;
+    compiler.strict = options.strict || module.strict;
     compiler.eval_program = true;
     // Unconditional, unlike an ordinary program, and it is what makes the eval'd code reachable
     // from itself. A module-scope binding that is *not* boxed is read from a nested function
@@ -896,7 +960,7 @@ pub fn compile_eval(
         );
     }
     compiler.compile_eval_body(module);
-    compiler.finish()
+    compiler.finish_with_strictness()
 }
 
 /// Compile one module while preserving the scalar linkage needed by a graph linker.
@@ -1259,6 +1323,12 @@ enum Resolution {
 struct Compiler {
     constants: Vec<Constant>,
     functions: Vec<FunctionProto>,
+    /// Whether `functions[i]` was compiled as strict code, in the same order.
+    ///
+    /// Beside the protos rather than on them, because a proto is bytecode the C backend reads
+    /// too and this is the interpreter's answer to one question: whether a refused write throws
+    /// or is discarded. See [`Strictness`].
+    strict_functions: Vec<bool>,
     /// Enclosing function states, module body first. Empty while compiling the module body.
     enclosing: Vec<FunctionState>,
     upvalues: Vec<Upvalue>,
@@ -1387,6 +1457,7 @@ impl Compiler {
             constants: Vec::new(),
             code: Vec::new(),
             functions: Vec::new(),
+            strict_functions: Vec::new(),
             enclosing: Vec::new(),
             upvalues: Vec::new(),
             upvalue_names: HashMap::new(),
@@ -1480,14 +1551,24 @@ impl Compiler {
     }
 
     fn finish(self) -> Result<Program, Vec<CompileDiagnostic>> {
+        Ok(self.finish_with_strictness()?.0)
+    }
+
+    fn finish_with_strictness(self) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
         if self.diagnostics.is_empty() {
-            Ok(Program {
-                version: BYTECODE_VERSION,
-                constants: self.constants,
-                code: self.code,
-                local_count: self.local_count,
-                functions: self.functions,
-            })
+            Ok((
+                Program {
+                    version: BYTECODE_VERSION,
+                    constants: self.constants,
+                    code: self.code,
+                    local_count: self.local_count,
+                    functions: self.functions,
+                },
+                Strictness {
+                    body: self.strict,
+                    functions: self.strict_functions,
+                },
+            ))
         } else {
             Err(self.diagnostics)
         }
@@ -4570,7 +4651,19 @@ impl Compiler {
         self.scopes.pop().expect("class scope was just pushed");
     }
 
+    /// A class body is strict code, whatever encloses it.
+    ///
+    /// Not only its methods -- which are functions and would inherit it anyway -- but the
+    /// heritage expression, the computed keys and the field initialisers, all of which are
+    /// compiled into whatever code surrounds the class. So the flag is raised around the whole
+    /// declaration and lowered again after it.
     fn class_declaration(&mut self, class: &Class) {
+        let outer_strict = std::mem::replace(&mut self.strict, true);
+        self.strict_class_declaration(class);
+        self.strict = outer_strict;
+    }
+
+    fn strict_class_declaration(&mut self, class: &Class) {
         let Some(name) = class.name.clone() else {
             self.error(Some(class.span), "a class declaration requires a name");
             return;
@@ -4625,6 +4718,7 @@ impl Compiler {
                 generator: false,
                 parameters: Vec::new(),
                 body: Vec::new(),
+                strict: true,
                 span: class.span,
             },
         };
@@ -5007,6 +5101,12 @@ impl Compiler {
             &mut self.async_generator,
             function.generator && function.asynchronous,
         );
+        // Strictness is inherited and never given up: a body written inside strict code is
+        // strict whether or not it says so, and a `"use strict"` of its own turns it on for
+        // this body and everything nested in it. Restored on the way out, because a sibling
+        // written after a strict function is not strict because of it.
+        let inherited_strict = self.strict || function.strict;
+        let outer_strict = std::mem::replace(&mut self.strict, inherited_strict);
         let outer = FunctionState {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
@@ -5106,6 +5206,7 @@ impl Compiler {
             .enclosing
             .pop()
             .expect("this function pushed its own enclosing state");
+        let strict = std::mem::replace(&mut self.strict, outer_strict);
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
@@ -5132,6 +5233,7 @@ impl Compiler {
 
         let index = self.functions.len() as u32;
         self.functions.push(proto);
+        self.strict_functions.push(strict);
         Some(index)
     }
 
@@ -7252,6 +7354,7 @@ mod tests {
 
     fn module(body: Vec<Statement>) -> Module {
         Module {
+            strict: false,
             source_kind: kiln_hir::SourceKind::JavaScript,
             source_goal: kiln_hir::SourceGoal::Module,
             items: Vec::new(),
@@ -7287,6 +7390,7 @@ mod tests {
 
     fn function(name: &str, parameters: &[&str], body: Vec<Statement>) -> Statement {
         statement(StatementKind::Function(Box::new(kiln_hir::Function {
+            strict: false,
             binds_own_name: false,
             asynchronous: false,
             name: Some(name.to_owned()),
@@ -7460,6 +7564,7 @@ mod tests {
     fn arrow(parameters: &[&str], body: Vec<Statement>) -> Expression {
         Expression {
             kind: ExpressionKind::Function(Box::new(kiln_hir::Function {
+                strict: false,
                 binds_own_name: false,
                 asynchronous: false,
                 name: None,
@@ -7814,6 +7919,7 @@ mod tests {
             span: Span::default(),
         };
         let function = statement(StatementKind::Function(Box::new(kiln_hir::Function {
+            strict: false,
             binds_own_name: false,
             asynchronous: false,
             name: Some("factory".to_owned()),
@@ -7921,6 +8027,7 @@ mod tests {
     #[test]
     fn a_class_method_default_captures_its_module_binding() {
         let method = kiln_hir::Function {
+            strict: false,
             binds_own_name: false,
             asynchronous: false,
             name: Some("read".to_owned()),
@@ -7980,6 +8087,7 @@ mod tests {
     #[test]
     fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
         let constructor = kiln_hir::Function {
+            strict: false,
             binds_own_name: false,
             asynchronous: false,
             name: None,
@@ -8001,6 +8109,7 @@ mod tests {
             span: Span::default(),
         };
         let wrapper = kiln_hir::Function {
+            strict: false,
             binds_own_name: false,
             asynchronous: false,
             name: Some("wrapper".to_owned()),
@@ -8064,6 +8173,7 @@ mod tests {
                 name: Some("Derived".to_owned()),
                 superclass: Some(identifier("Base")),
                 constructor: Some(kiln_hir::Function {
+                    strict: false,
                     binds_own_name: false,
                     asynchronous: false,
                     name: None,
@@ -8919,6 +9029,7 @@ mod tests {
         // the wrong one. Invisible until a module binding existed before the line declaring it.
         let program = compile(&module(vec![
             statement(StatementKind::Function(Box::new(kiln_hir::Function {
+                strict: false,
                 binds_own_name: false,
                 asynchronous: false,
                 name: Some("outer".into()),

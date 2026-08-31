@@ -50,6 +50,14 @@ pub struct Diagnostic {
 pub struct Module {
     pub source_kind: SourceKind,
     pub source_goal: SourceGoal,
+    /// The body opened with a `"use strict"` directive prologue.
+    ///
+    /// A directive is not a statement -- it is a string literal the language reads before the
+    /// body runs -- so it cannot survive as one, and every pass below here would otherwise have
+    /// to re-parse the source text to learn whether the code it is lowering may throw on a
+    /// refused write. A Module goal is strict whatever its text says; this records only what the
+    /// text said, and the goal is applied where the goal is known.
+    pub strict: bool,
     pub items: Vec<Item>,
     /// Executable, TypeScript-erased module body.
     pub body: Vec<Statement>,
@@ -92,6 +100,12 @@ pub struct Function {
     /// from `parameters` because it takes no positional slot and its arity is not fixed.
     pub rest: Option<Pattern>,
     pub body: Vec<Statement>,
+    /// The body opened with a `"use strict"` directive of its own.
+    ///
+    /// Only what this body's own prologue said. Strictness is inherited -- a function written
+    /// inside strict code is strict without saying so -- and the inheriting is the compiler's,
+    /// which is the only place that knows what encloses what.
+    pub strict: bool,
     pub span: Span,
 }
 
@@ -1531,6 +1545,7 @@ mod tests {
     #[test]
     fn runtime_names_exclude_types_and_unresolved_stars() {
         let module = Module {
+            strict: false,
             source_kind: SourceKind::TypeScript,
             source_goal: SourceGoal::Module,
             items: Vec::new(),
@@ -1603,6 +1618,7 @@ mod tests {
 
     fn empty_function(body: Vec<Statement>) -> Function {
         Function {
+            strict: false,
             name: None,
             binds_own_name: false,
             arrow: false,
@@ -1617,6 +1633,7 @@ mod tests {
 
     fn empty_module(body: Vec<Statement>) -> Module {
         Module {
+            strict: false,
             source_kind: SourceKind::JavaScript,
             source_goal: SourceGoal::Script,
             items: Vec::new(),

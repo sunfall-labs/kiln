@@ -13,7 +13,9 @@ use std::time::Instant;
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::{SourceGoal, Span};
-use kiln_interpreter::{ExecutionError, ExecutionLimits, execute_module, execute_reclaiming};
+use kiln_interpreter::{
+    ExecutionError, ExecutionLimits, execute_module, execute_reclaiming_with_strictness,
+};
 use kiln_ir::ModuleProgram;
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolveError};
 use kiln_runtime::CaptureHost;
@@ -291,37 +293,39 @@ fn run_variant_uncaught(
         return CaseResult::new(Outcome::Unsupported, diagnostics, String::new(), started);
     }
 
-    let program = match kiln_ir::compile(&module) {
-        Ok(program) => program,
-        Err(compile_diagnostics) => {
-            let unsupported = compile_diagnostics
-                .iter()
-                .all(|diagnostic| is_intentionally_unsupported(&diagnostic.message));
-            diagnostics.extend(compile_diagnostics.into_iter().map(|diagnostic| {
-                Diagnostic::new(
-                    DiagnosticPhase::Compile,
-                    diagnostic.message,
-                    diagnostic.span.map(|span| adjust_span(span, prefix_len)),
-                )
-            }));
-            // Unsupported HIR is never the runtime error promised by a negative test.  Keep this
-            // distinct from Pass so capability gaps cannot hide as conformance successes.
-            return CaseResult::new(
-                if unsupported {
-                    Outcome::Unsupported
-                } else {
-                    Outcome::Fail
-                },
-                diagnostics,
-                String::new(),
-                started,
-            );
-        }
-    };
+    let (program, strictness) =
+        match kiln_ir::compile_with_strictness(&module, kiln_ir::CompileOptions::default()) {
+            Ok(compiled) => compiled,
+            Err(compile_diagnostics) => {
+                let unsupported = compile_diagnostics
+                    .iter()
+                    .all(|diagnostic| is_intentionally_unsupported(&diagnostic.message));
+                diagnostics.extend(compile_diagnostics.into_iter().map(|diagnostic| {
+                    Diagnostic::new(
+                        DiagnosticPhase::Compile,
+                        diagnostic.message,
+                        diagnostic.span.map(|span| adjust_span(span, prefix_len)),
+                    )
+                }));
+                // Unsupported HIR is never the runtime error promised by a negative test.  Keep this
+                // distinct from Pass so capability gaps cannot hide as conformance successes.
+                return CaseResult::new(
+                    if unsupported {
+                        Outcome::Unsupported
+                    } else {
+                        Outcome::Fail
+                    },
+                    diagnostics,
+                    String::new(),
+                    started,
+                );
+            }
+        };
 
     let mut host = CaptureHost::new();
-    match execute_reclaiming(
+    match execute_reclaiming_with_strictness(
         std::rc::Rc::new(program),
+        std::rc::Rc::new(strictness),
         &mut host,
         conformance_limits(case),
     ) {
@@ -368,15 +372,22 @@ fn execute_positive(
     prefix_len: usize,
     started: Instant,
 ) -> CaseResult {
-    let program = match kiln_ir::compile(module) {
-        Ok(program) => program,
-        Err(compile_diagnostics) => {
-            return compile_failure(compile_diagnostics, diagnostics, prefix_len, started);
-        }
-    };
+    let (program, strictness) =
+        match kiln_ir::compile_with_strictness(module, kiln_ir::CompileOptions::default()) {
+            Ok(compiled) => compiled,
+            Err(compile_diagnostics) => {
+                return compile_failure(compile_diagnostics, diagnostics, prefix_len, started);
+            }
+        };
 
     let mut host = CaptureHost::new();
-    let outcome = execute_reclaiming(std::rc::Rc::new(program), &mut host, limits).map(|_| ());
+    let outcome = execute_reclaiming_with_strictness(
+        std::rc::Rc::new(program),
+        std::rc::Rc::new(strictness),
+        &mut host,
+        limits,
+    )
+    .map(|_| ());
     finish_run(outcome, host, is_async, diagnostics, started)
 }
 

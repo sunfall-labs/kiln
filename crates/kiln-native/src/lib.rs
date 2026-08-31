@@ -61,7 +61,7 @@ const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
     assert!(PROVIDER_SCHEMA_VERSION == 1);
-    assert!(PROVIDER_ABI_VERSION == 9);
+    assert!(PROVIDER_ABI_VERSION == 11);
 };
 
 /// Native optimization and checking policy.
@@ -1656,7 +1656,9 @@ fn native_builtin_supports_export(
     match builtin {
         NodeBuiltin::Events => matches!(export_name, "EventEmitter" | "default"),
         NodeBuiltin::Net => export_name == "createServer",
-        NodeBuiltin::Http => matches!(export_name, "createServer" | "default" | "get"),
+        NodeBuiltin::Http => {
+            matches!(export_name, "createServer" | "default" | "get" | "request")
+        }
         _ => false,
     }
 }
@@ -1697,6 +1699,7 @@ exports[2] = create_server;"#,
         NodeBuiltin::Http => Some(
             r#"kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
 kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
+kiln_value request = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_REQUEST);
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
@@ -1704,11 +1707,13 @@ status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NUL
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "get", 3, get, 0, NULL);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "request", 7, request, 0, NULL);
+if (status != KILN_C99_OK) return status;
 exports[0] = kiln_c99_undefined();
 exports[1] = create_server;
 exports[2] = namespace;
 exports[3] = get;
-exports[4] = kiln_c99_undefined();"#,
+exports[4] = request;"#,
         ),
         _ => None,
     }
@@ -3551,7 +3556,7 @@ mod tests {
         assert!(runtime_abi_identity().contains("async-2"));
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-9"
+            "kiln-native-number-provider-11"
         );
     }
 
