@@ -21,6 +21,7 @@ pub enum ResolutionKind {
     Relative,
     Absolute,
     Package,
+    Builtin,
 }
 
 impl ResolutionKind {
@@ -29,6 +30,7 @@ impl ResolutionKind {
             Self::Relative => "relative",
             Self::Absolute => "absolute",
             Self::Package => "package",
+            Self::Builtin => "builtin",
         }
     }
 }
@@ -42,9 +44,65 @@ impl fmt::Display for ResolutionKind {
 /// A successfully resolved source module.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ResolvedModule {
-    /// The symlink-normalized, absolute source path.
+    /// The symlink-normalized, absolute source path, or a stable virtual builtin identity.
     pub path: PathBuf,
     pub kind: ResolutionKind,
+}
+
+/// Builtins supported by Kiln's Node compatibility adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum NodeBuiltin {
+    Events,
+    FsPromises,
+    Net,
+    Http,
+}
+
+impl NodeBuiltin {
+    pub fn parse(specifier: &str) -> Option<Self> {
+        Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
+            "events" => Self::Events,
+            "fs/promises" => Self::FsPromises,
+            "net" => Self::Net,
+            "http" => Self::Http,
+            _ => return None,
+        })
+    }
+
+    pub const fn specifier(self) -> &'static str {
+        match self {
+            Self::Events => "node:events",
+            Self::FsPromises => "node:fs/promises",
+            Self::Net => "node:net",
+            Self::Http => "node:http",
+        }
+    }
+
+    pub fn virtual_path(self, project_root: &Path) -> PathBuf {
+        project_root
+            .join(".kiln")
+            .join("builtins")
+            .join(self.specifier().trim_start_matches("node:"))
+            .with_extension("builtin")
+    }
+}
+
+impl ResolvedModule {
+    pub fn builtin(&self) -> Option<NodeBuiltin> {
+        if self.kind != ResolutionKind::Builtin {
+            return None;
+        }
+        let mut components = self.path.components().rev();
+        let file = components.next()?.as_os_str().to_str()?;
+        let stem = file.strip_suffix(".builtin")?;
+        let parent = components.next()?.as_os_str().to_str()?;
+        let name = if parent == "builtins" {
+            stem.to_owned()
+        } else {
+            format!("{parent}/{stem}")
+        };
+        NodeBuiltin::parse(&name)
+    }
 }
 
 /// A resolved request plus the package manifest that selected it, when package policy applied.
@@ -429,6 +487,57 @@ impl ResolutionPolicy for NodePackageResolver {
     }
 }
 
+/// Node package policy plus explicit builtin-module identities.
+///
+/// Builtins never touch the filesystem or package resolver. Unknown `node:` names remain errors,
+/// while unprefixed names are admitted only for the exact compatibility surface above.
+#[derive(Debug)]
+pub struct NodeRuntimeResolver {
+    packages: NodePackageResolver,
+}
+
+impl NodeRuntimeResolver {
+    pub fn new(project_root: impl AsRef<Path>) -> Result<Self, ResolveError> {
+        Ok(Self {
+            packages: NodePackageResolver::new(project_root)?,
+        })
+    }
+
+    pub fn project_root(&self) -> &Path {
+        self.packages.project_root()
+    }
+
+    pub fn resolve(
+        &self,
+        specifier: &str,
+        importer: impl AsRef<Path>,
+    ) -> Result<ResolvedModule, ResolveError> {
+        if let Some(builtin) = NodeBuiltin::parse(specifier) {
+            return Ok(ResolvedModule::new(
+                builtin.virtual_path(self.project_root()),
+                ResolutionKind::Builtin,
+            ));
+        }
+        if specifier.starts_with("node:") {
+            return Err(ResolveError::InvalidSpecifier {
+                specifier: specifier.to_owned(),
+                reason: InvalidSpecifierReason::UrlScheme,
+            });
+        }
+        self.packages.resolve(specifier, importer)
+    }
+}
+
+impl ResolutionPolicy for NodeRuntimeResolver {
+    fn project_root(&self) -> &Path {
+        self.project_root()
+    }
+
+    fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
+        NodeRuntimeResolver::resolve(self, specifier, importer)
+    }
+}
+
 /// Replays package decisions captured by a client-side [`NodePackageResolver`].
 ///
 /// Explicit paths retain [`ModuleResolver`]'s exact filesystem policy. Bare package requests are
@@ -595,6 +704,7 @@ fn resolve_in_root(
             .join(specifier),
         ResolutionKind::Absolute => PathBuf::from(specifier),
         ResolutionKind::Package => unreachable!("explicit resolver cannot classify packages"),
+        ResolutionKind::Builtin => unreachable!("builtins bypass filesystem resolution"),
     };
     let canonical_target = canonical_path(&candidate, PathRole::Target)?;
     ensure_utf8(&canonical_target, PathRole::Target)?;
@@ -1265,6 +1375,52 @@ mod tests {
             error.to_string(),
             "resolved module escapes project root: /tmp/outside.ts (root /tmp/project)"
         );
+    }
+
+    #[test]
+    fn node_runtime_policy_resolves_only_its_explicit_builtin_surface() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        for (specifier, builtin) in [
+            ("node:events", NodeBuiltin::Events),
+            ("node:fs/promises", NodeBuiltin::FsPromises),
+            ("node:net", NodeBuiltin::Net),
+            ("node:http", NodeBuiltin::Http),
+        ] {
+            let resolved = resolver
+                .resolve(specifier, &importer)
+                .expect("builtin resolves");
+            assert_eq!(resolved.kind, ResolutionKind::Builtin);
+            assert_eq!(resolved.builtin(), Some(builtin));
+            assert_eq!(resolved.path, builtin.virtual_path(resolver.project_root()));
+            assert!(
+                !resolved.path.exists(),
+                "builtin identity is not a source file"
+            );
+        }
+        assert!(matches!(
+            resolver.resolve("node:tls", &importer),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::UrlScheme,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn unprefixed_node_builtin_aliases_share_one_identity() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("valid project root");
+        for name in ["events", "fs/promises", "net", "http"] {
+            assert_eq!(
+                resolver.resolve(name, &importer).unwrap(),
+                resolver
+                    .resolve(&format!("node:{name}"), &importer)
+                    .unwrap()
+            );
+        }
     }
 
     // Small lexical path-difference helper kept local to tests so the crate stays dependency-free.
