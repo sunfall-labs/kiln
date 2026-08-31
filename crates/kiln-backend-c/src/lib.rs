@@ -1379,8 +1379,15 @@ typedef struct kiln_microtask {
     kiln_value argument;
     kiln_value derived;
     int rejected;
-    int passes_argument;
 } kiln_microtask;
+
+/* One process.nextTick callback. The Realm Runtime owns lane ordering; this payload contains
+ * only the language values its opaque work callback understands. */
+typedef struct kiln_next_tick {
+    kiln_value callback;
+    kiln_value *args;
+    size_t argc;
+} kiln_next_tick;
 
 /* One generated callback payload. The Realm Runtime owns its timer identity, deadline, sequence,
  * repeat policy and cancellation; this allocation contains only the language state its opaque
@@ -1538,7 +1545,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 3
+#define KILN_REALM_ASYNC_ABI_VERSION 4
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -1611,6 +1618,7 @@ int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds);
 static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
+int kiln_realm_queue_next_tick(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
                            void *work, uint64_t *out_id);
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
@@ -2051,9 +2059,11 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
                          kiln_value *out);
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
                             int rejected);
-static int kiln_c99_enqueue_callback(kiln_value callback);
+static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc);
 static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
 static void kiln_c99_drop_microtask(void *work);
+static int kiln_c99_run_next_tick(void *work, void *host, void *thrown);
+static void kiln_c99_drop_next_tick(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
 static void kiln_c99_drop_timer(void *work);
 static int kiln_c99_schedule(kiln_promise *promise, const kiln_reaction *reaction);
@@ -3625,6 +3635,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     switch (code) {
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
+    case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS:
@@ -12413,21 +12424,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_PROCESS_NEXT_TICK) {
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
-        size_t extra = argc > 1 ? argc - 1 : 0;
-        kiln_value queued = callback;
         if (!kiln_c99_is_callable(callback))
             return kiln_c99_throw_not_a(thrown, callback, "function");
-        /* `nextTick(callback, ...args)` queues one invocation carrying all of the supplied
-         * arguments.  Promise reactions use the same realm-owned microtask queue, but their
-         * payload has exactly one settlement value; bind the variadic Node shape before it
-         * crosses that intentionally small queue ABI. */
-        if (extra != 0) {
-            status = kiln_c99_bind_with(&queued, callback, kiln_c99_undefined(), args + 1,
-                                        extra);
-            if (status != KILN_C99_OK) return status;
-        }
         *result = kiln_c99_undefined();
-        return kiln_c99_enqueue_callback(queued);
+        return kiln_c99_enqueue_next_tick(callback, argc > 1 ? args + 1 : NULL,
+                                          argc > 1 ? argc - 1 : 0);
     }
     if (code == KILN_C99_METHOD_PROCESS_CWD) {
         *result = kiln_c99_copy_text("/", 1);
@@ -19155,7 +19156,6 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     task->argument = argument;
     task->derived = derived;
     task->rejected = rejected;
-    task->passes_argument = 1;
     status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask,
                                         task);
     if (status != KILN_C99_OK) {
@@ -19165,19 +19165,28 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
     return KILN_C99_OK;
 }
 
-static int kiln_c99_enqueue_callback(kiln_value callback) {
-    kiln_microtask *task;
+static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc) {
+    kiln_next_tick *task = (kiln_next_tick *)malloc(sizeof *task);
     int status;
-    task = (kiln_microtask *)malloc(sizeof *task);
     if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
-    task->handler = callback;
-    task->argument = kiln_c99_undefined();
-    task->derived = kiln_c99_undefined();
-    task->rejected = 0;
-    task->passes_argument = 0;
-    status = kiln_realm_queue_microtask(kiln_c99_run_microtask, kiln_c99_drop_microtask, task);
+    task->callback = callback;
+    task->argc = argc;
+    task->args = NULL;
+    if (argc != 0) {
+        if (argc > SIZE_MAX / sizeof *task->args) {
+            free(task);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        task->args = (kiln_value *)malloc(argc * sizeof *task->args);
+        if (task->args == NULL) {
+            free(task);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        memcpy(task->args, args, argc * sizeof *task->args);
+    }
+    status = kiln_realm_queue_next_tick(kiln_c99_run_next_tick, kiln_c99_drop_next_tick, task);
     if (status != KILN_C99_OK) {
-        kiln_c99_drop_microtask(task);
+        kiln_c99_drop_next_tick(task);
         return status;
     }
     return KILN_C99_OK;
@@ -19328,8 +19337,7 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
         return KILN_C99_OK;
     }
     status = kiln_c99_call(host, &produced, task->handler, kiln_c99_undefined(),
-                           task->passes_argument ? &task->argument : NULL,
-                           task->passes_argument ? 1 : 0, 0, thrown);
+                           &task->argument, 1, 0, thrown);
     if (status == KILN_C99_THROWN) {
         /* A handler that throws rejects the promise it was producing, rather than failing the
          * program: that is the whole reason `catch` exists further down the chain. */
@@ -19343,6 +19351,23 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
         return kiln_c99_settle(task->derived, produced, 0);
     }
     return KILN_C99_OK;
+}
+
+static void kiln_c99_drop_next_tick(void *work) {
+    kiln_next_tick *task = (kiln_next_tick *)work;
+    if (task == NULL) return;
+    free(task->args);
+    free(task);
+}
+
+static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_pointer) {
+    kiln_next_tick *task = (kiln_next_tick *)work;
+    kiln_host *host = (kiln_host *)host_pointer;
+    kiln_value *thrown = (kiln_value *)thrown_pointer;
+    kiln_value produced;
+    if (task == NULL || thrown == NULL) return KILN_C99_INVALID_ARGUMENT;
+    return kiln_c99_call(host, &produced, task->callback, kiln_c99_undefined(),
+                         task->argc == 0 ? NULL : task->args, task->argc, 0, thrown);
 }
 
 static void kiln_c99_drop_timer(void *work) {
@@ -24564,6 +24589,13 @@ int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low) {
     return KILN_C99_OK;
 }
 int kiln_realm_queue_microtask(kiln_realm_work_fn run,
+                               kiln_realm_drop_fn drop,
+                               void *work) {
+    (void)run;
+    if (drop != NULL) drop(work);
+    return KILN_C99_OK;
+}
+int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
                                kiln_realm_drop_fn drop,
                                void *work) {
     (void)run;

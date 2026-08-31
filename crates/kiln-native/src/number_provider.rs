@@ -36,6 +36,7 @@ const REQUIRED_EXPORTS: [&str; 58] = [
     "kiln_realm_now",
     "kiln_realm_now_nanoseconds",
     "kiln_realm_queue_microtask",
+    "kiln_realm_queue_next_tick",
     "kiln_realm_set_timeout",
     "kiln_realm_set_interval",
     "kiln_realm_clear_timer",

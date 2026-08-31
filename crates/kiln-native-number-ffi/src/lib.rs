@@ -1214,6 +1214,18 @@ mod realm {
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         loop {
+            let next_tick = realm.work.borrow_mut().pop_next_tick();
+            if let Some(work) = next_tick {
+                let status = run_in_runtime(realm, || work.run(host, thrown));
+                if status != 0 {
+                    return status;
+                }
+                if let Err(status) = checkpoint_http(realm, false) {
+                    return status;
+                }
+                continue;
+            }
+
             let microtask = realm.work.borrow_mut().pop_microtask();
             if let Some(work) = microtask {
                 let status = run_in_runtime(realm, || work.run(host, thrown));
@@ -1523,6 +1535,35 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             queue.queue_microtask(work);
+            0
+        })
+    }
+
+    /// Queues one opaque FIFO Node next-tick callback on the active Realm.
+    ///
+    /// Next-tick work is a separate language lane, drained before Promise jobs while retaining
+    /// the same Realm owner, callback ABI, and disposal rules as ordinary microtasks.
+    ///
+    /// # Safety
+    ///
+    /// `work` must be owned storage accepted by `run` and `drop`. Ownership transfers on success.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_queue_next_tick(
+        run: Option<RunWork>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(mut queue) = realm.work.try_borrow_mut() else {
+                return RUNTIME_ERROR;
+            };
+            let Some(work) = NativeWork::new(work, run, drop) else {
+                return INVALID_ARGUMENT;
+            };
+            queue.queue_next_tick(work);
             0
         })
     }
@@ -2612,11 +2653,39 @@ mod realm {
             // Realm teardown invokes `drop_recorded_work`.
             unsafe {
                 (*(*work).order).push((*work).value);
+                if (*work).value == 5 {
+                    let nested = recorded_work(6, &mut *(*work).order, &mut *(*work).drops);
+                    let status = kiln_realm_queue_next_tick(
+                        Some(record_work),
+                        Some(drop_recorded_work),
+                        nested,
+                    );
+                    if status != 0 {
+                        drop_recorded_work(nested);
+                        return status;
+                    }
+                }
                 if (*work).clear != 0 {
                     return kiln_realm_clear_timer((*work).clear);
                 }
             }
             0
+        }
+
+        unsafe extern "C" fn fail_recorded_work(
+            work: *mut c_void,
+            _host: *mut c_void,
+            _thrown: *mut c_void,
+        ) -> i32 {
+            if work.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: the test owns the record until Realm drive drops the popped payload.
+            let work = work.cast::<RecordedWork>();
+            unsafe {
+                (*(*work).order).push((*work).value);
+            }
+            RUNTIME_ERROR
         }
 
         unsafe extern "C" fn drop_recorded_work(work: *mut c_void) {
@@ -2646,9 +2715,19 @@ mod realm {
             }
             // SAFETY: the test passes live `(Vec<u8>, usize)` storage for this entry call.
             let (order, drops) = unsafe { &mut *context.cast::<(Vec<u8>, usize)>() };
-            let microtask = recorded_work(1, order, drops);
+            let next_tick = recorded_work(5, order, drops);
             // SAFETY: callbacks match the transferred allocation.
             let mut status = unsafe {
+                kiln_realm_queue_next_tick(Some(record_work), Some(drop_recorded_work), next_tick)
+            };
+            if status != 0 {
+                // SAFETY: ownership did not transfer on failure.
+                unsafe { drop_recorded_work(next_tick) };
+                return status;
+            }
+            let microtask = recorded_work(1, order, drops);
+            // SAFETY: callbacks match the transferred allocation.
+            status = unsafe {
                 kiln_realm_queue_microtask(Some(record_work), Some(drop_recorded_work), microtask)
             };
             if status != 0 {
@@ -2870,6 +2949,11 @@ mod realm {
             );
             // SAFETY: the null slot is intentionally rejected without dereferencing.
             assert_eq!(unsafe { kiln_realm_now(ptr::null_mut()) }, INVALID_ARGUMENT);
+            // SAFETY: no Realm is active, so the opaque callback cannot be accepted.
+            assert_eq!(
+                unsafe { kiln_realm_queue_next_tick(None, None, ptr::null_mut()) },
+                INVALID_ARGUMENT
+            );
         }
 
         #[test]
@@ -3718,9 +3802,60 @@ mod realm {
                 },
                 0
             );
-            assert_eq!(observed.0, [1, 2, 3, 4]);
+            assert_eq!(observed.0, [5, 6, 1, 2, 3, 4]);
             assert_eq!(kiln_realm_destroy(handle), 0);
-            assert_eq!(observed.1, 4);
+            assert_eq!(observed.1, 6);
+        }
+
+        #[test]
+        fn thrown_next_tick_drops_its_payload_before_drive_returns() {
+            let mut handle = 0;
+            let mut observed = (Vec::<u8>::new(), 0_usize);
+            // SAFETY: handle and context are live for the calls that use them.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            unsafe extern "C" fn schedule(context: *mut c_void) -> i32 {
+                if context.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: the test keeps this context live through Realm entry and drive.
+                let (order, drops) = unsafe { &mut *context.cast::<(Vec<u8>, usize)>() };
+                let work = recorded_work(7, order, drops);
+                // SAFETY: callbacks match the transferred allocation.
+                let status = unsafe {
+                    kiln_realm_queue_next_tick(
+                        Some(fail_recorded_work),
+                        Some(drop_recorded_work),
+                        work,
+                    )
+                };
+                if status != 0 {
+                    // SAFETY: ownership did not transfer on failure.
+                    unsafe { drop_recorded_work(work) };
+                }
+                status
+            }
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(handle, Some(schedule), (&raw mut observed).cast::<c_void>())
+                },
+                0
+            );
+            let mut host = 0_u8;
+            let mut thrown = 0_u8;
+            // SAFETY: both opaque callback-context slots remain live for the complete drive.
+            assert_eq!(
+                unsafe {
+                    kiln_realm_drive(
+                        handle,
+                        (&raw mut host).cast::<c_void>(),
+                        (&raw mut thrown).cast::<c_void>(),
+                    )
+                },
+                RUNTIME_ERROR
+            );
+            assert_eq!(observed.0, [7]);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(observed.1, 1);
         }
     }
 }
