@@ -3106,6 +3106,51 @@ pub enum Value {
     Function(Rc<Closure>),
 }
 
+/// Materialize the public exports of a Node builtin module.
+///
+/// Resolution and graph construction deliberately traffic only in the builtin's stable string
+/// identity. This function is the single execution-side table used by both static ESM imports
+/// and `process.getBuiltinModule`, so the two access paths cannot acquire different native
+/// implementations.
+pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static str]> {
+    Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
+        "events" => &["EventEmitter", "default"],
+        "fs/promises" => &["readFile", "stat", "writeFile"],
+        _ => return None,
+    })
+}
+
+fn node_builtin_namespace(specifier: &str) -> Option<Value> {
+    Some(Value::Native(
+        match specifier.strip_prefix("node:").unwrap_or(specifier) {
+            "events" => Native::NodeEvents,
+            "fs/promises" => Native::NodeFsPromises,
+            _ => return None,
+        },
+    ))
+}
+
+pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
+    let namespace = node_builtin_namespace(specifier)?;
+    let Value::Native(namespace) = namespace else {
+        unreachable!("builtin namespaces are native values")
+    };
+    let names = node_builtin_export_names(specifier)?;
+    Some(
+        names
+            .iter()
+            .map(|name| {
+                (
+                    (*name).to_owned(),
+                    namespace
+                        .property(name)
+                        .expect("every advertised builtin export has a native value"),
+                )
+            })
+            .collect(),
+    )
+}
+
 impl Value {
     /// The string a value becomes when used as a property key.
     ///
@@ -6995,13 +7040,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         match native {
             Native::ProcessGetBuiltinModule => match arguments.first() {
-                Some(Value::String(name))
-                    if matches!(name.as_str(), "fs/promises" | "node:fs/promises") =>
-                {
-                    Ok(Value::Native(Native::NodeFsPromises))
-                }
-                Some(Value::String(name)) if matches!(name.as_str(), "events" | "node:events") => {
-                    Ok(Value::Native(Native::NodeEvents))
+                Some(Value::String(name)) => {
+                    Ok(node_builtin_namespace(name).unwrap_or(Value::Undefined))
                 }
                 _ => Ok(Value::Undefined),
             },
@@ -21503,6 +21543,23 @@ mod tests {
         assert_eq!(
             Native::NodeEvents.property("EventEmitter"),
             Some(Value::Native(Native::NodeEventEmitter))
+        );
+        assert_eq!(
+            node_builtin_export_names("events"),
+            Some(&["EventEmitter", "default"][..])
+        );
+        assert_eq!(
+            node_builtin_exports("node:events"),
+            Some(vec![
+                (
+                    "EventEmitter".to_owned(),
+                    Value::Native(Native::NodeEventEmitter),
+                ),
+                (
+                    "default".to_owned(),
+                    Value::Native(Native::NodeEventEmitter),
+                ),
+            ])
         );
     }
 
