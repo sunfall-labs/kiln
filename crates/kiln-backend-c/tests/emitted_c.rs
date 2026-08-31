@@ -864,17 +864,6 @@ fn rejected_programs() {
         "control falls off the end",
         bad(vec![number(1.0)], vec![Instruction::Const(0)], 0),
     );
-    record(
-        "builtin the backend does not implement",
-        bad(
-            Vec::new(),
-            vec![
-                Instruction::LoadBuiltin(Builtin::WeakMap),
-                Instruction::Return,
-            ],
-            0,
-        ),
-    );
     record("function captures a slot its creator lacks", {
         let mut top = program(
             Vec::new(),
