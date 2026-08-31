@@ -1108,6 +1108,29 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
+#define KILN_REALM_ASYNC_ABI_VERSION 1
+#define KILN_REALM_ASYNC_OK 0
+#define KILN_REALM_ASYNC_ERROR 1
+#define KILN_REALM_ASYNC_NOT_FOUND 1
+#define KILN_REALM_ASYNC_BYTES 1
+typedef struct kiln_async_completion {
+    uint64_t request;
+    uint64_t sequence;
+    int32_t status;
+    uint32_t value_kind;
+    const uint8_t *bytes;
+    uint64_t bytes_len;
+    const uint8_t *error_code;
+    uint64_t error_code_len;
+    const uint8_t *error_syscall;
+    uint64_t error_syscall_len;
+    const uint8_t *error_path;
+    uint64_t error_path_len;
+    const uint8_t *error_message;
+    uint64_t error_message_len;
+} kiln_async_completion;
+typedef int (*kiln_realm_completion_fn)(void *work, const kiln_async_completion *completion,
+                                       void *host, void *thrown);
 int kiln_realm_create(uint64_t *out_realm);
 int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
@@ -1120,6 +1143,10 @@ int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_d
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
                             void *work, uint64_t *out_id);
 int kiln_realm_clear_timer(uint64_t id);
+int kiln_realm_read_file(uint64_t realm, const uint8_t *path, uint64_t path_len,
+                         kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work,
+                         uint64_t *out_request);
+int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
 void kiln_regexp_free(void *handle);
