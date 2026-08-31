@@ -8173,16 +8173,23 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (code == KILN_C99_METHOD_NODE_SERVER_LISTEN) {
             kiln_node_completion *work;
             kiln_value port_value = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value host_value = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
-                                        ? kiln_c99_text(args[1])
-                                        : kiln_c99_copy_text("0.0.0.0", 7);
+            kiln_value host_value = kiln_c99_copy_text("0.0.0.0", 7);
+            kiln_value callback = kiln_c99_undefined();
             double port = kiln_c99_as_number(port_value);
+            size_t argument_index;
             int status;
             if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "Port should be >= 0 and < 65536");
-            if (argc > 2 && kiln_c99_is_callable(args[2])) {
-                kiln_value once_args[2] = {kiln_c99_copy_text("listening", 9), args[2]};
+            for (argument_index = 1; argument_index < argc; ++argument_index) {
+                if (kiln_c99_is_callable(args[argument_index])) {
+                    callback = args[argument_index];
+                } else if (args[argument_index].tag == KILN_VALUE_STRING) {
+                    host_value = args[argument_index];
+                }
+            }
+            if (callback.tag != KILN_VALUE_UNDEFINED) {
+                kiln_value once_args[2] = {kiln_c99_copy_text("listening", 9), callback};
                 kiln_value ignored;
                 status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ONCE,
                                              receiver, once_args, 2, depth, thrown);
