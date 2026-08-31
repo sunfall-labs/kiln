@@ -5198,9 +5198,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let (_, actions) = connection.driver.end(data);
                     (receiver.clone(), actions)
                 }
-                Native::NodeSocketDestroy => {
-                    (receiver.clone(), vec![connection.driver.close()])
-                }
+                Native::NodeSocketDestroy => (receiver.clone(), vec![connection.driver.close()]),
                 _ => unreachable!("only socket natives dispatch here"),
             }
         };
@@ -5370,12 +5368,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if protocol == ServerProtocol::Net {
                     let socket = node_net_socket(state, accepted.resource.id);
                     let handler = state.borrow().handler.clone();
-                    self.call_value(
-                        &handler,
-                        Value::Undefined,
-                        vec![socket],
-                        instruction,
-                    )?;
+                    self.call_value(&handler, Value::Undefined, vec![socket], instruction)?;
                 }
                 for action in actions {
                     self.start_http_stream_action(
@@ -5502,13 +5495,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             instruction,
                             message: "node:http received data for an unknown stream".into(),
                         })?;
-                    connection
-                        .decoder
-                        .push_events(&bytes)
-                        .map_err(|error| ExecutionError::Host {
+                    connection.decoder.push_events(&bytes).map_err(|error| {
+                        ExecutionError::Host {
                             instruction,
                             message: format!("HTTP parse error: {error:?}"),
-                        })?
+                        }
+                    })?
                 };
                 for event in events {
                     self.dispatch_http_request_event(server, resource, event, instruction)?;
@@ -5613,12 +5605,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         connection.driver.pause_reading();
                     }
                 }
-                let incoming = self.dispatch_http_request_head(
-                    server,
-                    resource,
-                    request,
-                    instruction,
-                )?;
+                let incoming =
+                    self.dispatch_http_request_head(server, resource, request, instruction)?;
                 let mut state = server.borrow_mut();
                 let connection = state
                     .streams
@@ -14766,9 +14754,7 @@ fn node_net_socket_value(
         .and_then(|stream| stream.request.clone())
 }
 
-fn node_net_socket_state(
-    receiver: &Value,
-) -> Result<Rc<RefCell<NetSocketState>>, ExecutionError> {
+fn node_net_socket_state(receiver: &Value) -> Result<Rc<RefCell<NetSocketState>>, ExecutionError> {
     let Value::Object(object) = receiver else {
         return Err(ExecutionError::TypeErrorMessage {
             message: "Socket method called on an incompatible receiver".into(),
