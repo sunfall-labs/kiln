@@ -20,9 +20,11 @@ use kiln_artifact_cache::{
     ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, CacheError,
     Digest, Lookup,
 };
+#[cfg(test)]
+use kiln_backend_c::emit_module_with_logical_path;
 use kiln_backend_c::{
-    C_ABI_VERSION, EmitError, emit_c, emit_module_with_logical_path,
-    emit_runtime_module_with_logical_path,
+    C_ABI_VERSION, EmissionPolicy, EmitError, emit_module_with_logical_path_and_policy,
+    emit_runtime_module_with_logical_path, emit_with_policy,
 };
 use kiln_host_abi::HOST_ABI_VERSION;
 pub use kiln_host_abi::HostValue;
@@ -104,6 +106,41 @@ impl NativeProfile {
 pub struct NativeBuildOptions {
     pub output: PathBuf,
     pub profile: NativeProfile,
+    pub realm: NativeRealmPolicy,
+}
+
+impl NativeBuildOptions {
+    pub fn new(output: impl Into<PathBuf>, profile: NativeProfile) -> Self {
+        Self {
+            output: output.into(),
+            profile,
+            realm: NativeRealmPolicy::default(),
+        }
+    }
+
+    pub fn with_realm_policy(mut self, realm: NativeRealmPolicy) -> Self {
+        self.realm = realm;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NativeRealmPolicy {
+    pub host_clock: bool,
+}
+
+impl NativeRealmPolicy {
+    pub const fn host_clock() -> Self {
+        Self { host_clock: true }
+    }
+}
+
+impl NativeRealmPolicy {
+    const fn emission(self) -> EmissionPolicy {
+        EmissionPolicy {
+            host_clock: self.host_clock,
+        }
+    }
 }
 
 /// Which artifact stages were reused without invoking the platform compiler or linker.
@@ -457,7 +494,7 @@ impl NativeBuilder {
     ) -> Result<NativeBuildReport, NativeError> {
         let total_started = Instant::now();
         let emit_started = Instant::now();
-        let module = emit_c(program)?;
+        let module = emit_with_policy(program, options.realm.emission())?;
         let launcher = launcher_source(&module.symbol)?;
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();
@@ -700,7 +737,7 @@ impl NativeBuilder {
     ) -> Result<NativeSharedLibraryReport, NativeError> {
         let total_started = Instant::now();
         let emit_started = Instant::now();
-        let module = emit_c(program)?;
+        let module = emit_with_policy(program, options.realm.emission())?;
         let module_api_symbol = embedding_module_api_symbol(&module.symbol)?;
         let module_wrapper = owned_result_wrapper_source(
             &module.symbol,
@@ -910,7 +947,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module(node, &logical_path)?;
+            let emitted = emit_native_graph_module(node, &logical_path, options.realm)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1216,7 +1253,7 @@ impl NativeBuilder {
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module(node, &logical_path)?;
+            let emitted = emit_native_graph_module(node, &logical_path, options.realm)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1666,6 +1703,7 @@ fn native_builtin_supports_export(
 fn emit_native_graph_module(
     node: &kiln_module_graph::ModuleNode,
     logical_path: &str,
+    policy: NativeRealmPolicy,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
         ModuleSource::NodeBuiltin(builtin) => {
@@ -1678,7 +1716,11 @@ fn emit_native_graph_module(
                 body,
             )?)
         }
-        _ => Ok(emit_module_with_logical_path(&node.program, logical_path)?),
+        _ => Ok(emit_module_with_logical_path_and_policy(
+            &node.program,
+            logical_path,
+            policy.emission(),
+        )?),
     }
 }
 
@@ -3653,8 +3695,12 @@ mod tests {
             data: None,
             dependencies: Vec::new(),
         };
-        let emitted = emit_native_graph_module(&node, ".kiln/builtins/events.builtin")
-            .expect("events materializes");
+        let emitted = emit_native_graph_module(
+            &node,
+            ".kiln/builtins/events.builtin",
+            NativeRealmPolicy::default(),
+        )
+        .expect("events materializes");
 
         assert!(
             emitted
@@ -3720,6 +3766,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 &NativeBuildOptions {
                     output: project.path.join("server"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("native node:net graph builds");
@@ -3823,6 +3870,7 @@ socket.on("end", () => console.log(reply));
                 &NativeBuildOptions {
                     output: project.path.join("client"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("native node:net client builds");
@@ -3871,6 +3919,7 @@ socket.on("end", () => console.log(reply));
                 &NativeBuildOptions {
                     output: project.path.join("server"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("native HTTP half-close fixture builds");
@@ -3961,6 +4010,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 &NativeBuildOptions {
                     output: project.path.join("server"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("native node:http graph builds");
@@ -4549,6 +4599,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 &NativeBuildOptions {
                     output: root.path.join("program"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("native scheduling graph runs");
@@ -4585,6 +4636,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                         "program.so"
                     }),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build embedded scheduling graph");
@@ -4834,6 +4886,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.path.join("program"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("native star graph runs");
@@ -4844,6 +4897,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.path.join(shared_library_name()),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("native shared star graph links");
@@ -4915,6 +4969,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: first_output,
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("first native build succeeds");
@@ -4927,6 +4982,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: second_output,
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("cached native build and run succeeds");
@@ -4990,6 +5046,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: colliding_output.clone(),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect_err("a library output cannot alias its derived header");
@@ -5001,6 +5058,7 @@ int main(void) {{
         let options = NativeBuildOptions {
             output: library_path.clone(),
             profile: NativeProfile::Dev,
+            realm: NativeRealmPolicy::default(),
         };
         let first = builder
             .build_shared_library(&program, &options)
@@ -5014,6 +5072,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.path.join("ordinary-program"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("ordinary executable build succeeds after PIC build");
@@ -5055,6 +5114,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: renamed_path,
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("renamed shared-library build succeeds");
@@ -5190,6 +5250,7 @@ int main(void) {
                 &NativeBuildOptions {
                     output: root.path.join(shared_library_name()),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build owned-result scalar library");
@@ -5325,6 +5386,7 @@ int main(void) {{
             &NativeBuildOptions {
                 output: root.path.join(shared_library_name()),
                 profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
             },
         )
         .expect("build malformed-host scalar library");
@@ -5434,6 +5496,7 @@ int main(void) {{
             &NativeBuildOptions {
                 output: root.path.join(shared_library_name()),
                 profile: NativeProfile::Dev,
+                realm: NativeRealmPolicy::default(),
             },
         )
         .expect("build throw graph");
@@ -5520,6 +5583,7 @@ int main(void) {{
                     &NativeBuildOptions {
                         output: shared_output.clone(),
                         profile: NativeProfile::Dev,
+                        realm: NativeRealmPolicy::default(),
                     },
                 )
                 .expect("prime each native executable");
@@ -5540,6 +5604,7 @@ int main(void) {{
                         &NativeBuildOptions {
                             output,
                             profile: NativeProfile::Dev,
+                            realm: NativeRealmPolicy::default(),
                         },
                     )
                     .expect("concurrent native run succeeds")
@@ -5591,6 +5656,7 @@ int main(void) {{
                     &NativeBuildOptions {
                         output: root.join(name),
                         profile: NativeProfile::Dev,
+                        realm: NativeRealmPolicy::default(),
                     },
                 )
                 .unwrap_or_else(|error| panic!("native fixture {name} failed: {error}"));
@@ -5633,6 +5699,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.path.join("caught"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("catchable JSON exceptions run natively");
@@ -5657,6 +5724,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.path.join("uncaught"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("uncaught JSON exception run reports a native result");
@@ -5685,6 +5753,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.path.join("uncaught-cycle"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("uncaught cyclic JSON run reports a native result");
@@ -5799,6 +5868,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.join("first-program"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("first graph build succeeds");
@@ -5809,6 +5879,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.join("second-program"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("second graph build succeeds");
@@ -5872,6 +5943,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.join("edited-program"),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("edited graph build succeeds");
@@ -6016,6 +6088,7 @@ int main(void) {{
                             "so"
                         }),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build shared graph succeeds");
@@ -6027,6 +6100,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: report.output.clone(),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("cached shared graph succeeds");
@@ -6047,6 +6121,7 @@ int main(void) {{
                         },
                     ),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("renamed shared graph succeeds");
@@ -6213,6 +6288,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: root.path.join(shared_library_name()),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build shared host graph");
@@ -6381,6 +6457,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: first_dir.join(leaf),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build first same-basename library");
@@ -6390,6 +6467,7 @@ int main(void) {{
                 &NativeBuildOptions {
                     output: second_dir.join(leaf),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build second same-basename library");
@@ -6515,6 +6593,7 @@ int main(void) {{
                         "first.so"
                     }),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build first graph library");
@@ -6528,6 +6607,7 @@ int main(void) {{
                         "second.so"
                     }),
                     profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
                 },
             )
             .expect("build second graph library");
@@ -6708,6 +6788,73 @@ int main(int argc, char **argv) {{
             local_count: 0,
             functions: Vec::new(),
         }
+    }
+
+    #[test]
+    fn native_host_clock_is_explicit_while_default_date_stays_at_epoch() {
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native host-clock integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-host-clock");
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let program = Program {
+            version: BYTECODE_VERSION,
+            constants: vec![Constant::String("now".to_owned())],
+            code: vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Date),
+                Instruction::CallMethod { name: 0, argc: 0 },
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: Vec::new(),
+        };
+
+        let deterministic = builder
+            .run(
+                &program,
+                &NativeBuildOptions {
+                    output: root.path.join("deterministic"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("deterministic Date program runs");
+        assert_eq!(deterministic.result, Some(HostValue::number(0.0)));
+
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock is after epoch")
+            .as_secs_f64()
+            * 1_000.0;
+        let host_backed = builder
+            .run(
+                &program,
+                &NativeBuildOptions {
+                    output: root.path.join("host"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy { host_clock: true },
+                },
+            )
+            .expect("host-backed Date program runs");
+        let after = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("test clock is after epoch")
+            .as_secs_f64()
+            * 1_000.0;
+        let observed = host_backed
+            .result
+            .as_ref()
+            .and_then(HostValue::as_number)
+            .expect("Date.now returns a number");
+        assert!(
+            observed >= before && observed <= after,
+            "host Date.now {observed} outside build/run interval {before}..={after}"
+        );
+        assert_ne!(
+            deterministic.build.module_symbol,
+            host_backed.build.module_symbol
+        );
     }
 
     fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {

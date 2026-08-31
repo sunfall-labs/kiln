@@ -336,6 +336,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #define KILN_C99_THROWN (-7)
 
 #define KILN_HOST_OP_WRITE_STDOUT 1
+#define KILN_HOST_OP_CLOCK_NOW 2
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
@@ -462,6 +463,7 @@ const RUNTIME_PREFIX: &str = r#"/* Kiln native CLI runtime: deterministic HostOp
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 "#;
 
@@ -668,15 +670,40 @@ static kiln_value kiln_cli_undefined(void) {
     return value;
 }
 
-/* Stable CLI implementation of HostOps::WriteStdout (operation number 1). */
+static kiln_value kiln_cli_number(double number) {
+    kiln_value value = kiln_cli_undefined();
+    value.tag = KILN_VALUE_NUMBER;
+    memcpy(&value.bits, &number, sizeof(number));
+    return value;
+}
+
+static int kiln_cli_clock_now(kiln_value *result) {
+    double milliseconds;
+#if defined(TIME_UTC)
+    struct timespec now;
+    if (timespec_get(&now, TIME_UTC) != TIME_UTC) return KILN_C99_HOST_ERROR;
+    milliseconds = (double)now.tv_sec * 1000.0 + (double)now.tv_nsec / 1000000.0;
+#else
+    time_t now = time(NULL);
+    if (now == (time_t)-1) return KILN_C99_HOST_ERROR;
+    milliseconds = (double)now * 1000.0;
+#endif
+    *result = kiln_cli_number(milliseconds);
+    return KILN_C99_OK;
+}
+
+/* Stable CLI implementations of the explicit synchronous HostOps boundary. */
 int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                        const kiln_value *arguments, kiln_value *result) {
     uint16_t index;
     (void)context;
-    if (operation != KILN_HOST_OP_WRITE_STDOUT || result == NULL
-        || (argc != 0 && arguments == NULL)) {
+    if (result == NULL || (argc != 0 && arguments == NULL)) {
         return KILN_C99_HOST_ERROR;
     }
+    if (operation == KILN_HOST_OP_CLOCK_NOW) {
+        return argc == 0 ? kiln_cli_clock_now(result) : KILN_C99_HOST_ERROR;
+    }
+    if (operation != KILN_HOST_OP_WRITE_STDOUT) return KILN_C99_HOST_ERROR;
     for (index = 0; index < argc; ++index) {
         if (index != 0 && fputc(' ', stdout) == EOF) {
             return KILN_C99_HOST_ERROR;

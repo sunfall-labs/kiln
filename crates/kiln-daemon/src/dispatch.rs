@@ -1047,6 +1047,7 @@ pub(crate) fn native_build_program(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
+            realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
         Ok(report) => native_built(&project_root, report),
@@ -1165,6 +1166,7 @@ fn prepare_native_shared_build(
         kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
+            realm: kiln_native::NativeRealmPolicy::default(),
         },
     ))
 }
@@ -1205,6 +1207,7 @@ pub(crate) fn native_build_graph(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
+            realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
         Ok(report) => native_built(&project_root, report),
@@ -1235,6 +1238,7 @@ pub(crate) fn native_run_program(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
+            realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
         Ok(report) => native_ran(&project_root, report),
@@ -1265,6 +1269,7 @@ pub(crate) fn native_run_graph(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
+            realm: kiln_native::NativeRealmPolicy::default(),
         },
     ) {
         Ok(report) => native_ran(&project_root, report),
