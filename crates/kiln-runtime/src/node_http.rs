@@ -19,6 +19,17 @@ pub struct HttpRequest {
     pub keep_alive: bool,
 }
 
+/// One protocol-level transition emitted while decoding an HTTP/1 connection.
+///
+/// Keeping this below the JavaScript adapter lets live Tokio reads and scripted deterministic
+/// reads exercise the same request lifecycle without forcing the decoder to retain whole bodies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpRequestEvent {
+    Head(HttpRequest),
+    Data(Vec<u8>),
+    End,
+}
+
 impl HttpRequest {
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
@@ -80,6 +91,7 @@ struct RequestHead {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Http1Decoder {
     bytes: Vec<u8>,
+    request: Option<(HttpRequest, BodyKind)>,
 }
 
 impl Http1Decoder {
@@ -121,6 +133,82 @@ impl Http1Decoder {
             self.bytes.drain(..consumed);
         }
         Ok(requests)
+    }
+
+    /// Decode request lifecycle events without buffering a complete content-length body.
+    ///
+    /// Chunked framing still uses the complete-frame path for now; content-length requests, the
+    /// dominant server upload path, expose every available transport chunk immediately.
+    pub fn push_events(&mut self, bytes: &[u8]) -> Result<Vec<HttpRequestEvent>, HttpParseError> {
+        self.bytes.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        loop {
+            if self.request.is_none() {
+                let Some(head_end) = find_bytes(&self.bytes, b"\r\n\r\n") else {
+                    if self.bytes.len() > MAX_HEAD_BYTES {
+                        return Err(HttpParseError::HeadTooLarge);
+                    }
+                    break;
+                };
+                if head_end > MAX_HEAD_BYTES {
+                    return Err(HttpParseError::HeadTooLarge);
+                }
+                let head = parse_head(&self.bytes[..head_end])?;
+                self.bytes.drain(..head_end + 4);
+                let request = HttpRequest {
+                    method: head.method,
+                    target: head.target,
+                    version: head.version,
+                    headers: head.headers,
+                    body: Vec::new(),
+                    keep_alive: head.keep_alive,
+                };
+                let body = head.body;
+                events.push(HttpRequestEvent::Head(request.clone()));
+                match body {
+                    BodyKind::None | BodyKind::Length(0) => {
+                        events.push(HttpRequestEvent::End);
+                        continue;
+                    }
+                    _ => self.request = Some((request, body)),
+                }
+            }
+
+            let Some((_, body)) = self.request.as_mut() else {
+                continue;
+            };
+            match body {
+                BodyKind::Length(remaining) => {
+                    if self.bytes.is_empty() {
+                        break;
+                    }
+                    let length = (*remaining).min(self.bytes.len());
+                    events.push(HttpRequestEvent::Data(
+                        self.bytes.drain(..length).collect(),
+                    ));
+                    *remaining -= length;
+                    if *remaining == 0 {
+                        self.request = None;
+                        events.push(HttpRequestEvent::End);
+                        continue;
+                    }
+                    break;
+                }
+                BodyKind::Chunked => {
+                    let Some((body, consumed)) = decode_chunked(&self.bytes)? else {
+                        break;
+                    };
+                    self.bytes.drain(..consumed);
+                    self.request = None;
+                    if !body.is_empty() {
+                        events.push(HttpRequestEvent::Data(body));
+                    }
+                    events.push(HttpRequestEvent::End);
+                }
+                BodyKind::None => unreachable!("bodyless requests finish with their head"),
+            }
+        }
+        Ok(events)
     }
 
     pub fn buffered_bytes(&self) -> usize {
@@ -372,6 +460,43 @@ mod tests {
         assert_eq!(requests[1].target, "/b");
         assert!(!requests[1].keep_alive);
         assert_eq!(decoder.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn event_decoder_streams_content_length_body_across_transport_reads() {
+        let mut decoder = Http1Decoder::default();
+        assert_eq!(
+            decoder
+                .push_events(b"POST / HTTP/1.1\r\nContent-Length: 5\r\n\r\nhe")
+                .unwrap(),
+            vec![
+                HttpRequestEvent::Head(HttpRequest {
+                    method: "POST".into(),
+                    target: "/".into(),
+                    version: HttpVersion::Http11,
+                    headers: vec![("content-length".into(), "5".into())],
+                    body: Vec::new(),
+                    keep_alive: true,
+                }),
+                HttpRequestEvent::Data(b"he".to_vec()),
+            ]
+        );
+        assert_eq!(
+            decoder.push_events(b"lloGET /next HTTP/1.1\r\n\r\n").unwrap(),
+            vec![
+                HttpRequestEvent::Data(b"llo".to_vec()),
+                HttpRequestEvent::End,
+                HttpRequestEvent::Head(HttpRequest {
+                    method: "GET".into(),
+                    target: "/next".into(),
+                    version: HttpVersion::Http11,
+                    headers: Vec::new(),
+                    body: Vec::new(),
+                    keep_alive: true,
+                }),
+                HttpRequestEvent::End,
+            ]
+        );
     }
 
     #[test]

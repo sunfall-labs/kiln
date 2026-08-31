@@ -11,7 +11,7 @@ use kiln_ir::{
 };
 use kiln_runtime::{
     NodeHostOps, Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds,
-    node_http::{Http1Decoder, HttpResponse},
+    node_http::{Http1Decoder, HttpRequestEvent, HttpResponse},
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
@@ -1383,6 +1383,7 @@ struct HttpServerState {
 struct HttpConnection {
     driver: StreamDriver,
     decoder: Http1Decoder,
+    request: Option<Value>,
     close_after_finish: bool,
     closed: bool,
 }
@@ -5176,6 +5177,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut stream = HttpConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     decoder: Http1Decoder::default(),
+                    request: None,
                     close_after_finish: false,
                     closed: false,
                 };
@@ -5281,7 +5283,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             StreamAction::Data(bytes) => {
-                let requests = {
+                let events = {
                     let mut server_state = server.borrow_mut();
                     let connection = server_state
                         .streams
@@ -5293,24 +5295,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         })?;
                     connection
                         .decoder
-                        .push(&bytes)
+                        .push_events(&bytes)
                         .map_err(|error| ExecutionError::Host {
                             instruction,
                             message: format!("HTTP parse error: {error:?}"),
                         })?
                 };
-                for request in requests {
-                    if !request.keep_alive {
-                        if let Some(connection) = server
-                            .borrow_mut()
-                            .streams
-                            .iter_mut()
-                            .find(|stream| stream.driver.resource() == resource)
-                        {
-                            connection.driver.pause_reading();
-                        }
-                    }
-                    self.dispatch_http_request(server, resource, request, instruction)?;
+                for event in events {
+                    self.dispatch_http_request_event(server, resource, event, instruction)?;
                 }
                 Ok(())
             }
@@ -5355,13 +5347,97 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
-    fn dispatch_http_request(
+    fn dispatch_http_request_event(
+        &mut self,
+        server: &Rc<RefCell<HttpServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        event: HttpRequestEvent,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match event {
+            HttpRequestEvent::Head(request) => {
+                if !request.keep_alive {
+                    if let Some(connection) = server
+                        .borrow_mut()
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.driver.resource() == resource)
+                    {
+                        connection.driver.pause_reading();
+                    }
+                }
+                let incoming = self.dispatch_http_request_head(
+                    server,
+                    resource,
+                    request,
+                    instruction,
+                )?;
+                let mut state = server.borrow_mut();
+                let connection = state
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.driver.resource() == resource)
+                    .expect("request head belongs to its stream");
+                connection.request = Some(incoming);
+                Ok(())
+            }
+            HttpRequestEvent::Data(bytes) => {
+                let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
+                let body = node_bytes_value(bytes);
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    &incoming,
+                    &[Value::String("data".into()), body],
+                    instruction,
+                )?;
+                Ok(())
+            }
+            HttpRequestEvent::End => {
+                let incoming = self.http_incoming_for_stream(server, resource, instruction)?;
+                self.dispatch_node_event(
+                    Native::NodeEventEmit,
+                    &incoming,
+                    &[Value::String("end".into())],
+                    instruction,
+                )?;
+                if let Some(connection) = server
+                    .borrow_mut()
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.driver.resource() == resource)
+                {
+                    connection.request = None;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn http_incoming_for_stream(
+        &self,
+        server: &Rc<RefCell<HttpServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        server
+            .borrow()
+            .streams
+            .iter()
+            .find(|stream| stream.driver.resource() == resource)
+            .and_then(|stream| stream.request.clone())
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "node:http body event has no active request".into(),
+            })
+    }
+
+    fn dispatch_http_request_head(
         &mut self,
         server: &Rc<RefCell<HttpServerState>>,
         resource: kiln_host_abi::ResourceId,
         request: kiln_runtime::node_http::HttpRequest,
         instruction: usize,
-    ) -> Result<(), ExecutionError> {
+    ) -> Result<Value, ExecutionError> {
         let mut incoming = ObjectData::default();
         incoming.node_events = Some(Vec::new());
         incoming.set("method", Value::String(request.method.clone()));
@@ -5402,33 +5478,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             vec![incoming.clone(), response],
             instruction,
         )?;
-        if !request.body.is_empty() {
-            let body = Value::TypedArray(Rc::new(TypedArrayData {
-                buffer: BufferData::fixed(request.body.len()),
-                offset: 0,
-                length: Some(request.body.len()),
-                kind: TypedKind::Uint8,
-            }));
-            if let Value::TypedArray(view) = &body {
-                view.buffer
-                    .bytes
-                    .borrow_mut()
-                    .copy_from_slice(&request.body);
-            }
-            self.dispatch_node_event(
-                Native::NodeEventEmit,
-                &incoming,
-                &[Value::String("data".into()), body],
-                instruction,
-            )?;
-        }
-        self.dispatch_node_event(
-            Native::NodeEventEmit,
-            &incoming,
-            &[Value::String("end".into())],
-            instruction,
-        )?;
-        Ok(())
+        Ok(incoming)
     }
 
     fn dispatch_node_response(
@@ -14374,6 +14424,18 @@ fn node_body_bytes(value: Option<&Value>) -> Result<Vec<u8>, ExecutionError> {
             ),
         }),
     }
+}
+
+fn node_bytes_value(bytes: Vec<u8>) -> Value {
+    let length = bytes.len();
+    let buffer = BufferData::fixed(length);
+    buffer.bytes.borrow_mut().copy_from_slice(&bytes);
+    Value::TypedArray(Rc::new(TypedArrayData {
+        buffer,
+        offset: 0,
+        length: Some(length),
+        kind: TypedKind::Uint8,
+    }))
 }
 
 fn node_listeners(object: &Rc<RefCell<ObjectData>>, event: &str) -> Vec<NodeEventListener> {
