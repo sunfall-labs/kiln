@@ -879,7 +879,7 @@ mod realm {
     }
 
     fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> Result<usize, i32> {
-        let mut event_count = 0;
+        let mut event_count: usize = 0;
         if !in_context {
             // A response command can wake Hyper and make a pipelined request runnable without
             // another HostOps completion. Advance the one Tokio scheduler before inspecting
@@ -1120,7 +1120,7 @@ mod realm {
                     }
                 }
                 let had_events = !payloads.is_empty();
-                event_count += payloads.len();
+                event_count = event_count.saturating_add(payloads.len());
                 for payload in payloads {
                     let status = queue_http_event(realm, payload);
                     if status != 0 {

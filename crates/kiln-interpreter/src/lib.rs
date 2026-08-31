@@ -417,6 +417,8 @@ pub enum Native {
     MathExpm1,
     MathFround,
     MathF16Round,
+    /// One of the six `Uint8Array` conversions between bytes and text.
+    Uint8Text(ByteText),
     MathClz32,
     MathImul,
     MathAbs,
@@ -1477,6 +1479,9 @@ impl Native {
             (Self::TypedArrayConstructor(kind), "BYTES_PER_ELEMENT") => {
                 Some(Value::Number(kind.width() as f64))
             }
+            // The two that *build* a view are statics on `Uint8Array`; the four that read or
+            // fill one are methods on its prototype, and both lists come from one place.
+            (Self::TypedArrayConstructor(kind), _) => byte_text_method(kind, name, true),
             // Every function inherits from `Function.prototype`, which is what the interop
             // shims test when they clone a module's shape.
             (Self::FunctionConstructor, "prototype") => {
@@ -1532,7 +1537,7 @@ impl Native {
                     // is why reading it here rather than there would be the wrong shape.
                     PrototypeTable::TypedArrayFor(kind) => match name {
                         "BYTES_PER_ELEMENT" => Value::Number(kind.width() as f64),
-                        _ => Value::Undefined,
+                        _ => typed_array_for_method(kind, name),
                     },
                     PrototypeTable::DataView => data_view_method(name),
                     PrototypeTable::Iterator => iterator_method(name),
@@ -3560,6 +3565,427 @@ fn f32_to_half(value: f32) -> u16 {
         raw += 1;
     }
     sign | raw as u16
+}
+
+/// What a decoder raises when the text is not what it claims to be.
+///
+/// A `SyntaxError` rather than a `TypeError`, because the argument is the right *kind* of thing
+/// and the wrong *spelling* of one -- the same distinction `JSON.parse` draws.
+fn byte_text_refused(base64: bool) -> ExecutionError {
+    ExecutionError::SyntaxErrorMessage {
+        message: if base64 {
+            "invalid base64 string".to_owned()
+        } else {
+            "invalid hexadecimal string".to_owned()
+        },
+    }
+}
+
+/// What a *concrete* view's constructor or prototype publishes that the abstract one does not.
+///
+/// One function for both halves so that a static and a method cannot end up on the wrong object,
+/// and so the instance read, the table and the own-key walk agree about which names exist.
+fn byte_text_method(kind: TypedKind, name: &str, statics: bool) -> Option<Value> {
+    if kind != TypedKind::Uint8 {
+        return None;
+    }
+    let found = [
+        ByteText::FromBase64,
+        ByteText::FromHex,
+        ByteText::ToBase64,
+        ByteText::ToHex,
+        ByteText::SetFromBase64,
+        ByteText::SetFromHex,
+    ]
+    .into_iter()
+    .find(|conversion| conversion.key() == name && conversion.is_static() == statics)?;
+    Some(Value::Native(Native::Uint8Text(found)))
+}
+
+/// The methods a concrete view's prototype publishes, as a value rather than an option, for the
+/// tables that answer `undefined` for a name they do not have.
+fn typed_array_for_method(kind: TypedKind, name: &str) -> Value {
+    byte_text_method(kind, name, false).unwrap_or(Value::Undefined)
+}
+
+/// One of the six conversions between a `Uint8Array` and a text spelling of its bytes.
+///
+/// Defined on `Uint8Array` alone rather than on every view, because bytes are the only element
+/// type a text encoding of a buffer can mean: there is no agreed spelling of an `Int32Array` in
+/// base64, and a view whose elements are wider than a byte would have to invent a byte order to
+/// have one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByteText {
+    FromBase64,
+    FromHex,
+    ToBase64,
+    ToHex,
+    SetFromBase64,
+    SetFromHex,
+}
+
+impl ByteText {
+    /// The name this conversion answers to, which is also where it lives: the two that build a
+    /// view are statics on the constructor and the four that read or fill one are methods.
+    const fn key(self) -> &'static str {
+        match self {
+            Self::FromBase64 => "fromBase64",
+            Self::FromHex => "fromHex",
+            Self::ToBase64 => "toBase64",
+            Self::ToHex => "toHex",
+            Self::SetFromBase64 => "setFromBase64",
+            Self::SetFromHex => "setFromHex",
+        }
+    }
+
+    const fn is_static(self) -> bool {
+        matches!(self, Self::FromBase64 | Self::FromHex)
+    }
+}
+
+/// What to do with a base64 string whose final chunk is not four characters long.
+///
+/// Three answers rather than a boolean because they are genuinely three: `loose` decodes what is
+/// there, `strict` refuses it, and `stop-before-partial` decodes everything before it and
+/// reports how far it got -- which is the one a program streaming a base64 document needs, since
+/// the next read will carry the rest of that chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LastChunk {
+    Loose,
+    Strict,
+    StopBeforePartial,
+}
+
+/// What a decode produced: how much of the string it consumed, the bytes it made, and the
+/// refusal it stopped at.
+///
+/// The three travel together because `setFromBase64` reports all three and in that order: the
+/// bytes decoded before an illegal character are *written* and the refusal is raised afterwards,
+/// so a decode that both produced output and failed is an ordinary outcome rather than a
+/// contradiction.
+struct Decoded {
+    read: usize,
+    bytes: Vec<u8>,
+    refused: bool,
+}
+
+/// The value a base64 digit stands for, in whichever alphabet was asked for.
+///
+/// The two differ in exactly two characters, and mixing them is a refusal rather than a
+/// fallback: `+` and `/` are not base64url, `-` and `_` are not base64, and a decoder that
+/// accepted both would silently accept a string neither encoder produces.
+const fn base64_value(character: u8, url: bool) -> Option<u8> {
+    Some(match character {
+        b'A'..=b'Z' => character - b'A',
+        b'a'..=b'z' => character - b'a' + 26,
+        b'0'..=b'9' => character - b'0' + 52,
+        b'+' if !url => 62,
+        b'/' if !url => 63,
+        b'-' if url => 62,
+        b'_' if url => 63,
+        _ => return None,
+    })
+}
+
+/// The digit a six-bit value is written as.
+const fn base64_digit(value: u8, url: bool) -> u8 {
+    match value {
+        0..=25 => b'A' + value,
+        26..=51 => b'a' + value - 26,
+        52..=61 => b'0' + value - 52,
+        62 => {
+            if url {
+                b'-'
+            } else {
+                b'+'
+            }
+        }
+        _ => {
+            if url {
+                b'_'
+            } else {
+                b'/'
+            }
+        }
+    }
+}
+
+/// The five characters `FromBase64` skips wherever they appear.
+///
+/// ASCII whitespace and nothing else: a non-breaking space, a thin space and a line separator
+/// are all refusals, which is what stops a string pasted out of a rendered document from
+/// decoding to something subtly different from what it displays.
+const fn is_base64_whitespace(character: u8) -> bool {
+    matches!(character, b' ' | b'\t' | b'\n' | b'\x0c' | b'\r')
+}
+
+/// `DecodeBase64Chunk`: two, three or four digits as the one, two or three bytes they carry.
+///
+/// A short chunk has bits left over -- four in a two-digit chunk, two in a three-digit one --
+/// and `strict` is the mode that refuses a chunk whose leftover bits are not zero. They are
+/// unreachable through any encoder, so a string carrying them was not produced by one, and
+/// accepting it means two different strings decode to the same bytes.
+fn decode_base64_chunk(chunk: &[u8], strict: bool) -> Option<Vec<u8>> {
+    let mut packed: u32 = 0;
+    for digit in chunk {
+        packed = (packed << 6) | u32::from(*digit);
+    }
+    match chunk.len() {
+        2 => {
+            if strict && packed & 0xf != 0 {
+                return None;
+            }
+            #[expect(clippy::cast_possible_truncation)]
+            Some(vec![(packed >> 4) as u8])
+        }
+        3 => {
+            if strict && packed & 0x3 != 0 {
+                return None;
+            }
+            #[expect(clippy::cast_possible_truncation)]
+            Some(vec![(packed >> 10) as u8, (packed >> 2) as u8])
+        }
+        #[expect(clippy::cast_possible_truncation)]
+        _ => Some(vec![
+            (packed >> 16) as u8,
+            (packed >> 8) as u8,
+            packed as u8,
+        ]),
+    }
+}
+
+/// `FromBase64(string, alphabet, lastChunkHandling, maxLength)`.
+///
+/// Bounded by `limit` rather than decoding everything and truncating, because the bound is
+/// observable twice over: `setFromBase64` reports how much of the string it consumed, and a
+/// string whose *next* chunk would not fit is left unread rather than partly written. That is
+/// also why trailing garbage past a filled target is not a refusal -- the decoder stopped
+/// before reaching it, and a character it never looked at cannot be illegal.
+fn from_base64(text: &str, url: bool, handling: LastChunk, limit: usize) -> Decoded {
+    let units: Vec<u8> = text
+        .chars()
+        // A character outside ASCII cannot be a digit, a pad or whitespace, so it is refused --
+        // and it is folded to one byte here so the walk is over positions the caller counts in.
+        .map(|character| u8::try_from(character as u32).unwrap_or(0xff))
+        .collect();
+    let length = units.len();
+    let mut read = 0;
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut chunk: Vec<u8> = Vec::new();
+    let mut index = 0;
+    if limit == 0 {
+        return Decoded {
+            read,
+            bytes,
+            refused: false,
+        };
+    }
+    let skip = |mut at: usize| {
+        while at < length && is_base64_whitespace(units[at]) {
+            at += 1;
+        }
+        at
+    };
+    let refuse = |read: usize, bytes: Vec<u8>| Decoded {
+        read,
+        bytes,
+        refused: true,
+    };
+    loop {
+        index = skip(index);
+        if index == length {
+            if chunk.is_empty() {
+                return Decoded {
+                    read: length,
+                    bytes,
+                    refused: false,
+                };
+            }
+            // A chunk with nothing after it. `stop-before-partial` leaves it for the next read,
+            // `strict` refuses it because a complete document pads its last chunk, and `loose`
+            // takes what is there -- unless it is a single digit, which carries no whole byte.
+            return match handling {
+                LastChunk::StopBeforePartial => Decoded {
+                    read,
+                    bytes,
+                    refused: false,
+                },
+                LastChunk::Strict => refuse(read, bytes),
+                LastChunk::Loose if chunk.len() == 1 => refuse(read, bytes),
+                LastChunk::Loose => {
+                    if limit - bytes.len() < chunk.len() - 1 {
+                        return Decoded {
+                            read,
+                            bytes,
+                            refused: false,
+                        };
+                    }
+                    match decode_base64_chunk(&chunk, false) {
+                        Some(decoded) => {
+                            bytes.extend(decoded);
+                            Decoded {
+                                read: length,
+                                bytes,
+                                refused: false,
+                            }
+                        }
+                        None => refuse(read, bytes),
+                    }
+                }
+            };
+        }
+        let unit = units[index];
+        index += 1;
+        if unit == b'=' {
+            // Padding closes the string: a chunk of two digits needs two pads and one of three
+            // needs one, and anything after them -- another pad included -- is a refusal.
+            if chunk.len() < 2 {
+                return refuse(read, bytes);
+            }
+            index = skip(index);
+            if chunk.len() == 2 {
+                if index == length {
+                    return match handling {
+                        LastChunk::StopBeforePartial => Decoded {
+                            read,
+                            bytes,
+                            refused: false,
+                        },
+                        _ => refuse(read, bytes),
+                    };
+                }
+                if units[index] != b'=' {
+                    return refuse(read, bytes);
+                }
+                index = skip(index + 1);
+            }
+            if index != length {
+                return refuse(read, bytes);
+            }
+            if limit - bytes.len() < chunk.len() - 1 {
+                return Decoded {
+                    read,
+                    bytes,
+                    refused: false,
+                };
+            }
+            return match decode_base64_chunk(&chunk, handling == LastChunk::Strict) {
+                Some(decoded) => {
+                    bytes.extend(decoded);
+                    Decoded {
+                        read: length,
+                        bytes,
+                        refused: false,
+                    }
+                }
+                None => refuse(read, bytes),
+            };
+        }
+        let Some(value) = base64_value(unit, url) else {
+            return refuse(read, bytes);
+        };
+        chunk.push(value);
+        if chunk.len() == 4 {
+            // A chunk that would not fit is left *unread* rather than partly written, which is
+            // the difference between a bounded decode and a decode-then-truncate: a program
+            // filling a five-byte target from an eight-character string is told it consumed
+            // four characters, so the next read starts where this one stopped.
+            if limit - bytes.len() < 3 {
+                return Decoded {
+                    read,
+                    bytes,
+                    refused: false,
+                };
+            }
+            bytes.extend(decode_base64_chunk(&chunk, false).unwrap_or_default());
+            chunk.clear();
+            read = index;
+            if bytes.len() == limit {
+                return Decoded {
+                    read,
+                    bytes,
+                    refused: false,
+                };
+            }
+        }
+    }
+}
+
+/// `FromHex(string, maxLength)`.
+///
+/// No whitespace and no partial byte: hex has no chunk shorter than two digits, so an odd length
+/// is refused before anything is read rather than after the last whole pair.
+fn from_hex(text: &str, limit: usize) -> Decoded {
+    let units: Vec<char> = text.chars().collect();
+    let mut bytes = Vec::new();
+    if !units.len().is_multiple_of(2) {
+        return Decoded {
+            read: 0,
+            bytes,
+            refused: true,
+        };
+    }
+    let mut read = 0;
+    while read < units.len() && bytes.len() < limit {
+        let high = units[read].to_digit(16);
+        let low = units[read + 1].to_digit(16);
+        // `to_digit` admits exactly the sixteen ASCII hexits in either case, which is the set
+        // the specification names.
+        let (Some(high), Some(low)) = (high, low) else {
+            return Decoded {
+                read,
+                bytes,
+                refused: true,
+            };
+        };
+        #[expect(clippy::cast_possible_truncation)]
+        bytes.push(((high << 4) | low) as u8);
+        read += 2;
+    }
+    Decoded {
+        read,
+        bytes,
+        refused: false,
+    }
+}
+
+/// The base64 spelling of some bytes, padded unless the caller asked otherwise.
+fn to_base64_text(bytes: &[u8], url: bool, omit_padding: bool) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let packed = u32::from(group[0]) << 16
+            | u32::from(group.get(1).copied().unwrap_or(0)) << 8
+            | u32::from(group.get(2).copied().unwrap_or(0));
+        #[expect(clippy::cast_possible_truncation)]
+        let digits = [
+            base64_digit((packed >> 18) as u8 & 0x3f, url),
+            base64_digit((packed >> 12) as u8 & 0x3f, url),
+            base64_digit((packed >> 6) as u8 & 0x3f, url),
+            base64_digit(packed as u8 & 0x3f, url),
+        ];
+        // A group of one byte spells two digits and a group of two spells three; the rest is
+        // padding, which carries no bits and which a program may ask to have left off.
+        let kept = group.len() + 1;
+        for digit in &digits[..kept] {
+            out.push(char::from(*digit));
+        }
+        if !omit_padding {
+            for _ in kept..4 {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
+/// The hex spelling of some bytes, in lower case as the specification writes it.
+fn to_hex_text(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(char::from_digit(u32::from(byte >> 4), 16).unwrap_or('0'));
+        out.push(char::from_digit(u32::from(byte & 0xf), 16).unwrap_or('0'));
+    }
+    out
 }
 
 /// `value` converted the way an assignment through an element of `kind` converts it, or the
@@ -8259,10 +8685,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             ServerAction::Close => self.emit_http_server(state, "close", vec![], instruction),
             ServerAction::Connection(accepted) => {
                 let protocol = state.borrow().protocol;
+                let socket_state = Rc::new(RefCell::new(NetSocketState {
+                    owner: Some(Rc::downgrade(state)),
+                    resource: Some(accepted.resource.id),
+                    object: None,
+                    readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
+                }));
+                let socket = node_socket_object(&socket_state);
                 let mut stream = NodeConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     runtime_http: protocol == ServerProtocol::Http,
-                    socket: None,
+                    socket: Some(socket_state),
                     request: None,
                     response: None,
                     client_requests: std::collections::BTreeMap::new(),
@@ -8296,7 +8729,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 state.borrow_mut().streams.push(stream);
                 if protocol == ServerProtocol::Net {
-                    let socket = node_net_socket(state, accepted.resource.id);
+                    if let Some(connection) = state
+                        .borrow_mut()
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.resource() == accepted.resource.id)
+                    {
+                        connection.request = Some(socket.clone());
+                    }
                     let handler = state.borrow().handler.clone();
                     self.call_value(&handler, Value::Undefined, vec![socket], instruction)?;
                 }
@@ -9133,6 +9573,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             headers.set(&name, Value::String(value));
         }
         incoming.set("headers", Value::Object(Rc::new(RefCell::new(headers))));
+        let socket = server
+            .borrow()
+            .streams
+            .iter()
+            .find(|stream| stream.resource() == resource)
+            .and_then(|stream| stream.socket.clone())
+            .map(|state| node_socket_object(&state))
+            .unwrap_or(Value::Undefined);
+        incoming.set("socket", socket.clone());
+        incoming.set("connection", socket.clone());
         let incoming = Value::Object(Rc::new(RefCell::new(incoming)));
         if let Some(connection) = server
             .borrow_mut()
@@ -9171,6 +9621,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         response.set("on", Value::Native(Native::NodeEventOn));
         response.set("once", Value::Native(Native::NodeEventOnce));
         response.set("emit", Value::Native(Native::NodeEventEmit));
+        response.set("req", incoming.clone());
+        response.set("socket", socket.clone());
+        response.set("connection", socket);
         let response_object = Rc::new(RefCell::new(response));
         response_state.borrow_mut().object = Some(Rc::downgrade(&response_object));
         let response = Value::Object(response_object);
@@ -14236,6 +14689,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 Ok(target)
+            }
+            Native::Uint8Text(conversion) => {
+                self.byte_text(conversion, receiver, arguments, instruction)
             }
             Native::ReflectGet => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -24985,7 +25441,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     &self.intrinsics,
                     PrototypeTable::TypedArrayFor(view.kind),
                     other,
-                    Value::Undefined,
+                    typed_array_for_method(view.kind, other),
                 ) {
                     Value::Undefined => match table_step(
                         &self.intrinsics,
@@ -26593,6 +27049,180 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.define_own(receiver, name, descriptor, instruction)
     }
 
+    /// One of the six `Uint8Array` conversions between bytes and text.
+    ///
+    /// All six in one place because they are one algorithm read six ways: two directions, two
+    /// encodings, and -- for the decoding direction -- a choice between building a view and
+    /// filling one. Splitting them would mean six copies of the options reading, whose order and
+    /// refusals are exactly what half the tests here are about.
+    fn byte_text(
+        &mut self,
+        conversion: ByteText,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let base64 = matches!(
+            conversion,
+            ByteText::FromBase64 | ByteText::ToBase64 | ByteText::SetFromBase64
+        );
+        // `ValidateUint8Array`. A wider view is refused rather than reinterpreted: these are
+        // defined on the byte view alone, and answering for an `Int32Array` would have to invent
+        // a byte order to do it.
+        let view = match conversion {
+            ByteText::FromBase64 | ByteText::FromHex => None,
+            _ => match receiver {
+                Value::TypedArray(view) if view.kind == TypedKind::Uint8 => Some(Rc::clone(view)),
+                other => {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "{} called on {}",
+                            conversion.key(),
+                            other.to_display_string()
+                        ),
+                    });
+                }
+            },
+        };
+        // Which argument carries the options is the one thing the six do not share: a conversion
+        // that reads a string takes it first, and one that writes a string takes none at all.
+        let (text, options) = match conversion {
+            ByteText::ToBase64 | ByteText::ToHex => (None, arguments.first()),
+            _ => (Some(arguments.first()), arguments.get(1)),
+        };
+        // `ToString` is deliberately *not* applied: a decode is given a string or it is refused,
+        // because a number that stringifies to something base64 accepts is far more likely to be
+        // a mistake than an intention.
+        let text = match text {
+            None => None,
+            Some(Some(Value::String(text))) => Some(text.clone()),
+            Some(_) => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!("{} requires a string", conversion.key()),
+                });
+            }
+        };
+        let mut url = false;
+        let mut handling = LastChunk::Loose;
+        let mut omit_padding = false;
+        // `GetOptionsObject`: absent means the defaults, an object is read, and anything else is
+        // refused before a single field is looked at.
+        match options {
+            None | Some(Value::Undefined) => {}
+            Some(bag) if is_reflect_target(bag) => {
+                if base64 {
+                    // Each field is read once, and the value has to *be* a string: `Object("base64")`
+                    // is a `TypeError` and its `toString` is never called, which is what stops a
+                    // program from smuggling an option in through a coercion.
+                    let named = self.read_property(bag, "alphabet", instruction)?;
+                    url = match &named {
+                        Value::Undefined => false,
+                        Value::String(name) if name == "base64" => false,
+                        Value::String(name) if name == "base64url" => true,
+                        _ => {
+                            return Err(ExecutionError::TypeErrorMessage {
+                                message: "alphabet must be \"base64\" or \"base64url\"".to_owned(),
+                            });
+                        }
+                    };
+                }
+                match conversion {
+                    ByteText::ToBase64 => {
+                        // The one option that *is* coerced, because it is a flag rather than a
+                        // name: the specification says `ToBoolean`, so `{ omitPadding: 1 }` omits.
+                        let named = self.read_property(bag, "omitPadding", instruction)?;
+                        omit_padding = named.is_truthy();
+                    }
+                    ByteText::FromBase64 | ByteText::SetFromBase64 => {
+                        let named = self.read_property(bag, "lastChunkHandling", instruction)?;
+                        handling = match &named {
+                            Value::Undefined => LastChunk::Loose,
+                            Value::String(name) if name == "loose" => LastChunk::Loose,
+                            Value::String(name) if name == "strict" => LastChunk::Strict,
+                            Value::String(name) if name == "stop-before-partial" => {
+                                LastChunk::StopBeforePartial
+                            }
+                            _ => {
+                                return Err(ExecutionError::TypeErrorMessage {
+                                    message: "lastChunkHandling must be \"loose\", \"strict\", or \"stop-before-partial\""
+                                        .to_owned(),
+                                });
+                            }
+                        };
+                    }
+                    _ => {}
+                }
+            }
+            Some(_) => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "options must be an object".to_owned(),
+                });
+            }
+        }
+        // Reading the bytes out comes after the options, and is where a detached buffer stops
+        // the whole thing -- `ValidateTypedArray` again, at the point the specification puts it.
+        if let Some(view) = &view
+            && view.out_of_bounds()
+        {
+            return Err(ExecutionError::BufferDetached);
+        }
+        match conversion {
+            ByteText::ToBase64 | ByteText::ToHex => {
+                let bytes = view.map(|view| view.bytes()).unwrap_or_default();
+                Ok(Value::String(if base64 {
+                    to_base64_text(&bytes, url, omit_padding)
+                } else {
+                    to_hex_text(&bytes)
+                }))
+            }
+            ByteText::FromBase64 | ByteText::FromHex => {
+                let text = text.unwrap_or_default();
+                let decoded = if base64 {
+                    from_base64(&text, url, handling, usize::MAX)
+                } else {
+                    from_hex(&text, usize::MAX)
+                };
+                if decoded.refused {
+                    return Err(byte_text_refused(base64));
+                }
+                let items = decoded
+                    .bytes
+                    .into_iter()
+                    .map(|byte| Value::Number(f64::from(byte)))
+                    .collect();
+                construct_typed_array(TypedKind::Uint8, &[Value::Array(ArrayData::new(items))])
+            }
+            ByteText::SetFromBase64 | ByteText::SetFromHex => {
+                let Some(view) = view else {
+                    unreachable!("a set conversion validated its receiver above");
+                };
+                let text = text.unwrap_or_default();
+                // Bounded by the target rather than decoded whole and truncated: the bound is
+                // observable, because a chunk that would not fit is left *unread* and reported
+                // as such rather than partly written.
+                let decoded = if base64 {
+                    from_base64(&text, url, handling, view.len())
+                } else {
+                    from_hex(&text, view.len())
+                };
+                let written = decoded.bytes.len();
+                for (index, byte) in decoded.bytes.into_iter().enumerate() {
+                    view.set(index, &Value::Number(f64::from(byte)))?;
+                }
+                // The write happens first and the refusal second, so a program that catches the
+                // refusal still sees the bytes that were good -- which is the whole point of
+                // reporting how far a decode got.
+                if decoded.refused {
+                    return Err(byte_text_refused(base64));
+                }
+                let mut record = ObjectData::default();
+                record.set("read", Value::Number(decoded.read as f64));
+                record.set("written", Value::Number(written as f64));
+                Ok(Value::Object(Rc::new(RefCell::new(record))))
+            }
+        }
+    }
+
     /// `[[DefineOwnProperty]]`, with the one conversion only the machine can run.
     ///
     /// An accepted integer-indexed definition ends in `IntegerIndexedElementSet`, which is
@@ -27360,28 +27990,6 @@ fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::downgrade(&object));
     Value::Object(object)
-}
-
-fn node_net_socket(
-    server: &Rc<RefCell<NodeServerState>>,
-    resource: kiln_host_abi::ResourceId,
-) -> Value {
-    let state = Rc::new(RefCell::new(NetSocketState {
-        owner: Some(Rc::downgrade(server)),
-        resource: Some(resource),
-        object: None,
-        readable: new_readable_state(DEFAULT_HIGH_WATER_MARK, None),
-    }));
-    let socket = node_socket_object(&state);
-    if let Some(connection) = server
-        .borrow_mut()
-        .streams
-        .iter_mut()
-        .find(|stream| stream.resource() == resource)
-    {
-        connection.request = Some(socket.clone());
-    }
-    socket
 }
 
 fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
@@ -28973,6 +29581,11 @@ fn call_native(
         // may run a getter, so the machine has to be the one to do it.
         Native::ArrayBufferConstructor | Native::SharedArrayBufferConstructor => {
             unreachable!("`ArrayBuffer` is dispatched by the interpreter")
+        }
+        // Reading `{ alphabet }` and `{ lastChunkHandling }` off an options bag is an ordinary
+        // property read, which may run a getter, so the machine has to be the one to do it.
+        Native::Uint8Text(_) => {
+            unreachable!("a Uint8Array text conversion is dispatched by the interpreter")
         }
         // Every `DataView` entry point coerces an argument, and coercing one runs a method.
         Native::DataViewConstructor
@@ -36087,6 +36700,10 @@ const fn native_length(native: Native) -> Option<f64> {
         // Every method on `Date.prototype` carries its own, for the reason [`DateMethod`] gives.
         N::Date(method) => method.length(),
 
+        // `toBase64` takes only an options bag and `toHex` takes nothing, so neither declares a
+        // required argument; the four that read or fill from a string declare the string.
+        N::Uint8Text(ByteText::ToBase64 | ByteText::ToHex) => 0.0,
+
         // Everything left takes exactly one required argument.
         _ => 1.0,
     })
@@ -36384,6 +37001,18 @@ fn table_step(
 /// prototypes the same observable shape as ordinary objects.
 fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static str] {
     match table {
+        // A concrete view's prototype carries only what differs between the views: its element
+        // width, and -- for the byte view alone -- the four conversions to and from text.
+        PrototypeTable::TypedArrayFor(kind) => match kind {
+            TypedKind::Uint8 => &[
+                "BYTES_PER_ELEMENT",
+                "toBase64",
+                "toHex",
+                "setFromBase64",
+                "setFromHex",
+            ],
+            _ => &["BYTES_PER_ELEMENT"],
+        },
         PrototypeTable::Object => &[
             "hasOwnProperty",
             "isPrototypeOf",
@@ -36566,7 +37195,6 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         ],
         PrototypeTable::ArrayBuffer => &["resize", "slice", "transfer", "transferToFixedLength"],
         PrototypeTable::SharedArrayBuffer => &["grow", "slice"],
-        PrototypeTable::TypedArrayFor(_) => &["BYTES_PER_ELEMENT"],
         PrototypeTable::DataView => &[
             "getInt8",
             "getUint8",
@@ -36950,7 +37578,10 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
         Value::Native(Native::BigIntConstructor) => &["asIntN", "asUintN"],
         Value::Native(Native::MapConstructor) => &["groupBy"],
         Value::Native(Native::TypedArrayIntrinsic) => &["@@species"],
-        Value::Native(Native::TypedArrayConstructor(_)) => &["of", "from", "BYTES_PER_ELEMENT"],
+        Value::Native(Native::TypedArrayConstructor(kind)) => match kind {
+            TypedKind::Uint8 => &["of", "from", "BYTES_PER_ELEMENT", "fromBase64", "fromHex"],
+            _ => &["of", "from", "BYTES_PER_ELEMENT"],
+        },
         Value::Native(Native::SymbolConstructor) => &[
             "for",
             "keyFor",
@@ -37415,6 +38046,7 @@ fn native_js_name(native: &Native) -> String {
         Native::RegExpAccessor(accessor) => format!("get {}", accessor.property_key()),
         Native::BuiltinAccessor(accessor) => format!("get {}", accessor.property_key()),
         Native::SetOperation(operation) => operation.property_key().to_owned(),
+        Native::Uint8Text(conversion) => conversion.key().to_owned(),
         Native::ArrayCopy(method) => method.property_key().to_owned(),
         Native::StringHtml(wrapper) => wrapper.property_key().to_owned(),
         Native::RegExpSymbol(method) => method.js_name(),

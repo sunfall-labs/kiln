@@ -735,14 +735,12 @@ mod tests {
                 .await
                 .expect("pipelined requests write");
 
-            let first_id = loop {
-                match events.recv().await.expect("first server event arrives") {
-                    EngineEvent::RequestHead { id, request } => {
-                        assert_eq!(request.target, "/first");
-                        break id;
-                    }
-                    event => panic!("unexpected server event before first head: {event:?}"),
+            let first_id = match events.recv().await.expect("first server event arrives") {
+                EngineEvent::RequestHead { id, request } => {
+                    assert_eq!(request.target, "/first");
+                    id
                 }
+                event => panic!("unexpected server event before first head: {event:?}"),
             };
             assert!(matches!(
                 events.recv().await,
@@ -762,20 +760,19 @@ mod tests {
             response_body.end(b"first".to_vec());
 
             let second_id = tokio::time::timeout(std::time::Duration::from_secs(1), async {
-                loop {
-                    match events.recv().await.expect("second server event arrives") {
-                        EngineEvent::RequestHead { id, request } => {
-                            assert_eq!(request.target, "/second");
-                            break id;
-                        }
-                        event => panic!("unexpected server event before second head: {event:?}"),
+                match events.recv().await.expect("second server event arrives") {
+                    EngineEvent::RequestHead { id, request } => {
+                        assert_eq!(request.target, "/second");
+                        id
                     }
+                    event => panic!("unexpected server event before second head: {event:?}"),
                 }
             })
             .await
             .expect("second pipelined request head arrives after the first response head");
 
-            for (id, body) in [(second_id, b"second".as_slice())] {
+            {
+                let (id, body) = (second_id, b"second".as_slice());
                 let mut response_body = crate::http_body::ResponseBodyDriver::default();
                 response_body.end(body.to_vec());
                 let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
