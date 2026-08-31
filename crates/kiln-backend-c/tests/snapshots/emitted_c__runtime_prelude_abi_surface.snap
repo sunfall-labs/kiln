@@ -368,6 +368,13 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
+#define KILN_REALM_ASYNC_ABI_VERSION 1
+#define KILN_REALM_ASYNC_OK 0
+#define KILN_REALM_ASYNC_ERROR 1
+#define KILN_REALM_ASYNC_NOT_FOUND 1
+#define KILN_REALM_ASYNC_BYTES 1
+typedef struct kiln_async_completion {
+typedef int (*kiln_realm_completion_fn)(void *work, const kiln_async_completion *completion,
 int kiln_realm_create(uint64_t *out_realm);
 int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
@@ -378,6 +385,8 @@ int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, 
 int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
 int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
 int kiln_realm_clear_timer(uint64_t id);
+int kiln_realm_read_file(uint64_t realm, const uint8_t *path, uint64_t path_len,
+int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
 void kiln_regexp_free(void *handle);
 int32_t kiln_regexp_search(void *handle, const uint16_t *subject, size_t subject_len, size_t start,

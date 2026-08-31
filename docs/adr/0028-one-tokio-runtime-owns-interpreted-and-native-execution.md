@@ -89,6 +89,14 @@ continuation on its realm; it never calls generated code concurrently or on an a
 worker. Generated async functions remain compiler-produced state machines and resume on the realm
 thread through registered C function pointers and caller-owned state.
 
+The first native continuation slice uses private async ABI version 1 for one-shot `ReadFile`.
+Requests carry fixed-width integer fields and an opaque continuation; completion payload pointers
+are borrowed only during the callback, while the Rust runtime owns the bytes and structured error
+until that callback returns. The operation is declared only in generated C units and the private
+runtime package, not in the public embedding header. Its provider export list and runtime artifact
+identity therefore change without changing generated application-unit keys or the public embedding
+ABI.
+
 The native launcher creates the realm before evaluating any module, gives every module the same
 realm handle, and drives that realm after the complete graph reaches its checkpoint. Microtasks,
 timers and async completions are therefore realm-wide rather than per translation unit. This is the
