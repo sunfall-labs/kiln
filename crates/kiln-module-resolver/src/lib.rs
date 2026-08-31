@@ -116,6 +116,45 @@ pub struct ResolvedRequest {
     pub package_json: Option<PathBuf>,
 }
 
+/// Node's execution format for a resolved source file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeModuleFormat {
+    EsModule,
+    CommonJs,
+}
+
+/// Classify from explicit extension and the nearest package manifest selected by resolution.
+/// `.mjs`/`.cjs` are definitive; `.js` follows `type`, defaulting to CommonJS as Node does.
+pub fn node_module_format(
+    path: &Path,
+    package_json: Option<&Path>,
+) -> Result<NodeModuleFormat, ResolveError> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("mjs") => return Ok(NodeModuleFormat::EsModule),
+        Some("cjs") => return Ok(NodeModuleFormat::CommonJs),
+        _ => {}
+    }
+    let Some(manifest) = package_json else {
+        return Ok(NodeModuleFormat::CommonJs);
+    };
+    let bytes = fs::read(manifest).map_err(|error| ResolveError::Io {
+        role: PathRole::Target,
+        path: manifest.to_path_buf(),
+        kind: error.kind(),
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| ResolveError::InvalidPackageManifest {
+            path: manifest.to_path_buf(),
+        })?;
+    Ok(
+        if value.get("type").and_then(serde_json::Value::as_str) == Some("module") {
+            NodeModuleFormat::EsModule
+        } else {
+            NodeModuleFormat::CommonJs
+        },
+    )
+}
+
 impl ResolvedModule {
     pub fn new(path: PathBuf, kind: ResolutionKind) -> Self {
         Self { path, kind }
@@ -363,6 +402,14 @@ pub trait ResolutionPolicy {
     fn project_root(&self) -> &Path;
 
     fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError>;
+
+    /// Node execution format when this policy has authoritative package metadata.
+    fn node_format(
+        &self,
+        _module: &ResolvedModule,
+    ) -> Result<Option<NodeModuleFormat>, ResolveError> {
+        Ok(None)
+    }
 }
 
 impl ResolutionPolicy for ModuleResolver {
@@ -485,6 +532,13 @@ impl ResolutionPolicy for NodePackageResolver {
     fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
         NodePackageResolver::resolve(self, specifier, importer)
     }
+
+    fn node_format(
+        &self,
+        module: &ResolvedModule,
+    ) -> Result<Option<NodeModuleFormat>, ResolveError> {
+        Ok(Some(node_module_format_for_path(&module.path)?))
+    }
 }
 
 /// Node package policy plus explicit builtin-module identities.
@@ -536,6 +590,35 @@ impl ResolutionPolicy for NodeRuntimeResolver {
     fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
         NodeRuntimeResolver::resolve(self, specifier, importer)
     }
+
+    fn node_format(
+        &self,
+        module: &ResolvedModule,
+    ) -> Result<Option<NodeModuleFormat>, ResolveError> {
+        if module.kind == ResolutionKind::Builtin {
+            Ok(None)
+        } else {
+            Ok(Some(node_module_format_for_path(&module.path)?))
+        }
+    }
+}
+
+fn node_module_format_for_path(path: &Path) -> Result<NodeModuleFormat, ResolveError> {
+    if matches!(
+        path.extension().and_then(|value| value.to_str()),
+        Some("mjs" | "cjs")
+    ) {
+        return node_module_format(path, None);
+    }
+    let mut directory = path.parent();
+    while let Some(current) = directory {
+        let manifest = current.join("package.json");
+        if manifest.is_file() {
+            return node_module_format(path, Some(&manifest));
+        }
+        directory = current.parent();
+    }
+    node_module_format(path, None)
 }
 
 /// Replays package decisions captured by a client-side [`NodePackageResolver`].
@@ -1482,6 +1565,33 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn node_format_uses_definitive_extensions_and_package_type() {
+        let project = TempProject::new();
+        let common_manifest = project.write("cjs/package.json", r#"{"type":"commonjs"}"#);
+        let module_manifest = project.write("esm/package.json", r#"{"type":"module"}"#);
+        assert_eq!(
+            node_module_format(Path::new("x.cjs"), Some(&module_manifest)).unwrap(),
+            NodeModuleFormat::CommonJs
+        );
+        assert_eq!(
+            node_module_format(Path::new("x.mjs"), Some(&common_manifest)).unwrap(),
+            NodeModuleFormat::EsModule
+        );
+        assert_eq!(
+            node_module_format(Path::new("x.js"), Some(&common_manifest)).unwrap(),
+            NodeModuleFormat::CommonJs
+        );
+        assert_eq!(
+            node_module_format(Path::new("x.js"), Some(&module_manifest)).unwrap(),
+            NodeModuleFormat::EsModule
+        );
+        assert_eq!(
+            node_module_format(Path::new("x.js"), None).unwrap(),
+            NodeModuleFormat::CommonJs
+        );
     }
 
     // Small lexical path-difference helper kept local to tests so the crate stays dependency-free.

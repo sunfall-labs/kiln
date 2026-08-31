@@ -953,6 +953,7 @@ name = "kiln-module-resolver"
 version = "0.0.0"
 dependencies = [
  "oxc_resolver",
+ "serde_json",
 ]
 
 [[package]]

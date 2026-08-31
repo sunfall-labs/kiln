@@ -8,4 +8,5 @@ repository = "https://github.com/sunfall-labs/kiln"
 # Keep module resolution below the frontend and graph layers. Oxc owns Node and TypeScript package
 # rules; package-manager state and dependency installation remain caller-owned.
 [dependencies]
+serde_json = { workspace = true }
 oxc_resolver = { workspace = true }
