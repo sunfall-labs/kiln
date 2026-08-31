@@ -263,6 +263,8 @@ pub enum Native {
     NodeAsyncResource,
     NodeAsyncResourceBind,
     NodeAsyncResourceEmitDestroy,
+    NodeCrypto,
+    NodeCryptoRandomUuid,
     NodeStream,
     NodeStreamFinished,
     NodeDns,
@@ -275,6 +277,7 @@ pub enum Native {
     NodeHttp2,
     NodeHttp2CreateServer,
     NodeHttp2CreateSecureServer,
+    NodeUrl,
     NodeEventEmitter,
     NodeEventOn,
     NodeEventOnce,
@@ -1018,6 +1021,7 @@ impl Native {
             (Self::NodeAsyncHooks, "AsyncResource" | "default") => {
                 Some(Value::Native(Self::NodeAsyncResource))
             }
+            (Self::NodeCrypto, "randomUUID") => Some(Value::Native(Self::NodeCryptoRandomUuid)),
             (Self::NodeStream, "finished") => Some(Value::Native(Self::NodeStreamFinished)),
             (Self::NodeDns, "lookup") => Some(Value::Native(Self::NodeDnsLookup)),
             (Self::NodeOs, "networkInterfaces") => {
@@ -1031,6 +1035,7 @@ impl Native {
             (Self::NodeHttp2, "createSecureServer") => {
                 Some(Value::Native(Self::NodeHttp2CreateSecureServer))
             }
+            (Self::NodeUrl, "URL" | "default") => Some(Value::Native(Self::UrlConstructor)),
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
             }
@@ -3602,6 +3607,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
         "assert" | "assert/strict" => &["default", "ok", "strict"],
         "async_hooks" => &["AsyncResource", "default"],
+        "crypto" => &["default", "randomUUID"],
         "diagnostics_channel" => &["channel", "default", "hasSubscribers", "tracingChannel"],
         "dns" => &["default", "lookup"],
         "events" => &["EventEmitter", "default"],
@@ -3614,6 +3620,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
         "os" => &["default", "networkInterfaces"],
         "stream" => &["default", "finished"],
         "util" => &["debuglog", "default", "format", "inherits"],
+        "url" => &["URL", "default"],
         _ => return None,
     })
 }
@@ -3623,6 +3630,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "assert" | "assert/strict" => Native::NodeAssert,
             "async_hooks" => Native::NodeAsyncHooks,
+            "crypto" => Native::NodeCrypto,
             "diagnostics_channel" => Native::NodeDiagnosticsChannel,
             "dns" => Native::NodeDns,
             "events" => Native::NodeEvents,
@@ -3635,6 +3643,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             "os" => Native::NodeOs,
             "stream" => Native::NodeStream,
             "util" => Native::NodeUtil,
+            "url" => Native::NodeUrl,
             _ => return None,
         },
     ))
@@ -9447,6 +9456,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 })));
             }
             Native::NodeAsyncResourceEmitDestroy => return Ok(Value::Undefined),
+            Native::NodeCryptoRandomUuid => {
+                let first = split_mix_64(&mut self.random_state).to_be_bytes();
+                let second = split_mix_64(&mut self.random_state).to_be_bytes();
+                let mut bytes = [0_u8; 16];
+                bytes[..8].copy_from_slice(&first);
+                bytes[8..].copy_from_slice(&second);
+                // RFC 9562 UUIDv4: the realm entropy supplies payload bits; version and variant
+                // are structural. Deterministic/seeded realms reproduce, host realms will draw
+                // their words through HostOp::EntropyU64 once that execution path is enabled.
+                bytes[6] = (bytes[6] & 0x0f) | 0x40;
+                bytes[8] = (bytes[8] & 0x3f) | 0x80;
+                return Ok(Value::String(format!(
+                    "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                    bytes[0],
+                    bytes[1],
+                    bytes[2],
+                    bytes[3],
+                    bytes[4],
+                    bytes[5],
+                    bytes[6],
+                    bytes[7],
+                    bytes[8],
+                    bytes[9],
+                    bytes[10],
+                    bytes[11],
+                    bytes[12],
+                    bytes[13],
+                    bytes[14],
+                    bytes[15]
+                )));
+            }
             Native::NodeStreamFinished => {
                 let stream = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let callback = arguments
@@ -21889,6 +21929,8 @@ fn call_native(
         | Native::NodeAsyncResource
         | Native::NodeAsyncResourceBind
         | Native::NodeAsyncResourceEmitDestroy
+        | Native::NodeCrypto
+        | Native::NodeCryptoRandomUuid
         | Native::NodeStream
         | Native::NodeStreamFinished
         | Native::NodeDns
@@ -21901,6 +21943,7 @@ fn call_native(
         | Native::NodeHttp2
         | Native::NodeHttp2CreateServer
         | Native::NodeHttp2CreateSecureServer
+        | Native::NodeUrl
         | Native::NodeNet
         | Native::NodeNetCreateServer
         | Native::NodeNetConnect

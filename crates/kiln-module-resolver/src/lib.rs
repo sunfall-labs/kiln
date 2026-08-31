@@ -55,6 +55,7 @@ pub enum NodeBuiltin {
     Assert,
     AsyncHooks,
     DiagnosticsChannel,
+    Crypto,
     Dns,
     Events,
     FsPromises,
@@ -65,6 +66,7 @@ pub enum NodeBuiltin {
     PerfHooks,
     Os,
     Stream,
+    Url,
     Util,
 }
 
@@ -74,6 +76,7 @@ impl NodeBuiltin {
             "assert" | "assert/strict" => Self::Assert,
             "async_hooks" => Self::AsyncHooks,
             "diagnostics_channel" => Self::DiagnosticsChannel,
+            "crypto" => Self::Crypto,
             "dns" => Self::Dns,
             "events" => Self::Events,
             "fs/promises" => Self::FsPromises,
@@ -84,6 +87,7 @@ impl NodeBuiltin {
             "perf_hooks" => Self::PerfHooks,
             "os" => Self::Os,
             "stream" => Self::Stream,
+            "url" => Self::Url,
             "util" => Self::Util,
             _ => return None,
         })
@@ -94,6 +98,7 @@ impl NodeBuiltin {
             Self::Assert => "node:assert",
             Self::AsyncHooks => "node:async_hooks",
             Self::DiagnosticsChannel => "node:diagnostics_channel",
+            Self::Crypto => "node:crypto",
             Self::Dns => "node:dns",
             Self::Events => "node:events",
             Self::FsPromises => "node:fs/promises",
@@ -104,6 +109,7 @@ impl NodeBuiltin {
             Self::PerfHooks => "node:perf_hooks",
             Self::Os => "node:os",
             Self::Stream => "node:stream",
+            Self::Url => "node:url",
             Self::Util => "node:util",
         }
     }
