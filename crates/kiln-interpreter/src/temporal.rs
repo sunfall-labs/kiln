@@ -779,7 +779,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     }
 
     /// `ToTemporalX`: an existing value of that type, an ISO string, or a property bag.
-    fn coerce_temporal(
+    ///
+    /// `pub(crate)` because `Intl.DurationFormat.prototype.format` takes a `ToTemporalDuration`
+    /// argument: the conversion is the same one, and a second copy of it in `intl.rs` would be a
+    /// second place for the property-bag read order to drift.
+    pub(crate) fn coerce_temporal(
         &mut self,
         kind: engine::Kind,
         value: &Value,
