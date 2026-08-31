@@ -3590,6 +3590,141 @@ mod tests {
     }
 
     #[test]
+    fn scripted_provider_drains_response_before_same_turn_server_close() {
+        use crate::node_stream::StreamAction;
+
+        let resource = ResourceId::new(45);
+        let read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: node_stream::DEFAULT_HIGH_WATER_MARK,
+        };
+        let request = b"GET /same-turn HTTP/1.1\r\nHost: kiln\r\nConnection: close\r\n\r\n";
+        let write = AsyncHostOp::TcpWrite {
+            stream: resource,
+            data: b"HTTP/1.1 200 OK\r\ncontent-length: 9\r\nconnection: close\r\n\r\nsame-turn"
+                .to_vec(),
+        };
+        let close = AsyncHostOp::CloseResource { resource };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
+            ScriptedHostStep {
+                operation: read.clone(),
+                result: Ok(AsyncHostValue::Bytes(request.to_vec())),
+            },
+            ScriptedHostStep {
+                operation: write.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+            ScriptedHostStep {
+                operation: close.clone(),
+                result: Ok(AsyncHostValue::Undefined),
+            },
+        ]))
+        .expect("scripted runtime builds");
+        let start = runtime.start_http1_connection(resource);
+        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+            panic!("HTTP connection starts one scripted read: {start:?}");
+        };
+        assert_eq!(read_operation, &read);
+        let read_request = runtime.start_host_op(read_operation.clone(), false);
+        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+        let read_completion = runtime
+            .next_host_completion()
+            .expect("scripted request read completes");
+        let actions = runtime
+            .complete_http_connection(resource, read_completion)
+            .expect("request read belongs to connection");
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            StreamAction::Start(AsyncHostOp::TcpRead { stream, .. }) if *stream == resource
+        )));
+        runtime.poll_http_connection(resource);
+        let events = runtime.take_http_events(resource);
+        let (id, _, body) = request_events(&events);
+        assert!(body.is_empty());
+        assert!(runtime.respond_http1(
+            resource,
+            id,
+            node_http::HttpResponse {
+                status: 200,
+                reason: None,
+                headers: Vec::new(),
+                body: b"same-turn".to_vec(),
+            },
+        ));
+
+        // This is the native callback's ordering: response.end() queues the Hyper command, then
+        // server.close() runs before Tokio gets another poll of the connection task.
+        let close_actions = runtime
+            .close_http_connection(resource)
+            .expect("server close belongs to HTTP connection");
+        assert!(
+            close_actions.is_empty(),
+            "close must wait for the response body"
+        );
+
+        let writes = runtime
+            .poll_http_connection(resource)
+            .expect("connection remains while response drains");
+        let [StreamAction::Start(AsyncHostOp::TcpWrite { stream, data })] = writes.as_slice()
+        else {
+            panic!("response write must precede close: {writes:?}");
+        };
+        assert_eq!(*stream, resource);
+        assert_eq!(
+            &AsyncHostOp::TcpWrite {
+                stream: resource,
+                data: data.clone(),
+            },
+            &write
+        );
+        let write_request = runtime.start_host_op(write.clone(), false);
+        assert!(runtime.http_connection_started(resource, &write, write_request));
+        let write_completion = runtime
+            .next_host_completion()
+            .expect("scripted response write completes");
+        let completion = runtime
+            .complete_http_connection(resource, write_completion)
+            .expect("response write belongs to connection");
+        assert!(
+            completion.is_empty()
+                || completion.iter().all(|action| matches!(
+                    action,
+                    StreamAction::Start(AsyncHostOp::TcpWrite { .. })
+                        | StreamAction::Event(node_stream::StreamEvent::Close)
+                ))
+        );
+
+        let close_action = (0..8)
+            .find_map(|_| {
+                let _ = runtime.take_http_events(resource);
+                runtime.poll_http_connection(resource).and_then(|actions| {
+                    actions.into_iter().find(|action| {
+                        matches!(
+                            action,
+                            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
+                                if *closed == resource
+                        )
+                    })
+                })
+            })
+            .unwrap_or_else(|| panic!("response write must be acknowledged before close"));
+        assert!(matches!(
+            close_action,
+            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
+                if closed == resource
+        ));
+        let close_request = runtime.start_host_op(close, false);
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("close follows the response write")
+                .request,
+            close_request
+        );
+        assert!(runtime.host_mut().is_exhausted());
+    }
+
+    #[test]
     fn scripted_provider_dispatches_buffered_http1_pipeline_after_first_response() {
         use crate::node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction};
 
