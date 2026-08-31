@@ -447,6 +447,21 @@ impl<T> DuplexState<T> {
             .map(|write| &write.payload)
     }
 
+    /// Mark the queue head as submitted to a non-HostOps consumer.
+    ///
+    /// HTTP response bodies use the same Node-visible accounting as sockets, but Hyper consumes
+    /// their frames rather than a host request table. The caller supplies a monotonically unique
+    /// identity and completes it when Hyper accepts the frame.
+    pub(crate) fn submit_next(&mut self, request: RequestId) -> Option<&T> {
+        self.write_started(request).then(|| {
+            &self
+                .writes
+                .front()
+                .expect("write_started requires a queue head")
+                .payload
+        })
+    }
+
     /// Complete the ordered queue head and return events plus whether another write is ready to
     /// submit. A mismatched completion is ignored: it belongs to another stream or stale request.
     pub fn write_completed(&mut self, request: RequestId) -> (Vec<StreamEvent>, bool) {

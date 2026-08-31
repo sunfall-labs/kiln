@@ -5,6 +5,7 @@
 //! the realm at the next deadline, while the realm decides the order in which JavaScript work
 //! runs. Tokio types are deliberately private to this crate.
 
+mod http_body;
 mod http_transport;
 mod hyper_http;
 pub mod node_http;
@@ -32,6 +33,7 @@ use tokio::net::{
 };
 use tokio::sync::mpsc;
 
+use crate::http_body::{BodyEvent, ResponseBodyDriver};
 use crate::http_transport::HttpTransportDriver;
 
 /// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
@@ -42,6 +44,12 @@ pub enum RuntimeHttpEvent {
         id: u64,
         request: node_http::HttpRequest,
         body: Vec<u8>,
+    },
+    Drain {
+        id: u64,
+    },
+    Finish {
+        id: u64,
     },
     Error(String),
     Closed,
@@ -570,6 +578,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 task,
                 events: event_receiver,
                 responses: response_sender,
+                response_bodies: BTreeMap::new(),
+                body_events: BTreeMap::new(),
             },
         );
         actions
@@ -628,6 +638,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 hyper_http::EngineEvent::Closed => RuntimeHttpEvent::Closed,
             });
         }
+        for (&id, receiver) in &mut connection.body_events {
+            while let Ok(event) = receiver.try_recv() {
+                events.push(match event {
+                    BodyEvent::Drain => RuntimeHttpEvent::Drain { id },
+                    BodyEvent::Finish => RuntimeHttpEvent::Finish { id },
+                });
+            }
+        }
         events
     }
 
@@ -638,14 +656,92 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         id: u64,
         response: node_http::HttpResponse,
     ) -> bool {
-        self.http_connections
-            .get(&resource)
-            .is_some_and(|connection| {
-                connection
-                    .responses
-                    .send(hyper_http::ResponseCommand { id, response })
-                    .is_ok()
-            })
+        let Some(connection) = self.http_connections.get_mut(&resource) else {
+            return false;
+        };
+        let body_length = response.body.len();
+        let mut headers = response.headers;
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        {
+            headers.push(("content-length".into(), body_length.to_string()));
+        }
+        let mut body = ResponseBodyDriver::default();
+        body.end(response.body);
+        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
+        let command = hyper_http::ResponseCommand {
+            id,
+            status: response.status,
+            headers,
+            body: body.body(body_event_sender),
+        };
+        if connection.responses.send(command).is_err() {
+            return false;
+        }
+        connection.response_bodies.insert(id, body);
+        connection.body_events.insert(id, body_event_receiver);
+        true
+    }
+
+    pub fn start_http1_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        status: u16,
+        headers: Vec<(String, String)>,
+        high_water_mark: usize,
+    ) -> bool {
+        let Some(connection) = self.http_connections.get_mut(&resource) else {
+            return false;
+        };
+        if connection.response_bodies.contains_key(&id) {
+            return false;
+        }
+        let body = ResponseBodyDriver::new(high_water_mark);
+        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
+        let command = hyper_http::ResponseCommand {
+            id,
+            status,
+            headers,
+            body: body.body(body_event_sender),
+        };
+        if connection.responses.send(command).is_err() {
+            return false;
+        }
+        connection.response_bodies.insert(id, body);
+        connection.body_events.insert(id, body_event_receiver);
+        true
+    }
+
+    pub fn write_http1_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
+        Some(
+            self.http_connections
+                .get_mut(&resource)?
+                .response_bodies
+                .get_mut(&id)?
+                .write(data),
+        )
+    }
+
+    pub fn end_http1_response(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        data: Vec<u8>,
+    ) -> Option<node_stream::WriteDisposition> {
+        Some(
+            self.http_connections
+                .get_mut(&resource)?
+                .response_bodies
+                .get_mut(&id)?
+                .end(data),
+        )
     }
 
     /// Drives `realm` until it has no microtasks or timers left.
@@ -701,6 +797,8 @@ struct RuntimeHttpConnection {
     task: tokio::task::JoinHandle<Result<(), hyper::Error>>,
     events: mpsc::UnboundedReceiver<hyper_http::EngineEvent>,
     responses: mpsc::UnboundedSender<hyper_http::ResponseCommand>,
+    response_bodies: BTreeMap<u64, ResponseBodyDriver>,
+    body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
 }
 
 impl Drop for RuntimeHttpConnection {
@@ -3625,6 +3723,80 @@ mod tests {
         assert!(response.contains("content-type: text/plain\r\n"));
         assert!(response.ends_with("\r\n\r\nping"));
         assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
+    }
+
+    #[test]
+    fn runtime_http_response_body_preserves_node_write_and_drain_semantics() {
+        use crate::node_stream::{StreamAction, WriteDisposition};
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let resource = ResourceId::new(92);
+        let start = runtime.start_http1_connection(resource);
+        let [StreamAction::Start(read)] = start.as_slice() else {
+            panic!("HTTP connection starts one read")
+        };
+        assert!(runtime.http_connection_started(resource, read, RequestId::new(1)));
+        runtime
+            .complete_http_connection(
+                resource,
+                Completion {
+                    request: RequestId::new(1),
+                    sequence: 0,
+                    result: Ok(AsyncHostValue::Bytes(
+                        b"GET /stream HTTP/1.1\r\nhost: kiln\r\nconnection: close\r\n\r\n".to_vec(),
+                    )),
+                },
+            )
+            .expect("scripted completion belongs to connection");
+        runtime.poll_http_connection(resource);
+        let events = runtime.take_http_events(resource);
+        let [RuntimeHttpEvent::Request { id, .. }] = events.as_slice() else {
+            panic!("request event arrives: {events:?}")
+        };
+        let id = *id;
+        assert!(runtime.start_http1_response(
+            resource,
+            id,
+            200,
+            vec![("content-type".into(), "text/plain".into())],
+            8,
+        ));
+        assert_eq!(
+            runtime.write_http1_response(resource, id, vec![1; 4]),
+            Some(WriteDisposition {
+                ready: true,
+                submit_now: true,
+            })
+        );
+        assert_eq!(
+            runtime.write_http1_response(resource, id, vec![2; 4]),
+            Some(WriteDisposition {
+                ready: false,
+                submit_now: false,
+            })
+        );
+        assert_eq!(
+            runtime.end_http1_response(resource, id, Vec::new()),
+            Some(WriteDisposition {
+                ready: false,
+                submit_now: false,
+            })
+        );
+
+        let mut drain_count = 0;
+        let mut finish_count = 0;
+        for _ in 0..32 {
+            runtime.poll_http_connection(resource);
+            for event in runtime.take_http_events(resource) {
+                drain_count += usize::from(event == RuntimeHttpEvent::Drain { id });
+                finish_count += usize::from(event == RuntimeHttpEvent::Finish { id });
+            }
+            if finish_count == 1 {
+                break;
+            }
+        }
+        assert_eq!(drain_count, 1);
+        assert_eq!(finish_count, 1);
     }
 
     fn drive(realm: &mut Realm, events: &Rc<RefCell<Vec<String>>>) {

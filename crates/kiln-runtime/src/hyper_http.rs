@@ -7,13 +7,13 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::BodyExt;
 use hyper::{Request, Response, body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
 
-use crate::node_http::{HttpRequest, HttpResponse, HttpVersion};
+use crate::http_body::ResponseBody;
+use crate::node_http::{HttpRequest, HttpVersion};
 
 #[derive(Debug)]
 pub(crate) enum EngineEvent {
@@ -28,14 +28,16 @@ pub(crate) enum EngineEvent {
 
 pub(crate) struct ResponseCommand {
     pub(crate) id: u64,
-    pub(crate) response: HttpResponse,
+    pub(crate) status: u16,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: ResponseBody,
 }
 
 async fn serve_http1_service<I, F, Fut>(io: I, service: F) -> Result<(), hyper::Error>
 where
     I: AsyncRead + AsyncWrite + Unpin,
     F: Fn(Request<Incoming>) -> Fut,
-    Fut: Future<Output = Result<Response<Full<Bytes>>, std::convert::Infallible>>,
+    Fut: Future<Output = Result<Response<ResponseBody>, std::convert::Infallible>>,
 {
     let service = service_fn(service);
     let mut builder = hyper::server::conn::http1::Builder::new();
@@ -77,14 +79,17 @@ where
                 let _ = events.send(EngineEvent::Request { id, request, body });
                 let response = loop {
                     match responses.lock().await.recv().await {
-                        Some(command) if command.id == id => break command.response,
+                        Some(command) if command.id == id => break command,
                         Some(_) => continue,
                         None => {
-                            break HttpResponse {
+                            let mut driver = crate::http_body::ResponseBodyDriver::default();
+                            driver.end(Vec::new());
+                            let (event_sender, _) = tokio::sync::mpsc::unbounded_channel();
+                            break ResponseCommand {
+                                id,
                                 status: 503,
-                                reason: None,
                                 headers: vec![("connection".into(), "close".into())],
-                                body: Vec::new(),
+                                body: driver.body(event_sender),
                             };
                         }
                     }
@@ -130,13 +135,13 @@ fn kiln_request_parts(parts: &hyper::http::request::Parts) -> HttpRequest {
     }
 }
 
-fn hyper_response(response: HttpResponse) -> Response<Full<Bytes>> {
+fn hyper_response(response: ResponseCommand) -> Response<ResponseBody> {
     let mut builder = Response::builder().status(response.status);
     for (name, value) in response.headers {
         builder = builder.header(name, value);
     }
     builder
-        .body(Full::new(Bytes::from(response.body)))
+        .body(response.body)
         .expect("Kiln validated the HTTP response")
 }
 
@@ -144,7 +149,8 @@ fn hyper_response(response: HttpResponse) -> Response<Full<Bytes>> {
 mod tests {
     use super::*;
     use crate::http_transport;
-    use http_body_util::BodyExt;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
     use hyper::client::conn::http1;
     use tokio::io::duplex;
 
@@ -184,15 +190,15 @@ mod tests {
             assert_eq!(request.method, "GET");
             assert_eq!(request.target, "/health");
             assert!(body.is_empty());
+            let mut body = crate::http_body::ResponseBodyDriver::default();
+            body.end(b"kiln".to_vec());
+            let (body_event_sender, _) = tokio::sync::mpsc::unbounded_channel();
             response_sender
                 .send(ResponseCommand {
                     id,
-                    response: HttpResponse {
-                        status: 200,
-                        reason: None,
-                        headers: vec![("content-type".into(), "text/plain".into())],
-                        body: b"kiln".to_vec(),
-                    },
+                    status: 200,
+                    headers: vec![("content-type".into(), "text/plain".into())],
+                    body: body.body(body_event_sender),
                 })
                 .expect("response command sends");
             let response = response_future.await.expect("request succeeds");
@@ -237,15 +243,15 @@ mod tests {
             else {
                 panic!("expected request event")
             };
+            let mut body = crate::http_body::ResponseBodyDriver::default();
+            body.end(b"kiln".to_vec());
+            let (body_event_sender, _) = tokio::sync::mpsc::unbounded_channel();
             response_sender
                 .send(ResponseCommand {
                     id,
-                    response: HttpResponse {
-                        status: 200,
-                        reason: None,
-                        headers: vec![("connection".into(), "close".into())],
-                        body: b"kiln".to_vec(),
-                    },
+                    status: 200,
+                    headers: vec![("connection".into(), "close".into())],
+                    body: body.body(body_event_sender),
                 })
                 .expect("response command sends");
             let mut response = Vec::new();
@@ -265,7 +271,12 @@ mod tests {
                 .expect("server connection completes");
             let response = String::from_utf8(response).expect("HTTP is ASCII");
             assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-            assert!(response.ends_with("\r\n\r\nkiln"));
+            assert!(
+                response
+                    .to_ascii_lowercase()
+                    .contains("transfer-encoding: chunked\r\n")
+            );
+            assert!(response.ends_with("4\r\nkiln\r\n0\r\n\r\n"));
             assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
         });
     }
