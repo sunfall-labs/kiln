@@ -5130,6 +5130,14 @@ pub enum ExecutionError {
     Uncaught {
         instruction: usize,
         message: String,
+        /// The thrown value's constructor name, if it has one.
+        ///
+        /// JavaScript permits throwing primitives and arbitrary objects whose string
+        /// representation happens to start with `TypeError:`. Conformance must judge the
+        /// constructor rather than parsing that representation. This deliberately records the
+        /// nearest constructor, so `class E extends TypeError {}` remains `E` rather than being
+        /// mistaken for `TypeError`.
+        error_constructor: Option<String>,
         /// The functions that were on the stack, innermost first.
         ///
         /// Not `Error.prototype.stack`, which is a property the program can read and which this
@@ -6328,6 +6336,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         return Err(ExecutionError::Uncaught {
             instruction,
             message,
+            error_constructor: vm.error_constructor(&reason),
             trace,
         });
     }
@@ -11424,6 +11433,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return Err(ExecutionError::Uncaught {
                 instruction,
                 message: self.describe_uncaught(&thrown, instruction),
+                error_constructor: self.error_constructor(&thrown),
                 trace,
             });
         };
@@ -19140,6 +19150,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Err(ExecutionError::Uncaught {
             instruction,
             message: format!("(in promise) {described}"),
+            error_constructor: self.error_constructor(&reason),
             trace,
         })
     }
@@ -23202,6 +23213,50 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return text;
         }
         describe_thrown(thrown)
+    }
+
+    /// Find the constructor name in a thrown value's prototype chain.
+    ///
+    /// This is the name Test262's negative contract compares, not the mutable `name` property
+    /// used for display. The latter can be changed by a program, and primitives can be displayed
+    /// with exactly the same spelling as an error. Starting at the thrown value itself means a
+    /// program-supplied `constructor` property is observed just as `value.constructor` would be.
+    fn error_constructor(&self, thrown: &Value) -> Option<String> {
+        let mut current = Some(thrown.clone());
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            let value = current?;
+            current = match &value {
+                Value::Object(object) => {
+                    let object = object.borrow();
+                    if let Some(Property::Value(constructor)) =
+                        object.get_own_property("constructor")
+                    {
+                        return constructor_name(constructor);
+                    }
+                    object.prototype.clone()
+                }
+                Value::Function(function) => {
+                    let properties = function.properties.borrow();
+                    if let Some(Property::Value(constructor)) =
+                        properties.get_own_property("constructor")
+                    {
+                        return constructor_name(constructor);
+                    }
+                    properties.prototype.clone()
+                }
+                Value::Array(array) => {
+                    let properties = array.properties.borrow();
+                    if let Some(Property::Value(constructor)) =
+                        properties.get_own_property("constructor")
+                    {
+                        return constructor_name(constructor);
+                    }
+                    properties.prototype.clone()
+                }
+                _ => return None,
+            };
+        }
+        None
     }
 
     /// Read a property, calling a getter when the slot holds one.
@@ -30232,6 +30287,18 @@ fn error_to_string(value: &Value) -> String {
         name
     } else {
         format!("{name}: {message}")
+    }
+}
+
+/// The name read from a constructor value in an object's prototype chain.
+fn constructor_name(value: &Value) -> Option<String> {
+    match value {
+        Value::Function(closure) => match closure.properties.borrow().get_own("name") {
+            Some(Value::String(name)) => Some(name.clone()),
+            _ => None,
+        },
+        Value::Native(Native::Error(kind)) => Some(kind.name().to_owned()),
+        _ => None,
     }
 }
 
