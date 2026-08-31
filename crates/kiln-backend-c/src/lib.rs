@@ -752,6 +752,11 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD 277
 #define KILN_C99_METHOD_NODE_RESPONSE_WRITE 278
 #define KILN_C99_METHOD_NODE_RESPONSE_END 279
+#define KILN_C99_METHOD_NODE_HTTP_GET 280
+#define KILN_C99_METHOD_NODE_HTTP_REQUEST 281
+#define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
+#define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
+#define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -883,19 +888,9 @@ typedef struct kiln_closure {
 /* A property is a value, or a pair of functions.  Reading an accessor *calls* one, which is why
  * every program-visible read has to go through the runtime rather than being a struct field
  * access -- and why `kiln_c99_get` takes a host and a depth. */
-typedef enum kiln_property_kind {
-    KILN_PROPERTY_DATA = 0,
-    KILN_PROPERTY_NATIVE_POINTER = 1
-} kiln_property_kind;
-
 typedef struct kiln_property {
     const char *key;
     size_t key_len;
-    /* Native handles live in an internal slot rather than in `kiln_value`. Keeping the kind on
-     * the slot means ordinary property operations can treat the slot as absent and can never
-     * mistake a C pointer for a program object. */
-    kiln_property_kind kind;
-    void *native_pointer;
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
     int enumerable;
@@ -1013,6 +1008,14 @@ typedef struct kiln_generator {
     int binding;
     int started;
     int done;
+    /* Whether the body is on the C stack right now.
+     *
+     * A generator has one frame, and `next` resumes *that* frame -- so a `next` from inside the
+     * body would resume a frame that is already running, overwriting the locals and operand stack
+     * the running body is standing on. The language answers "Generator is already running"
+     * instead, and this is what lets the answer be given: before it, the re-entrant call clobbered
+     * the frame and the process ended with an exit code and no words. */
+    int running;
 } kiln_generator;
 
 /* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there
@@ -1172,11 +1175,31 @@ struct kiln_node_socket {
     uint64_t shutdown_request;
     uint64_t close_request;
     kiln_node_server *server;
+    struct kiln_node_client_request *client_request;
     void *http_decoder;
     int close_after_write;
     int http_dispatched;
     int closing;
 };
+
+typedef struct kiln_node_client_request {
+    kiln_host *host;
+    kiln_value object;
+    kiln_value callback;
+    kiln_value response;
+    kiln_node_socket *socket;
+    void *response_decoder;
+    char *host_name;
+    size_t host_name_len;
+    char *path;
+    size_t path_len;
+    uint16_t port;
+    uint64_t connect_request;
+    int ended;
+    int response_started;
+    int response_ended;
+    int utf8;
+} kiln_node_client_request;
 
 typedef struct kiln_node_response {
     kiln_node_socket *socket;
@@ -1193,6 +1216,7 @@ typedef struct kiln_node_completion {
     uint32_t kind;
     kiln_node_server *server;
     kiln_node_socket *socket;
+    kiln_node_client_request *client_request;
 } kiln_node_completion;
 
 /* A cursor over JSON source, moved forward as text is consumed. */
@@ -1233,6 +1257,7 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 #define KILN_REALM_OP_CLOSE_RESOURCE 4
 #define KILN_REALM_OP_TCP_LISTEN 7
 #define KILN_REALM_OP_TCP_ACCEPT 8
+#define KILN_REALM_OP_TCP_CONNECT 9
 #define KILN_REALM_OP_TCP_READ 10
 #define KILN_REALM_OP_TCP_WRITE 11
 #define KILN_REALM_OP_TCP_SHUTDOWN 12
@@ -1317,6 +1342,27 @@ int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header
                                    const size_t *header_value_lens, size_t header_count,
                                    const uint8_t *body, size_t body_len, uint8_t keep_alive,
                                    uint8_t *buffer, size_t capacity);
+typedef struct kiln_http1_response_event_view {
+    uint8_t kind;
+    uint16_t status;
+    uint8_t *reason;
+    size_t reason_capacity;
+    size_t reason_len;
+    uint8_t *data;
+    size_t data_capacity;
+    size_t data_len;
+    uint8_t *headers;
+    size_t headers_capacity;
+    size_t headers_len;
+} kiln_http1_response_event_view;
+int32_t kiln_http1_response_decoder_create(void **out_decoder);
+void kiln_http1_response_decoder_free(void *decoder);
+int32_t kiln_http1_response_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
+                                         void **out_events);
+size_t kiln_http1_response_events_len(const void *events);
+int32_t kiln_http1_response_events_get(const void *events, size_t index,
+                                       kiln_http1_response_event_view *out_event);
+void kiln_http1_response_events_free(void *events);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
 void kiln_regexp_free(void *handle);
@@ -1496,6 +1542,7 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
                                   int writing);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
+static int kiln_c99_can_be_prototype(kiln_value value);
 static int kiln_c99_new_promise(kiln_value *out);
 static kiln_promise *kiln_c99_promise_of(kiln_value value);
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects);
@@ -1523,6 +1570,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
+static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,
+                                const char *key, size_t key_len);
 static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char *role);
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value);
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target);
@@ -2093,10 +2142,6 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
            (key_len == 0 || memcmp(property->key, key, key_len) == 0);
 }
 
-static int kiln_c99_property_is_native_pointer(const kiln_property *property) {
-    return property->kind == KILN_PROPERTY_NATIVE_POINTER;
-}
-
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -2197,6 +2242,17 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
         /* Silently, which is what the interpreter does and therefore what this has to do. */
         return KILN_C99_OK;
     }
+    if (kiln_c99_same_name(key, key_len, "__proto__") &&
+        object->prototype.tag != KILN_VALUE_NULL) {
+        /* The other half of the accessor above: a write relinks the object instead of giving it
+         * a property called `__proto__`. A primitive is ignored rather than refused, which is the
+         * setter's rule and the literal's -- `Object.setPrototypeOf` is the spelling that
+         * complains. */
+        if (kiln_c99_can_be_prototype(value)) {
+            object->prototype = value;
+        }
+        return KILN_C99_OK;
+    }
     /* A setter found anywhere on the chain takes the write; only when there is none does the
      * assignment create an own data property. That asymmetry is what makes `obj.x = 1` on a
      * class with `set x()` run the setter rather than shadow it. */
@@ -2211,13 +2267,6 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
             walked = kiln_c99_object_of(current);
             for (index = 0; index < walked->count; ++index) {
                 if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
-                    continue;
-                }
-                if (kiln_c99_property_is_native_pointer(&walked->properties[index])) {
-                    /* Native slots are not part of JavaScript's property space. In particular,
-                     * an assignment using the reserved spelling must not replace the slot or
-                     * turn a later native method call into a use-after-free/type confusion. */
-                    if (steps == 0) return KILN_C99_OK;
                     continue;
                 }
                 if (!walked->properties[index].accessor) {
@@ -2314,8 +2363,6 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
         }
         object->properties[position].key = key;
         object->properties[position].key_len = key_len;
-        object->properties[position].kind = KILN_PROPERTY_DATA;
-        object->properties[position].native_pointer = NULL;
         /* A `@@` key is the machine's, not the program's: a private member, an error's kind, a
          * combinator's bookkeeping. Nothing that enumerates own string properties may see one, and
          * marking it here is one place rather than at each of the seven walks. The program cannot
@@ -2391,6 +2438,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->is_async = 0;
     frame->started = 0;
     frame->done = 0;
+    frame->running = 0;
     *out = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
     return KILN_C99_OK;
 }
@@ -5010,9 +5058,6 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
                 if (!kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
                     continue;
                 }
-                if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
-                    continue;
-                }
                 if (!object->properties[index].accessor) {
                     steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
                     break;
@@ -5438,9 +5483,6 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
             if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
                 continue;
             }
-            if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
-                continue;
-            }
             *found = 1;
             if (!object->properties[index].accessor) {
                 *out = object->properties[index].value;
@@ -5484,9 +5526,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             object = kiln_c99_object_of(current);
             for (index = 0; index < object->count; ++index) {
                 if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
-                    continue;
-                }
-                if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
                     continue;
                 }
                 if (!object->properties[index].accessor) {
@@ -5537,6 +5576,19 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 *out = kiln_c99_builtin(kind != 0 ? kind : KILN_C99_BUILTIN_OBJECT);
                 return KILN_C99_OK;
             }
+        }
+        if (kiln_c99_same_name(key, key_len, "__proto__") &&
+            kiln_c99_object_of(target)->prototype.tag != KILN_VALUE_NULL) {
+            /* An accessor on `Object.prototype`, not a property, which is why it is answered
+             * here rather than stored: it reports the same link `Object.getPrototypeOf` does and
+             * has to keep reporting it after a `setPrototypeOf` moves it. Reading undefined for
+             * it was a silent wrong answer about a name every second library still uses.
+             *
+             * `Object.create(null)` does not inherit the accessor, so on such an object
+             * `__proto__` is an ordinary absent name and stays undefined -- reached above,
+             * because the chain ends in an explicit null rather than in nothing recorded. */
+            return kiln_c99_invoke_method(host, out, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                          kiln_c99_undefined(), &target, 1, depth, thrown);
         }
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
@@ -6258,10 +6310,6 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                     size_t slot;
                     for (slot = 0; slot < store->count; ++slot) {
                         if (kiln_c99_same_key(&store->properties[slot], name.ptr, name.len)) {
-                            if (kiln_c99_property_is_native_pointer(&store->properties[slot])) {
-                                *out = kiln_c99_undefined();
-                                return KILN_C99_OK;
-                            }
                             *out = store->properties[slot].value;
                             return KILN_C99_OK;
                         }
@@ -6399,6 +6447,34 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
         }
         return kiln_c99_put(host, target, text.ptr, text.len, value, depth, thrown);
     }
+}
+
+/* One `key: value` of an object literal.
+ *
+ * A literal *defines* its members; it does not assign them. The difference is invisible on a
+ * fresh object for almost every key, and decisive for one: `{ ["__proto__"]: v }` must produce an
+ * own property called `__proto__`, where `o.__proto__ = v` relinks the object -- the
+ * specification draws the line at whether the key was computed, not at what it evaluated to. Any
+ * inherited setter is bypassed for the same reason, which is what "define" means.
+ *
+ * Only an object literal reaches this, so only an ordinary object is handled; anything else is
+ * the caller having built something this cannot be asked about. */
+static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value) {
+    kiln_value text = kiln_c99_property_key(key);
+    kiln_property *slot;
+    int status;
+    if (text.tag != KILN_VALUE_STRING || target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_own_slot(target, text.ptr, text.len, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->accessor = 0;
+    slot->getter = kiln_c99_undefined();
+    slot->setter = kiln_c99_undefined();
+    slot->value = value;
+    return KILN_C99_OK;
 }
 
 static int kiln_c99_array_push(kiln_value target, kiln_value value) {
@@ -7843,22 +7919,21 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, size_t key_len,
                                             void *pointer) {
     kiln_property *slot;
-    int status = kiln_c99_own_slot(object, key, key_len, &slot);
+    int status = kiln_c99_put(NULL, object, key, key_len,
+                              kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer,
+                                             NULL, 0), 0, NULL);
     if (status != KILN_C99_OK) return status;
-    slot->kind = KILN_PROPERTY_NATIVE_POINTER;
-    slot->native_pointer = pointer;
-    slot->value = kiln_c99_undefined();
+    slot = kiln_c99_own_private(object, key, key_len);
+    if (slot == NULL) return KILN_C99_CONTROL_ERROR;
     slot->enumerable = 0;
-    slot->writable = 0;
-    slot->configurable = 0;
     return KILN_C99_OK;
 }
 
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
     kiln_property *slot = kiln_c99_own_private(object, key, key_len);
-    if (slot == NULL || !kiln_c99_property_is_native_pointer(slot))
+    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT || slot->value.ptr != NULL)
         return NULL;
-    return slot->native_pointer;
+    return (void *)(uintptr_t)slot->value.bits;
 }
 
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
@@ -7910,8 +7985,6 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     if (socket->close_request != 0) return KILN_C99_OK;
     socket->closing = 1;
     kiln_c99_node_cancel_request(&socket->read_request);
-    /* HTTP response.end() owns a write that must reach the peer before server.close() tears down
-     * the accepted socket. The write completion already knows how to start the final close. */
     if (!force && socket->server != NULL && socket->server->protocol_http &&
         socket->write_request != 0) {
         socket->close_after_write = 1;
@@ -8020,6 +8093,121 @@ static int kiln_c99_node_http_request(kiln_node_socket *socket, const uint8_t *b
     }
 }
 
+static int kiln_c99_node_http_client_events(kiln_node_client_request *request,
+                                            const uint8_t *bytes, size_t bytes_len,
+                                            kiln_value *thrown) {
+    void *events = NULL;
+    size_t count;
+    size_t index;
+    int status = kiln_http1_response_decoder_push(request->response_decoder, bytes, bytes_len,
+                                                  &events);
+    if (status != KILN_C99_OK) return status;
+    count = kiln_http1_response_events_len(events);
+    for (index = 0; index < count; ++index) {
+        kiln_http1_response_event_view event;
+        uint8_t *reason = NULL;
+        uint8_t *data = NULL;
+        uint8_t *headers_buffer = NULL;
+        memset(&event, 0, sizeof event);
+        status = kiln_http1_response_events_get(events, index, &event);
+        if (status == -3) {
+            size_t reason_len = event.reason_len;
+            size_t data_len = event.data_len;
+            size_t headers_len = event.headers_len;
+            if (event.reason_len != 0) reason = (uint8_t *)malloc(event.reason_len);
+            if (event.data_len != 0) data = (uint8_t *)malloc(event.data_len);
+            if (event.headers_len != 0) headers_buffer = (uint8_t *)malloc(event.headers_len);
+            if ((event.reason_len != 0 && reason == NULL) ||
+                (event.data_len != 0 && data == NULL) ||
+                (event.headers_len != 0 && headers_buffer == NULL)) {
+                free(reason); free(data); free(headers_buffer);
+                status = KILN_C99_OUT_OF_MEMORY;
+                break;
+            }
+            event.reason = reason;
+            event.reason_capacity = event.reason_len;
+            event.data = data;
+            event.data_capacity = data_len;
+            event.headers = headers_buffer;
+            event.headers_capacity = headers_len;
+            event.reason_capacity = reason_len;
+            status = kiln_http1_response_events_get(events, index, &event);
+        }
+        if (status != KILN_C99_OK) break;
+        if (event.kind == 1) {
+            kiln_value ignored;
+            status = kiln_c99_new_object(&request->response);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_node_event(request->host, &ignored,
+                                             KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                             request->response, NULL, 0, 0, thrown);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, request->response, "statusCode", 10,
+                                      kiln_c99_number((double)event.status), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_put(NULL, request->response, "statusMessage", 13,
+                                      kiln_c99_copy_text((const char *)event.reason,
+                                                         event.reason_len), 0, NULL);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_define_method(
+                    request->response, "setEncoding", 11,
+                    kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+            if (status == KILN_C99_OK) {
+                kiln_value headers;
+                size_t at = 0;
+                status = kiln_c99_new_object(&headers);
+                while (status == KILN_C99_OK && at < event.headers_len) {
+                    const char *name = (const char *)event.headers + at;
+                    size_t name_len = strlen(name);
+                    const char *value;
+                    size_t value_len;
+                    at += name_len + 1;
+                    if (at > event.headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
+                    value = (const char *)event.headers + at;
+                    value_len = strlen(value);
+                    at += value_len + 1;
+                    if (at > event.headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
+                    status = kiln_c99_put(NULL, headers, name, name_len,
+                                          kiln_c99_copy_text(value, value_len), 0, NULL);
+                }
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_put(NULL, request->response, "headers", 7, headers, 0,
+                                          NULL);
+            }
+            if (status == KILN_C99_OK)
+                status = kiln_c99_node_set_hidden_pointer(request->response, "@@node:client", 13,
+                                                          request);
+            if (status == KILN_C99_OK) {
+                request->response_started = 1;
+                status = kiln_c99_call(request->host, &ignored, request->callback,
+                                       kiln_c99_undefined(), &request->response, 1, 0, thrown);
+            }
+        } else if (event.kind == 2) {
+            kiln_value data_value = request->utf8
+                                        ? kiln_c99_copy_text((const char *)event.data,
+                                                             event.data_len)
+                                        : kiln_c99_copy_text((const char *)event.data,
+                                                             event.data_len);
+            status = kiln_c99_node_emit(request->host, request->response, "data", data_value, 1,
+                                        0, thrown);
+        } else if (event.kind == 3) {
+            status = kiln_c99_node_emit(request->host, request->response, "end",
+                                        kiln_c99_undefined(), 0, 0, thrown);
+            request->response_ended = 1;
+            request->socket->closing = 1;
+        }
+        free(reason);
+        free(data);
+        free(headers_buffer);
+        if (status != KILN_C99_OK) break;
+    }
+    kiln_http1_response_events_free(events);
+    if (status == KILN_C99_OK && request->response_ended) {
+        status = kiln_c99_node_close_socket(request->socket, 1);
+    }
+    return status;
+}
+
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
                                   void *host, void *thrown) {
     kiln_node_completion *work = (kiln_node_completion *)opaque;
@@ -8028,8 +8216,43 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
     if (completion->status != KILN_REALM_ASYNC_OK) {
         kiln_value message = kiln_c99_copy_text((const char *)completion->error_message,
                                                 (size_t)completion->error_message_len);
-        kiln_value object = work->server != NULL ? work->server->object : work->socket->object;
+        kiln_value object = work->server != NULL
+                                ? work->server->object
+                                : work->client_request != NULL
+                                      ? work->client_request->object
+                                      : work->socket->object;
         return kiln_c99_node_emit((kiln_host *)host, object, "error", message, 1, 0, exception);
+    }
+    if (work->client_request != NULL) {
+        kiln_node_client_request *request = work->client_request;
+        if (work->kind == KILN_REALM_OP_TCP_CONNECT) {
+            kiln_node_completion *write;
+            kiln_node_socket *socket = (kiln_node_socket *)calloc(1, sizeof *socket);
+            kiln_text wire = {NULL, 0, 0};
+            int status;
+            if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
+            socket->host = request->host;
+            socket->resource = completion->resource;
+            socket->client_request = request;
+            request->socket = socket;
+            status = kiln_c99_node_socket_object(socket, exception);
+            if (status != KILN_C99_OK) return status;
+            if (kiln_c99_text_append(&wire, "GET ", 4) != KILN_C99_OK ||
+                kiln_c99_text_append(&wire, request->path, request->path_len) != KILN_C99_OK ||
+                kiln_c99_text_append(&wire, " HTTP/1.1\r\nHost: ", 17) != KILN_C99_OK ||
+                kiln_c99_text_append(&wire, request->host_name, request->host_name_len) != KILN_C99_OK ||
+                kiln_c99_text_append(&wire, "\r\nConnection: close\r\n\r\n", 23) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+            write = (kiln_node_completion *)calloc(1, sizeof *write);
+            if (write == NULL) return KILN_C99_OUT_OF_MEMORY;
+            write->kind = KILN_REALM_OP_TCP_WRITE;
+            write->socket = socket;
+            status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, socket->resource, 0, NULL, 0,
+                                         (const uint8_t *)wire.bytes, wire.len, write,
+                                         &socket->write_request);
+            free(wire.bytes);
+            return status;
+        }
     }
     if (work->server != NULL) {
         kiln_node_server *server = work->server;
@@ -8111,7 +8334,11 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 kiln_value data = kiln_c99_copy_text((const char *)completion->bytes,
                                                      (size_t)completion->bytes_len);
                 int status;
-                if (socket->server != NULL && socket->server->protocol_http) {
+                if (socket->client_request != NULL) {
+                    status = kiln_c99_node_http_client_events(
+                        socket->client_request, completion->bytes,
+                        (size_t)completion->bytes_len, exception);
+                } else if (socket->server != NULL && socket->server->protocol_http) {
                     status = kiln_c99_node_http_request(socket, completion->bytes,
                                                         (size_t)completion->bytes_len, exception);
                 } else {
@@ -8130,6 +8357,15 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         if (work->kind == KILN_REALM_OP_TCP_WRITE) {
             kiln_node_completion *close;
             socket->write_request = 0;
+            if (socket->client_request != NULL) {
+                kiln_node_completion *read =
+                    (kiln_node_completion *)calloc(1, sizeof *read);
+                if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
+                read->kind = KILN_REALM_OP_TCP_READ;
+                read->socket = socket;
+                return kiln_c99_node_start(KILN_REALM_OP_TCP_READ, socket->resource, 16384,
+                                           NULL, 0, NULL, 0, read, &socket->read_request);
+            }
             if (socket->close_after_write) {
                 close = (kiln_node_completion *)calloc(1, sizeof *close);
                 if (close == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -8151,6 +8387,10 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             socket->close_request = 0;
             kiln_http1_decoder_free(socket->http_decoder);
             socket->http_decoder = NULL;
+            if (socket->client_request != NULL) {
+                kiln_http1_response_decoder_free(socket->client_request->response_decoder);
+                socket->client_request->response_decoder = NULL;
+            }
             return kiln_c99_node_emit(socket->host, socket->object, "close",
                                       kiln_c99_undefined(), 0, 0, exception);
         }
@@ -8210,23 +8450,16 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (code == KILN_C99_METHOD_NODE_SERVER_LISTEN) {
             kiln_node_completion *work;
             kiln_value port_value = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value host_value = kiln_c99_copy_text("0.0.0.0", 7);
-            kiln_value callback = kiln_c99_undefined();
+            kiln_value host_value = argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED
+                                        ? kiln_c99_text(args[1])
+                                        : kiln_c99_copy_text("0.0.0.0", 7);
             double port = kiln_c99_as_number(port_value);
-            size_t argument_index;
             int status;
             if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "Port should be >= 0 and < 65536");
-            for (argument_index = 1; argument_index < argc; ++argument_index) {
-                if (kiln_c99_is_callable(args[argument_index])) {
-                    callback = args[argument_index];
-                } else if (args[argument_index].tag == KILN_VALUE_STRING) {
-                    host_value = args[argument_index];
-                }
-            }
-            if (callback.tag != KILN_VALUE_UNDEFINED) {
-                kiln_value once_args[2] = {kiln_c99_copy_text("listening", 9), callback};
+            if (argc > 2 && kiln_c99_is_callable(args[2])) {
+                kiln_value once_args[2] = {kiln_c99_copy_text("listening", 9), args[2]};
                 kiln_value ignored;
                 status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_ONCE,
                                              receiver, once_args, 2, depth, thrown);
@@ -8343,6 +8576,85 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
     (void)depth;
     if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER)
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
+    if (code == KILN_C99_METHOD_NODE_HTTP_GET || code == KILN_C99_METHOD_NODE_HTTP_REQUEST) {
+        kiln_node_client_request *request;
+        kiln_node_completion *connect;
+        kiln_value options = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value callback = argc > 1 ? args[1] : kiln_c99_undefined();
+        kiln_value host_value = kiln_c99_copy_text("localhost", 9);
+        kiln_value path_value = kiln_c99_copy_text("/", 1);
+        kiln_value port_value = kiln_c99_number(80.0);
+        int status;
+        if (options.tag == KILN_VALUE_OBJECT) {
+            status = kiln_c99_get(host, options, "host", 4, &host_value, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (host_value.tag == KILN_VALUE_UNDEFINED)
+                host_value = kiln_c99_copy_text("localhost", 9);
+            status = kiln_c99_get(host, options, "port", 4, &port_value, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_get(host, options, "path", 4, &path_value, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (path_value.tag == KILN_VALUE_UNDEFINED) path_value = kiln_c99_copy_text("/", 1);
+        } else {
+            return kiln_c99_throw_not_a(thrown, options, "request options object");
+        }
+        host_value = kiln_c99_text(host_value);
+        path_value = kiln_c99_text(path_value);
+        if (!kiln_c99_is_callable(callback))
+            return kiln_c99_throw_not_a(thrown, callback, "function");
+        request = (kiln_node_client_request *)calloc(1, sizeof *request);
+        if (request == NULL) return KILN_C99_OUT_OF_MEMORY;
+        request->host = host;
+        request->callback = callback;
+        request->host_name = (char *)malloc(host_value.len);
+        request->path = (char *)malloc(path_value.len);
+        if ((host_value.len != 0 && request->host_name == NULL) ||
+            (path_value.len != 0 && request->path == NULL)) return KILN_C99_OUT_OF_MEMORY;
+        memcpy(request->host_name, host_value.ptr, host_value.len);
+        memcpy(request->path, path_value.ptr, path_value.len);
+        request->host_name_len = host_value.len;
+        request->path_len = path_value.len;
+        request->port = (uint16_t)kiln_c99_as_number(port_value);
+        status = kiln_http1_response_decoder_create(&request->response_decoder);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_new_object(&request->object);
+        if (status == KILN_C99_OK) {
+            kiln_value ignored;
+            status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMITTER,
+                                         request->object, NULL, 0, depth, thrown);
+        }
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(request->object, "write", 5,
+                                            kiln_c99_method(KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_method(request->object, "end", 3,
+                                            kiln_c99_method(KILN_C99_METHOD_NODE_CLIENT_REQUEST_END));
+        if (status == KILN_C99_OK)
+            status = kiln_c99_node_set_hidden_pointer(request->object, "@@node:client", 13,
+                                                      request);
+        if (status != KILN_C99_OK) return status;
+        connect = (kiln_node_completion *)calloc(1, sizeof *connect);
+        if (connect == NULL) return KILN_C99_OUT_OF_MEMORY;
+        connect->kind = KILN_REALM_OP_TCP_CONNECT;
+        connect->client_request = request;
+        status = kiln_c99_node_start(KILN_REALM_OP_TCP_CONNECT, 0, request->port,
+                                     request->host_name,
+                                     request->host_name_len, NULL, 0, connect,
+                                     &request->connect_request);
+        if (status != KILN_C99_OK) return status;
+        request->ended = code == KILN_C99_METHOD_NODE_HTTP_GET;
+        *result = request->object;
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
+        kiln_node_client_request *request =
+            (kiln_node_client_request *)kiln_c99_node_hidden_pointer(receiver,
+                                                                     "@@node:client", 13);
+        if (request == NULL) return kiln_c99_throw_not_a(thrown, receiver, "IncomingMessage");
+        request->utf8 = 1;
+        *result = receiver;
+        return KILN_C99_OK;
+    }
     if (response == NULL) return kiln_c99_throw_not_a(thrown, receiver, "ServerResponse");
     if (code == KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
@@ -8357,6 +8669,19 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                         "Invalid status code");
         response->status = (uint16_t)status;
+        if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
+            kiln_object *provided = kiln_c99_object_of(args[1]);
+            size_t index;
+            for (index = 0; index < provided->count; ++index) {
+                kiln_property *property = &provided->properties[index];
+                if (property->enumerable) {
+                    status = kiln_c99_put(NULL, response->headers, property->key,
+                                          property->key_len,
+                                          kiln_c99_text(property->value), 0, NULL);
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
+        }
         *result = receiver;
         return KILN_C99_OK;
     }
@@ -8476,7 +8801,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code >= KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER &&
-        code <= KILN_C99_METHOD_NODE_RESPONSE_END) {
+        code <= KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
@@ -9477,10 +9802,24 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 *result = built;
                 return status;
             }
-            if (args[0].tag != KILN_VALUE_OBJECT) {
+            if (args[0].tag == KILN_VALUE_FUNCTION) {
+                /* A function is an object: `f.version = 2` is an own enumerable property of it,
+                 * and it is kept on the closure's store rather than in a slot list of its own.
+                 * `name`, `length` and `prototype` are read from the closure and are not in that
+                 * store, which is right -- none of the three is enumerated. */
+                kiln_value store = kiln_c99_closure_of(args[0])->properties;
+                if (store.tag != KILN_VALUE_OBJECT) {
+                    /* Nothing was ever assigned to it, so there is nothing to list. */
+                    status = kiln_c99_new_array(&built);
+                    *result = built;
+                    return status;
+                }
+                object = kiln_c99_object_of(store);
+            } else if (args[0].tag == KILN_VALUE_OBJECT) {
+                object = kiln_c99_object_of(args[0]);
+            } else {
                 return KILN_C99_CONTROL_ERROR;
             }
-            object = kiln_c99_object_of(args[0]);
             status = kiln_c99_new_array(&built);
             for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
                 kiln_value key;
@@ -10222,8 +10561,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             object = kiln_c99_object_of(receiver);
             for (index = 0; index < object->count && !found; ++index) {
-                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len) &&
-                        !kiln_c99_property_is_native_pointer(&object->properties[index]);
+                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
             }
             *result = kiln_c99_boolean(found);
             return KILN_C99_OK;
@@ -10233,7 +10571,33 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * *kind* rather than converting: `[object Array]`, not `1,2,3`. A library that has to
              * tell an array from an arguments object still reaches for it. */
             kiln_text built = {NULL, 0, 0};
+            kiln_value custom = kiln_c99_undefined();
             const char *tag;
+            /* `Symbol.toStringTag` overrides the built-in answer, which is the whole reason the
+             * symbol exists: it is how a class says what a library's type test should call it.
+             * Read through the ordinary chain walk, so an accessor on a prototype runs -- the
+             * usual spelling is a getter on the class rather than a field on each instance.
+             *
+             * Only for an object, because only an object can carry one. A primitive's tag comes
+             * from its kind and asking it for a property would be a conversion the operation does
+             * not make. */
+            if (receiver.tag == KILN_VALUE_OBJECT) {
+                int status = kiln_c99_get(host, receiver, "@@toStringTag", 13, &custom, depth,
+                                          thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            if (custom.tag == KILN_VALUE_STRING) {
+                if (kiln_c99_text_append_c(&built, "[object ") != KILN_C99_OK ||
+                    kiln_c99_text_append(&built, custom.ptr, custom.len) != KILN_C99_OK ||
+                    kiln_c99_text_append_c(&built, "]") != KILN_C99_OK) {
+                    free(built.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+                return KILN_C99_OK;
+            }
             switch (receiver.tag) {
             case KILN_VALUE_UNDEFINED: tag = "Undefined"; break;
             case KILN_VALUE_NULL: tag = "Null"; break;
@@ -10250,8 +10614,22 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             case KILN_VALUE_TYPED_ARRAY:
                 tag = kiln_c99_typed_name(kiln_c99_typed_array_of(receiver)->kind);
                 break;
-            case KILN_VALUE_FUNCTION:
+            /* One tag holds both collections, so which one it is comes from the collection
+             * rather than from the value tag. */
+            case KILN_VALUE_COLLECTION:
+                tag = kiln_c99_collection_of(receiver)->is_map ? "Map" : "Set";
+                break;
             case KILN_VALUE_BUILTIN:
+                /* `Math` and `JSON` are the two namespaces the language gives a tag of their own,
+                 * and they are not functions -- calling them `Function` was the reason
+                 * `Object.prototype.toString.call(Math)` disagreed with every other engine. A
+                 * constructor really is a function and keeps that answer. */
+                tag = receiver.bits == KILN_C99_BUILTIN_MATH   ? "Math"
+                      : receiver.bits == KILN_C99_BUILTIN_JSON ? "JSON"
+                      : kiln_c99_is_namespace(receiver.bits)   ? "Object"
+                                                               : "Function";
+                break;
+            case KILN_VALUE_FUNCTION:
             case KILN_VALUE_METHOD:
             case KILN_VALUE_BOUND:
             case KILN_VALUE_SETTLER: tag = "Function"; break;
@@ -10472,6 +10850,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return KILN_C99_CONTROL_ERROR;
             }
             frame = kiln_c99_generator_of(receiver);
+            /* One frame, and it is on the C stack: resuming it from inside itself would overwrite
+             * the locals the running body is standing on. The language says so by name. */
+            if (frame->running) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Generator is already running");
+            }
             if (frame->async_generator && code == KILN_C99_METHOD_GENERATOR_NEXT) {
                 /* Each step gets a promise of its own, because the body can `await` any number of
                  * times before it reaches the `yield` that finishes the step. */
@@ -10484,7 +10868,23 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     host, receiver, argc > 0 ? args[0] : kiln_c99_undefined(), 0, depth, thrown);
             }
             /* `.return(v)` finishes the generator without resuming it, so the body never runs
-             * again and the value is the caller's rather than the body's. */
+             * again and the value is the caller's rather than the body's.
+             *
+             * Except that the language does resume it once, in *return completion*, so that a
+             * `finally` around the suspended `yield` runs -- which is what makes a generator
+             * usable for a resource that has to be released. This backend cannot yet re-enter a
+             * body in that mode, and skipping the `finally` silently is the wrong half to guess:
+             * the caller sees the same step object either way and the cleanup simply never
+             * happens.
+             *
+             * A suspended frame already records how deep its handler stack is, so the case can be
+             * told apart without knowing anything about the body: nothing live to unwind is the
+             * case this *does* implement, and it is the common one -- `.return()` before the
+             * first `next`, after completion, or out of a plain loop. A live `try` refuses. */
+            if (code == KILN_C99_METHOD_GENERATOR_RETURN && frame->started && !frame->done &&
+                frame->handler_top != 0) {
+                return KILN_C99_CONTROL_ERROR;
+            }
             if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
                 frame->done = 1;
                 produced = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -10493,8 +10893,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 closure = kiln_c99_closure_of(frame->function);
                 {
                     kiln_value saved_target = kiln_c99_enter_new_target(closure);
+                    frame->running = 1;
                     status = closure->body(host, &produced, closure->upvalues, frame->receiver,
                                            NULL, 0, depth + 1, thrown, frame);
+                    frame->running = 0;
                     kiln_c99_new_target = saved_target;
                 }
                 if (status == KILN_C99_YIELDED) {
@@ -10706,6 +11108,17 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (subject.tag != KILN_VALUE_OBJECT && subject.tag != KILN_VALUE_FUNCTION &&
                 kiln_c99_exotic_store(subject) == NULL) {
                 return KILN_C99_CONTROL_ERROR;
+            }
+            {
+                /* Where the literal's `__proto__` ignores a primitive, this one throws: a
+                 * program that asked for a prototype in so many words is told the request could
+                 * not be met rather than left to find out later. */
+                kiln_value wanted = argc > 1 ? args[1] : kiln_c99_undefined();
+                if (!kiln_c99_can_be_prototype(wanted)) {
+                    return kiln_c99_throw_error(
+                        thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                        "Object prototype may only be an Object or null");
+                }
             }
             status = kiln_c99_set_prototype(subject, argc > 1 ? args[1] : kiln_c99_undefined());
             /* The object, so a `setPrototypeOf` can be inlined into the expression that built
@@ -11018,9 +11431,6 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             object = kiln_c99_object_of(receiver);
             for (slot = 0; slot < object->count; ++slot) {
                 if (kiln_c99_same_key(&object->properties[slot], name.ptr, name.len)) {
-                    if (kiln_c99_property_is_native_pointer(&object->properties[slot])) {
-                        break;
-                    }
                     *result = kiln_c99_boolean(object->properties[slot].enumerable);
                     break;
                 }
@@ -11147,13 +11557,22 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     return KILN_C99_OK;
                 }
             }
+            if (args[0].tag == KILN_VALUE_FUNCTION) {
+                /* A function's own properties are the three the closure answers from itself and
+                 * whatever a program assigned beside them -- the same three-and-a-store shape an
+                 * array has, and the descriptor path already knows all of it. */
+                kiln_value descriptor;
+                status = kiln_c99_describe_property(host, args[0], key.ptr, key.len, &descriptor,
+                                                    &found, depth, thrown);
+                *result = kiln_c99_boolean(found);
+                return status;
+            }
             if (args[0].tag != KILN_VALUE_OBJECT) {
                 return KILN_C99_CONTROL_ERROR;
             }
             object = kiln_c99_object_of(args[0]);
             for (index = 0; index < object->count && !found; ++index) {
-                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len) &&
-                        !kiln_c99_property_is_native_pointer(&object->properties[index]);
+                found = kiln_c99_same_key(&object->properties[index], key.ptr, key.len);
             }
             *result = kiln_c99_boolean(found);
             return KILN_C99_OK;
@@ -12435,9 +12854,6 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
         object = kiln_c99_object_of(current);
         for (index = 0; index < object->count; ++index) {
             if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
-                if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
-                    continue;
-                }
                 *answer = 1;
                 return KILN_C99_OK;
             }
@@ -12538,12 +12954,6 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
     for (index = 0; index < object->count; ++index) {
         if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
             continue;
-        }
-        if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
-            /* Internal slots are absent from the JavaScript object model. A delete therefore
-             * succeeds without removing the capability native methods use. */
-            *answer = 1;
-            return KILN_C99_OK;
         }
         if (!object->properties[index].configurable) {
             /* `delete` answers about the end state, and the property is still there. */
@@ -12872,9 +13282,6 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
             continue;
         }
-        if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
-            return KILN_C99_OK;
-        }
         if (!object->properties[index].accessor) {
             object->properties[index].accessor = 1;
             object->properties[index].getter = kiln_c99_undefined();
@@ -13038,13 +13445,49 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
         kiln_object *object = kiln_c99_object_of(store);
         for (at = 0; at < object->count; ++at) {
             if (kiln_c99_same_key(&object->properties[at], key, key_len)) {
-                if (kiln_c99_property_is_native_pointer(&object->properties[at])) {
-                    /* A native capability is not redefinable from JavaScript. */
-                    return KILN_C99_OK;
-                }
                 existed = 1;
                 break;
             }
+        }
+        /* What a definition is *not allowed* to do, checked before anything is written.
+         *
+         * A configurable property can be redefined into anything; a non-configurable one is a
+         * promise the object has already made, and the language keeps it by throwing rather than
+         * by quietly ignoring the request. Accepting silently was the worse half of both worlds:
+         * a frozen object read back as though the write had taken, so `Object.freeze` looked as
+         * though a later `defineProperty` had undone it. The one redefinition a non-configurable
+         * property does allow is the one that changes nothing, which is why each attribute is
+         * compared rather than the descriptor being rejected on sight.
+         *
+         * `frozen` is the object-wide form of the same promise -- freezing is recorded on the
+         * object here rather than by rewriting every slot -- so it fails for the same reason. */
+        if (existed && (object->frozen || !object->properties[at].configurable)) {
+            kiln_property *fixed = &object->properties[at];
+            int accessor = (has_getter || has_setter) ? 1 : 0;
+            int settled = object->frozen || !fixed->writable;
+            int refused = (has_configurable && kiln_c99_truthy(configurable)) ||
+                          (has_enumerable &&
+                           (kiln_c99_truthy(enumerable) != 0) != (fixed->enumerable != 0));
+            if (!refused && fixed->accessor) {
+                refused = !accessor ||
+                          (has_getter && !kiln_c99_strict_equal(getter, fixed->getter)) ||
+                          (has_setter && !kiln_c99_strict_equal(setter, fixed->setter));
+            } else if (!refused) {
+                /* A writable data property may still take a new value and be made non-writable;
+                 * only once it is non-writable is its value settled too. */
+                refused = accessor || (settled && has_writable && kiln_c99_truthy(writable)) ||
+                          (settled && has_value && !kiln_c99_strict_equal(value, fixed->value));
+            }
+            if (refused) {
+                return kiln_c99_throw_named(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot redefine property: ", key, key_len);
+            }
+        }
+        if (!existed && object->frozen) {
+            /* A frozen object is not extensible either, so a name it never had cannot be added.
+             * Same promise, the other half of it. */
+            return kiln_c99_throw_named(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Cannot define property ", key, key_len);
         }
     }
     status = kiln_c99_own_slot(store, key, key_len, &slot);
@@ -13174,13 +13617,58 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         *out = built;
         return status;
     }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        /* A function's own properties are `name`, `length`, `prototype`, and whatever a program
+         * assigned beside them. The first three are read from the closure rather than from a
+         * slot list, so they are described from the closure too -- all three non-enumerable,
+         * which is why `Object.keys(f)` is empty for a function nobody has decorated.
+         *
+         * `prototype` is the one still refused: whether it is writable and configurable depends
+         * on how the function was written -- a plain function's is writable, a class's is not,
+         * and a method has none at all -- and this backend does not record which. Undefined is a
+         * real answer here, so guessing would be a wrong answer indistinguishable from a right
+         * one. */
+        kiln_closure *closure = kiln_c99_closure_of(target);
+        int is_name = kiln_c99_same_name(key, key_len, "name");
+        if (is_name || kiln_c99_same_name(key, key_len, "length")) {
+            kiln_value value = is_name
+                                   ? (closure->name == NULL
+                                          ? kiln_c99_from_units(NULL, 0)
+                                          : kiln_c99_copy_text(closure->name, closure->name_len))
+                                   : kiln_c99_number((double)closure->arity);
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0,
+                                      NULL);
+            }
+            *found = 1;
+            *out = built;
+            return status;
+        }
+        if (kiln_c99_same_name(key, key_len, "prototype")) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        if (closure->properties.tag != KILN_VALUE_OBJECT) {
+            return KILN_C99_OK;
+        }
+        store = closure->properties;
+        target = closure->properties;
+    }
     if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY) {
         /* Undefined is a *real answer* here -- it means the name is not an own property -- so
-         * this can only be asked of a value whose own properties are all modelled. A function
-         * carries `name`, `length` and `prototype` outside its store, and a built-in carries
-         * members this backend has not grown; answering undefined for either would be a wrong
-         * answer indistinguishable from a right one. The built-in members that *are* modelled
-         * are answered above, where the table can be asked. */
+         * this can only be asked of a value whose own properties are all modelled. A built-in
+         * carries members this backend has not grown, and answering undefined for one would be a
+         * wrong answer indistinguishable from a right one. The built-in members that *are*
+         * modelled are answered above, where the table can be asked. */
         return KILN_C99_CONTROL_ERROR;
     }
     if (target.tag == KILN_VALUE_ARRAY) {
@@ -13250,9 +13738,6 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
             kiln_property property;
             if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
                 continue;
-            }
-            if (kiln_c99_property_is_native_pointer(&object->properties[index])) {
-                return KILN_C99_OK;
             }
             property = object->properties[index];
             status = kiln_c99_new_object(&built);
@@ -14619,6 +15104,25 @@ static const char *kiln_c99_kind_name(kiln_value value) {
  * Built here rather than spelled at each throw site so the subject is never dropped: "is not a
  * function" on its own names nothing a program can act on, and does not say what the interpreter
  * says about the same fault. */
+/* "Cannot redefine property: x" and its neighbours: a fixed sentence with the property's name on
+ * the end. The name is not NUL-terminated where it is stored, which is the only reason this is a
+ * function rather than a `kiln_c99_throw_error` call at each site. */
+static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,
+                                const char *key, size_t key_len) {
+    static const char terminator[1] = {0};
+    kiln_text built = {NULL, 0, 0};
+    int status;
+    if (kiln_c99_text_append_c(&built, sentence) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, key, key_len) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, terminator, 1) != KILN_C99_OK) {
+        free(built.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_throw_error(thrown, kind, built.bytes);
+    free(built.bytes);
+    return status;
+}
+
 static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char *role) {
     static const char terminator[1] = {0};
     kiln_text built = {NULL, 0, 0};
@@ -15241,14 +15745,23 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_node_event(host, result, callee.bits, kiln_c99_undefined(), args, argc,
                                    depth, thrown);
     }
-    if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_REGEXP ||
-                                             callee.bits == KILN_C99_BUILTIN_STRING ||
+    if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||
                                              callee.bits == KILN_C99_BUILTIN_BOOLEAN)) {
-        /* These four build the same thing whether or not `new` was written, so they go through
-         * the call path rather than repeating it. (For the three primitives that is not what the
-         * language says -- `new Number(1)` is an object wrapper -- but neither engine has wrapper
-         * objects, and agreeing about that is better than one of them inventing them.) */
+        /* `new String("hi")` is a *wrapper object*, not a string: `typeof` says "object", it is
+         * never `===` its own contents, and `new Boolean(false)` is truthy. This backend has no
+         * wrapper objects, and it used to answer with the primitive -- the same thing `String(x)`
+         * gives -- which read as though the constructor had worked.
+         *
+         * That was safe only while the interpreter did the same, and it no longer is: the
+         * interpreter has wrappers now, so the shared answer became a silent disagreement about
+         * `typeof`, `===` and truthiness all at once. A refusal is the honest state until the
+         * object model grows a wrapper, because there is no primitive that behaves like one. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_REGEXP) {
+        /* `new RegExp(source, flags)` builds exactly what `RegExp(source, flags)` builds -- the
+         * language says so -- so it goes through the call path rather than repeating it. */
         return kiln_c99_call(host, result, callee, kiln_c99_undefined(), args, argc, depth,
                              thrown);
     }
@@ -15558,11 +16071,35 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     return KILN_C99_OK;
 }
 
+/* Whether a value may *be* a prototype: an object of some kind, or null. Everything else is a
+ * primitive, and a primitive has no chain to hang another object's reads off. The two operations
+ * that set a prototype disagree about what to do with one -- `{ __proto__: 42 }` ignores it and
+ * `Object.setPrototypeOf(o, 42)` throws -- so the test is shared and the reaction is not. */
+static int kiln_c99_can_be_prototype(kiln_value value) {
+    return value.tag == KILN_VALUE_NULL || value.tag == KILN_VALUE_OBJECT ||
+           value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_FUNCTION ||
+           value.tag == KILN_VALUE_BUILTIN || value.tag == KILN_VALUE_METHOD ||
+           value.tag == KILN_VALUE_BOUND || value.tag == KILN_VALUE_DATE ||
+           value.tag == KILN_VALUE_COLLECTION || value.tag == KILN_VALUE_PROMISE ||
+           value.tag == KILN_VALUE_REGEXP || value.tag == KILN_VALUE_ARRAY_BUFFER ||
+           value.tag == KILN_VALUE_TYPED_ARRAY || value.tag == KILN_VALUE_PROXY ||
+           value.tag == KILN_VALUE_GENERATOR;
+}
+
 /* `class D extends C` links two pairs of things: the prototype objects, so an instance of `D`
  * finds a method of `C`, and the *constructors*, so `D` finds a static of `C`. The second is
  * what makes this take a function as well as an object. */
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
     if (target.tag == KILN_VALUE_OBJECT) {
+        if (!kiln_c99_can_be_prototype(prototype)) {
+            /* `{ __proto__: 42 }` is an object literal with no property and no link: the
+             * specification honours the `__proto__` production only for an object or null and
+             * *ignores* every other value rather than throwing. Storing the primitive left the
+             * literal with a prototype nothing could read through, so `Object.getPrototypeOf`
+             * answered 42 and the object had lost `Object.prototype` -- a fresh `{}` that could
+             * not find `toString`. */
+            return KILN_C99_OK;
+        }
         kiln_c99_object_of(target)->prototype = prototype;
         return KILN_C99_OK;
     }
@@ -17875,8 +18412,11 @@ fn emit_instruction(
             let asynchronous = i32::from(target.asynchronous);
             let arrow = i32::from(target.arrow);
             let async_generator = i32::from(target.async_generator);
-            // `f.length` counts declared parameters, and `bind` subtracts the ones it fixed.
-            let arity = target.parameter_count;
+            // `f.length` is how many arguments a caller *must* supply, which is the parameters
+            // before the first default and before a rest -- not how many slots the frame has.
+            // `(a, b = 1) => a` has two slots and a length of one, and reporting two said the
+            // second argument was required. `bind` subtracts the ones it fixed from this.
+            let arity = target.declared_length;
             let frame_locals = target.local_count.max(1);
             let frame_stack = frame_stacks[*proto as usize].max(1);
             // One handler slot per instruction: a body cannot register more handlers than it has
@@ -17961,7 +18501,7 @@ fn emit_instruction(
             if count > 0 {
                 writeln!(
                     output,
-                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2]; kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1]; status = kiln_c99_set_computed(host, built, key, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2]; kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1]; status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
                 writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
@@ -19187,43 +19727,6 @@ int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
 int kiln_realm_cancel_active_request(uint64_t request) {
     (void)request;
     return KILN_REALM_ASYNC_NOT_FOUND;
-}
-
-/* The generated prelude declares the HTTP provider ABI for every unit. Backend tests link
- * generated scalar C directly and do not exercise Node HTTP, so these symbols deliberately
- * refuse every HTTP operation. The real Rust adapter is linked by native/runtime integration
- * tests and production artifacts. */
-int32_t kiln_http1_decoder_create(void **out_decoder) {
-    if (out_decoder != NULL) *out_decoder = NULL;
-    return KILN_C99_INVALID_ARGUMENT;
-}
-void kiln_http1_decoder_free(void *decoder) { (void)decoder; }
-int32_t kiln_http1_decoder_push(void *decoder, const uint8_t *bytes, size_t bytes_len,
-                                kiln_http1_request_view *out_request) {
-    (void)decoder;
-    (void)bytes;
-    (void)bytes_len;
-    (void)out_request;
-    return KILN_C99_INVALID_ARGUMENT;
-}
-int64_t kiln_http1_response_encode(uint16_t status, const uint8_t *const *header_names,
-                                   const size_t *header_name_lens,
-                                   const uint8_t *const *header_values,
-                                   const size_t *header_value_lens, size_t header_count,
-                                   const uint8_t *body, size_t body_len, uint8_t keep_alive,
-                                   uint8_t *buffer, size_t capacity) {
-    (void)status;
-    (void)header_names;
-    (void)header_name_lens;
-    (void)header_values;
-    (void)header_value_lens;
-    (void)header_count;
-    (void)body;
-    (void)body_len;
-    (void)keep_alive;
-    (void)buffer;
-    (void)capacity;
-    return KILN_C99_INVALID_ARGUMENT;
 }
 "#;
 

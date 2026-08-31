@@ -361,7 +361,6 @@ struct kiln_closure;
 struct kiln_generator;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
 typedef struct kiln_closure {
-typedef enum kiln_property_kind {
 typedef struct kiln_property {
 typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
@@ -382,10 +381,8 @@ typedef struct kiln_symbol {
 typedef struct kiln_bound {
 typedef struct kiln_microtask {
 typedef struct kiln_timer {
-typedef struct kiln_node_server kiln_node_server;
-typedef struct kiln_node_socket kiln_node_socket;
-struct kiln_node_server {
-struct kiln_node_socket {
+typedef struct kiln_node_server {
+typedef struct kiln_node_socket {
 typedef struct kiln_node_response {
 typedef struct kiln_node_completion {
 typedef struct kiln_json_reader {
@@ -564,6 +561,7 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
+static int kiln_c99_can_be_prototype(kiln_value value);
 static int kiln_c99_new_promise(kiln_value *out);
 static kiln_promise *kiln_c99_promise_of(kiln_value value);
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects);
@@ -584,6 +582,7 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
 static kiln_generator *kiln_c99_generator_of(kiln_value value);
 static int kiln_c99_function_store(kiln_value function, kiln_value *out);
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message);
+static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,
 static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char *role);
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value);
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target);
@@ -641,7 +640,6 @@ static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_
 static double kiln_c99_key_index(const char *key, size_t key_len) {
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
-static int kiln_c99_property_is_native_pointer(const kiln_property *property) {
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
@@ -751,6 +749,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value) {
 static int kiln_c99_array_push(kiln_value target, kiln_value value) {
 #define KILN_C99_INSPECT_DEPTH 2
 static int kiln_c99_quote(kiln_text *text, const char *bytes, size_t len) {
@@ -776,8 +775,6 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t argument,
-static void kiln_c99_node_cancel_request(uint64_t *request) {
-static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
 static int kiln_c99_node_http_request(kiln_node_socket *socket, const uint8_t *bytes,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
@@ -838,6 +835,7 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len) {
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
 static const char *kiln_c99_kind_name(kiln_value value) {
+static int kiln_c99_throw_named(kiln_value *thrown, uint64_t kind, const char *sentence,
 static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char *role) {
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value) {
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target) {
@@ -865,6 +863,7 @@ static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, 
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent,
 static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
+static int kiln_c99_can_be_prototype(kiln_value value) {
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
 static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *answer) {
 static kiln_value kiln_c99_typeof(kiln_value value) {

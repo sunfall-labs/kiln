@@ -28,7 +28,7 @@ kiln_label_4:;
         kiln_value built; size_t pair; int status;
         status = kiln_c99_new_object(&built);
         if (status != KILN_C99_OK) return status;
-        for (pair = 0; pair < (size_t)2; ++pair) { kiln_value key = stack[sp - (size_t)2 * 2 + pair * 2]; kiln_value member = stack[sp - (size_t)2 * 2 + pair * 2 + 1]; status = kiln_c99_set_computed(host, built, key, member, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; }
+        for (pair = 0; pair < (size_t)2; ++pair) { kiln_value key = stack[sp - (size_t)2 * 2 + pair * 2]; kiln_value member = stack[sp - (size_t)2 * 2 + pair * 2 + 1]; status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status != KILN_C99_OK) return status; }
         sp -= (size_t)2 * 2;
         stack[sp++] = built;
     }
