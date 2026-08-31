@@ -41,15 +41,14 @@ mod realm {
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
     use kiln_runtime::{
-        duration_from_milliseconds,
+        ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
+        RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
         node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
         node_stream::StreamAction,
-        ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
-        RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem,
     };
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
