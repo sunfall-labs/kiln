@@ -148,7 +148,8 @@ impl NodeCompatInventory {
                     path: config_path.to_owned(),
                     message: format!(
                         "configured Node test differs from the pinned bytes: {} (expected {}, got {actual})",
-                        path.display(), expectation.sha256
+                        path.display(),
+                        expectation.sha256
                     ),
                 });
             }
