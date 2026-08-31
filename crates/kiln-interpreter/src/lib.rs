@@ -26362,6 +26362,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// `FromPropertyDescriptor`: the fields the record holds, and no others.
+    ///
+    /// Distinct from [`Self::completed_descriptor`], which fills the absent ones in with their
+    /// defaults. A *partial* descriptor is a real thing in the specification -- it is what
+    /// `[[Set]]` hands `[[DefineOwnProperty]]` to change a value without touching the flags --
+    /// and a handler that is shown a completed one is being told about attributes nobody asked
+    /// to change.
+    fn descriptor_object(described: &Descriptor) -> Value {
+        let mut data = ObjectData::default();
+        if let Some(value) = &described.value {
+            data.set("value", value.clone());
+        }
+        if let Some(writable) = described.writable {
+            data.set("writable", Value::Boolean(writable));
+        }
+        if let Some(get) = &described.get {
+            data.set("get", get.clone());
+        }
+        if let Some(set) = &described.set {
+            data.set("set", set.clone());
+        }
+        if let Some(enumerable) = described.enumerable {
+            data.set("enumerable", Value::Boolean(enumerable));
+        }
+        if let Some(configurable) = described.configurable {
+            data.set("configurable", Value::Boolean(configurable));
+        }
+        Value::Object(Rc::new(RefCell::new(data)))
+    }
+
     /// `FromPropertyDescriptor(ToPropertyDescriptor(x))`: every field spelled out.
     fn completed_descriptor(described: &Descriptor) -> Value {
         let mut data = ObjectData::default();
@@ -28601,11 +28631,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !is_reflect_target(receiver) {
                 return Ok(false);
             }
-            let descriptor = Descriptor {
-                value: Some(value),
-                ..Descriptor::default()
-            };
-            return self.define_on_receiver(receiver, name, &descriptor, instruction);
+            return self.define_on_receiver(receiver, name, value, instruction);
         }
         let parent = self.prototype_for(target, instruction)?;
         if !matches!(parent, Value::Null | Value::Undefined) {
@@ -28614,47 +28640,80 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !is_reflect_target(receiver) {
             return Ok(false);
         }
-        self.define_on_receiver(
-            receiver,
-            name,
-            &Descriptor {
+        self.define_on_receiver(receiver, name, value, instruction)
+    }
+
+    /// The tail of `OrdinarySetWithOwnDescriptor`: the write lands on the *receiver*, and what
+    /// it is allowed to change there is decided by what the receiver already holds.
+    ///
+    /// The distinction this makes is the whole of the operation. A receiver that already has an
+    /// own data property is redefined with a descriptor carrying **only** `[[Value]]`, so its
+    /// writable, enumerable and configurable flags are left exactly as they were; a receiver
+    /// that has no own property gets `CreateDataProperty`, which is the full descriptor with all
+    /// three flags true. Completing the partial descriptor instead -- filling the three absent
+    /// fields with their `false` defaults -- turns the first write through a proxy into a
+    /// freeze, and every write after it is refused. That is one write per property, which is
+    /// what a reactive store looks like when it stops working.
+    fn define_on_receiver(
+        &mut self,
+        receiver: &Value,
+        name: &str,
+        value: Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let held = self.own_state(receiver, &Value::String(name.to_owned()), instruction)?;
+        let descriptor = match held {
+            // An accessor on the receiver is refused outright, whichever half it has: the
+            // target's data property is what decided this is a data write, and the receiver
+            // never agreed to that.
+            Some((Property::Accessor { .. }, _)) => return Ok(false),
+            Some((Property::Value(_), attributes)) if !attributes.writable => return Ok(false),
+            Some((Property::Value(_), _)) => Descriptor {
+                value: Some(value),
+                ..Descriptor::default()
+            },
+            None => Descriptor {
                 value: Some(value),
                 writable: Some(true),
                 enumerable: Some(true),
                 configurable: Some(true),
                 ..Descriptor::default()
             },
-            instruction,
-        )
+        };
+        self.define_own_operation(receiver, name, &descriptor, instruction)
     }
 
-    fn define_on_receiver(
+    /// `target.[[DefineOwnProperty]](name, descriptor)`, asked as an operation rather than of a
+    /// store, so a proxy answers with its trap and keeps the descriptor *partial* while it does.
+    fn define_own_operation(
         &mut self,
-        receiver: &Value,
+        target: &Value,
         name: &str,
         descriptor: &Descriptor,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
-        let held = self.own_state(receiver, &Value::String(name.to_owned()), instruction)?;
-        if let Some((property, attributes)) = held {
-            match property {
-                Property::Accessor { set: None, .. } => return Ok(false),
-                Property::Value(_) if !attributes.writable => return Ok(false),
-                _ => {}
-            }
+        let Value::Proxy(proxy) = target else {
+            return self.define_own(target, name, descriptor, instruction);
+        };
+        let proxy = Rc::clone(proxy);
+        let inner = proxy.target.clone();
+        let key = Value::String(name.to_owned());
+        let Some(trap) = self.proxy_trap(&proxy, "defineProperty", instruction)? else {
+            // No trap: the definition forwards to the target as the record it is. Round-tripping
+            // it through a descriptor object here is what used to complete it.
+            return self.define_own_operation(&inner, name, descriptor, instruction);
+        };
+        // `FromPropertyDescriptor`, which spells out only the fields the record actually has --
+        // a handler that reads `"writable" in descriptor` can see the difference.
+        let object = Self::descriptor_object(descriptor);
+        let handler = proxy.handler.clone();
+        let list = vec![inner.clone(), Self::trap_key(&key), object];
+        let answered = self.call_value(&trap, handler, list, instruction)?;
+        if !answered.is_truthy() {
+            return Ok(false);
         }
-        if let Value::Proxy(_) = receiver {
-            let object = Self::completed_descriptor(descriptor);
-            return Ok(self
-                .dispatch_native(
-                    Native::ReflectDefineProperty,
-                    &Value::Undefined,
-                    &[receiver.clone(), Value::String(name.to_owned()), object],
-                    instruction,
-                )?
-                .is_truthy());
-        }
-        self.define_own(receiver, name, descriptor, instruction)
+        self.check_define_invariant(&inner, &key, descriptor, instruction)?;
+        Ok(true)
     }
 
     /// One of the six `Uint8Array` conversions between bytes and text.
