@@ -47,6 +47,12 @@ pub struct NodeTestExpectation {
     pub windows: bool,
     #[serde(default)]
     pub features: Vec<String>,
+    /// Executable repository-owned cases derived from this exact upstream source.
+    #[serde(default)]
+    pub adapted: Vec<String>,
+    /// Whether those cases preserve every relevant assertion in the selected upstream file.
+    #[serde(default)]
+    pub adapted_complete: bool,
 }
 
 const fn enabled() -> bool {
@@ -122,6 +128,22 @@ impl NodeCompatInventory {
                     message: format!("test `{test}` needs a non-empty reason"),
                 });
             }
+            if expectation.adapted_complete && expectation.adapted.is_empty() {
+                return Err(NodeCompatError::Schema {
+                    path: path.to_owned(),
+                    message: format!(
+                        "test `{test}` cannot declare complete adaptation without adapted cases"
+                    ),
+                });
+            }
+            if expectation.expectation == Expectation::Pass && !expectation.adapted_complete {
+                return Err(NodeCompatError::Schema {
+                    path: path.to_owned(),
+                    message: format!(
+                        "passing test `{test}` must declare a complete executable adaptation"
+                    ),
+                });
+            }
         }
         Ok(())
     }
@@ -152,6 +174,18 @@ impl NodeCompatInventory {
                         expectation.sha256
                     ),
                 });
+            }
+            for adapted in &expectation.adapted {
+                let adapted_path = base.join(adapted);
+                if !adapted_path.is_file() {
+                    return Err(NodeCompatError::Schema {
+                        path: config_path.to_owned(),
+                        message: format!(
+                            "configured adaptation is missing: {}",
+                            adapted_path.display()
+                        ),
+                    });
+                }
             }
         }
         Ok(())

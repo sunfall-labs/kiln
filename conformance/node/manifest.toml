@@ -130,3 +130,24 @@ source = "upstream-adapted/fs-promises-promise-chain.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop"]
 expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/events/add-listeners"
+source = "upstream-adapted/event-emitter-add-listeners.mjs"
+status = "runnable"
+features = ["node:events", "event-emitter", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/net/listen-close-server"
+source = "upstream-adapted/net-listen-close-server.mjs"
+status = "runnable"
+features = ["node:net", "tokio-net", "resource-lifecycle", "module-graph"]
+expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/http/tokio-owned-server-client"
+source = "upstream-adapted/http-server-tokio-owned.mjs"
+status = "runnable"
+features = ["node:http", "node:net", "tokio-net", "streams", "timers", "module-graph"]
+expected_stdout = "pass\n"
