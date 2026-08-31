@@ -560,6 +560,7 @@ mod realm {
         continuations: RefCell<HashMap<RequestId, AsyncContinuation>>,
         http_connections: RefCell<HashMap<kiln_host_abi::ResourceId, NativeHttpConnection>>,
         http_requests: RefCell<HashMap<RequestId, kiln_host_abi::ResourceId>>,
+        next_http_client_request_id: Cell<u64>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
         entered: Cell<bool>,
@@ -573,6 +574,7 @@ mod realm {
                 continuations: RefCell::new(HashMap::new()),
                 http_connections: RefCell::new(HashMap::new()),
                 http_requests: RefCell::new(HashMap::new()),
+                next_http_client_request_id: Cell::new(1),
                 cancelled: Rc::new(RefCell::new(HashSet::new())),
                 queued: Rc::new(RefCell::new(HashSet::new())),
                 entered: Cell::new(false),
@@ -1571,6 +1573,24 @@ mod realm {
     }
 
     #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_client_request_id_active(out_id: *mut u64) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(out_id) = (unsafe { out_id.as_mut() }) else {
+                return INVALID_ARGUMENT;
+            };
+            let id = realm.next_http_client_request_id.get();
+            realm
+                .next_http_client_request_id
+                .set(id.wrapping_add(1).max(1));
+            *out_id = id;
+            0
+        })
+    }
+
+    #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_client_start_active(
         resource: u64,
         id: u64,
@@ -2330,6 +2350,11 @@ mod realm {
             unsafe { kiln_realm_now(context.cast::<f64>()) }
         }
 
+        unsafe extern "C" fn allocates_http_request_id(context: *mut c_void) -> i32 {
+            // SAFETY: the test supplies one live `u64` slot while this callback runs.
+            unsafe { kiln_realm_http_client_request_id_active(context.cast::<u64>()) }
+        }
+
         #[test]
         fn opaque_handle_enters_tokio_and_rejects_stale_or_cross_thread_use() {
             let mut handle = 0;
@@ -2360,6 +2385,51 @@ mod realm {
             assert_eq!(foreign, INVALID_ARGUMENT);
             assert_eq!(kiln_realm_destroy(handle), 0);
             assert_eq!(kiln_realm_destroy(handle), INVALID_ARGUMENT);
+        }
+
+        #[test]
+        fn http_client_request_ids_are_monotonic_and_realm_scoped() {
+            let mut first_realm = 0;
+            let mut second_realm = 0;
+            assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
+            assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
+
+            let mut first = 0;
+            let mut second = 0;
+            let mut other_realm = 0;
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        first_realm,
+                        Some(allocates_http_request_id),
+                        (&raw mut first).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        first_realm,
+                        Some(allocates_http_request_id),
+                        (&raw mut second).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        second_realm,
+                        Some(allocates_http_request_id),
+                        (&raw mut other_realm).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!((first, second, other_realm), (1, 2, 1));
+            assert_eq!(kiln_realm_destroy(first_realm), 0);
+            assert_eq!(kiln_realm_destroy(second_realm), 0);
         }
 
         #[test]
