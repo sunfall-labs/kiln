@@ -183,9 +183,7 @@ impl Http1Decoder {
                         break;
                     }
                     let length = (*remaining).min(self.bytes.len());
-                    events.push(HttpRequestEvent::Data(
-                        self.bytes.drain(..length).collect(),
-                    ));
+                    events.push(HttpRequestEvent::Data(self.bytes.drain(..length).collect()));
                     *remaining -= length;
                     if *remaining == 0 {
                         self.request = None;
@@ -482,7 +480,9 @@ mod tests {
             ]
         );
         assert_eq!(
-            decoder.push_events(b"lloGET /next HTTP/1.1\r\n\r\n").unwrap(),
+            decoder
+                .push_events(b"lloGET /next HTTP/1.1\r\n\r\n")
+                .unwrap(),
             vec![
                 HttpRequestEvent::Data(b"llo".to_vec()),
                 HttpRequestEvent::End,
