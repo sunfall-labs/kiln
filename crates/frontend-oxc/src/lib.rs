@@ -4,7 +4,7 @@
 //! accepts ordinary strings and returns [`kiln_hir`] values, so an Oxc upgrade cannot leak AST
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
@@ -18,17 +18,20 @@ use kiln_hir::{
 };
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
-    Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
-    ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
-    FormalParameters, Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
-    PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
-};
-use oxc_ast::ast::{
     ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
+};
+use oxc_ast::{
+    AstKind,
+    ast::{
+        Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern,
+        Class, ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
+        FormalParameters, Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
+        PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
+    },
 };
 use oxc_diagnostics::OxcDiagnostic;
 use oxc_parser::{ParseOptions, Parser};
-use oxc_semantic::SemanticBuilder;
+use oxc_semantic::{IsGlobalReference, SemanticBuilder};
 use oxc_span::{GetSpan, SourceType, Span};
 use oxc_syntax::module_record::{
     ExportEntry as OxcExportEntry, ExportExportName, ExportImportName, ExportLocalName,
@@ -62,11 +65,70 @@ pub fn parse_with_goal(path: &str, source: &str, goal: SourceGoal) -> Module {
     parse_source(source, source_type)
 }
 
-/// Parse a CommonJS file under the Script goal while preserving the owned HIR boundary.
-/// Package-format policy belongs to the Node resolver/graph; the frontend only selects grammar.
+/// Parse a CommonJS file with Oxc's explicit wrapper-aware goal while preserving the owned HIR
+/// boundary. Package-format policy belongs to the Node resolver/graph; the frontend only selects
+/// grammar. Unlike an ordinary Script goal, this admits the wrapper's top-level `return` and
+/// `new.target` while continuing to reject top-level `await`.
 pub fn parse_commonjs(path: &str, source: &str) -> Module {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source(source, inferred.with_script(true))
+    parse_source(source, inferred.with_commonjs(true))
+}
+
+/// Parse CommonJS and return the literal dependencies identified by Oxc's own scope graph.
+///
+/// Keeping this fact beside parsing avoids reimplementing JavaScript hoisting and shadowing in
+/// Kiln HIR. Only owned strings cross the frontend boundary; Oxc nodes and arena lifetimes do not.
+pub fn parse_commonjs_with_requires(path: &str, source: &str) -> (Module, Vec<String>) {
+    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
+    parse_source_with_commonjs_requires(source, inferred.with_commonjs(true))
+}
+
+fn parse_source_with_commonjs_requires(
+    source: &str,
+    source_type: SourceType,
+) -> (Module, Vec<String>) {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, source_type)
+        .with_options(ParseOptions {
+            parse_regular_expression: true,
+            ..ParseOptions::default()
+        })
+        .parse();
+    let requires = if parsed.panicked || !parsed.diagnostics.is_empty() {
+        Vec::new()
+    } else {
+        let semantic = SemanticBuilder::new()
+            .with_build_nodes(true)
+            .build(&parsed.program)
+            .semantic;
+        let mut requires = semantic
+            .nodes()
+            .iter()
+            .filter_map(|node| {
+                let AstKind::CallExpression(call) = node.kind() else {
+                    return None;
+                };
+                let Expression::Identifier(callee) = &call.callee else {
+                    return None;
+                };
+                if callee.name != "require" || !callee.is_global_reference(semantic.scoping()) {
+                    return None;
+                }
+                let argument = call.arguments.first()?.as_expression()?;
+                let Expression::StringLiteral(literal) = argument else {
+                    return None;
+                };
+                Some((call.span.start, literal.value.to_string()))
+            })
+            .collect::<Vec<_>>();
+        requires.sort_by_key(|(start, _)| *start);
+        let mut seen = HashSet::new();
+        requires
+            .into_iter()
+            .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
+            .collect()
+    };
+    (lower_parsed(&parsed, source_type), requires)
 }
 
 fn parse_source(source: &str, source_type: SourceType) -> Module {
@@ -84,6 +146,10 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         })
         .parse();
 
+    lower_parsed(&parsed, source_type)
+}
+
+fn lower_parsed(parsed: &oxc_parser::ParserReturn<'_>, source_type: SourceType) -> Module {
     let mut requested_modules = parsed
         .module_record
         .requested_modules
@@ -2168,7 +2234,73 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(kiln_hir::commonjs_literal_requires(&module), ["./dep.cjs"]);
+        let (_, requires) = parse_commonjs_with_requires(
+            "fixture.cjs",
+            "module.exports = function () { return require('./dep.cjs'); };",
+        );
+        assert_eq!(requires, ["./dep.cjs"]);
+    }
+
+    #[test]
+    fn commonjs_goal_uses_oxcs_wrapper_grammar() {
+        let returned = parse_commonjs("fixture.js", "return module.exports;");
+        assert!(
+            returned.diagnostics.is_empty(),
+            "{:?}",
+            returned.diagnostics
+        );
+
+        let awaited = parse_commonjs("fixture.js", "await Promise.resolve();");
+        assert!(
+            !awaited.diagnostics.is_empty(),
+            "CommonJS must reject top-level await"
+        );
+    }
+
+    #[test]
+    fn commonjs_requires_use_oxc_scope_semantics() {
+        let source = r#"
+            require('./first');
+            if (ready) require('./nested');
+            require('./first');
+            require(dynamic);
+            function parameter(require) { require('./parameter'); }
+            function hoisted() {
+                require('./var-before');
+                if (ready) var require;
+                require('./var-after');
+            }
+            {
+                require('./block-before');
+                let require;
+                require('./block-after');
+            }
+            try {} catch (require) { require('./catch'); }
+            require('./last');
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", source);
+        assert_eq!(requires, ["./first", "./nested", "./last"]);
+    }
+
+    #[test]
+    fn commonjs_require_discovery_walks_all_oxc_ast_nodes_in_source_order() {
+        let source = r#"
+            const value = {
+                [require('./key')]: require('./value'),
+                method() { return require('./method'); }
+            };
+            class Example extends require('./base') {
+                field = require('./field');
+            }
+            [require('./array'), ...require('./spread')];
+        "#;
+        let (_, requires) = parse_commonjs_with_requires("fixture.cjs", source);
+        assert_eq!(
+            requires,
+            [
+                "./key", "./value", "./method", "./base", "./field", "./array", "./spread"
+            ]
+        );
     }
 
     #[test]
@@ -2737,6 +2869,57 @@ mod tests {
             };
             assert_eq!(function.name.as_deref(), expected, "{source}");
         }
+    }
+
+    #[test]
+    fn named_evaluation_infers_an_anonymous_class_name_without_creating_a_binding() {
+        let module = parse_with_goal("class-name.js", "let C = class {};", SourceGoal::Script);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected a variable declaration");
+        };
+        let Some(initializer) = &declarations[0].initializer else {
+            panic!("expected a class initializer");
+        };
+        let HirExpressionKind::Class(class) = &initializer.kind else {
+            panic!("expected a class initializer, got {:?}", initializer.kind);
+        };
+        assert_eq!(class.name, None);
+        assert_eq!(class.inferred_name.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn optional_private_member_lowering_preserves_the_short_circuit_marker() {
+        let module = parse_with_goal(
+            "optional-private.js",
+            "class C { #x; read(value) { return value?.#x; } }",
+            SourceGoal::Script,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Class(class) = &module.body[0].kind else {
+            panic!("expected a class declaration");
+        };
+        let method = class
+            .methods
+            .iter()
+            .find(|method| matches!(method.key, kiln_hir::ObjectKey::Static(ref name) if name == "read"))
+            .expect("read method");
+        let Some(statement) = method.function.body.first() else {
+            panic!("expected a return statement");
+        };
+        let HirStatementKind::Return(Some(value)) = &statement.kind else {
+            panic!("expected a return expression");
+        };
+        let HirExpressionKind::Chain { expression } = &value.kind else {
+            panic!("expected an optional chain, got {:?}", value.kind);
+        };
+        let HirExpressionKind::PrivateMember { optional, .. } = &expression.kind else {
+            panic!(
+                "expected an optional private member, got {:?}",
+                expression.kind
+            );
+        };
+        assert!(*optional);
     }
 
     #[test]

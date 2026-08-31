@@ -61,8 +61,16 @@ KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
 		crates/kiln-native-number-ffi/src/lib.rs \
+		crates/kiln-temporal/Cargo.toml \
+		crates/kiln-temporal/src/lib.rs \
 		crates/kiln-runtime/Cargo.toml \
-		crates/kiln-runtime/src/lib.rs; do
+		crates/kiln-runtime/src/http_body.rs \
+		crates/kiln-runtime/src/http_transport.rs \
+		crates/kiln-runtime/src/hyper_http.rs \
+		crates/kiln-runtime/src/lib.rs \
+		crates/kiln-runtime/src/node_http.rs \
+		crates/kiln-runtime/src/node_net.rs \
+		crates/kiln-runtime/src/node_stream.rs; do
 		KILN_NUMBER_SOURCE_SIZE=$(wc -c <"$KILN_NUMBER_SOURCE" | tr -d '[:space:]')
 		printf '%s\0%s\0' "$KILN_NUMBER_SOURCE" "$KILN_NUMBER_SOURCE_SIZE"
 		dd if="$KILN_NUMBER_SOURCE" bs=65536 2>/dev/null

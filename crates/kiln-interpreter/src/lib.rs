@@ -415,6 +415,8 @@ pub enum Native {
     NodeQueryStringParse,
     NodeUrl,
     NodeUrlParse,
+    NodeUrlFileUrlToPath,
+    NodeUrlPathToFileUrl,
     TextDecoderConstructor,
     TextDecoderDecode,
     NodeEventEmitter,
@@ -1374,6 +1376,8 @@ impl Native {
             (Self::NodeQueryString, "default") => Some(Value::Native(Self::NodeQueryString)),
             (Self::NodeUrl, "URL") => Some(Value::Native(Self::UrlConstructor)),
             (Self::NodeUrl, "parse") => Some(Value::Native(Self::NodeUrlParse)),
+            (Self::NodeUrl, "fileURLToPath") => Some(Value::Native(Self::NodeUrlFileUrlToPath)),
+            (Self::NodeUrl, "pathToFileURL") => Some(Value::Native(Self::NodeUrlPathToFileUrl)),
             (Self::NodeUrl, "default") => Some(Value::Native(Self::NodeUrl)),
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
@@ -5323,7 +5327,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
             "inspect",
         ],
         "querystring" => &["decode", "default", "parse"],
-        "url" => &["URL", "default", "parse"],
+        "url" => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
         _ => return None,
     })
 }
@@ -11419,6 +11423,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 RuntimeTurn::Completion(completion) => {
                     runtime.enter(|| self.settle_host_completion(completion))?;
                 }
+                RuntimeTurn::Failure(failure) => {
+                    return Err(ExecutionError::Host {
+                        instruction: self.instruction,
+                        message: failure.to_string(),
+                    });
+                }
                 RuntimeTurn::Timer(WorkItem::Timer { work: timer, .. }) => {
                     runtime.enter(|| {
                         self.call_value(
@@ -14966,6 +14976,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map(Value::to_display_string)
                     .unwrap_or_default(),
             )),
+            Native::NodeUrlFileUrlToPath => {
+                let input = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                let path = input.strip_prefix("file://").ok_or_else(|| {
+                    ExecutionError::TypeErrorMessage {
+                        message: "fileURLToPath requires a file: URL".to_owned(),
+                    }
+                })?;
+                Ok(Value::String(decode_form_component(path)))
+            }
+            Native::NodeUrlPathToFileUrl => {
+                let path = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                let absolute = if path.starts_with('/') {
+                    path
+                } else {
+                    format!("/{path}")
+                };
+                Ok(url_object(parse_url(&format!("file://{absolute}"), None)?))
+            }
             Native::NodeQueryStringParse => Ok(node_querystring_parse(
                 &arguments
                     .first()
@@ -33164,6 +33198,8 @@ fn call_native(
         | Native::NodeQueryStringParse
         | Native::NodeUrl
         | Native::NodeUrlParse
+        | Native::NodeUrlFileUrlToPath
+        | Native::NodeUrlPathToFileUrl
         | Native::NodeNet
         | Native::NodeNetCreateServer
         | Native::NodeNetConnect
@@ -40500,6 +40536,7 @@ mod tests {
     }
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
+    use kiln_ir::Builtin;
 
     #[test]
     fn commonjs_require_reads_replacements_through_the_shared_cache_cell() {
@@ -42524,6 +42561,83 @@ mod tests {
             .unwrap(),
             Value::Boolean(false)
         );
+    }
+
+    fn symbol_with_throwing_right_value_of(operator: BinaryOp) -> Program {
+        // `Symbol() * f()` must reject while reducing the left operand. If the right operand is
+        // reduced first (or both operands are reduced before the numeric check), its `valueOf`
+        // throws "called" and hides the required Symbol TypeError.
+        Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: vec![
+                Constant::String("valueOf".to_owned()),
+                Constant::String("called".to_owned()),
+            ],
+            code: vec![
+                Instruction::LoadBuiltin(Builtin::Symbol),
+                Instruction::Call { argc: 0 },
+                Instruction::MakeFunction(0),
+                Instruction::Call { argc: 0 },
+                Instruction::Binary(operator),
+                Instruction::Return,
+            ],
+            local_count: 0,
+            functions: vec![
+                kiln_ir::FunctionProto {
+                    prologue_end: 0,
+                    asynchronous: false,
+                    name: Some("right".to_owned()),
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    declared_length: 0,
+                    local_count: 0,
+                    code: vec![
+                        Instruction::Const(0),
+                        Instruction::MakeFunction(1),
+                        Instruction::NewObject { count: 1 },
+                        Instruction::Return,
+                    ],
+                    upvalues: Vec::new(),
+                },
+                kiln_ir::FunctionProto {
+                    prologue_end: 0,
+                    asynchronous: false,
+                    name: Some("valueOf".to_owned()),
+                    arrow: false,
+                    generator: false,
+                    async_generator: false,
+                    parameter_count: 0,
+                    declared_length: 0,
+                    local_count: 0,
+                    code: vec![Instruction::Const(1), Instruction::Throw],
+                    upvalues: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_symbol_numeric_error_precedes_the_right_value_of_call() {
+        assert!(matches!(
+            run(&symbol_with_throwing_right_value_of(BinaryOp::Multiply)),
+            Err(ExecutionError::Uncaught { message, .. })
+                if message == "TypeError: Cannot convert a Symbol value to a number"
+        ));
+    }
+
+    #[test]
+    fn symbol_addition_and_relational_comparison_reduce_the_right_value_first() {
+        for operator in [BinaryOp::Add, BinaryOp::LessThan] {
+            assert!(
+                matches!(
+                    run(&symbol_with_throwing_right_value_of(operator)),
+                    Err(ExecutionError::Uncaught { message, .. }) if message == "called"
+                ),
+                "{operator:?} must reduce the right operand before choosing its conversion"
+            );
+        }
     }
 
     #[test]

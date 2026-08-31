@@ -1283,6 +1283,7 @@ mod realm {
                     };
                     realm.work.borrow_mut().queue_microtask(work);
                 }
+                Some(RuntimeTurn::Failure(_)) => return RUNTIME_ERROR,
                 Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) => {
                     let status = run_in_runtime(realm, || work.run(host, thrown));
                     if status != 0 {
@@ -4086,6 +4087,37 @@ mod bigint {
         unsafe { &*handle }.to_f64().unwrap_or(f64::NAN)
     }
 
+    /// The exact value as a 128-bit integer, split into a signed top half and an unsigned bottom
+    /// half because C99 has no portable one -- the same pair `kiln_temporal_now` takes.
+    ///
+    /// Exact or nothing: [`OUT_OF_RANGE`] when the value does not fit, never a saturated or
+    /// truncated one. This is what `Temporal.Instant.fromEpochNanoseconds` needs, and an instant
+    /// off by 2^128 nanoseconds would be a wrong answer that prints rather than a caught error.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live and both out-parameters writable slots.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_bigint_to_i128(
+        handle: *const BigInt,
+        out_high: *mut i64,
+        out_low: *mut u64,
+    ) -> i32 {
+        if handle.is_null() || out_high.is_null() || out_low.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        let Some(value) = unsafe { &*handle }.to_i128() else {
+            return OUT_OF_RANGE;
+        };
+        // SAFETY: both out-parameters are writable slots by the caller contract.
+        unsafe {
+            out_high.write((value >> 64) as i64);
+            out_low.write(value as u64);
+        }
+        0
+    }
+
     /// Whether the value is zero, which is the whole of a BigInt's truthiness.
     ///
     /// # Safety
@@ -4732,6 +4764,63 @@ mod temporal {
         }
     }
 
+    /// `Temporal.Instant.fromEpochMilliseconds(ms)`.
+    ///
+    /// A separate entry point from [`kiln_temporal_from_fields`] because it is not a field bag:
+    /// the argument is one number counted from the epoch, and the engine rejects a fractional or
+    /// out-of-range one with the RangeError the language specifies rather than truncating it.
+    ///
+    /// # Safety
+    ///
+    /// `out_handle` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_instant_from_epoch_milliseconds(
+        milliseconds: f64,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if out_handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        match kiln_temporal::instant_from_epoch_milliseconds(milliseconds) {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// `Temporal.Instant.fromEpochNanoseconds(ns)`, where the argument is a `BigInt`.
+    ///
+    /// It arrives split the way [`kiln_temporal_now`]'s instant does, for the same reason: C99 has
+    /// no portable 128-bit integer. The caller reads the two halves out of the BigInt provider,
+    /// which is the only other place in this archive that holds a number this wide -- and the two
+    /// providers stay independent features because nothing but scalars passes between them.
+    ///
+    /// # Safety
+    ///
+    /// `out_handle` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_instant_from_epoch_nanoseconds(
+        high: i64,
+        low: u64,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if out_handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let epoch_nanoseconds = (i128::from(high) << 64) | i128::from(low);
+        match kiln_temporal::instant(epoch_nanoseconds) {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
     /// Release a handle from any of the constructors.
     ///
     /// # Safety
@@ -4768,8 +4857,16 @@ mod temporal {
     ///
     /// The answer says which shape it is: 0 no such property, 1 a number in `out_number`, 2 text
     /// written to `buffer` under the [`emit`] retry protocol, 3 a flag in `out_number`, 4 the
-    /// property exists and is `undefined`, and 5 a value only a BigInt can hold -- which this slice
-    /// does not yet carry across, and which the caller must refuse by name rather than round.
+    /// property exists and is `undefined`, and 5 a value only a BigInt can hold -- `epochNanoseconds`
+    /// -- whose exact decimal digits are written to `buffer` under the same retry protocol as
+    /// shape 2, for the caller to hand to `kiln_bigint_parse`.
+    ///
+    /// Shape 5 travels as digits rather than as a BigInt handle on purpose: the two providers are
+    /// independent features of one archive, and a nanosecond count is at most forty characters, so
+    /// the decimal spelling is exact, is the spelling the language would print anyway, and costs
+    /// this side no knowledge of what a BigInt is. Rounding it through the `f64` slot instead is
+    /// the one thing that must never happen: a `Temporal` instant carries more precision than a
+    /// double holds, and a rounded answer is a wrong answer that prints.
     ///
     /// # Safety
     ///
@@ -4815,7 +4912,13 @@ mod temporal {
                 3
             }
             kiln_temporal::Field::Undefined => 4,
-            kiln_temporal::Field::Integer128(_) => 5,
+            kiln_temporal::Field::Integer128(integer) => {
+                // SAFETY: `buffer` is writable for `capacity` by the caller contract.
+                let written = unsafe { emit(&integer.to_string(), buffer, capacity) };
+                // SAFETY: `out_length` is a writable slot by the caller contract.
+                unsafe { out_length.write(written) };
+                5
+            }
         }
     }
 

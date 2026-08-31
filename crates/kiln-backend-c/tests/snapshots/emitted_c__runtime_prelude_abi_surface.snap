@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 293
+assertion_line: 337
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -46,7 +46,8 @@ KILN_VALUE_BIGINT = 21,
 KILN_VALUE_ARRAY_BUFFER = 22,
 KILN_VALUE_TYPED_ARRAY = 23,
 KILN_VALUE_PROXY = 24,
-KILN_VALUE_TEMPORAL = 25
+KILN_VALUE_TEMPORAL = 25,
+KILN_VALUE_COMMONJS_REQUIRE = 26
 #define KILN_C99_BUILTIN_PROMISE 15
 #define KILN_C99_BUILTIN_BOOLEAN 16
 #define KILN_C99_BUILTIN_REFLECT 17
@@ -135,6 +136,11 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_BUILTIN_RANGE_ERROR 12
 #define KILN_C99_BUILTIN_REFERENCE_ERROR 13
 #define KILN_C99_BUILTIN_SYNTAX_ERROR 14
+#define KILN_C99_BUILTIN_URI_ERROR 65
+#define KILN_C99_BUILTIN_WEAK_MAP 66
+#define KILN_C99_BUILTIN_WEAK_SET 67
+#define KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE 68
+#define KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE 69
 #define KILN_C99_BUILTIN_DATE 7
 #define KILN_C99_YIELDED 1
 #define KILN_C99_BUILTIN_STRING 1
@@ -362,46 +368,72 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
-#define KILN_C99_METHOD_NODE_NET_CONNECT 336
-#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 337
-#define KILN_C99_METHOD_BUFFER_FROM 338
-#define KILN_C99_METHOD_BUFFER_ALLOC 339
-#define KILN_C99_METHOD_BUFFER_IS_BUFFER 340
-#define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 341
-#define KILN_C99_METHOD_BUFFER_CONCAT 342
-#define KILN_C99_METHOD_BUFFER_TO_STRING 343
-#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 344
-#define KILN_C99_METHOD_NODE_UTIL_NOOP 345
-#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 346
-#define KILN_C99_METHOD_NODE_UTIL_INSPECT 347
-#define KILN_C99_METHOD_NODE_UTIL_INHERITS 348
-#define KILN_C99_METHOD_NODE_UTIL_FORMAT 349
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 350
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 351
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 352
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 353
-#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 354
-#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 355
-#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 356
-#define KILN_C99_METHOD_NODE_DNS_LOOKUP 357
-#define KILN_C99_METHOD_NODE_OS_HOSTNAME 358
-#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 359
-#define KILN_C99_METHOD_NODE_STREAM 360
-#define KILN_C99_METHOD_NODE_READABLE 361
-#define KILN_C99_METHOD_NODE_WRITABLE 362
-#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 363
-#define KILN_C99_METHOD_NODE_STREAM_FINISHED 364
-#define KILN_C99_METHOD_NODE_READABLE_PUSH 365
-#define KILN_C99_METHOD_NODE_READABLE_READ 366
-#define KILN_C99_METHOD_NODE_READABLE_DESTROY 367
-#define KILN_C99_METHOD_NODE_READABLE_PAUSE 368
-#define KILN_C99_METHOD_NODE_READABLE_RESUME 369
-#define KILN_C99_METHOD_NODE_READABLE_PIPE 370
-#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 371
-#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 372
-#define KILN_C99_METHOD_NODE_WRITABLE_END 373
-#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 374
-#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 375
+#define KILN_C99_METHOD_NODE_NET_CONNECT 338
+#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 339
+#define KILN_C99_METHOD_BUFFER_FROM 340
+#define KILN_C99_METHOD_BUFFER_ALLOC 341
+#define KILN_C99_METHOD_BUFFER_IS_BUFFER 342
+#define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 343
+#define KILN_C99_METHOD_BUFFER_CONCAT 344
+#define KILN_C99_METHOD_BUFFER_TO_STRING 345
+#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 346
+#define KILN_C99_METHOD_NODE_UTIL_NOOP 347
+#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 348
+#define KILN_C99_METHOD_NODE_UTIL_INSPECT 349
+#define KILN_C99_METHOD_NODE_UTIL_INHERITS 350
+#define KILN_C99_METHOD_NODE_UTIL_FORMAT 351
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 352
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 353
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 354
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 355
+#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 356
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 357
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 358
+#define KILN_C99_METHOD_NODE_DNS_LOOKUP 359
+#define KILN_C99_METHOD_NODE_OS_HOSTNAME 360
+#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 361
+#define KILN_C99_METHOD_NODE_STREAM 362
+#define KILN_C99_METHOD_NODE_READABLE 363
+#define KILN_C99_METHOD_NODE_WRITABLE 364
+#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 365
+#define KILN_C99_METHOD_NODE_STREAM_FINISHED 366
+#define KILN_C99_METHOD_NODE_READABLE_PUSH 367
+#define KILN_C99_METHOD_NODE_READABLE_READ 368
+#define KILN_C99_METHOD_NODE_READABLE_DESTROY 369
+#define KILN_C99_METHOD_NODE_READABLE_PAUSE 370
+#define KILN_C99_METHOD_NODE_READABLE_RESUME 371
+#define KILN_C99_METHOD_NODE_READABLE_PIPE 372
+#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 373
+#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 374
+#define KILN_C99_METHOD_NODE_WRITABLE_END 375
+#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 376
+#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 377
+#define KILN_C99_METHOD_NODE_FS_EXISTS_SYNC 378
+#define KILN_C99_METHOD_NODE_FS_READ_FILE 379
+#define KILN_C99_METHOD_NODE_FS_STAT 380
+#define KILN_C99_METHOD_NODE_FS_WRITE_FILE 381
+#define KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE 382
+#define KILN_C99_METHOD_NODE_PATH_JOIN 383
+#define KILN_C99_METHOD_NODE_PATH_RESOLVE 384
+#define KILN_C99_METHOD_NODE_ASSERT_OK 385
+#define KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR 386
+#define KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE 387
+#define KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH 388
+#define KILN_C99_METHOD_NODE_URL_PARSE 389
+#define KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL 390
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE 391
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND 392
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY 393
+#define KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID 394
+#define KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH 395
+#define KILN_C99_METHOD_PROCESS_NEXT_TICK 396
+#define KILN_C99_METHOD_PROCESS_HRTIME 397
+#define KILN_C99_METHOD_PROCESS_HRTIME_BIGINT 398
+#define KILN_C99_METHOD_PROCESS_CWD 399
+#define KILN_C99_METHOD_ATOMICS_UNAVAILABLE 400
+#define KILN_C99_METHOD_SET_IMMEDIATE 401
+#define KILN_C99_METHOD_CLEAR_IMMEDIATE 402
+#define KILN_C99_METHOD_NODE_HTTP_SERVER 403
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -414,7 +446,9 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST 312
 #define KILN_C99_METHOD_TEMPORAL_OP 313
 #define KILN_C99_METHOD_TEMPORAL_OP_LAST 335
-#define KILN_C99_METHOD_TEMPORAL_LAST 335
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS 336
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS 337
+#define KILN_C99_METHOD_TEMPORAL_LAST 337
 #define KILN_C99_METHOD_SET_TIME 177
 #define KILN_C99_METHOD_SET_FULL_YEAR 178
 #define KILN_C99_METHOD_SET_MONTH 179
@@ -451,6 +485,8 @@ typedef struct kiln_settler {
 typedef struct kiln_regexp {
 typedef struct kiln_symbol {
 typedef struct kiln_bound {
+typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
+typedef struct kiln_commonjs_require {
 typedef struct kiln_microtask {
 typedef struct kiln_timer {
 typedef struct kiln_node_server kiln_node_server;
@@ -463,6 +499,7 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
 static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
 typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
+static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
 typedef struct kiln_node_completion {
 typedef struct kiln_json_reader {
 typedef struct kiln_text {
@@ -551,8 +588,11 @@ int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *rig
 int32_t kiln_bigint_negate(const void *handle, void **out);
 int32_t kiln_bigint_compare(const void *left, const void *right);
 int32_t kiln_bigint_is_zero(const void *handle);
+int32_t kiln_bigint_to_i128(const void *handle, int64_t *out_high, uint64_t *out_low);
 int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
+int32_t kiln_temporal_instant_from_epoch_milliseconds(double milliseconds, void **out_handle);
+int32_t kiln_temporal_instant_from_epoch_nanoseconds(int64_t high, uint64_t low,
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
 int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, const unsigned char *zone,
 void kiln_temporal_free(void *handle);
@@ -685,6 +725,7 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
 static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
 static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
 static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+static int kiln_c99_node_path(kiln_value *out, uint64_t code,
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
@@ -698,7 +739,7 @@ static double kiln_c99_parse_date(const char *bytes, size_t len);
 static int kiln_c99_pad_number(kiln_text *text, int64_t value, int width);
 static int kiln_c99_is_hole(kiln_value value);
 static kiln_collection *kiln_c99_collection_of(kiln_value value);
-static int kiln_c99_new_collection(kiln_value *out, int is_map);
+static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak);
 static const char *kiln_c99_error_name(uint64_t builtin);
 static uint64_t kiln_c99_error_kind(kiln_value value);
 static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
@@ -718,6 +759,7 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
 static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected);
 static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value on_rejected,
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
+static int kiln_c99_enqueue_callback(kiln_value callback);
 static int kiln_c99_run_microtask(void *work, void *host, void *thrown);
 static void kiln_c99_drop_microtask(void *work);
 static int kiln_c99_run_timer(void *work, void *host, void *thrown);
@@ -771,6 +813,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
+static int kiln_c99_node_path(kiln_value *result, uint64_t code,
+done:
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
 static kiln_array *kiln_c99_array_of(kiln_value value) {
@@ -812,6 +856,7 @@ static int kiln_c99_changes_length(uint64_t code) {
 static int kiln_c99_reads_only(uint64_t code) {
 static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len) {
 static kiln_value kiln_c99_method(uint64_t code) {
+static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call,
 static const char *kiln_c99_method_name(uint64_t code) {
 #ifndef KILN_REALM_ENTROPY_SEED
 #define KILN_REALM_ENTROPY_SEED UINT64_C(0x9E3779B97F4A7C15)
@@ -840,6 +885,10 @@ static kiln_value kiln_c99_captured_arguments;
 static int kiln_c99_frame_is_arrow;
 static int kiln_c99_visible_arguments(kiln_value *out) {
 static kiln_value kiln_c99_globals;
+static kiln_value kiln_c99_process;
+static kiln_value kiln_c99_atomics;
+static int kiln_c99_atomics_object(kiln_value *out) {
+static int kiln_c99_process_object(kiln_value *out) {
 static int kiln_c99_global_object(kiln_value *out) {
 static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
 static kiln_value kiln_c99_bigint_text(kiln_value value, uint32_t radix) {
@@ -1050,7 +1099,7 @@ static kiln_collection *kiln_c99_collection_of(kiln_value value) {
 static kiln_proxy *kiln_c99_proxy_of(kiln_value value) {
 static kiln_value kiln_c99_proxy_inner(kiln_value value) {
 static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
-static int kiln_c99_new_collection(kiln_value *out, int is_map) {
+static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
@@ -1072,6 +1121,7 @@ static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, siz
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message) {
 static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value derived,
+static int kiln_c99_enqueue_callback(kiln_value callback) {
 static int kiln_c99_new_promise(kiln_value *out) {
 static kiln_promise *kiln_c99_promise_of(kiln_value value) {
 static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,

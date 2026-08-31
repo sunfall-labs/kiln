@@ -8654,6 +8654,94 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
+        let read = kiln_hir::Function {
+            strict: true,
+            binds_own_name: false,
+            asynchronous: false,
+            name: Some("read".to_owned()),
+            arrow: false,
+            generator: false,
+            parameters: Vec::new(),
+            rest: None,
+            body: vec![statement(StatementKind::Return(Some(Expression {
+                kind: ExpressionKind::PrivateMember {
+                    object: Box::new(identifier("Outer")),
+                    name: "x".to_owned(),
+                    optional: false,
+                },
+                span: Span::default(),
+            })))],
+            span: Span::default(),
+        };
+        let inner = kiln_hir::Class {
+            inferred_name: None,
+            name: Some("Inner".to_owned()),
+            superclass: None,
+            constructor: None,
+            methods: vec![kiln_hir::ClassMethod {
+                key: ObjectKey::Static("read".to_owned()),
+                function: read,
+                is_static: true,
+                kind: kiln_hir::MethodKind::Normal,
+            }],
+            fields: Vec::new(),
+            span: Span::default(),
+        };
+        let make = kiln_hir::Function {
+            strict: true,
+            binds_own_name: false,
+            asynchronous: false,
+            name: Some("make".to_owned()),
+            arrow: false,
+            generator: false,
+            parameters: Vec::new(),
+            rest: None,
+            body: vec![statement(StatementKind::Class(Box::new(inner)))],
+            span: Span::default(),
+        };
+        let program = compile(&module(vec![statement(StatementKind::Class(Box::new(
+            kiln_hir::Class {
+                inferred_name: None,
+                name: Some("Outer".to_owned()),
+                superclass: None,
+                constructor: None,
+                methods: vec![kiln_hir::ClassMethod {
+                    key: ObjectKey::Static("make".to_owned()),
+                    function: make,
+                    is_static: true,
+                    kind: kiln_hir::MethodKind::Normal,
+                }],
+                fields: vec![ClassField {
+                    key: ObjectKey::Private("x".to_owned()),
+                    value: Some(number(1.0)),
+                    is_static: true,
+                }],
+                span: Span::default(),
+            },
+        )))]))
+        .expect("nested class compiles");
+        program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("read"))
+            .expect("nested read method");
+        assert!(
+            program
+                .constants
+                .contains(&Constant::String("@@private:0:x".to_owned())),
+            "the nested class reads the private key declared by Outer: {:?}",
+            program.constants
+        );
+        assert!(
+            !program
+                .constants
+                .contains(&Constant::String("@@private:1:x".to_owned())),
+            "the nested class must not invent a private key of its own"
+        );
+    }
+
+    #[test]
     fn a_class_constructor_inside_a_wrapper_captures_the_wrapper_binding() {
         let constructor = kiln_hir::Function {
             strict: false,
