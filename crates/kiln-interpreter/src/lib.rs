@@ -406,6 +406,8 @@ pub enum Native {
     NodeQueryStringParse,
     NodeUrl,
     NodeUrlParse,
+    NodeUrlFileUrlToPath,
+    NodeUrlPathToFileUrl,
     TextDecoderConstructor,
     TextDecoderDecode,
     NodeEventEmitter,
@@ -1333,6 +1335,8 @@ impl Native {
             (Self::NodeQueryString, "default") => Some(Value::Native(Self::NodeQueryString)),
             (Self::NodeUrl, "URL") => Some(Value::Native(Self::UrlConstructor)),
             (Self::NodeUrl, "parse") => Some(Value::Native(Self::NodeUrlParse)),
+            (Self::NodeUrl, "fileURLToPath") => Some(Value::Native(Self::NodeUrlFileUrlToPath)),
+            (Self::NodeUrl, "pathToFileURL") => Some(Value::Native(Self::NodeUrlPathToFileUrl)),
             (Self::NodeUrl, "default") => Some(Value::Native(Self::NodeUrl)),
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
@@ -5256,7 +5260,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
             "inspect",
         ],
         "querystring" => &["decode", "default", "parse"],
-        "url" => &["URL", "default", "parse"],
+        "url" => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
         _ => return None,
     })
 }
@@ -11307,6 +11311,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 RuntimeTurn::Completion(completion) => {
                     runtime.enter(|| self.settle_host_completion(completion))?;
                 }
+                RuntimeTurn::Failure(failure) => {
+                    return Err(ExecutionError::Host {
+                        instruction: self.instruction,
+                        message: failure.to_string(),
+                    });
+                }
                 RuntimeTurn::Timer(WorkItem::Timer { work: timer, .. }) => {
                     runtime.enter(|| {
                         self.call_value(
@@ -14808,6 +14818,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .map(Value::to_display_string)
                     .unwrap_or_default(),
             )),
+            Native::NodeUrlFileUrlToPath => {
+                let input = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                let path = input.strip_prefix("file://").ok_or_else(|| {
+                    ExecutionError::TypeErrorMessage {
+                        message: "fileURLToPath requires a file: URL".to_owned(),
+                    }
+                })?;
+                Ok(Value::String(decode_form_component(path)))
+            }
+            Native::NodeUrlPathToFileUrl => {
+                let path = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                let absolute = if path.starts_with('/') {
+                    path
+                } else {
+                    format!("/{path}")
+                };
+                Ok(url_object(parse_url(&format!("file://{absolute}"), None)?))
+            }
             Native::NodeQueryStringParse => Ok(node_querystring_parse(
                 &arguments
                     .first()
@@ -32886,6 +32920,8 @@ fn call_native(
         | Native::NodeQueryStringParse
         | Native::NodeUrl
         | Native::NodeUrlParse
+        | Native::NodeUrlFileUrlToPath
+        | Native::NodeUrlPathToFileUrl
         | Native::NodeNet
         | Native::NodeNetCreateServer
         | Native::NodeNetConnect
