@@ -705,6 +705,7 @@ static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size
 static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
 static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_value *out,
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_set_function_name(kiln_value function, kiln_value key,
 static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 typedef struct kiln_json_frame {
@@ -959,6 +960,7 @@ static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, con
 static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
 static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
+static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,

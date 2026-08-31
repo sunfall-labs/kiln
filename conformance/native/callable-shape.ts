@@ -32,13 +32,12 @@ console.log((function () {}).name, (() => {}).name);
 // are named too.
 const holder = { method(a: number) {}, arrow: (a: number) => a, ["computed"](a: number, b: number) {} };
 console.log(holder.method.name, holder.arrow.name, holder.computed.name, holder.computed.length);
-// A computed method key and a class's own methods are named "" in both engines where node names
-// them "computed", "make" and "area". That is the pair being wrong together -- a gap in how a
-// method's name is recorded, not a backend disagreement -- so it is recorded here rather than
-// hidden: this corpus asks whether the two engines agree, and `conformance/differential` is where
-// the same lines are measured against node. See NOTES.md.
+// A class's own methods take the key they were written under, computed or not, and so does an
+// accessor -- prefixed with the half it is. Both engines named them "" until the definition that
+// installs a method started naming it, which is the only place a computed key is known.
 class Shape { static make() {} area(): number { return 0; } get size(): number { return 1; } }
 console.log(Shape.name, Shape.length, Shape.make.name, Shape.prototype.area.name);
+console.log(Object.getOwnPropertyDescriptor(Shape.prototype, "size")!.get!.name);
 class WithFields { constructor(a: number, b: number) {} }
 console.log(WithFields.name, WithFields.length);
 
