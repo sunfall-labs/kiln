@@ -7,7 +7,9 @@
 
 use std::collections::VecDeque;
 
-use kiln_host_abi::RequestId;
+use kiln_host_abi::{
+    AsyncHostError, AsyncHostOp, AsyncHostValue, Completion, RequestId, ResourceId,
+};
 
 /// Default writable high-water mark used by Node byte streams.
 pub const DEFAULT_HIGH_WATER_MARK: usize = 16 * 1024;
@@ -18,7 +20,256 @@ pub enum StreamEvent {
     Drain,
     End,
     Finish,
+    Error,
     Close,
+}
+
+/// One side effect selected by [`StreamDriver`].
+///
+/// The caller performs host operations and publishes language events. That inversion is what
+/// lets a live Tokio host and a deterministic scripted host exercise exactly the same driver.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamAction {
+    Start(AsyncHostOp),
+    Data(Vec<u8>),
+    Event(StreamEvent),
+    Error(AsyncHostError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingKind {
+    Read,
+    Write,
+    Shutdown,
+    Close,
+    Ref,
+}
+
+/// Correlates host requests for one duplex resource and drives its Node-visible state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamDriver {
+    resource: ResourceId,
+    state: DuplexState<Vec<u8>>,
+    requests: Vec<(RequestId, PendingKind)>,
+    reading: bool,
+    read_size: usize,
+}
+
+impl StreamDriver {
+    pub fn new(resource: ResourceId, high_water_mark: usize) -> Self {
+        Self {
+            resource,
+            state: DuplexState::new(high_water_mark),
+            requests: Vec::new(),
+            reading: false,
+            read_size: high_water_mark.max(1),
+        }
+    }
+
+    pub const fn state(&self) -> &DuplexState<Vec<u8>> {
+        &self.state
+    }
+
+    pub fn start_reading(&mut self) -> Vec<StreamAction> {
+        self.reading = true;
+        self.next_read_action().into_iter().collect()
+    }
+
+    pub fn pause_reading(&mut self) {
+        self.reading = false;
+    }
+
+    pub fn write(&mut self, data: Vec<u8>) -> (WriteDisposition, Vec<StreamAction>) {
+        let disposition = self.state.enqueue_write(data.clone(), data.len());
+        let actions = if disposition.submit_now {
+            vec![StreamAction::Start(AsyncHostOp::TcpWrite {
+                stream: self.resource,
+                data,
+            })]
+        } else {
+            Vec::new()
+        };
+        (disposition, actions)
+    }
+
+    pub fn end(&mut self, data: Option<Vec<u8>>) -> (WriteDisposition, Vec<StreamAction>) {
+        let (disposition, mut actions) = match data {
+            Some(data) if !data.is_empty() => self.write(data),
+            _ => (
+                WriteDisposition {
+                    ready: true,
+                    submit_now: false,
+                },
+                Vec::new(),
+            ),
+        };
+        if self.state.request_end() {
+            actions.push(StreamAction::Start(AsyncHostOp::TcpShutdown {
+                stream: self.resource,
+            }));
+        }
+        (disposition, actions)
+    }
+
+    pub fn set_referenced(&self, referenced: bool) -> StreamAction {
+        StreamAction::Start(AsyncHostOp::SetResourceReferenced {
+            resource: self.resource,
+            referenced,
+        })
+    }
+
+    pub fn close(&self) -> StreamAction {
+        StreamAction::Start(AsyncHostOp::CloseResource {
+            resource: self.resource,
+        })
+    }
+
+    /// Associate the request identity returned for a selected host operation.
+    pub fn started(&mut self, operation: &AsyncHostOp, request: RequestId) -> bool {
+        let kind = match operation {
+            AsyncHostOp::TcpRead { stream, .. } if *stream == self.resource => PendingKind::Read,
+            AsyncHostOp::TcpWrite { stream, .. } if *stream == self.resource => {
+                if !self.state.write_started(request) {
+                    return false;
+                }
+                PendingKind::Write
+            }
+            AsyncHostOp::TcpShutdown { stream } if *stream == self.resource => {
+                PendingKind::Shutdown
+            }
+            AsyncHostOp::CloseResource { resource } if *resource == self.resource => {
+                PendingKind::Close
+            }
+            AsyncHostOp::SetResourceReferenced { resource, .. } if *resource == self.resource => {
+                PendingKind::Ref
+            }
+            _ => return false,
+        };
+        if self
+            .requests
+            .iter()
+            .any(|(existing, _)| *existing == request)
+        {
+            return false;
+        }
+        self.requests.push((request, kind));
+        true
+    }
+
+    /// Consume one completion if it belongs to this stream.
+    pub fn completed(&mut self, completion: Completion) -> Option<Vec<StreamAction>> {
+        let index = self
+            .requests
+            .iter()
+            .position(|(request, _)| *request == completion.request)?;
+        let (_, kind) = self.requests.remove(index);
+        let value = match completion.result {
+            Ok(value) => value,
+            Err(error) => {
+                let mut actions = vec![StreamAction::Error(error)];
+                actions.extend(
+                    self.state
+                        .close_resource()
+                        .into_iter()
+                        .map(StreamAction::Event),
+                );
+                return Some(actions);
+            }
+        };
+        let mut actions = Vec::new();
+        match kind {
+            PendingKind::Read => match value {
+                AsyncHostValue::Bytes(bytes) if bytes.is_empty() => {
+                    actions.extend(self.state.read_eof().into_iter().map(StreamAction::Event));
+                }
+                AsyncHostValue::Bytes(bytes) => {
+                    actions.push(StreamAction::Data(bytes));
+                    if let Some(read) = self.next_read_action() {
+                        actions.push(read);
+                    }
+                }
+                _ => actions.push(StreamAction::Error(unexpected_value("read"))),
+            },
+            PendingKind::Write => {
+                if !matches!(value, AsyncHostValue::Undefined) {
+                    actions.push(StreamAction::Error(unexpected_value("write")));
+                    return Some(actions);
+                }
+                let (events, submit_next) = self.state.write_completed(completion.request);
+                actions.extend(events.into_iter().map(StreamAction::Event));
+                if submit_next {
+                    let data = self
+                        .state
+                        .next_write()
+                        .expect("state selected a queued write")
+                        .clone();
+                    actions.push(StreamAction::Start(AsyncHostOp::TcpWrite {
+                        stream: self.resource,
+                        data,
+                    }));
+                } else if self.state.end_requested() && !self.state.write_closed() {
+                    actions.push(StreamAction::Start(AsyncHostOp::TcpShutdown {
+                        stream: self.resource,
+                    }));
+                }
+            }
+            PendingKind::Shutdown => {
+                if matches!(value, AsyncHostValue::Undefined) {
+                    actions.extend(
+                        self.state
+                            .shutdown_completed()
+                            .into_iter()
+                            .map(StreamAction::Event),
+                    );
+                } else {
+                    actions.push(StreamAction::Error(unexpected_value("shutdown")));
+                }
+            }
+            PendingKind::Close => {
+                if matches!(value, AsyncHostValue::Undefined) {
+                    actions.extend(
+                        self.state
+                            .close_resource()
+                            .into_iter()
+                            .map(StreamAction::Event),
+                    );
+                } else {
+                    actions.push(StreamAction::Error(unexpected_value("close")));
+                }
+            }
+            PendingKind::Ref => {
+                if !matches!(value, AsyncHostValue::Undefined) {
+                    actions.push(StreamAction::Error(unexpected_value("ref")));
+                }
+            }
+        }
+        Some(actions)
+    }
+
+    fn next_read_action(&self) -> Option<StreamAction> {
+        (self.reading
+            && !self.state.read_closed
+            && !self.state.resource_closed
+            && !self
+                .requests
+                .iter()
+                .any(|(_, kind)| matches!(kind, PendingKind::Read)))
+        .then(|| {
+            StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: self.resource,
+                max_bytes: self.read_size,
+            })
+        })
+    }
+}
+
+fn unexpected_value(syscall: &str) -> AsyncHostError {
+    AsyncHostError::new(
+        "ERR_KILN_HOST_VALUE",
+        syscall,
+        None,
+        "host returned an incompatible value for the stream operation",
+    )
 }
 
 /// Result of accepting one user write into the stream queue.
@@ -31,17 +282,18 @@ pub struct WriteDisposition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PendingWrite {
+struct PendingWrite<T> {
     bytes: usize,
+    payload: T,
     request: Option<RequestId>,
 }
 
 /// Node-visible state for one duplex byte stream.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DuplexState {
+pub struct DuplexState<T = Vec<u8>> {
     high_water_mark: usize,
     buffered_bytes: usize,
-    writes: VecDeque<PendingWrite>,
+    writes: VecDeque<PendingWrite<T>>,
     waiting_for_drain: bool,
     read_closed: bool,
     end_requested: bool,
@@ -49,13 +301,13 @@ pub struct DuplexState {
     resource_closed: bool,
 }
 
-impl Default for DuplexState {
+impl<T> Default for DuplexState<T> {
     fn default() -> Self {
         Self::new(DEFAULT_HIGH_WATER_MARK)
     }
 }
 
-impl DuplexState {
+impl<T> DuplexState<T> {
     pub fn new(high_water_mark: usize) -> Self {
         Self {
             high_water_mark,
@@ -81,6 +333,10 @@ impl DuplexState {
         self.write_closed
     }
 
+    pub const fn end_requested(&self) -> bool {
+        self.end_requested
+    }
+
     pub const fn resource_closed(&self) -> bool {
         self.resource_closed
     }
@@ -88,7 +344,7 @@ impl DuplexState {
     /// Queue one write. The adapter submits only the queue head and calls [`Self::write_started`]
     /// with its request identity; subsequent writes remain ordered without serialising Tokio's
     /// unrelated work.
-    pub fn enqueue_write(&mut self, bytes: usize) -> WriteDisposition {
+    pub fn enqueue_write(&mut self, payload: T, bytes: usize) -> WriteDisposition {
         if self.end_requested || self.write_closed || self.resource_closed {
             return WriteDisposition {
                 ready: false,
@@ -99,6 +355,7 @@ impl DuplexState {
         self.buffered_bytes = self.buffered_bytes.saturating_add(bytes);
         self.writes.push_back(PendingWrite {
             bytes,
+            payload,
             request: None,
         });
         let ready = self.buffered_bytes < self.high_water_mark;
@@ -115,6 +372,13 @@ impl DuplexState {
         }
         head.request = Some(request);
         true
+    }
+
+    pub fn next_write(&self) -> Option<&T> {
+        self.writes
+            .front()
+            .filter(|write| write.request.is_none())
+            .map(|write| &write.payload)
     }
 
     /// Complete the ordered queue head and return events plus whether another write is ready to
@@ -190,11 +454,142 @@ impl DuplexState {
 mod tests {
     use super::*;
 
+    fn completion(request: u64, value: AsyncHostValue) -> Completion {
+        Completion {
+            request: RequestId::new(request),
+            sequence: request,
+            result: Ok(value),
+        }
+    }
+
+    fn start(driver: &mut StreamDriver, action: &StreamAction, request: u64) {
+        let StreamAction::Start(operation) = action else {
+            panic!("expected host operation, got {action:?}");
+        };
+        assert!(driver.started(operation, RequestId::new(request)));
+    }
+
+    #[test]
+    fn driver_serialises_writes_and_shuts_down_only_after_the_queue_drains() {
+        let resource = ResourceId::new(9);
+        let mut driver = StreamDriver::new(resource, 4);
+        let (first, first_actions) = driver.write(b"abc".to_vec());
+        assert!(first.ready);
+        assert_eq!(
+            first_actions,
+            vec![StreamAction::Start(AsyncHostOp::TcpWrite {
+                stream: resource,
+                data: b"abc".to_vec(),
+            })]
+        );
+        start(&mut driver, &first_actions[0], 1);
+
+        let (second, second_actions) = driver.end(Some(b"de".to_vec()));
+        assert!(!second.ready);
+        assert!(second_actions.is_empty());
+        assert!(driver.state().end_requested());
+        assert_eq!(driver.state().buffered_bytes(), 5);
+
+        let actions = driver
+            .completed(completion(1, AsyncHostValue::Undefined))
+            .expect("write belongs to stream");
+        assert_eq!(
+            actions,
+            vec![
+                StreamAction::Event(StreamEvent::Drain),
+                StreamAction::Start(AsyncHostOp::TcpWrite {
+                    stream: resource,
+                    data: b"de".to_vec(),
+                }),
+            ]
+        );
+        start(&mut driver, &actions[1], 2);
+
+        let actions = driver
+            .completed(completion(2, AsyncHostValue::Undefined))
+            .expect("second write belongs to stream");
+        assert_eq!(
+            actions,
+            vec![StreamAction::Start(AsyncHostOp::TcpShutdown {
+                stream: resource,
+            })]
+        );
+        start(&mut driver, &actions[0], 3);
+        assert_eq!(
+            driver.completed(completion(3, AsyncHostValue::Undefined)),
+            Some(vec![StreamAction::Event(StreamEvent::Finish)])
+        );
+    }
+
+    #[test]
+    fn driver_keeps_one_read_in_flight_and_turns_eof_into_end() {
+        let resource = ResourceId::new(4);
+        let mut driver = StreamDriver::new(resource, 8);
+        let actions = driver.start_reading();
+        assert_eq!(
+            actions,
+            vec![StreamAction::Start(AsyncHostOp::TcpRead {
+                stream: resource,
+                max_bytes: 8,
+            })]
+        );
+        start(&mut driver, &actions[0], 10);
+        assert!(
+            driver.start_reading().is_empty(),
+            "one read stays in flight"
+        );
+
+        let actions = driver
+            .completed(completion(10, AsyncHostValue::Bytes(b"hello".to_vec())))
+            .expect("read belongs to stream");
+        assert_eq!(
+            actions,
+            vec![
+                StreamAction::Data(b"hello".to_vec()),
+                StreamAction::Start(AsyncHostOp::TcpRead {
+                    stream: resource,
+                    max_bytes: 8,
+                }),
+            ]
+        );
+        start(&mut driver, &actions[1], 11);
+        assert_eq!(
+            driver.completed(completion(11, AsyncHostValue::Bytes(Vec::new()))),
+            Some(vec![StreamAction::Event(StreamEvent::End)])
+        );
+        assert!(driver.state().read_closed());
+    }
+
+    #[test]
+    fn driver_ignores_foreign_completions_and_surfaces_host_errors() {
+        let resource = ResourceId::new(2);
+        let mut driver = StreamDriver::new(resource, 16);
+        let (_, actions) = driver.write(vec![1]);
+        start(&mut driver, &actions[0], 20);
+        assert_eq!(
+            driver.completed(completion(99, AsyncHostValue::Undefined)),
+            None
+        );
+        let error = AsyncHostError::new("EPIPE", "write", None, "broken pipe");
+        assert_eq!(
+            driver.completed(Completion {
+                request: RequestId::new(20),
+                sequence: 20,
+                result: Err(error.clone()),
+            }),
+            Some(vec![
+                StreamAction::Error(error),
+                StreamAction::Event(StreamEvent::Close),
+            ])
+        );
+        assert!(driver.state().resource_closed());
+    }
+
     #[test]
     fn high_water_mark_applies_to_total_queued_bytes_and_drain_fires_once() {
         let mut stream = DuplexState::new(8);
         assert_eq!(
-            stream.enqueue_write(4),
+            stream.enqueue_write(vec![0; 4], 4),
             WriteDisposition {
                 ready: true,
                 submit_now: true
@@ -202,7 +597,7 @@ mod tests {
         );
         assert!(stream.write_started(RequestId::new(1)));
         assert_eq!(
-            stream.enqueue_write(4),
+            stream.enqueue_write(vec![0; 4], 4),
             WriteDisposition {
                 ready: false,
                 submit_now: false
@@ -224,9 +619,9 @@ mod tests {
     #[test]
     fn writes_complete_strictly_in_submission_order() {
         let mut stream = DuplexState::default();
-        stream.enqueue_write(1);
+        stream.enqueue_write(vec![1], 1);
         stream.write_started(RequestId::new(10));
-        stream.enqueue_write(2);
+        stream.enqueue_write(vec![2; 2], 2);
         assert_eq!(
             stream.write_completed(RequestId::new(11)),
             (Vec::new(), false)
@@ -240,7 +635,7 @@ mod tests {
 
     #[test]
     fn natural_duplex_close_orders_end_finish_close() {
-        let mut stream = DuplexState::default();
+        let mut stream = DuplexState::<Vec<u8>>::default();
         assert!(stream.request_end());
         assert_eq!(stream.read_eof(), vec![StreamEvent::End]);
         assert_eq!(
@@ -254,7 +649,7 @@ mod tests {
 
     #[test]
     fn explicit_close_is_exactly_once() {
-        let mut stream = DuplexState::default();
+        let mut stream = DuplexState::<Vec<u8>>::default();
         assert_eq!(stream.close_resource(), vec![StreamEvent::Close]);
         assert!(stream.close_resource().is_empty());
         assert!(stream.read_eof().contains(&StreamEvent::End));

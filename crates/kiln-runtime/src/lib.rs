@@ -1983,6 +1983,128 @@ mod tests {
         }
     }
 
+    #[test]
+    fn node_stream_driver_runs_the_same_action_loop_on_live_tokio_sockets() {
+        use crate::node_stream::{StreamAction, StreamDriver, StreamEvent};
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match runtime
+            .next_host_completion()
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let port = listener.port.expect("ephemeral port assigned");
+        let accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        let connect = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            false,
+        );
+        let mut accepted = None;
+        let mut client = None;
+        for _ in 0..2 {
+            let completion = runtime
+                .next_host_completion()
+                .expect("connection completes");
+            if completion.request == accept {
+                accepted = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(accepted) => accepted.resource,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else if completion.request == connect {
+                client = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource,
+                    other => panic!("expected client stream, got {other:?}"),
+                });
+            }
+        }
+        let accepted = accepted.expect("accepted stream observed");
+        let client = client.expect("client stream observed");
+        let mut reader = StreamDriver::new(accepted.id, 16);
+        let mut writer = StreamDriver::new(client.id, 4);
+
+        let read = reader.start_reading().pop().expect("read action");
+        let StreamAction::Start(read_op) = &read else {
+            panic!("expected read operation");
+        };
+        let read_request = runtime.start_host_op(read_op.clone(), false);
+        assert!(reader.started(read_op, read_request));
+
+        let (_, actions) = writer.end(Some(b"hello".to_vec()));
+        assert_eq!(actions.len(), 1);
+        let StreamAction::Start(write_op) = &actions[0] else {
+            panic!("expected write operation");
+        };
+        let write_request = runtime.start_host_op(write_op.clone(), false);
+        assert!(writer.started(write_op, write_request));
+
+        let mut bytes = Vec::new();
+        let mut writer_events = Vec::new();
+        let mut reader_events = Vec::new();
+        while !writer.state().write_closed() || !reader.state().read_closed() {
+            let completion = runtime
+                .next_host_completion()
+                .expect("stream work completes");
+            let (owner_is_writer, actions) =
+                if let Some(actions) = writer.completed(completion.clone()) {
+                    (true, actions)
+                } else {
+                    (
+                        false,
+                        reader
+                            .completed(completion)
+                            .expect("completion belongs to a driver"),
+                    )
+                };
+            for action in actions {
+                match action {
+                    StreamAction::Start(operation) => {
+                        let request = runtime.start_host_op(operation.clone(), false);
+                        assert!(
+                            writer.started(&operation, request)
+                                || reader.started(&operation, request)
+                        );
+                    }
+                    StreamAction::Data(data) => bytes.extend(data),
+                    StreamAction::Event(event) => {
+                        if owner_is_writer {
+                            writer_events.push(event);
+                        } else {
+                            reader_events.push(event);
+                        }
+                    }
+                    StreamAction::Error(error) => panic!("unexpected stream error: {error}"),
+                }
+            }
+        }
+        assert_eq!(bytes, b"hello");
+        assert_eq!(writer_events, [StreamEvent::Drain, StreamEvent::Finish]);
+        assert_eq!(reader_events, [StreamEvent::End]);
+
+        for resource in [client.id, accepted.id, listener.id] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+            runtime.next_host_completion().expect("close completes");
+        }
+    }
+
     fn drive(realm: &mut Realm, events: &Rc<RefCell<Vec<String>>>) {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         runtime
