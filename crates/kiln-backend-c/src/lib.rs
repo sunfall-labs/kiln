@@ -9559,11 +9559,14 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             if (server->accept_request != 0) {
                 kiln_c99_node_cancel_request(&server->accept_request);
             }
-            if (!server->protocol_http) {
-                for (socket = server->sockets; socket != NULL; socket = socket->next) {
-                    status = kiln_c99_node_close_socket(socket, 1);
-                    if (status != KILN_C99_OK) return status;
-                }
+            for (socket = server->sockets; socket != NULL; socket = socket->next) {
+                // HTTP responses may still have a write in flight. The socket helper keeps
+                // that final write ordered before closing; for an idle keep-alive connection it
+                // cancels the read and closes immediately. This is the native equivalent of the
+                // interpreter's server-close drain, and prevents an accepted HTTP socket from
+                // retaining the realm after the listener has been closed.
+                status = kiln_c99_node_close_socket(socket, 0);
+                if (status != KILN_C99_OK) return status;
             }
             if (server->listener != 0) {
                 work = (kiln_node_completion *)calloc(1, sizeof *work);
