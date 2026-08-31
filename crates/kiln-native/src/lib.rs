@@ -734,8 +734,14 @@ impl NativeBuilder {
         let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
-        let object_options =
-            Digest::hash(format!("c11\0{}\0{}", identity.kind, profile.as_str()).as_bytes());
+        let object_options = Digest::hash(
+            format!(
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
+                identity.kind,
+                profile.as_str()
+            )
+            .as_bytes(),
+        );
         let application_key = key(
             ArtifactKind::NativeObject,
             &compiler,
@@ -989,7 +995,7 @@ impl NativeBuilder {
             self.cached_payload(&shared_source_key, &shared_module_source)?;
         let object_options = Digest::hash(
             format!(
-                "shared-library\0pic\0c11\0{}\0{}",
+                "shared-library\0pic\0c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
                 identity.kind,
                 profile.as_str()
             )
@@ -1521,8 +1527,14 @@ impl NativeBuilder {
         let (launcher_bytes, launcher_source_digest, launcher_generated_c_cache_hit) =
             self.cached_payload(&launcher_source_key, launcher.as_bytes())?;
 
-        let object_options =
-            Digest::hash(format!("c11\0{}\0{}", identity.kind, profile.as_str()).as_bytes());
+        let object_options = Digest::hash(
+            format!(
+                "c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
+                identity.kind,
+                profile.as_str()
+            )
+            .as_bytes(),
+        );
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             ..CompileOptions::default()
