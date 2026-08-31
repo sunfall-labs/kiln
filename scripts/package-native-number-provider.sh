@@ -71,9 +71,11 @@ kiln_provider_sha256_stream() {
 	fi
 }
 
-# The manifest advertises a portable generic CPU. RUSTFLAGS outranks Cargo config; removing the
-# encoded form prevents a caller's host-only flags from silently changing that deployment contract.
-KILN_PROVIDER_RUSTFLAGS="-C panic=abort -C relocation-model=pic -C target-cpu=generic -C debuginfo=0"
+# Keep this policy in lockstep with `PROVIDER_RUSTFLAGS` in `kiln-native::number_provider`. RUSTFLAGS
+# outranks Cargo config; removing the encoded form prevents a caller's host-only flags from silently
+# changing that deployment contract. The unwind policy is required because provider entries catch
+# Rust panics before returning across the private C ABI.
+KILN_PROVIDER_RUSTFLAGS="-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0"
 
 env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	RUSTC_WRAPPER= RUSTC_WORKSPACE_WRAPPER= \
@@ -126,7 +128,9 @@ KILN_PROVIDER_SOURCE_DIGEST=$(
 		crates/kiln-number-core/Cargo.toml \
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
-		crates/kiln-native-number-ffi/src/lib.rs; do
+		crates/kiln-native-number-ffi/src/lib.rs \
+		crates/kiln-runtime/Cargo.toml \
+		crates/kiln-runtime/src/lib.rs; do
 		KILN_PROVIDER_SIZE=$(wc -c <"$KILN_PROVIDER_SOURCE" | tr -d '[:space:]')
 		printf '%s\0%s\0' "$KILN_PROVIDER_SOURCE" "$KILN_PROVIDER_SIZE"
 		dd if="$KILN_PROVIDER_SOURCE" bs=65536 2>/dev/null
@@ -167,7 +171,7 @@ printf '%s\n' \
 	'  "cpu_features": "generic",' \
 	"  \"deployment\": \"$KILN_PROVIDER_DEPLOYMENT\"," \
 	"  \"libc_baseline\": \"$KILN_PROVIDER_LIBC\"," \
-	'  "exports": ["kiln_number_to_js_string", "kiln_string_to_number"]' \
+	'  "exports": ["kiln_realm_create", "kiln_realm_enter", "kiln_realm_is_active", "kiln_realm_now", "kiln_realm_queue_microtask", "kiln_realm_set_timeout", "kiln_realm_set_interval", "kiln_realm_clear_timer", "kiln_realm_drive", "kiln_realm_destroy", "kiln_number_to_js_string", "kiln_string_to_number", "kiln_regexp_compile", "kiln_regexp_free", "kiln_regexp_search", "kiln_regexp_group_count", "kiln_regexp_group_name", "kiln_bigint_parse", "kiln_bigint_from_double", "kiln_bigint_free", "kiln_bigint_to_double", "kiln_bigint_to_string", "kiln_bigint_binary", "kiln_bigint_negate", "kiln_bigint_compare", "kiln_bigint_is_zero"]' \
 	'}' >"$KILN_PROVIDER_MANIFEST_TEMP"
 
 mv -f "$KILN_PROVIDER_ARCHIVE_TEMP" "$KILN_PROVIDER_ARCHIVE"

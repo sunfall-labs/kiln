@@ -60,7 +60,9 @@ KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
 		crates/kiln-number-core/Cargo.toml \
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
-		crates/kiln-native-number-ffi/src/lib.rs; do
+		crates/kiln-native-number-ffi/src/lib.rs \
+		crates/kiln-runtime/Cargo.toml \
+		crates/kiln-runtime/src/lib.rs; do
 		KILN_NUMBER_SOURCE_SIZE=$(wc -c <"$KILN_NUMBER_SOURCE" | tr -d '[:space:]')
 		printf '%s\0%s\0' "$KILN_NUMBER_SOURCE" "$KILN_NUMBER_SOURCE_SIZE"
 		dd if="$KILN_NUMBER_SOURCE" bs=65536 2>/dev/null
