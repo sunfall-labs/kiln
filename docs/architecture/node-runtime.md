@@ -219,7 +219,10 @@ No Node API is advertised on native merely because its synchronous facade compil
 only when its continuations, resources, cancellation, and liveness enter the shared realm protocol.
 The canonical standalone acceptance case builds `conformance/server/s01-http-hello.mjs` through
 the public `kiln build --node` command, executes the emitted artifact, and requires the same output
-as interpreted Node mode. `bench/results/server-baseline.json` measures that artifact alongside
+as interpreted Node mode. The next vertical case, `s02-routing-json.mjs`, is also a maintained
+standalone acceptance case: it adds async routing, WHATWG URL/query parsing, JSON response bodies,
+and three sequential client requests without changing the scheduler or transport seam.
+`bench/results/server-baseline.json` measures the first artifact alongside
 Node, Deno, and Bun without making the comparison a CI gate.
 
 ## Migration sequence
