@@ -219,7 +219,8 @@ The architecture is migrated by deleting alternate ownership, not by building a 
 3. move stream/net/HTTP semantic machines above `kiln-runtime`, leaving Tokio transport below;
 4. implement the strict scripted provider and run the same state machines against both providers;
 5. attach generated native continuations to the same completion ingress and delete the generated-C
-   queues, timers, and event-loop ownership;
+   queues, timers, and event-loop ownership (the generic operation/resource ABI and shared
+   completion-vs-timer arbitration are complete; Node facade bindings remain);
 6. broaden the pinned Node inventory by real-server leverage, promoting only complete claims.
 
 At every step there is one authoritative owner for each concern. Temporary compatibility shims get

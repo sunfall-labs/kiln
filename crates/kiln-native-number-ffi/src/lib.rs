@@ -37,7 +37,9 @@ const RUNTIME_ERROR: i32 = -8;
 mod realm {
     use super::{INVALID_ARGUMENT, RUNTIME_ERROR};
     use core::ffi::c_void;
-    use kiln_host_abi::{AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId};
+    use kiln_host_abi::{
+        AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
+    };
     use kiln_runtime::{
         Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     };
@@ -65,6 +67,16 @@ mod realm {
         pub value_kind: u32,
         pub bytes: *const u8,
         pub bytes_len: u64,
+        pub value_u64: u64,
+        pub resource: u64,
+        pub resource_kind: u32,
+        pub resource_port: u32,
+        pub resource_flags: u32,
+        pub address: *const u8,
+        pub address_len: u64,
+        pub peer_address: *const u8,
+        pub peer_address_len: u64,
+        pub peer_port: u32,
         pub error_code: *const u8,
         pub error_code_len: u64,
         pub error_syscall: *const u8,
@@ -74,6 +86,51 @@ mod realm {
         pub error_message: *const u8,
         pub error_message_len: u64,
     }
+
+    /// Portable operation frame copied by the provider before submission returns.
+    ///
+    /// `text` carries a path or host, `bytes` carries a write buffer, `resource` names an existing
+    /// realm resource, and the two scalar arguments carry ports, read sizes, or booleans. The
+    /// operation tag decides which fields are meaningful; no Rust enum layout crosses this seam.
+    #[repr(C)]
+    pub struct HostOpView {
+        pub operation: u32,
+        pub flags: u32,
+        pub resource: u64,
+        pub argument: u64,
+        pub text: *const u8,
+        pub text_len: u64,
+        pub bytes: *const u8,
+        pub bytes_len: u64,
+    }
+
+    const OP_READ_FILE: u32 = 1;
+    const OP_WRITE_FILE: u32 = 2;
+    const OP_STAT: u32 = 3;
+    const OP_CLOSE_RESOURCE: u32 = 4;
+    const OP_SET_RESOURCE_REFERENCED: u32 = 5;
+    const OP_RESOURCE_STATE: u32 = 6;
+    const OP_TCP_LISTEN: u32 = 7;
+    const OP_TCP_ACCEPT: u32 = 8;
+    const OP_TCP_CONNECT: u32 = 9;
+    const OP_TCP_READ: u32 = 10;
+    const OP_TCP_WRITE: u32 = 11;
+    const OP_TCP_SHUTDOWN: u32 = 12;
+
+    const VALUE_UNDEFINED: u32 = 0;
+    const VALUE_BYTES: u32 = 1;
+    const VALUE_FILE_STAT: u32 = 2;
+    const VALUE_RESOURCE: u32 = 3;
+    const VALUE_RESOURCE_STATE: u32 = 4;
+    const VALUE_ACCEPTED_STREAM: u32 = 5;
+
+    const RESOURCE_LISTENER: u32 = 1;
+    const RESOURCE_STREAM: u32 = 2;
+    const FLAG_REFERENCED: u32 = 1 << 0;
+    const FLAG_READ_CLOSED: u32 = 1 << 1;
+    const FLAG_WRITE_CLOSED: u32 = 1 << 2;
+    const FLAG_FILE: u32 = 1 << 3;
+    const FLAG_DIRECTORY: u32 = 1 << 4;
 
     struct WorkOwner {
         pointer: *mut c_void,
@@ -130,6 +187,14 @@ mod realm {
         status: i32,
         value_kind: u32,
         bytes: Vec<u8>,
+        value_u64: u64,
+        resource: u64,
+        resource_kind: u32,
+        resource_port: u32,
+        resource_flags: u32,
+        address: Vec<u8>,
+        peer_address: Vec<u8>,
+        peer_port: u32,
         error_code: Vec<u8>,
         error_syscall: Vec<u8>,
         error_path: Vec<u8>,
@@ -137,31 +202,89 @@ mod realm {
     }
 
     impl CompletionPayload {
+        fn empty(request: RequestId, sequence: u64, value_kind: u32) -> Self {
+            Self {
+                request: request.get(),
+                sequence,
+                status: 0,
+                value_kind,
+                bytes: Vec::new(),
+                value_u64: 0,
+                resource: 0,
+                resource_kind: 0,
+                resource_port: 0,
+                resource_flags: 0,
+                address: Vec::new(),
+                peer_address: Vec::new(),
+                peer_port: 0,
+                error_code: Vec::new(),
+                error_syscall: Vec::new(),
+                error_path: Vec::new(),
+                error_message: Vec::new(),
+            }
+        }
+
+        fn resource_kind(kind: ResourceKind) -> u32 {
+            match kind {
+                ResourceKind::TcpListener => RESOURCE_LISTENER,
+                ResourceKind::TcpStream => RESOURCE_STREAM,
+            }
+        }
+
+        fn install_resource(&mut self, resource: kiln_host_abi::ResourceInfo) {
+            self.resource = resource.id.get();
+            self.resource_kind = Self::resource_kind(resource.kind);
+            self.resource_port = resource.port.map_or(0, u32::from);
+            self.address = resource.address.unwrap_or_default().into_bytes();
+        }
+
         fn from_result(
             request: RequestId,
             sequence: u64,
             result: Result<AsyncHostValue, AsyncHostError>,
         ) -> Self {
             match result {
-                Ok(AsyncHostValue::Bytes(bytes)) => Self {
-                    request: request.get(),
-                    sequence,
-                    status: 0,
-                    value_kind: 1,
-                    bytes,
-                    error_code: Vec::new(),
-                    error_syscall: Vec::new(),
-                    error_path: Vec::new(),
-                    error_message: Vec::new(),
-                },
-                Ok(_) => Self::error(
-                    request,
-                    sequence,
-                    "ERR_UNSUPPORTED",
-                    "read",
-                    None,
-                    "read file returned a non-byte value",
-                ),
+                Ok(AsyncHostValue::Undefined) => Self::empty(request, sequence, VALUE_UNDEFINED),
+                Ok(AsyncHostValue::Bytes(bytes)) => {
+                    let mut payload = Self::empty(request, sequence, VALUE_BYTES);
+                    payload.bytes = bytes;
+                    payload
+                }
+                Ok(AsyncHostValue::FileStat(stat)) => {
+                    let mut payload = Self::empty(request, sequence, VALUE_FILE_STAT);
+                    payload.value_u64 = stat.size;
+                    payload.resource_flags = if stat.is_file { FLAG_FILE } else { 0 }
+                        | if stat.is_directory { FLAG_DIRECTORY } else { 0 };
+                    payload
+                }
+                Ok(AsyncHostValue::Resource(resource)) => {
+                    let mut payload = Self::empty(request, sequence, VALUE_RESOURCE);
+                    payload.install_resource(resource);
+                    payload
+                }
+                Ok(AsyncHostValue::ResourceState(state)) => {
+                    let mut payload = Self::empty(request, sequence, VALUE_RESOURCE_STATE);
+                    payload.install_resource(state.info);
+                    payload.resource_flags = if state.referenced { FLAG_REFERENCED } else { 0 }
+                        | if state.read_closed {
+                            FLAG_READ_CLOSED
+                        } else {
+                            0
+                        }
+                        | if state.write_closed {
+                            FLAG_WRITE_CLOSED
+                        } else {
+                            0
+                        };
+                    payload
+                }
+                Ok(AsyncHostValue::AcceptedTcpStream(accepted)) => {
+                    let mut payload = Self::empty(request, sequence, VALUE_ACCEPTED_STREAM);
+                    payload.install_resource(accepted.resource);
+                    payload.peer_address = accepted.peer_address.into_bytes();
+                    payload.peer_port = u32::from(accepted.peer_port);
+                    payload
+                }
                 Err(error) => Self::error(
                     request,
                     sequence,
@@ -187,6 +310,14 @@ mod realm {
                 status: 1,
                 value_kind: 0,
                 bytes: Vec::new(),
+                value_u64: 0,
+                resource: 0,
+                resource_kind: 0,
+                resource_port: 0,
+                resource_flags: 0,
+                address: Vec::new(),
+                peer_address: Vec::new(),
+                peer_port: 0,
                 error_code: code.as_bytes().to_vec(),
                 error_syscall: syscall.as_bytes().to_vec(),
                 error_path: path.unwrap_or_default().as_bytes().to_vec(),
@@ -201,6 +332,8 @@ mod realm {
 
         fn view(&self) -> CompletionView {
             let (bytes, bytes_len) = Self::bytes_ptr_len(&self.bytes);
+            let (address, address_len) = Self::bytes_ptr_len(&self.address);
+            let (peer_address, peer_address_len) = Self::bytes_ptr_len(&self.peer_address);
             let (error_code, error_code_len) = Self::bytes_ptr_len(&self.error_code);
             let (error_syscall, error_syscall_len) = Self::bytes_ptr_len(&self.error_syscall);
             let (error_path, error_path_len) = Self::bytes_ptr_len(&self.error_path);
@@ -212,6 +345,16 @@ mod realm {
                 value_kind: self.value_kind,
                 bytes,
                 bytes_len,
+                value_u64: self.value_u64,
+                resource: self.resource,
+                resource_kind: self.resource_kind,
+                resource_port: self.resource_port,
+                resource_flags: self.resource_flags,
+                address,
+                address_len,
+                peer_address,
+                peer_address_len,
+                peer_port: self.peer_port,
                 error_code,
                 error_code_len,
                 error_syscall,
@@ -383,6 +526,68 @@ mod realm {
         let runtime = realm.runtime.as_ptr();
         let _active = ActiveRuntime::enter(runtime);
         realm.runtime.borrow_mut().enter(work)
+    }
+
+    unsafe fn borrowed_bytes<'a>(pointer: *const u8, length: u64) -> Option<&'a [u8]> {
+        let length = usize::try_from(length).ok()?;
+        if length == 0 {
+            return Some(&[]);
+        }
+        if pointer.is_null() {
+            return None;
+        }
+        // SAFETY: the FFI caller promises this byte span remains readable for the submission
+        // call; every operation copies it before returning.
+        Some(unsafe { std::slice::from_raw_parts(pointer, length) })
+    }
+
+    unsafe fn host_operation(view: &HostOpView) -> Option<AsyncHostOp> {
+        // SAFETY: the caller keeps both framed spans live for this call.
+        let text = unsafe { borrowed_bytes(view.text, view.text_len) }?;
+        // SAFETY: the caller keeps both framed spans live for this call.
+        let bytes = unsafe { borrowed_bytes(view.bytes, view.bytes_len) }?;
+        let text = std::str::from_utf8(text).ok()?.to_owned();
+        Some(match view.operation {
+            OP_READ_FILE => AsyncHostOp::ReadFile { path: text },
+            OP_WRITE_FILE => AsyncHostOp::WriteFile {
+                path: text,
+                data: bytes.to_vec(),
+            },
+            OP_STAT => AsyncHostOp::Stat { path: text },
+            OP_CLOSE_RESOURCE => AsyncHostOp::CloseResource {
+                resource: ResourceId::new(view.resource),
+            },
+            OP_SET_RESOURCE_REFERENCED => AsyncHostOp::SetResourceReferenced {
+                resource: ResourceId::new(view.resource),
+                referenced: view.argument != 0,
+            },
+            OP_RESOURCE_STATE => AsyncHostOp::ResourceState {
+                resource: ResourceId::new(view.resource),
+            },
+            OP_TCP_LISTEN => AsyncHostOp::TcpListen {
+                host: text,
+                port: u16::try_from(view.argument).ok()?,
+            },
+            OP_TCP_ACCEPT => AsyncHostOp::TcpAccept {
+                listener: ResourceId::new(view.resource),
+            },
+            OP_TCP_CONNECT => AsyncHostOp::TcpConnect {
+                host: text,
+                port: u16::try_from(view.argument).ok()?,
+            },
+            OP_TCP_READ => AsyncHostOp::TcpRead {
+                stream: ResourceId::new(view.resource),
+                max_bytes: usize::try_from(view.argument).ok()?,
+            },
+            OP_TCP_WRITE => AsyncHostOp::TcpWrite {
+                stream: ResourceId::new(view.resource),
+                data: bytes.to_vec(),
+            },
+            OP_TCP_SHUTDOWN => AsyncHostOp::TcpShutdown {
+                stream: ResourceId::new(view.resource),
+            },
+            _ => return None,
+        })
     }
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
@@ -590,8 +795,38 @@ mod realm {
         work: *mut c_void,
         out_request: *mut u64,
     ) -> i32 {
+        let operation = HostOpView {
+            operation: OP_READ_FILE,
+            flags: 0,
+            resource: 0,
+            argument: 0,
+            text: path,
+            text_len: path_len,
+            bytes: std::ptr::null(),
+            bytes_len: 0,
+        };
+        // SAFETY: this wrapper preserves the original path/callback ownership contract and the
+        // operation frame is live for the complete submission call.
+        unsafe {
+            kiln_realm_start_host_op(handle, &raw const operation, run, drop, work, out_request)
+        }
+    }
+
+    /// Starts one portable asynchronous host operation on the active Realm.
+    ///
+    /// Every pointer in `operation` is borrowed only for this call. The provider copies path,
+    /// host, and payload bytes before returning; continuation ownership transfers only on success.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_start_host_op(
+        handle: u64,
+        operation: *const HostOpView,
+        run: Option<RunCompletion>,
+        drop: Option<DropWork>,
+        work: *mut c_void,
+        out_request: *mut u64,
+    ) -> i32 {
         ffi(|| {
-            if path_len > usize::MAX as u64 || out_request.is_null() {
+            if operation.is_null() || out_request.is_null() {
                 return INVALID_ARGUMENT;
             }
             let Some(run) = run else {
@@ -606,19 +841,10 @@ mod realm {
             let Some(realm) = active_handle(handle) else {
                 return INVALID_ARGUMENT;
             };
-            let path_len = path_len as usize;
-            if path_len != 0 && path.is_null() {
-                return INVALID_ARGUMENT;
-            }
-            // SAFETY: the caller owns the path bytes for the duration of this call; the runtime
-            // copies them into its owned host operation before returning. The empty path avoids
-            // constructing a slice from a potentially null zero-length pointer.
-            let path = if path_len == 0 {
-                &[]
-            } else {
-                unsafe { std::slice::from_raw_parts(path, path_len) }
-            };
-            let Ok(path) = std::str::from_utf8(path) else {
+            // SAFETY: null was rejected and the operation frame is borrowed for this call.
+            let operation_view = unsafe { &*operation };
+            // SAFETY: both framed byte spans remain live until this submission returns.
+            let Some(operation) = (unsafe { host_operation(operation_view) }) else {
                 return INVALID_ARGUMENT;
             };
             let Some(runtime) = active_runtime() else {
@@ -626,12 +852,10 @@ mod realm {
             };
             // SAFETY: `runtime` is the active realm's runtime, and the callback runs synchronously
             // while the runtime's owned Tokio task is executing.
-            let request = unsafe { &mut *runtime }.start_host_op_in_context(
-                AsyncHostOp::ReadFile {
-                    path: path.to_owned(),
-                },
-                true,
-            );
+            // `flags & 1` is the generic request-liveness bit; zero leaves incidental inspection
+            // requests unreferenced while resource creation still records its own resource state.
+            let referenced = operation_view.flags & 1 != 0;
+            let request = unsafe { &mut *runtime }.start_host_op_in_context(operation, referenced);
             let continuation = AsyncContinuation {
                 pointer: work,
                 run,
@@ -835,6 +1059,113 @@ mod realm {
             read: ReadSubmission,
             order: *mut Vec<u8>,
             drops: *mut usize,
+        }
+
+        #[derive(Default)]
+        struct HostObservation {
+            status: i32,
+            request: u64,
+            sequence: u64,
+            value_kind: u32,
+            bytes: Vec<u8>,
+            value_u64: u64,
+            resource: u64,
+            resource_kind: u32,
+            resource_port: u32,
+            resource_flags: u32,
+            address: Vec<u8>,
+            peer_address: Vec<u8>,
+            peer_port: u32,
+            drops: usize,
+        }
+
+        struct HostWork {
+            observation: *mut HostObservation,
+        }
+
+        unsafe extern "C" fn record_host_completion(
+            work: *mut c_void,
+            completion: *const CompletionView,
+            _host: *mut c_void,
+            _thrown: *mut c_void,
+        ) -> i32 {
+            if work.is_null() || completion.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: this continuation and completion view are owned by the current request.
+            let target = unsafe { &mut *(*work.cast::<HostWork>()).observation };
+            // SAFETY: the runtime keeps the completion view and all referenced bytes live until
+            // this callback returns.
+            let completion = unsafe { &*completion };
+            target.status = completion.status;
+            target.request = completion.request;
+            target.sequence = completion.sequence;
+            target.value_kind = completion.value_kind;
+            target.value_u64 = completion.value_u64;
+            target.resource = completion.resource;
+            target.resource_kind = completion.resource_kind;
+            target.resource_port = completion.resource_port;
+            target.resource_flags = completion.resource_flags;
+            target.peer_port = completion.peer_port;
+            for (pointer, length, destination) in [
+                (completion.bytes, completion.bytes_len, &mut target.bytes),
+                (
+                    completion.address,
+                    completion.address_len,
+                    &mut target.address,
+                ),
+                (
+                    completion.peer_address,
+                    completion.peer_address_len,
+                    &mut target.peer_address,
+                ),
+            ] {
+                let length = usize::try_from(length).unwrap_or(usize::MAX);
+                if length != 0 && pointer.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: each completion byte span is borrowed for this callback.
+                *destination = unsafe { std::slice::from_raw_parts(pointer, length) }.to_vec();
+            }
+            0
+        }
+
+        unsafe extern "C" fn drop_host_work(work: *mut c_void) {
+            if work.is_null() {
+                return;
+            }
+            // SAFETY: the realm invokes the matching disposer exactly once.
+            let work = unsafe { Box::from_raw(work.cast::<HostWork>()) };
+            // SAFETY: the test observation outlives the request and realm.
+            unsafe {
+                (*work.observation).drops = (*work.observation).drops.saturating_add(1);
+            }
+        }
+
+        unsafe fn start_test_host_op(
+            handle: u64,
+            operation: &HostOpView,
+            observation: *mut HostObservation,
+            request: *mut u64,
+        ) -> i32 {
+            let work = Box::into_raw(Box::new(HostWork { observation })).cast::<c_void>();
+            // SAFETY: every pointer remains live through submission and the continuation targets
+            // remain live through realm drive.
+            let status = unsafe {
+                kiln_realm_start_host_op(
+                    handle,
+                    operation,
+                    Some(record_host_completion),
+                    Some(drop_host_work),
+                    work,
+                    request,
+                )
+            };
+            if status != 0 {
+                // SAFETY: ownership did not transfer on failure.
+                unsafe { drop_host_work(work) };
+            }
+            status
         }
 
         unsafe extern "C" fn record_read_completion(
@@ -1254,6 +1585,300 @@ mod realm {
             assert_eq!(kiln_realm_destroy(handle), 0);
             assert_eq!(timer_drops, 1);
             assert!(fs::remove_file(path).is_ok());
+        }
+
+        #[test]
+        fn generic_native_host_ops_exchange_live_tcp_bytes_and_resources() {
+            struct TcpExchange {
+                handle: u64,
+                stage: u8,
+                listener: HostObservation,
+                accepted: HostObservation,
+                client: HostObservation,
+                write: HostObservation,
+                read: HostObservation,
+                unref: HostObservation,
+                state: HostObservation,
+                close_listener: HostObservation,
+                close_client: HostObservation,
+                close_accepted: HostObservation,
+                requests: [u64; 10],
+            }
+
+            unsafe extern "C" fn submit_stage(context: *mut c_void) -> i32 {
+                if context.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: the test keeps this exchange live through every entry and drive.
+                let exchange = unsafe { &mut *context.cast::<TcpExchange>() };
+                let host = b"127.0.0.1";
+                match exchange.stage {
+                    0 => {
+                        let operation = HostOpView {
+                            operation: OP_TCP_LISTEN,
+                            flags: 1,
+                            resource: 0,
+                            argument: 0,
+                            text: host.as_ptr(),
+                            text_len: host.len() as u64,
+                            bytes: ptr::null(),
+                            bytes_len: 0,
+                        };
+                        // SAFETY: operation framing and callback targets are live.
+                        unsafe {
+                            start_test_host_op(
+                                exchange.handle,
+                                &operation,
+                                &raw mut exchange.listener,
+                                &raw mut exchange.requests[0],
+                            )
+                        }
+                    }
+                    1 => {
+                        let accept = HostOpView {
+                            operation: OP_TCP_ACCEPT,
+                            flags: 1,
+                            resource: exchange.listener.resource,
+                            argument: 0,
+                            text: ptr::null(),
+                            text_len: 0,
+                            bytes: ptr::null(),
+                            bytes_len: 0,
+                        };
+                        let connect = HostOpView {
+                            operation: OP_TCP_CONNECT,
+                            flags: 1,
+                            resource: 0,
+                            argument: u64::from(exchange.listener.resource_port),
+                            text: host.as_ptr(),
+                            text_len: host.len() as u64,
+                            bytes: ptr::null(),
+                            bytes_len: 0,
+                        };
+                        // SAFETY: both operations copy their frames before returning.
+                        let status = unsafe {
+                            start_test_host_op(
+                                exchange.handle,
+                                &accept,
+                                &raw mut exchange.accepted,
+                                &raw mut exchange.requests[1],
+                            )
+                        };
+                        if status != 0 {
+                            return status;
+                        }
+                        // SAFETY: callback targets remain live through the following drive.
+                        unsafe {
+                            start_test_host_op(
+                                exchange.handle,
+                                &connect,
+                                &raw mut exchange.client,
+                                &raw mut exchange.requests[2],
+                            )
+                        }
+                    }
+                    2 => {
+                        let bytes = b"native tcp";
+                        let write = HostOpView {
+                            operation: OP_TCP_WRITE,
+                            flags: 1,
+                            resource: exchange.client.resource,
+                            argument: 0,
+                            text: ptr::null(),
+                            text_len: 0,
+                            bytes: bytes.as_ptr(),
+                            bytes_len: bytes.len() as u64,
+                        };
+                        let read = HostOpView {
+                            operation: OP_TCP_READ,
+                            flags: 1,
+                            resource: exchange.accepted.resource,
+                            argument: 64,
+                            text: ptr::null(),
+                            text_len: 0,
+                            bytes: ptr::null(),
+                            bytes_len: 0,
+                        };
+                        // SAFETY: the write bytes are copied and callback targets remain live.
+                        let status = unsafe {
+                            start_test_host_op(
+                                exchange.handle,
+                                &read,
+                                &raw mut exchange.read,
+                                &raw mut exchange.requests[3],
+                            )
+                        };
+                        if status != 0 {
+                            return status;
+                        }
+                        // SAFETY: operation framing is live through submission.
+                        unsafe {
+                            start_test_host_op(
+                                exchange.handle,
+                                &write,
+                                &raw mut exchange.write,
+                                &raw mut exchange.requests[4],
+                            )
+                        }
+                    }
+                    3 => {
+                        let unref = HostOpView {
+                            operation: OP_SET_RESOURCE_REFERENCED,
+                            flags: 0,
+                            resource: exchange.client.resource,
+                            argument: 0,
+                            text: ptr::null(),
+                            text_len: 0,
+                            bytes: ptr::null(),
+                            bytes_len: 0,
+                        };
+                        // SAFETY: operation framing is live through submission.
+                        unsafe {
+                            start_test_host_op(
+                                exchange.handle,
+                                &unref,
+                                &raw mut exchange.unref,
+                                &raw mut exchange.requests[5],
+                            )
+                        }
+                    }
+                    4 => {
+                        let state = HostOpView {
+                            operation: OP_RESOURCE_STATE,
+                            flags: 0,
+                            resource: exchange.client.resource,
+                            argument: 0,
+                            text: ptr::null(),
+                            text_len: 0,
+                            bytes: ptr::null(),
+                            bytes_len: 0,
+                        };
+                        // SAFETY: operation framing is live through submission.
+                        unsafe {
+                            start_test_host_op(
+                                exchange.handle,
+                                &state,
+                                &raw mut exchange.state,
+                                &raw mut exchange.requests[6],
+                            )
+                        }
+                    }
+                    5 => {
+                        let resources = [
+                            (exchange.listener.resource, &raw mut exchange.close_listener),
+                            (exchange.client.resource, &raw mut exchange.close_client),
+                            (exchange.accepted.resource, &raw mut exchange.close_accepted),
+                        ];
+                        for (offset, (resource, observation)) in resources.into_iter().enumerate() {
+                            let close = HostOpView {
+                                operation: OP_CLOSE_RESOURCE,
+                                flags: 0,
+                                resource,
+                                argument: 0,
+                                text: ptr::null(),
+                                text_len: 0,
+                                bytes: ptr::null(),
+                                bytes_len: 0,
+                            };
+                            // SAFETY: each operation is copied and each callback target remains
+                            // live through the following drive.
+                            let status = unsafe {
+                                start_test_host_op(
+                                    exchange.handle,
+                                    &close,
+                                    observation,
+                                    &raw mut exchange.requests[7 + offset],
+                                )
+                            };
+                            if status != 0 {
+                                return status;
+                            }
+                        }
+                        0
+                    }
+                    _ => INVALID_ARGUMENT,
+                }
+            }
+
+            let mut handle = 0;
+            let mut exchange = TcpExchange {
+                handle: 0,
+                stage: 0,
+                listener: HostObservation::default(),
+                accepted: HostObservation::default(),
+                client: HostObservation::default(),
+                write: HostObservation::default(),
+                read: HostObservation::default(),
+                unref: HostObservation::default(),
+                state: HostObservation::default(),
+                close_listener: HostObservation::default(),
+                close_client: HostObservation::default(),
+                close_accepted: HostObservation::default(),
+                requests: [0; 10],
+            };
+            // SAFETY: handle and exchange storage remain live through the complete test.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            exchange.handle = handle;
+            let mut host = 0_u8;
+            let mut thrown = 0_u8;
+            for stage in 0..=5 {
+                exchange.stage = stage;
+                // SAFETY: callback and context satisfy their contracts.
+                assert_eq!(
+                    unsafe {
+                        kiln_realm_enter(
+                            handle,
+                            Some(submit_stage),
+                            (&raw mut exchange).cast::<c_void>(),
+                        )
+                    },
+                    0
+                );
+                // SAFETY: host and thrown slots remain live for every continuation in this drive.
+                assert_eq!(
+                    unsafe {
+                        kiln_realm_drive(
+                            handle,
+                            (&raw mut host).cast::<c_void>(),
+                            (&raw mut thrown).cast::<c_void>(),
+                        )
+                    },
+                    0
+                );
+            }
+
+            assert_eq!(exchange.listener.value_kind, VALUE_RESOURCE);
+            assert_eq!(exchange.listener.resource_kind, RESOURCE_LISTENER);
+            assert_eq!(exchange.listener.address, b"127.0.0.1");
+            assert_ne!(exchange.listener.resource_port, 0);
+            assert_eq!(exchange.accepted.value_kind, VALUE_ACCEPTED_STREAM);
+            assert_eq!(exchange.accepted.resource_kind, RESOURCE_STREAM);
+            assert_eq!(exchange.accepted.peer_address, b"127.0.0.1");
+            assert_eq!(exchange.client.value_kind, VALUE_RESOURCE);
+            assert_eq!(exchange.client.resource_kind, RESOURCE_STREAM);
+            assert_eq!(exchange.write.value_kind, VALUE_UNDEFINED);
+            assert_eq!(exchange.read.value_kind, VALUE_BYTES);
+            assert_eq!(exchange.read.bytes, b"native tcp");
+            assert_eq!(exchange.unref.value_kind, VALUE_UNDEFINED);
+            assert_eq!(exchange.state.value_kind, VALUE_RESOURCE_STATE);
+            assert_eq!(exchange.state.resource, exchange.client.resource);
+            assert_eq!(exchange.state.resource_kind, RESOURCE_STREAM);
+            assert_eq!(exchange.state.resource_flags & FLAG_REFERENCED, 0);
+            assert_eq!(exchange.close_listener.value_kind, VALUE_UNDEFINED);
+            assert_eq!(exchange.close_client.value_kind, VALUE_UNDEFINED);
+            assert_eq!(exchange.close_accepted.value_kind, VALUE_UNDEFINED);
+            assert!(exchange.requests.into_iter().all(|request| request != 0));
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(exchange.listener.drops, 1);
+            assert_eq!(exchange.accepted.drops, 1);
+            assert_eq!(exchange.client.drops, 1);
+            assert_eq!(exchange.write.drops, 1);
+            assert_eq!(exchange.read.drops, 1);
+            assert_eq!(exchange.unref.drops, 1);
+            assert_eq!(exchange.state.drops, 1);
+            assert_eq!(exchange.close_listener.drops, 1);
+            assert_eq!(exchange.close_client.drops, 1);
+            assert_eq!(exchange.close_accepted.drops, 1);
         }
 
         #[test]

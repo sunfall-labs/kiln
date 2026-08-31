@@ -1108,11 +1108,26 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 1
+#define KILN_REALM_ASYNC_ABI_VERSION 2
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
+#define KILN_REALM_ASYNC_UNDEFINED 0
 #define KILN_REALM_ASYNC_BYTES 1
+#define KILN_REALM_ASYNC_FILE_STAT 2
+#define KILN_REALM_ASYNC_RESOURCE 3
+#define KILN_REALM_ASYNC_RESOURCE_STATE 4
+#define KILN_REALM_ASYNC_ACCEPTED_STREAM 5
+typedef struct kiln_async_host_op {
+    uint32_t operation;
+    uint32_t flags;
+    uint64_t resource;
+    uint64_t argument;
+    const uint8_t *text;
+    uint64_t text_len;
+    const uint8_t *bytes;
+    uint64_t bytes_len;
+} kiln_async_host_op;
 typedef struct kiln_async_completion {
     uint64_t request;
     uint64_t sequence;
@@ -1120,6 +1135,16 @@ typedef struct kiln_async_completion {
     uint32_t value_kind;
     const uint8_t *bytes;
     uint64_t bytes_len;
+    uint64_t value_u64;
+    uint64_t resource;
+    uint32_t resource_kind;
+    uint32_t resource_port;
+    uint32_t resource_flags;
+    const uint8_t *address;
+    uint64_t address_len;
+    const uint8_t *peer_address;
+    uint64_t peer_address_len;
+    uint32_t peer_port;
     const uint8_t *error_code;
     uint64_t error_code_len;
     const uint8_t *error_syscall;
@@ -1146,6 +1171,9 @@ int kiln_realm_clear_timer(uint64_t id);
 int kiln_realm_read_file(uint64_t realm, const uint8_t *path, uint64_t path_len,
                          kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work,
                          uint64_t *out_request);
+int kiln_realm_start_host_op(uint64_t realm, const kiln_async_host_op *operation,
+                             kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work,
+                             uint64_t *out_request);
 int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
