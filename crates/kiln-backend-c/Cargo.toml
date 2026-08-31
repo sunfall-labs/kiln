@@ -9,6 +9,7 @@ repository.workspace = true
 kiln-host-abi = { workspace = true }
 kiln-ir = { workspace = true }
 kiln-native-number = { workspace = true }
+kiln-native-number-abi = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

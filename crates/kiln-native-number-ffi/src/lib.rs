@@ -3977,7 +3977,7 @@ mod realm {
         (realm, kiln_realm_http_server_attach_with_options_active, realm_http_attach_options) => {
             const _: unsafe extern "C" fn(u64, i32, Option<RunHttpEvent>, Option<DropWork>, *mut c_void) -> i32 = kiln_realm_http_server_attach_with_options_active;
         };
-        (realm, kiln_realm_http_server_close_active, realm_http_close) => {
+        (realm, kiln_realm_http_server_close_active, realm_http_close_mode) => {
             const _: unsafe extern "C" fn(u64, i32) -> i32 = kiln_realm_http_server_close_active;
         };
         (realm, kiln_realm_http_client_request_id_active, realm_http_request_id) => {
