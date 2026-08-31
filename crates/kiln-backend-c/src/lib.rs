@@ -7183,6 +7183,10 @@ static kiln_value kiln_c99_control_diagnostic(void) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_receiver_tag);
         (void)kiln_c99_text_append_c(&text, " receiver_tag=");
         (void)kiln_c99_text_append(&text, number, written);
+    } else if (kiln_c99_diagnostic_receiver_tag != 0) {
+        KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_receiver_tag);
+        (void)kiln_c99_text_append_c(&text, " receiver_tag=");
+        (void)kiln_c99_text_append(&text, number, written);
     }
 #undef KILN_DIAGNOSTIC_DECIMAL
     if (text.bytes == NULL) return kiln_c99_copy_text("unknown native operation", 24);
@@ -23747,15 +23751,11 @@ fn emit_instruction(
         guarded,
     } = emitter;
     let before = output.len();
-    writeln!(
-        output,
-        "    kiln_c99_diagnostic_site = {}; kiln_c99_diagnostic_instruction = (size_t){index}; kiln_c99_diagnostic_operation = \"{}\";",
-        c_string(diagnostic_site),
-        instruction_diagnostic(instruction, constants)
-    )
-    .unwrap();
-    output.push_str("    kiln_c99_diagnostic_has_method = 0;\n");
-    output.push_str("    kiln_c99_diagnostic_detail = NULL;\n");
+    let instruction_site = c_string(diagnostic_site);
+    let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
+    let control_refusal = format!(
+        "if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_site == NULL) {{ kiln_c99_diagnostic_site = {instruction_site}; kiln_c99_diagnostic_instruction = (size_t){index}; kiln_c99_diagnostic_operation = {instruction_operation}; }}"
+    );
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
@@ -24012,7 +24012,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, stack[sp - {argc} - 1], kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -24648,10 +24648,17 @@ fn emit_instruction(
     }
     if matches!(site, ReturnSite::Entry { .. }) {
         let emitted = &mut output[before..];
-        let replaced = emitted.replace(
-            "if (status != KILN_C99_OK) return status;",
-            "if (status == KILN_C99_CONTROL_ERROR) { kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; goto kiln_refusal; } if (status != KILN_C99_OK) return status;",
+        let reset = format!(
+            "kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; {instruction_site}"
         );
+        let replaced = emitted.replace(&instruction_site, &reset);
+        output.truncate(before);
+        output.push_str(&replaced);
+        let emitted = &mut output[before..];
+        let refusal = format!(
+            "{control_refusal} goto kiln_refusal; }} if (status != KILN_C99_OK) return status;"
+        );
+        let replaced = emitted.replace("if (status != KILN_C99_OK) return status;", &refusal);
         output.truncate(before);
         output.push_str(&replaced);
     }

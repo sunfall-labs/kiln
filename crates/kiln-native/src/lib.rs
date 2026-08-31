@@ -2367,7 +2367,11 @@ fn cache_identity(
 }
 
 fn module_abi_identity() -> String {
-    format!("host-{HOST_ABI_VERSION};c-{C_ABI_VERSION}")
+    // Generated modules carry the private value runtime in their translation unit today. Any
+    // change to that source therefore changes the object ABI even when the public scalar C ABI
+    // does not. Pin the generator revision here so a stale object can never be linked beside a
+    // freshly generated sibling merely because both still expose C ABI v1.
+    format!("host-{HOST_ABI_VERSION};c-{C_ABI_VERSION};generator-2")
 }
 
 fn runtime_abi_identity() -> String {
@@ -4699,7 +4703,7 @@ mod tests {
 
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
-        assert_eq!(module_abi_identity(), "host-2;c-1");
+        assert_eq!(module_abi_identity(), "host-2;c-1;generator-2");
         assert!(runtime_abi_identity().contains("async-4"));
         // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
         // would silently invalidate every cached native artifact. When the bump is intended,
@@ -7052,6 +7056,108 @@ int main(void) {{
                 },
             )
             .expect("shared graph builds");
+    }
+
+    #[test]
+    fn native_commonjs_callable_exports_cross_module_boundaries() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-commonjs-callable-export");
+        fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write package metadata");
+        fs::write(
+            root.path.join("callee.js"),
+            "module.exports = function answer(value) { return value + 1 }",
+        )
+        .expect("write callable CommonJS provider");
+        let entry = root.path.join("main.js");
+        fs::write(
+            &entry,
+            "const answer = require('./callee.js'); console.log(answer(41)); module.exports = answer(1);",
+        )
+        .expect("write callable CommonJS consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build CommonJS callable graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native CommonJS callable integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let report = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native CommonJS callable graph builds and runs");
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stderr={}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(report.stdout, b"42\n");
+    }
+
+    #[test]
+    fn native_commonjs_real_package_callable_executes_after_require() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        let package_root = workspace.join("conformance/server/packages");
+        let entry = package_root.join(format!(
+            ".kiln-native-safe-regex2-{}.mjs",
+            std::process::id()
+        ));
+        fs::write(
+            &entry,
+            "import safe from 'safe-regex2'; console.log(safe(/a+/));",
+        )
+        .expect("write package probe");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&package_root).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build real package graph");
+        let result = (|| {
+            let toolchain = Toolchain::discover().ok()?;
+            let cache = std::env::temp_dir().join(format!(
+                "kiln-native-safe-regex-cache-{}",
+                std::process::id()
+            ));
+            let builder = NativeBuilder::new(ArtifactCache::new(cache), toolchain);
+            Some(
+                builder.run_graph(
+                    &graph,
+                    &NativeBuildOptions {
+                        output: std::env::temp_dir()
+                            .join(format!("kiln-native-safe-regex-{}", std::process::id())),
+                        profile: NativeProfile::Dev,
+                        realm: NativeRealmPolicy::default(),
+                    },
+                ),
+            )
+        })();
+        fs::remove_file(&entry).expect("remove package probe");
+        let Some(report) = result else {
+            eprintln!("skipping real CommonJS package integration: no C compiler found");
+            return;
+        };
+        let report = report.expect("real CommonJS package runs natively");
+        assert_eq!(report.stdout, b"true\n");
     }
 
     #[test]
