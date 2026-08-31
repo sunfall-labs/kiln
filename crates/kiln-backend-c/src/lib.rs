@@ -292,7 +292,13 @@ enum kiln_value_tag {
      * extra behaviour: it can stand in front of an array or a function just as well, `typeof`
      * asks the thing behind it, and every property operation on it is a *call*. Nothing that
      * tests for one of the tags above may accidentally match it. */
-    KILN_VALUE_PROXY = 24
+    KILN_VALUE_PROXY = 24,
+    /* One of the eight `Temporal` types. bits holds the provider's opaque handle.
+     *
+     * A tag rather than an object because every one of them is immutable and every operation on
+     * one has to reach the engine anyway (ADR 0025): an object would be a second place for the
+     * state to live and a second thing to keep in step. */
+    KILN_VALUE_TEMPORAL = 25
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
@@ -358,6 +364,22 @@ enum kiln_value_tag {
 /* `Proxy` is a constructor and not a namespace: `typeof Proxy` is "function", and the only way
  * to reach one is `new`. */
 #define KILN_C99_BUILTIN_PROXY 52
+
+/* `Temporal`: the namespace, its eight types, and `Temporal.Now`.
+ *
+ * The eight are contiguous and in the provider's own kind order, so the code the provider takes is
+ * `builtin - KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE` rather than a translation table that could
+ * drift away from it. */
+#define KILN_C99_BUILTIN_TEMPORAL 53
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE 54
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME 55
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME 56
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH 57
+#define KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY 58
+#define KILN_C99_BUILTIN_TEMPORAL_DURATION 59
+#define KILN_C99_BUILTIN_TEMPORAL_INSTANT 60
+#define KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME 61
+#define KILN_C99_BUILTIN_TEMPORAL_NOW 62
 
 /* Array methods, part two.
  *
@@ -757,6 +779,22 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
+
+/* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
+ * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
+/* `from` and `compare` are one function per type in the language -- `Temporal.PlainDate.from`
+ * accepts a different bag from `Temporal.Duration.from` -- and the call path carries only the
+ * method code, not the value the method was reached through. So the kind rides in the code: the
+ * eight are contiguous and the base is subtracted to recover it. */
+#define KILN_C99_METHOD_TEMPORAL_FROM 285
+#define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
+#define KILN_C99_METHOD_TEMPORAL_COMPARE 293
+#define KILN_C99_METHOD_TEMPORAL_COMPARE_LAST 300
+#define KILN_C99_METHOD_TEMPORAL_TO_STRING 301
+#define KILN_C99_METHOD_TEMPORAL_TO_JSON 302
+#define KILN_C99_METHOD_TEMPORAL_VALUE_OF 303
+#define KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID 304
+#define KILN_C99_METHOD_TEMPORAL_LAST 304
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -1384,6 +1422,27 @@ int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *rig
 int32_t kiln_bigint_negate(const void *handle, void **out);
 int32_t kiln_bigint_compare(const void *left, const void *right);
 int32_t kiln_bigint_is_zero(const void *handle);
+/* `Temporal`, over the same `kiln-temporal` adapter the interpreter links (ADR 0025, ADR 0029 section 4).
+ *
+ * The handles are opaque and every readback is a scalar, exactly as the BigInt block above. The
+ * field reader is keyed by *name* because the adapter's own reader is: one call answers `year`,
+ * `daysInMonth` and `blank` alike, for all eight types, so there is no per-field C at all. */
+int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
+                                  const unsigned char *text, const int64_t *text_lengths,
+                                  size_t text_count, void **out_handle);
+int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
+                                           void **out_handle);
+int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
+                            void **out_handle);
+int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, void **out_handle);
+void kiln_temporal_free(void *handle);
+int32_t kiln_temporal_kind(const void *handle);
+int32_t kiln_temporal_get(const void *handle, const unsigned char *name, size_t name_len,
+                          double *out_number, unsigned char *buffer, size_t capacity,
+                          int32_t *out_length);
+int32_t kiln_temporal_to_string(const void *handle, unsigned char *buffer, size_t capacity);
+int32_t kiln_temporal_compare(const void *left, const void *right, int32_t *out_order);
+int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_t capacity);
 
 
 /* Forward declarations.
@@ -1400,6 +1459,20 @@ static kiln_value kiln_c99_boolean(int value);
 static kiln_value kiln_c99_number(double value);
 static kiln_value kiln_c99_uninitialized(void);
 static kiln_value kiln_c99_builtin(uint64_t code);
+static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found);
+static kiln_value kiln_c99_temporal_value(void *handle);
+static void *kiln_c99_temporal_of(kiln_value value);
+static int kiln_c99_temporal_raise(kiln_value *thrown, int32_t code);
+static int kiln_c99_temporal_string(kiln_value *out, kiln_value value, kiln_value *thrown);
+static const char *kiln_c99_temporal_tag(kiln_value value);
+static const char *kiln_c99_temporal_builtin_name(uint64_t builtin);
+static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin);
+static uint64_t kiln_c99_temporal_builtin_of(kiln_value value);
+static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
+                                         size_t member_len);
+static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    int depth, kiln_value *thrown);
 static kiln_value kiln_c99_method(uint64_t code);
 static kiln_value kiln_c99_function(kiln_closure *closure);
 static kiln_closure *kiln_c99_closure_of(kiln_value value);
@@ -2583,6 +2656,10 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REPLACE: return "replace";
     case KILN_C99_METHOD_REPLACE_ALL: return "replaceAll";
     case KILN_C99_METHOD_STRING_CONCAT: return "concat";
+    case KILN_C99_METHOD_TEMPORAL_TO_STRING: return "toString";
+    case KILN_C99_METHOD_TEMPORAL_TO_JSON: return "toJSON";
+    case KILN_C99_METHOD_TEMPORAL_VALUE_OF: return "valueOf";
+    case KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID: return "timeZoneId";
     case KILN_C99_METHOD_MATH_FLOOR: return "floor";
     case KILN_C99_METHOD_MATH_CEIL: return "ceil";
     case KILN_C99_METHOD_MATH_ROUND: return "round";
@@ -3077,6 +3154,16 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_BOOLEAN: return "Boolean";
     case KILN_C99_BUILTIN_REFLECT: return "Reflect";
     case KILN_C99_BUILTIN_PROXY: return "Proxy";
+    case KILN_C99_BUILTIN_TEMPORAL: return "Temporal";
+    case KILN_C99_BUILTIN_TEMPORAL_NOW: return "Now";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE: return "PlainDate";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME: return "PlainTime";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME: return "PlainDateTime";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH: return "PlainYearMonth";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY: return "PlainMonthDay";
+    case KILN_C99_BUILTIN_TEMPORAL_DURATION: return "Duration";
+    case KILN_C99_BUILTIN_TEMPORAL_INSTANT: return "Instant";
+    case KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME: return "ZonedDateTime";
     case KILN_C99_BUILTIN_OBJECT_PROTOTYPE: return "Object";
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE: return "Array";
     case KILN_C99_BUILTIN_ERROR_PROTOTYPE: return "Error";
@@ -3288,6 +3375,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"Math", KILN_C99_BUILTIN_MATH},
                         {"JSON", KILN_C99_BUILTIN_JSON},
                         {"Reflect", KILN_C99_BUILTIN_REFLECT},
+                        {"Temporal", KILN_C99_BUILTIN_TEMPORAL},
                         {"Proxy", KILN_C99_BUILTIN_PROXY},
                         {"Error", KILN_C99_BUILTIN_ERROR},
                         {"TypeError", KILN_C99_BUILTIN_TYPE_ERROR},
@@ -3369,6 +3457,32 @@ static int kiln_c99_global_object(kiln_value *out) {
     return KILN_C99_OK;
 }
 
+/* One binding of the realm's global object, for a name the compiler could not place.
+ *
+ * `found` stays 0 for a name that is genuinely absent, which is the caller's cue to throw. Only
+ * *own* properties count: the global object is the last place identifier resolution looks, and
+ * inheriting `toString` from `Object.prototype` would make a bare `toString` resolve. */
+static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t name_len, int *found) {
+    kiln_value globals;
+    kiln_object *object;
+    size_t slot;
+    int status = kiln_c99_global_object(&globals);
+    *found = 0;
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object = kiln_c99_object_of(globals);
+    for (slot = 0; slot < object->count; ++slot) {
+        if (object->properties[slot].key_len == name_len &&
+            memcmp(object->properties[slot].key, name, name_len) == 0) {
+            *out = object->properties[slot].value;
+            *found = 1;
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_OK;
+}
+
 /* A BigInt written out in `radix`.
  *
  * The provider owns the digits, so this asks twice: once for the length and once for the bytes.
@@ -3431,6 +3545,171 @@ static const void *kiln_c99_bigint_one(void) {
 /* Wrap a handle the provider just produced. */
 static kiln_value kiln_c99_bigint_value(void *handle) {
     return kiln_c99_value(KILN_VALUE_BIGINT, (uint64_t)(uintptr_t)handle, NULL, 0);
+}
+
+/* The `Temporal` handle, and the readback that keeps every crossing scalar.
+ *
+ * The engine is the same `kiln-temporal` the interpreter links (ADR 0025), so the two cannot
+ * disagree about a calendar. What is here is the object model around it, which stays in C for the
+ * reason the regexp match result does: it is the part that is already written once. */
+static kiln_value kiln_c99_temporal_value(void *handle) {
+    return kiln_c99_value(KILN_VALUE_TEMPORAL, (uint64_t)(uintptr_t)handle, NULL, 0);
+}
+
+static void *kiln_c99_temporal_of(kiln_value value) {
+    return (void *)(uintptr_t)value.bits;
+}
+
+/* Turn a provider failure into the error the engine chose.
+ *
+ * The class travels in the return code rather than being guessed from the message: `Temporal`
+ * distinguishes RangeError from TypeError from SyntaxError on nearly every path, and Test262
+ * checks the distinction, so a caller that collapsed them would be wrong in a way no probe that
+ * only prints values would notice. */
+static int kiln_c99_temporal_raise(kiln_value *thrown, int32_t code) {
+    char inline_buffer[192];
+    int32_t class_code = 0;
+    int32_t written = kiln_temporal_last_error(&class_code, (unsigned char *)inline_buffer,
+                                               sizeof inline_buffer - 1);
+    const char *message = "Temporal rejected this operation";
+    uint64_t kind = KILN_C99_BUILTIN_RANGE_ERROR;
+    char *spilled = NULL;
+    if (written < 0) {
+        /* The one negative answer says exactly how much it wanted, so a second call always fits. */
+        size_t wanted = (size_t)(-written);
+        spilled = (char *)malloc(wanted + 1);
+        if (spilled != NULL) {
+            written = kiln_temporal_last_error(&class_code, (unsigned char *)spilled, wanted);
+            if (written >= 0) {
+                spilled[written] = '\0';
+                message = spilled;
+            }
+        }
+    } else if (written > 0) {
+        inline_buffer[written] = '\0';
+        message = inline_buffer;
+    }
+    /* -1 is a violated argument contract rather than a rejection the program can see, and it has
+     * no message of its own; the classes below are the engine's own classification. */
+    if (class_code == -3) {
+        kind = KILN_C99_BUILTIN_TYPE_ERROR;
+    } else if (class_code == -4) {
+        kind = KILN_C99_BUILTIN_SYNTAX_ERROR;
+    }
+    (void)code;
+    {
+        int status = kiln_c99_throw_error(thrown, kind, message);
+        free(spilled);
+        return status;
+    }
+}
+
+/* A value's own ISO text, under the provider's one-retry length protocol. */
+static int kiln_c99_temporal_string(kiln_value *out, kiln_value value, kiln_value *thrown) {
+    char inline_buffer[128];
+    void *handle = kiln_c99_temporal_of(value);
+    int32_t written =
+        kiln_temporal_to_string(handle, (unsigned char *)inline_buffer, sizeof inline_buffer);
+    if (written >= 0) {
+        *out = kiln_c99_copy_text(inline_buffer, (size_t)written);
+        return KILN_C99_OK;
+    }
+    {
+        size_t wanted = (size_t)(-written);
+        char *spilled = (char *)malloc(wanted);
+        int status;
+        if (spilled == NULL) {
+            return kiln_c99_temporal_raise(thrown, written);
+        }
+        written = kiln_temporal_to_string(handle, (unsigned char *)spilled, wanted);
+        if (written < 0) {
+            free(spilled);
+            return kiln_c99_temporal_raise(thrown, written);
+        }
+        *out = kiln_c99_copy_text(spilled, (size_t)written);
+        status = KILN_C99_OK;
+        free(spilled);
+        return status;
+    }
+}
+
+/* Which of the eight types a constructor builtin stands for, or -1 if it is not one. */
+static int32_t kiln_c99_temporal_kind_of_builtin(uint64_t builtin) {
+    if (builtin < KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE ||
+        builtin > KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME) {
+        return -1;
+    }
+    return (int32_t)(builtin - KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE);
+}
+
+/* The constructor builtin for a live handle, which is what `constructor` and the tag both want. */
+static uint64_t kiln_c99_temporal_builtin_of(kiln_value value) {
+    int32_t kind = kiln_temporal_kind(kiln_c99_temporal_of(value));
+    if (kind < 0) {
+        return KILN_C99_BUILTIN_TEMPORAL;
+    }
+    return KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE + (uint64_t)kind;
+}
+
+/* `Symbol.toStringTag`, which every one of the eight carries and which decides how it prints. */
+static const char *kiln_c99_temporal_tag(kiln_value value) {
+    switch (kiln_c99_temporal_builtin_of(value)) {
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE: return "Temporal.PlainDate";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME: return "Temporal.PlainTime";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME: return "Temporal.PlainDateTime";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH: return "Temporal.PlainYearMonth";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY: return "Temporal.PlainMonthDay";
+    case KILN_C99_BUILTIN_TEMPORAL_DURATION: return "Temporal.Duration";
+    case KILN_C99_BUILTIN_TEMPORAL_INSTANT: return "Temporal.Instant";
+    case KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME: return "Temporal.ZonedDateTime";
+    default: return "Temporal";
+    }
+}
+
+/* The name a `Temporal` constructor answers to, for `.name` and for a refusal that says which. */
+static const char *kiln_c99_temporal_builtin_name(uint64_t builtin) {
+    switch (builtin) {
+    case KILN_C99_BUILTIN_TEMPORAL: return "Temporal";
+    case KILN_C99_BUILTIN_TEMPORAL_NOW: return "Temporal.Now";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE: return "Temporal.PlainDate";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME: return "Temporal.PlainTime";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME: return "Temporal.PlainDateTime";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH: return "Temporal.PlainYearMonth";
+    case KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY: return "Temporal.PlainMonthDay";
+    case KILN_C99_BUILTIN_TEMPORAL_DURATION: return "Temporal.Duration";
+    case KILN_C99_BUILTIN_TEMPORAL_INSTANT: return "Temporal.Instant";
+    case KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME: return "Temporal.ZonedDateTime";
+    default: return NULL;
+    }
+}
+
+/* A member that is there in the language and not here yet.
+ *
+ * It refuses *by name* rather than reading as `undefined`, because an undefined member turns into
+ * "x is not a function" three frames away, and the whole point of the two-engine arrangement is
+ * that a gap announces itself as a gap. */
+static int kiln_c99_temporal_unsupported(kiln_value *thrown, const char *owner, const char *member,
+                                         size_t member_len) {
+    char message[192];
+    size_t at = 0;
+    const char *prefix = "unsupported Temporal member: ";
+    while (*prefix != '\0' && at + 1 < sizeof message) {
+        message[at++] = *prefix++;
+    }
+    while (*owner != '\0' && at + 1 < sizeof message) {
+        message[at++] = *owner++;
+    }
+    if (at + 1 < sizeof message) {
+        message[at++] = '.';
+    }
+    {
+        size_t index;
+        for (index = 0; index < member_len && at + 1 < sizeof message; ++index) {
+            message[at++] = member[index];
+        }
+    }
+    message[at] = '\0';
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, message);
 }
 
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value) {
@@ -3588,6 +3867,11 @@ static uint64_t kiln_c99_callable_method(const char *key, size_t key_len) {
 /* A namespace is an object holding functions rather than a callable, which decides both how it
  * prints and what `typeof` answers about it. */
 static int kiln_c99_is_namespace(uint64_t builtin) {
+    /* `Temporal` and `Temporal.Now` hold functions rather than being callable; the eight types are
+     * constructors and are not namespaces. */
+    if (builtin == KILN_C99_BUILTIN_TEMPORAL || builtin == KILN_C99_BUILTIN_TEMPORAL_NOW) {
+        return 1;
+    }
     return builtin == KILN_C99_BUILTIN_MATH || builtin == KILN_C99_BUILTIN_JSON ||
            builtin == KILN_C99_BUILTIN_REFLECT ||
            builtin == KILN_C99_BUILTIN_OBJECT_PROTOTYPE ||
@@ -5633,6 +5917,85 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         return kiln_c99_get(host, closure->properties, key, key_len, out, depth, thrown);
     }
+    case KILN_VALUE_TEMPORAL: {
+        /* Every calendar and wall-clock field of all eight types comes through one name-keyed call
+         * into the engine, so there is no per-field code here and no second table to drift. */
+        char inline_buffer[64];
+        double number = 0.0;
+        int32_t length = 0;
+        int32_t shape = kiln_temporal_get(kiln_c99_temporal_of(target),
+                                          (const unsigned char *)key, key_len, &number,
+                                          (unsigned char *)inline_buffer, sizeof inline_buffer,
+                                          &length);
+        switch (shape) {
+        case 1:
+            *out = kiln_c99_number(number);
+            return KILN_C99_OK;
+        case 3:
+            *out = kiln_c99_boolean(number != 0.0);
+            return KILN_C99_OK;
+        case 4:
+            /* The property exists and its answer is `undefined` -- `weekOfYear` in a calendar with
+             * no week numbering. Not the same as having no such property. */
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        case 2:
+            if (length >= 0) {
+                *out = kiln_c99_copy_text(inline_buffer, (size_t)length);
+                return KILN_C99_OK;
+            }
+            {
+                size_t wanted = (size_t)(-length);
+                char *spilled = (char *)malloc(wanted);
+                if (spilled == NULL) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                shape = kiln_temporal_get(kiln_c99_temporal_of(target),
+                                          (const unsigned char *)key, key_len, &number,
+                                          (unsigned char *)spilled, wanted, &length);
+                if (shape != 2 || length < 0) {
+                    free(spilled);
+                    return KILN_C99_CONTROL_ERROR;
+                }
+                *out = kiln_c99_copy_text(spilled, (size_t)length);
+                free(spilled);
+                return KILN_C99_OK;
+            }
+        case 5:
+            /* `epochNanoseconds`, which only a BigInt can hold. Refused by name rather than
+             * rounded through a double, because a rounded answer is a wrong answer that prints. */
+            return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), key,
+                                                 key_len);
+        default:
+            break;
+        }
+        if (kiln_c99_same_name(key, key_len, "toString") ||
+            kiln_c99_same_name(key, key_len, "toLocaleString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_TO_STRING);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "toJSON")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_TO_JSON);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_VALUE_OF);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+            const char *tag = kiln_c99_temporal_tag(target);
+            *out = kiln_c99_copy_text(tag, strlen(tag));
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(kiln_c99_temporal_builtin_of(target));
+            return KILN_C99_OK;
+        }
+        /* The arithmetic and conversion surface -- `add`, `until`, `round`, `with`, `equals`,
+         * `toPlainDate` and their siblings. Every one exists in the language, so each refuses by
+         * name; reading `undefined` would surface three frames away as "not a function". */
+        return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), key, key_len);
+    }
     case KILN_VALUE_REGEXP: {
         kiln_regexp *regexp = kiln_c99_regexp_of(target);
         size_t index;
@@ -6002,6 +6365,94 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         return KILN_C99_CONTROL_ERROR;
     }
     case KILN_VALUE_BUILTIN: {
+        /* `Temporal` first, because the namespace tables below are keyed by method name and every
+         * name here is a *value*: `Temporal.PlainDate` is a constructor, not a function to call. */
+        if (target.bits == KILN_C99_BUILTIN_TEMPORAL) {
+            static const struct {
+                const char *name;
+                uint64_t builtin;
+            } types[] = {{"PlainDate", KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE},
+                         {"PlainTime", KILN_C99_BUILTIN_TEMPORAL_PLAIN_TIME},
+                         {"PlainDateTime", KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE_TIME},
+                         {"PlainYearMonth", KILN_C99_BUILTIN_TEMPORAL_PLAIN_YEAR_MONTH},
+                         {"PlainMonthDay", KILN_C99_BUILTIN_TEMPORAL_PLAIN_MONTH_DAY},
+                         {"Duration", KILN_C99_BUILTIN_TEMPORAL_DURATION},
+                         {"Instant", KILN_C99_BUILTIN_TEMPORAL_INSTANT},
+                         {"ZonedDateTime", KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME},
+                         {"Now", KILN_C99_BUILTIN_TEMPORAL_NOW}};
+            size_t index;
+            for (index = 0; index < sizeof types / sizeof *types; ++index) {
+                if (kiln_c99_same_name(key, key_len, types[index].name)) {
+                    *out = kiln_c99_builtin(types[index].builtin);
+                    return KILN_C99_OK;
+                }
+            }
+            if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+                *out = kiln_c99_copy_text("Temporal", 8);
+                return KILN_C99_OK;
+            }
+            /* A name the namespace does not have is `undefined`, as it is on any object -- the
+             * refusal below is for the ones that *do* exist and are not wired yet. */
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        if (target.bits == KILN_C99_BUILTIN_TEMPORAL_NOW) {
+            /* `Temporal.Now` reads the realm's clock, which ADR 0015 makes virtual and UTC. The
+             * timezone is answerable without one; the five readers are not, because the clock this
+             * backend can reach carries milliseconds and the interpreter feeds the engine
+             * nanoseconds -- so wiring them from it would make the two engines disagree below the
+             * millisecond rather than refuse. */
+            if (kiln_c99_same_name(key, key_len, "timeZoneId")) {
+                /* A function the program calls, not a string it reads. */
+                *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_same_name(key, key_len, "instant") ||
+                kiln_c99_same_name(key, key_len, "plainDateISO") ||
+                kiln_c99_same_name(key, key_len, "plainTimeISO") ||
+                kiln_c99_same_name(key, key_len, "plainDateTimeISO") ||
+                kiln_c99_same_name(key, key_len, "zonedDateTimeISO")) {
+                return kiln_c99_temporal_unsupported(thrown, "Temporal.Now", key, key_len);
+            }
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        {
+            int32_t constructed = kiln_c99_temporal_kind_of_builtin(target.bits);
+            if (constructed >= 0) {
+                if (kiln_c99_same_name(key, key_len, "from")) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_FROM +
+                                           (uint64_t)constructed);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name(key, key_len, "compare")) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_TEMPORAL_COMPARE +
+                                           (uint64_t)constructed);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name(key, key_len, "name")) {
+                    const char *name = kiln_c99_temporal_builtin_name(target.bits);
+                    /* The bare type name, as `Temporal.PlainDate.name` answers -- not the dotted
+                     * spelling the tag uses. */
+                    const char *bare = name == NULL ? NULL : strchr(name, '.');
+                    bare = bare == NULL ? name : bare + 1;
+                    *out = bare == NULL ? kiln_c99_undefined()
+                                        : kiln_c99_copy_text(bare, strlen(bare));
+                    return KILN_C99_OK;
+                }
+                /* `prototype` and the rest of the static surface exist in the language and are not
+                 * here, so they say which rather than reading as undefined. */
+                if (kiln_c99_same_name(key, key_len, "prototype") ||
+                    kiln_c99_same_name(key, key_len, "fromEpochMilliseconds") ||
+                    kiln_c99_same_name(key, key_len, "fromEpochNanoseconds")) {
+                    const char *owner = kiln_c99_temporal_builtin_name(target.bits);
+                    return kiln_c99_temporal_unsupported(thrown, owner == NULL ? "Temporal" : owner,
+                                                         key, key_len);
+                }
+                *out = kiln_c99_undefined();
+                return KILN_C99_OK;
+            }
+        }
         {
             kiln_typed_kind typed_kind;
             int concrete = kiln_c99_typed_prototype_kind(target.bits, &typed_kind);
@@ -8795,6 +9246,252 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
 
 
 
+/* The calendar and wall-clock field names, in the order the specification reads them.
+ *
+ * The order is observable: each name is a property *read*, a getter can run, and Test262 checks
+ * the sequence. It is the same list the interpreter walks, for the same reason. `slot` is where the
+ * value lands in the provider's numeric array, or -1 for the five that are text. */
+typedef struct kiln_temporal_key {
+    const char *name;
+    int slot;
+    int text_slot;
+} kiln_temporal_key;
+
+static const kiln_temporal_key KILN_C99_TEMPORAL_FIELD_KEYS[15] = {
+    {"calendar", -1, 4},   {"day", 3, -1},        {"era", -1, 0},
+    {"eraYear", 0, -1},    {"hour", 4, -1},       {"microsecond", 8, -1},
+    {"millisecond", 7, -1},{"minute", 5, -1},     {"month", 2, -1},
+    {"monthCode", -1, 1},  {"nanosecond", 9, -1}, {"offset", -1, 2},
+    {"second", 6, -1},     {"timeZone", -1, 3},   {"year", 1, -1}};
+
+/* The ten duration components, in the order the specification reads those. */
+static const kiln_temporal_key KILN_C99_TEMPORAL_DURATION_KEYS[10] = {
+    {"days", 3, -1},         {"hours", 4, -1},       {"microseconds", 8, -1},
+    {"milliseconds", 7, -1}, {"minutes", 5, -1},     {"months", 1, -1},
+    {"nanoseconds", 9, -1},  {"seconds", 6, -1},     {"weeks", 2, -1},
+    {"years", 0, -1}};
+
+/* One text slot: the bytes a field carried, owned by the packing buffer below. */
+typedef struct kiln_temporal_text {
+    const char *bytes;
+    int64_t length;
+} kiln_temporal_text;
+
+/* Read a bag into the provider's two arrays, in the specified order.
+ *
+ * The reads happen here rather than behind the boundary because they are observable, and a
+ * boundary that took the object could not express that. */
+static int kiln_c99_temporal_read_bag(kiln_host *host, kiln_value bag, int duration,
+                                      double *numbers, kiln_temporal_text *texts, int depth,
+                                      kiln_value *thrown) {
+    const kiln_temporal_key *keys =
+        duration ? KILN_C99_TEMPORAL_DURATION_KEYS : KILN_C99_TEMPORAL_FIELD_KEYS;
+    size_t count = duration ? 10u : 15u;
+    size_t index;
+    int touched = 0;
+    for (index = 0; index < count; ++index) {
+        kiln_value read;
+        int status = kiln_c99_get(host, bag, keys[index].name, strlen(keys[index].name), &read,
+                                  depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (read.tag == KILN_VALUE_UNDEFINED) {
+            continue;
+        }
+        touched = 1;
+        if (keys[index].text_slot >= 0) {
+            kiln_value text = kiln_c99_text(read);
+            if (text.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            texts[keys[index].text_slot].bytes = text.ptr;
+            texts[keys[index].text_slot].length = (int64_t)text.len;
+            continue;
+        }
+        {
+            double number;
+            status = kiln_c99_to_number_checked(host, read, &number, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* NaN is the provider's "absent", so a field that really is NaN has to be rejected
+             * here rather than silently dropped -- the language throws for one anyway. */
+            if (number != number) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "a Temporal field cannot be NaN");
+            }
+            numbers[keys[index].slot] = number;
+        }
+    }
+    if (!touched) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "a Temporal bag needs at least one recognized field");
+    }
+    return KILN_C99_OK;
+}
+
+/* Pack the six text slots into the one buffer the provider takes, and build the value. */
+static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
+                                   const kiln_temporal_text *texts, kiln_value *out,
+                                   kiln_value *thrown) {
+    int64_t lengths[6];
+    size_t total = 0;
+    size_t slot;
+    char *packed;
+    void *handle = NULL;
+    int32_t answered;
+    for (slot = 0; slot < 6; ++slot) {
+        lengths[slot] = texts[slot].bytes == NULL ? -1 : texts[slot].length;
+        if (lengths[slot] > 0) {
+            total += (size_t)lengths[slot];
+        }
+    }
+    packed = (char *)malloc(total == 0 ? 1 : total);
+    if (packed == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    {
+        size_t at = 0;
+        for (slot = 0; slot < 6; ++slot) {
+            if (lengths[slot] > 0) {
+                memcpy(packed + at, texts[slot].bytes, (size_t)lengths[slot]);
+                at += (size_t)lengths[slot];
+            }
+        }
+    }
+    if (kind == 5) {
+        answered = kiln_temporal_duration_from_fields(numbers, 10, &handle);
+    } else {
+        answered = kiln_temporal_from_fields((uint32_t)kind, numbers, 10,
+                                             (const unsigned char *)packed, lengths, 6, &handle);
+    }
+    free(packed);
+    if (answered != 0) {
+        return kiln_c99_temporal_raise(thrown, answered);
+    }
+    *out = kiln_c99_temporal_value(handle);
+    return KILN_C99_OK;
+}
+
+/* `Temporal.X.from(item)`: a value of the same type, ISO text, or a bag of fields. */
+static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value item,
+                                    kiln_value options, kiln_value *out, int depth,
+                                    kiln_value *thrown) {
+    double numbers[10];
+    kiln_temporal_text texts[6];
+    size_t index;
+    int status;
+    for (index = 0; index < 10; ++index) {
+        numbers[index] = 0.0 / 0.0;
+    }
+    for (index = 0; index < 6; ++index) {
+        texts[index].bytes = NULL;
+        texts[index].length = -1;
+    }
+    if (item.tag == KILN_VALUE_TEMPORAL) {
+        /* Same type in, same value out: every one of them is immutable, so there is nothing to
+         * copy. A *different* type is a TypeError, which the engine reports when asked. */
+        if (kiln_temporal_kind(kiln_c99_temporal_of(item)) == kind) {
+            *out = item;
+            return KILN_C99_OK;
+        }
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Temporal.from received a different Temporal type");
+    }
+    if (item.tag == KILN_VALUE_STRING) {
+        void *handle = NULL;
+        int32_t answered = kiln_temporal_parse((uint32_t)kind, (const unsigned char *)item.ptr,
+                                               item.len, &handle);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *out = kiln_c99_temporal_value(handle);
+        return KILN_C99_OK;
+    }
+    if (item.tag != KILN_VALUE_OBJECT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Temporal.from needs an object or an ISO string");
+    }
+    status = kiln_c99_temporal_read_bag(host, item, kind == 5, numbers, texts, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    /* `overflow` is read after the fields, which is the order the specification puts it in. */
+    if (options.tag == KILN_VALUE_OBJECT) {
+        kiln_value read;
+        status = kiln_c99_get(host, options, "overflow", 8, &read, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (read.tag != KILN_VALUE_UNDEFINED) {
+            kiln_value text = kiln_c99_text(read);
+            if (text.tag != KILN_VALUE_STRING) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            texts[5].bytes = text.ptr;
+            texts[5].length = (int64_t)text.len;
+        }
+    }
+    return kiln_c99_temporal_build(kind, numbers, texts, out, thrown);
+}
+
+/* The `Temporal` methods this backend answers. Everything else refuses by name where it is read. */
+static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    int depth, kiln_value *thrown) {
+    if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_FROM_LAST) {
+        int32_t kind = (int32_t)(code - KILN_C99_METHOD_TEMPORAL_FROM);
+        kiln_value item = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value options = argc > 1 ? args[1] : kiln_c99_undefined();
+        return kiln_c99_temporal_coerce(host, kind, item, options, result, depth, thrown);
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_COMPARE &&
+        code <= KILN_C99_METHOD_TEMPORAL_COMPARE_LAST) {
+        int32_t kind = (int32_t)(code - KILN_C99_METHOD_TEMPORAL_COMPARE);
+        kiln_value left;
+        kiln_value right;
+        int32_t order = 0;
+        int32_t answered;
+        int status = kiln_c99_temporal_coerce(host, kind, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                              kiln_c99_undefined(), &left, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        status = kiln_c99_temporal_coerce(host, kind, argc > 1 ? args[1] : kiln_c99_undefined(),
+                                          kiln_c99_undefined(), &right, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        answered = kiln_temporal_compare(kiln_c99_temporal_of(left), kiln_c99_temporal_of(right),
+                                         &order);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *result = kiln_c99_number((double)order);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_TEMPORAL_NOW_TIME_ZONE_ID) {
+        /* ADR 0015: the realm's zone is UTC, and it says so rather than leaving it to be found. */
+        *result = kiln_c99_copy_text("UTC", 3);
+        return KILN_C99_OK;
+    }
+    if (receiver.tag != KILN_VALUE_TEMPORAL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "a Temporal method needs a Temporal receiver");
+    }
+    if (code == KILN_C99_METHOD_TEMPORAL_TO_STRING || code == KILN_C99_METHOD_TEMPORAL_TO_JSON) {
+        return kiln_c99_temporal_string(result, receiver, thrown);
+    }
+    if (code == KILN_C99_METHOD_TEMPORAL_VALUE_OF) {
+        /* Specified to throw: `date1 < date2` would otherwise compare two NaNs and answer false,
+         * which is exactly the silent wrong answer the language added this refusal to prevent. */
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Temporal values have no primitive conversion; use compare()");
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown) {
@@ -8812,6 +9509,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     if (code >= KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER &&
         code <= KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
+    }
+    /* Claimed here because the string range further down is open-ended at its top. */
+    if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_LAST) {
+        return kiln_c99_temporal_method(host, result, code, receiver, args, argc, depth, thrown);
     }
     /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
      * `length` and writes an element through the handler's traps, which is how a copy-on-write
@@ -15091,6 +15792,7 @@ static const char *kiln_c99_kind_name(kiln_value value) {
     case KILN_VALUE_NUMBER: return "number";
     case KILN_VALUE_STRING: return "string";
     case KILN_VALUE_BIGINT: return "bigint";
+    case KILN_VALUE_TEMPORAL: return "object";
     case KILN_VALUE_SYMBOL: return "symbol";
     case KILN_VALUE_ARRAY: return "array";
     case KILN_VALUE_DATE: return "date";
@@ -16281,6 +16983,8 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     case KILN_VALUE_PROMISE:
     case KILN_VALUE_ARRAY_BUFFER:
     case KILN_VALUE_TYPED_ARRAY:
+    /* Every `Temporal` type is an ordinary object to `typeof`; none of them is callable. */
+    case KILN_VALUE_TEMPORAL:
         return kiln_c99_value(KILN_VALUE_STRING, 0, object_text, sizeof(object_text) - 1);
     case KILN_VALUE_UNDEFINED:
     default:
@@ -17293,9 +17997,13 @@ fn stack_effect(
                 Ok((height, false))
             }
         }
-        // The name is a constant rather than a stack value, and control leaves for a handler
-        // exactly as a `throw` does.
-        Instruction::ThrowReference(_) => Ok((height, true)),
+        // The name is a constant rather than a stack value. Control does *not* necessarily leave:
+        // the instruction stands in for a value load, and the emitted runtime resolves the name
+        // against the realm's global object before throwing -- so on the found path it pushes
+        // exactly what `LoadBuiltin` would have, and the instructions after it were compiled
+        // expecting that value. Modelling it as terminal would leave those instructions verified
+        // at a height one short of the one the machine actually runs them at.
+        Instruction::ThrowReference(_) => Ok((height + 1, false)),
         // A literal produces a fresh object, so it only ever grows the stack.
         Instruction::NewRegExp { .. } => Ok((height + 1, false)),
         Instruction::LoadNewTarget => Ok((height + 1, false)),
@@ -18337,13 +19045,23 @@ fn emit_instruction(
             // A name that is not there. Emitted rather than refused, because a reference in a
             // branch that never runs is not an error in JavaScript and real bundles are full of
             // them -- feature detection mentions globals the host may not have.
+            //
+            // "Not there" is decided at *run* time, though, not here. The compiler reaches this
+            // instruction for every name outside `kiln_ir::Builtin`, and the realm's global object
+            // holds intrinsics that table does not name -- `Temporal` is one. The interpreter has
+            // always looked there before throwing (see its `ThrowReference` arm); this backend did
+            // not, which is why a fully implemented `Temporal` was still a ReferenceError under
+            // `--native`. The lookup is a no-op for every name the table *does* carry, because
+            // those never reach this instruction at all.
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string reference name before emission")
             };
             writeln!(
                 output,
-                "    {{ static const char kiln_missing_{index}[] = {}; int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }}",
+                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; int status = kiln_c99_global_binding(&stack[sp], kiln_missing_name_{index}, {}, &found); if (status != KILN_C99_OK) return status; if (found) {{ ++sp; }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
+                c_string(text),
                 c_string(&format!("{text} is not defined")),
+                text.len(),
                 unwind_or_return(handlers, site)
             )
             .unwrap();
@@ -19643,6 +20361,48 @@ int32_t kiln_bigint_compare(const void *left, const void *right) {
     return 0;
 }
 int32_t kiln_bigint_is_zero(const void *handle) { (void)handle; return 1; }
+int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
+                                  const unsigned char *text, const int64_t *text_lengths,
+                                  size_t text_count, void **out_handle) {
+    (void)kind; (void)fields; (void)field_count; (void)text; (void)text_lengths;
+    (void)text_count; (void)out_handle;
+    return -1;
+}
+int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
+                                           void **out_handle) {
+    (void)fields; (void)field_count; (void)out_handle;
+    return -1;
+}
+int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
+                            void **out_handle) {
+    (void)kind; (void)bytes; (void)len; (void)out_handle;
+    return -1;
+}
+int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, void **out_handle) {
+    (void)kind; (void)high; (void)low; (void)out_handle;
+    return -1;
+}
+void kiln_temporal_free(void *handle) { (void)handle; }
+int32_t kiln_temporal_kind(const void *handle) { (void)handle; return -1; }
+int32_t kiln_temporal_get(const void *handle, const unsigned char *name, size_t name_len,
+                          double *out_number, unsigned char *buffer, size_t capacity,
+                          int32_t *out_length) {
+    (void)handle; (void)name; (void)name_len; (void)out_number; (void)buffer; (void)capacity;
+    (void)out_length;
+    return -1;
+}
+int32_t kiln_temporal_to_string(const void *handle, unsigned char *buffer, size_t capacity) {
+    (void)handle; (void)buffer; (void)capacity;
+    return -1;
+}
+int32_t kiln_temporal_compare(const void *left, const void *right, int32_t *out_order) {
+    (void)left; (void)right; (void)out_order;
+    return -1;
+}
+int32_t kiln_temporal_last_error(int32_t *out_kind, unsigned char *buffer, size_t capacity) {
+    (void)out_kind; (void)buffer; (void)capacity;
+    return -1;
+}
 "#;
 
     /// Link-only Realm provider for backend unit tests.

@@ -3431,3 +3431,520 @@ mod tests {
         assert!(unsafe { kiln_string_to_number(malformed.as_ptr(), malformed.len()) }.is_nan());
     }
 }
+
+/// `Temporal`, over the same `kiln-temporal` adapter the interpreter links (ADR 0025, ADR 0029 §4).
+///
+/// The boundary keeps the discipline the regexp and BigInt providers set: the value is an opaque
+/// handle, and nothing that is not a scalar crosses. That is cheaper here than anywhere else,
+/// because `kiln-temporal` was already built with a scalar seam -- fields come back by *name* as
+/// numbers, strings and flags, and options arrive as strings -- so one generic reader serves every
+/// field of all eight types and the C side needs no per-field code.
+///
+/// The instant is always an argument, never read here. ADR 0015 makes the realm's clock virtual and
+/// its zone UTC, and a provider that could reach the host's clock would be able to break that
+/// invariant without anything failing to compile.
+#[cfg(feature = "temporal")]
+mod temporal {
+    use super::INVALID_ARGUMENT;
+    use kiln_temporal::{Fields, Kind, Options, TemporalValue};
+    use std::cell::RefCell;
+
+    /// A failed call left a message behind. Negative, so a caller testing `< 0` catches every one.
+    ///
+    /// All three classes are carried rather than flattened. `Temporal` picks between them on nearly
+    /// every path -- a field out of range is a RangeError, malformed ISO text a SyntaxError, a
+    /// wrong argument *type* a TypeError -- and the interpreter raises exactly what the engine
+    /// chose, so collapsing any two here would make the two engines disagree about which error a
+    /// program catches.
+    const RANGE_ERROR: i32 = -2;
+    const TYPE_ERROR: i32 = -3;
+    const SYNTAX_ERROR: i32 = -4;
+
+    /// The numeric field slots [`kiln_temporal_from_fields`] reads, in order: eraYear, year,
+    /// month, day, hour, minute, second, millisecond, microsecond, nanosecond. NaN means absent,
+    /// which is what lets one array carry an arbitrary subset without a presence mask beside it.
+    const FIELD_SLOTS: usize = 10;
+
+    /// The ten `Duration` components, in the order [`kiln_temporal::DurationFields`] declares them.
+    const DURATION_SLOTS: usize = 10;
+
+    /// The string slots, in order: era, monthCode, offset, timeZone, calendar, overflow.
+    ///
+    /// They arrive as one concatenated buffer plus a length per slot, because six pointer/length
+    /// pairs in a C signature is a shape nobody can call correctly twice. A length of -1 means the
+    /// program did not supply the field at all, which is not the same as supplying `""`.
+    const TEXT_SLOTS: usize = 6;
+
+    thread_local! {
+        /// The message and class of the last failure on this thread.
+        ///
+        /// Carried out-of-band because the fallible calls already spend their return value on the
+        /// error *class* -- and `Temporal` is unusually specific about that class, so flattening a
+        /// RangeError into a TypeError would be a visible wrong answer rather than a lost detail.
+        static LAST_ERROR: RefCell<(i32, String)> = const { RefCell::new((0, String::new())) };
+    }
+
+    fn remember(error: &kiln_temporal::Error) -> i32 {
+        let code = match error.kind {
+            kiln_temporal::ErrorKind::Type => TYPE_ERROR,
+            kiln_temporal::ErrorKind::Syntax => SYNTAX_ERROR,
+            kiln_temporal::ErrorKind::Range => RANGE_ERROR,
+        };
+        LAST_ERROR.with(|slot| *slot.borrow_mut() = (code, error.message.clone()));
+        code
+    }
+
+    fn kind_of(code: u32) -> Option<Kind> {
+        Some(match code {
+            0 => Kind::PlainDate,
+            1 => Kind::PlainTime,
+            2 => Kind::PlainDateTime,
+            3 => Kind::PlainYearMonth,
+            4 => Kind::PlainMonthDay,
+            5 => Kind::Duration,
+            6 => Kind::Instant,
+            7 => Kind::ZonedDateTime,
+            _ => return None,
+        })
+    }
+
+    fn code_of(kind: Kind) -> i32 {
+        match kind {
+            Kind::PlainDate => 0,
+            Kind::PlainTime => 1,
+            Kind::PlainDateTime => 2,
+            Kind::PlainYearMonth => 3,
+            Kind::PlainMonthDay => 4,
+            Kind::Duration => 5,
+            Kind::Instant => 6,
+            Kind::ZonedDateTime => 7,
+        }
+    }
+
+    /// A byte span, or `None` when the pointer contract is violated.
+    ///
+    /// # Safety
+    ///
+    /// A non-null `pointer` must be readable for `length` bytes.
+    unsafe fn span<'a>(pointer: *const u8, length: usize) -> Option<&'a [u8]> {
+        if length == 0 {
+            return Some(&[]);
+        }
+        if pointer.is_null() || length > isize::MAX as usize {
+            return None;
+        }
+        // SAFETY: checked above and guaranteed by the caller contract.
+        Some(unsafe { core::slice::from_raw_parts(pointer, length) })
+    }
+
+    /// An optional UTF-8 string argument: absent when the pointer is null.
+    ///
+    /// # Safety
+    ///
+    /// A non-null `pointer` must be readable for `length` bytes.
+    unsafe fn text<'a>(pointer: *const u8, length: usize) -> Result<Option<&'a str>, ()> {
+        if pointer.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: the caller contract guarantees the span is readable for its length.
+        let Some(bytes) = (unsafe { span(pointer, length) }) else {
+            return Err(());
+        };
+        core::str::from_utf8(bytes).map(Some).map_err(|_| ())
+    }
+
+    /// Copy `value` into `buffer`, answering the length written, or the negative length it wanted.
+    ///
+    /// The retry protocol the BigInt provider uses: one negative answer tells the caller exactly
+    /// how much to allocate, so a second call always succeeds.
+    ///
+    /// # Safety
+    ///
+    /// `buffer` must be writable for `capacity` bytes when `capacity` is non-zero.
+    unsafe fn emit(value: &str, buffer: *mut u8, capacity: usize) -> i32 {
+        let bytes = value.as_bytes();
+        let Ok(length) = i32::try_from(bytes.len()) else {
+            return INVALID_ARGUMENT;
+        };
+        if bytes.len() > capacity || buffer.is_null() {
+            return -length;
+        }
+        // SAFETY: `buffer` is writable for `capacity >= bytes.len()` by the caller contract, and
+        // the source is a distinct allocation owned by this side.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer, bytes.len()) };
+        length
+    }
+
+    /// Split the packed text buffer into its slots.
+    ///
+    /// # Safety
+    ///
+    /// `text` must be readable for the sum of the non-negative lengths, and `lengths` for `count`
+    /// values.
+    unsafe fn unpack<'a>(
+        text: *const u8,
+        lengths: *const i64,
+        count: usize,
+    ) -> Option<[Option<&'a str>; TEXT_SLOTS]> {
+        if count != TEXT_SLOTS || lengths.is_null() {
+            return None;
+        }
+        // SAFETY: the caller contract guarantees `lengths` is readable for `count` values.
+        let lengths = unsafe { core::slice::from_raw_parts(lengths, count) };
+        let mut out: [Option<&str>; TEXT_SLOTS] = [None; TEXT_SLOTS];
+        let mut offset = 0usize;
+        for (slot, &length) in lengths.iter().enumerate() {
+            if length < 0 {
+                continue;
+            }
+            let length = usize::try_from(length).ok()?;
+            let start = text.wrapping_add(offset);
+            // SAFETY: the caller contract guarantees the concatenation is readable for the sum of
+            // the non-negative lengths, and `offset` never passes that sum.
+            let bytes = unsafe { span(start, length) }?;
+            *out.get_mut(slot)? = Some(core::str::from_utf8(bytes).ok()?);
+            offset = offset.checked_add(length)?;
+        }
+        Some(out)
+    }
+
+    /// Build one of the eight types from a field bag the caller has already read.
+    ///
+    /// The caller does the reading, and in the order the specification names: property reads are
+    /// observable, so a design that took the JavaScript object here would have moved observable
+    /// behaviour behind a boundary that cannot express it. What crosses is the result.
+    ///
+    /// Returns 0 and writes the handle on success; -1 for a violated argument contract, and
+    /// [`RANGE_ERROR`], [`TYPE_ERROR`] or [`SYNTAX_ERROR`] for a rejection whose message
+    /// [`kiln_temporal_last_error`] then carries.
+    ///
+    /// # Safety
+    ///
+    /// `fields` must be readable for `field_count` doubles, `text` and `text_lengths` must satisfy
+    /// [`unpack`], and `out_handle` must be a writable slot. The handle belongs to the caller and
+    /// is released by [`kiln_temporal_free`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_from_fields(
+        kind: u32,
+        fields: *const f64,
+        field_count: usize,
+        text: *const u8,
+        text_lengths: *const i64,
+        text_count: usize,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if out_handle.is_null() || fields.is_null() || field_count != FIELD_SLOTS {
+            return INVALID_ARGUMENT;
+        }
+        let Some(kind) = kind_of(kind) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees `fields` is readable for `field_count` doubles.
+        let slots = unsafe { core::slice::from_raw_parts(fields, field_count) };
+        // SAFETY: the caller contract guarantees the packed text satisfies `unpack`.
+        let Some(strings) = (unsafe { unpack(text, text_lengths, text_count) }) else {
+            return INVALID_ARGUMENT;
+        };
+        let present = |index: usize| slots.get(index).copied().filter(|value| !value.is_nan());
+        let owned = |index: usize| strings.get(index).copied().flatten().map(str::to_owned);
+        let bag = Fields {
+            era: owned(0),
+            era_year: present(0),
+            year: present(1),
+            month: present(2),
+            month_code: owned(1),
+            day: present(3),
+            hour: present(4),
+            minute: present(5),
+            second: present(6),
+            millisecond: present(7),
+            microsecond: present(8),
+            nanosecond: present(9),
+            offset: owned(2),
+            time_zone: owned(3),
+            calendar: owned(4),
+        };
+        let options = Options {
+            overflow: owned(5),
+            ..Default::default()
+        };
+        match kiln_temporal::from_fields(kind, &bag, &options) {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// Build a `Temporal.Duration` from its ten components, NaN for a component left out.
+    ///
+    /// Separate from [`kiln_temporal_from_fields`] because the two bags are separate in the
+    /// language: a duration has weeks and no month code, a date has a month code and no weeks.
+    ///
+    /// # Safety
+    ///
+    /// `fields` must be readable for `field_count` doubles and `out_handle` a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_duration_from_fields(
+        fields: *const f64,
+        field_count: usize,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if out_handle.is_null() || fields.is_null() || field_count != DURATION_SLOTS {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees `fields` is readable for `field_count` doubles.
+        let slots = unsafe { core::slice::from_raw_parts(fields, field_count) };
+        let present = |index: usize| slots.get(index).copied().filter(|value| !value.is_nan());
+        let bag = kiln_temporal::DurationFields {
+            years: present(0),
+            months: present(1),
+            weeks: present(2),
+            days: present(3),
+            hours: present(4),
+            minutes: present(5),
+            seconds: present(6),
+            milliseconds: present(7),
+            microseconds: present(8),
+            nanoseconds: present(9),
+        };
+        match kiln_temporal::duration_from_fields(&bag) {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// Parse one of the eight types out of its ISO text.
+    ///
+    /// # Safety
+    ///
+    /// `bytes` must be readable for `len`, and `out_handle` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_parse(
+        kind: u32,
+        bytes: *const u8,
+        len: usize,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if out_handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(kind) = kind_of(kind) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees the span is readable for its length.
+        let Ok(Some(source)) = (unsafe { text(bytes, len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        match kiln_temporal::parse(kind, source) {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// `Temporal.Now`, off the instant the realm supplies rather than any clock reachable here.
+    ///
+    /// The instant arrives split in two because C99 has no portable 128-bit integer: `high` is the
+    /// signed top half and `low` the unsigned bottom half of the epoch nanosecond count. ADR 0015
+    /// makes that count the realm's virtual clock, which starts at the epoch.
+    ///
+    /// # Safety
+    ///
+    /// `out_handle` must be a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_now(
+        kind: u32,
+        high: i64,
+        low: u64,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if out_handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        let Some(kind) = kind_of(kind) else {
+            return INVALID_ARGUMENT;
+        };
+        let epoch_nanoseconds = (i128::from(high) << 64) | i128::from(low);
+        match kiln_temporal::now::read(kind, epoch_nanoseconds, None) {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// Release a handle from any of the constructors.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must have come from this module and must not be used again.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_free(handle: *mut TemporalValue) {
+        if handle.is_null() {
+            return;
+        }
+        // SAFETY: the caller contract guarantees the pointer came from `Box::into_raw` above.
+        drop(unsafe { Box::from_raw(handle) });
+    }
+
+    /// Which of the eight types `handle` is, as the code [`kiln_temporal_from_fields`] takes.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_kind(handle: *const TemporalValue) -> i32 {
+        if handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        code_of(unsafe { &*handle }.kind())
+    }
+
+    /// One property, by the name the language spells it with.
+    ///
+    /// This is the call that makes the whole surface cheap: `kiln-temporal` answers every field of
+    /// all eight types through one name-keyed reader, so the C side gets `year`, `daysInMonth` and
+    /// `blank` alike without a line of per-field code.
+    ///
+    /// The answer says which shape it is: 0 no such property, 1 a number in `out_number`, 2 text
+    /// written to `buffer` under the [`emit`] retry protocol, 3 a flag in `out_number`, 4 the
+    /// property exists and is `undefined`, and 5 a value only a BigInt can hold -- which this slice
+    /// does not yet carry across, and which the caller must refuse by name rather than round.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live, `name` readable for `name_len`, `out_number` a writable slot, and
+    /// `buffer` writable for `capacity` bytes when `capacity` is non-zero.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_get(
+        handle: *const TemporalValue,
+        name: *const u8,
+        name_len: usize,
+        out_number: *mut f64,
+        buffer: *mut u8,
+        capacity: usize,
+        out_length: *mut i32,
+    ) -> i32 {
+        if handle.is_null() || out_number.is_null() || out_length.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the span is readable for its length.
+        let Ok(Some(name)) = (unsafe { text(name, name_len) }) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees the handle is live.
+        let Some(field) = unsafe { &*handle }.get(name) else {
+            return 0;
+        };
+        match field {
+            kiln_temporal::Field::Number(number) => {
+                // SAFETY: `out_number` is a writable slot by the caller contract.
+                unsafe { out_number.write(number) };
+                1
+            }
+            kiln_temporal::Field::Text(value) => {
+                // SAFETY: `buffer` is writable for `capacity` by the caller contract.
+                let written = unsafe { emit(&value, buffer, capacity) };
+                // SAFETY: `out_length` is a writable slot by the caller contract.
+                unsafe { out_length.write(written) };
+                2
+            }
+            kiln_temporal::Field::Flag(flag) => {
+                // SAFETY: `out_number` is a writable slot by the caller contract.
+                unsafe { out_number.write(if flag { 1.0 } else { 0.0 }) };
+                3
+            }
+            kiln_temporal::Field::Undefined => 4,
+            kiln_temporal::Field::Integer128(_) => 5,
+        }
+    }
+
+    /// The value's own ISO text, which is what `toString` and `toJSON` both answer.
+    ///
+    /// # Safety
+    ///
+    /// `handle` must be live and `buffer` writable for `capacity` bytes when `capacity` is
+    /// non-zero.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_to_string(
+        handle: *const TemporalValue,
+        buffer: *mut u8,
+        capacity: usize,
+    ) -> i32 {
+        if handle.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees the handle is live.
+        match unsafe { &*handle }.to_temporal_string(&Options::default()) {
+            // SAFETY: `buffer` is writable for `capacity` by the caller contract.
+            Ok(text) => unsafe { emit(&text, buffer, capacity) },
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// Order two values of the same type: -1, 0 or 1, as `compare` answers.
+    ///
+    /// # Safety
+    ///
+    /// Both handles must be live, and `out_order` a writable slot.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_compare(
+        left: *const TemporalValue,
+        right: *const TemporalValue,
+        out_order: *mut i32,
+    ) -> i32 {
+        if left.is_null() || right.is_null() || out_order.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller contract guarantees both handles are live.
+        match kiln_temporal::compare(unsafe { &*left }, unsafe { &*right }) {
+            Ok(order) => {
+                // SAFETY: `out_order` is a writable slot by the caller contract.
+                unsafe { out_order.write(order) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
+    /// The message and class of the last failure on this thread.
+    ///
+    /// Writes the class to `out_kind` -- [`RANGE_ERROR`] or [`TYPE_ERROR`] -- and the message under
+    /// the [`emit`] retry protocol. `Temporal` distinguishes the two classes on nearly every path,
+    /// so the caller raises the one the engine chose rather than guessing.
+    ///
+    /// # Safety
+    ///
+    /// `out_kind` must be a writable slot and `buffer` writable for `capacity` bytes when
+    /// `capacity` is non-zero.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_last_error(
+        out_kind: *mut i32,
+        buffer: *mut u8,
+        capacity: usize,
+    ) -> i32 {
+        if out_kind.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        LAST_ERROR.with(|slot| {
+            let (code, message) = &*slot.borrow();
+            // SAFETY: `out_kind` is a writable slot by the caller contract.
+            unsafe { out_kind.write(*code) };
+            // SAFETY: `buffer` is writable for `capacity` by the caller contract.
+            unsafe { emit(message, buffer, capacity) }
+        })
+    }
+}
