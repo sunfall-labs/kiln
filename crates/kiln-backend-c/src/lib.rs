@@ -256,7 +256,14 @@ enum kiln_value_tag {
     KILN_VALUE_BIGINT = 21,
     /* Typed views are private heap values.  Their pointers never cross the scalar embedding ABI. */
     KILN_VALUE_ARRAY_BUFFER = 22,
-    KILN_VALUE_TYPED_ARRAY = 23
+    KILN_VALUE_TYPED_ARRAY = 23,
+    /* A target with a handler standing in front of it. bits holds a kiln_proxy*.
+     *
+     * A tag of its own rather than a flag on an object, because a proxy is not an object with
+     * extra behaviour: it can stand in front of an array or a function just as well, `typeof`
+     * asks the thing behind it, and every property operation on it is a *call*. Nothing that
+     * tests for one of the tags above may accidentally match it. */
+    KILN_VALUE_PROXY = 24
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
@@ -306,6 +313,22 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_UINT32_ARRAY_PROTOTYPE 46
 #define KILN_C99_BUILTIN_FLOAT32_ARRAY_PROTOTYPE 47
 #define KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE 48
+
+/* The two collection prototype tables. They exist for the same reason the others do: a class
+ * that extends `Map` needs `Map.prototype` to link its own prototype to, and without one the
+ * whole of `class Registry extends Map {}` is unreachable. */
+#define KILN_C99_BUILTIN_MAP_PROTOTYPE 49
+#define KILN_C99_BUILTIN_SET_PROTOTYPE 50
+
+/* One table for every error kind rather than one each. The chain is not what answers a question
+ * about an error here -- `instanceof` reads the kind the instance records, and `name`, `message`
+ * and `stack` are own properties of the instance -- so the table exists to be a *link*, which is
+ * what `class HttpError extends Error {}` needs and all it needs. */
+#define KILN_C99_BUILTIN_ERROR_PROTOTYPE 51
+
+/* `Proxy` is a constructor and not a namespace: `typeof Proxy` is "function", and the only way
+ * to reach one is `new`. */
+#define KILN_C99_BUILTIN_PROXY 52
 
 /* Array methods, part two.
  *
@@ -599,6 +622,44 @@ enum kiln_value_tag {
  * not as `this`. */
 #define KILN_C99_METHOD_STRING_RAW 155
 
+/* The descriptor half of the reflective statics: the operations that talk about a property
+ * rather than through it. Numbered in the receiver-less range, because every one of them takes
+ * its subject as an argument. */
+#define KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY 156
+#define KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES 157
+#define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR 158
+#define KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS 159
+
+/* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
+#define KILN_C99_METHOD_OBJECT_IS 185
+
+/* `Error.captureStackTrace`. Present so `typeof` reports "function", which is what libraries
+ * feature-detect on; calling it evaluates to undefined rather than inventing a stack this engine
+ * does not record. The interpreter makes exactly that trade, and the two have to make it
+ * together. */
+#define KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE 186
+
+/* `Reflect`: the operations a proxy handler forwards with, as ordinary functions.
+ *
+ * They are not aliases for the `Object` statics that look like them. `Reflect.get` takes a
+ * *receiver*, which is what a forwarding handler has to pass on for an inherited accessor to see
+ * the proxy; `Reflect.set` and `Reflect.deleteProperty` answer with a boolean where the operator
+ * forms answer with the value; and none of them coerces a primitive target -- `Reflect.get(1, k)`
+ * is a TypeError where `(1)[k]` is a read off the string prototype. */
+#define KILN_C99_METHOD_REFLECT_OWN_KEYS 187
+#define KILN_C99_METHOD_REFLECT_GET 188
+#define KILN_C99_METHOD_REFLECT_SET 189
+#define KILN_C99_METHOD_REFLECT_HAS 190
+#define KILN_C99_METHOD_REFLECT_DELETE_PROPERTY 191
+#define KILN_C99_METHOD_REFLECT_APPLY 192
+#define KILN_C99_METHOD_REFLECT_CONSTRUCT 193
+
+/* `Proxy.revocable(target, handler)` and the function it hands back. The second is reached only
+ * through the first, as a bound method whose receiver is the proxy it retires -- which is what
+ * gives the returned function the one capability it needs and nothing else. */
+#define KILN_C99_METHOD_PROXY_REVOCABLE 194
+#define KILN_C99_METHOD_PROXY_REVOKE 195
+
 /* `Math`, part two -- numbered here rather than beside the first range because that range ends
  * where `Number`'s begins. Still below the array boundary, because these take no receiver. */
 #define KILN_C99_METHOD_MATH_RANDOM 160
@@ -776,6 +837,14 @@ typedef struct kiln_property {
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
     int enumerable;
+    /* Whether an assignment may replace the value, and whether `delete` may remove the property
+     * or `defineProperty` redefine it. Both are true for everything an assignment or a literal
+     * creates, which is why they went unmodelled for so long: only `Object.defineProperty` and
+     * `Object.freeze` can produce a property where they are not, and only
+     * `getOwnPropertyDescriptor` reports them back. Absent, a defined non-writable property took
+     * writes and a non-configurable one deleted -- both silently. */
+    int writable;
+    int configurable;
     int accessor;
     kiln_value value;
     kiln_value getter;
@@ -800,6 +869,21 @@ typedef struct kiln_object {
  * walk is on the C stack, where running out aborts rather than reports. Bounded, like the
  * interpreter's. */
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
+
+/* A proxy's two halves.
+ *
+ * Both are held as ordinary values because both are: a handler is a plain object whose
+ * properties are the traps, and a target is whatever was proxied -- including another proxy,
+ * which is why neither is narrowed to a kind here. */
+typedef struct kiln_proxy {
+    kiln_value target;
+    kiln_value handler;
+    /* `Proxy.revocable`'s second half was called. A revoked proxy is not an empty one: every
+     * operation on it is a TypeError, which is the entire point -- the capability it stood for
+     * has been withdrawn, and a program holding a stale reference has to find out rather than
+     * see a plausible answer. */
+    int revoked;
+} kiln_proxy;
 
 /* An array's elements are dense and its `length` is derived, not stored: writing past the end
  * grows it and the gap is filled with holes, which read as undefined and are not the same thing --
@@ -905,6 +989,10 @@ typedef struct kiln_collection {
     size_t live;
     size_t capacity;
     int is_map;
+    /* Where `class Registry extends Map {}` puts the prototype its instances inherit from, and
+     * where a write that is not an entry goes. Undefined until something needs one, so an
+     * ordinary Map costs nothing for it. */
+    kiln_value properties;
 } kiln_collection;
 
 /* A promise: a value that arrives once, later, and everything waiting for it.
@@ -1073,6 +1161,9 @@ static kiln_value kiln_c99_function(kiln_closure *closure);
 static kiln_closure *kiln_c99_closure_of(kiln_value value);
 static kiln_value *kiln_c99_cell_of(kiln_value value);
 static kiln_object *kiln_c99_object_of(kiln_value value);
+static kiln_proxy *kiln_c99_proxy_of(kiln_value value);
+static kiln_value kiln_c99_proxy_inner(kiln_value value);
+static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler);
 static kiln_array *kiln_c99_array_of(kiln_value value);
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value);
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value);
@@ -1104,10 +1195,53 @@ static size_t kiln_c99_typed_width(kiln_typed_kind kind);
 static double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value);
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
+static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
+                             kiln_property **out);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
+static kiln_value *kiln_c99_exotic_store(kiln_value target);
+static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
+                               kiln_value *trap, int depth, kiln_value *thrown);
+static int kiln_c99_proxy_get(kiln_host *host, kiln_value proxy, kiln_value key,
+                              kiln_value receiver, kiln_value *out, int depth,
+                              kiln_value *thrown);
+static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
+                                      kiln_value receiver, kiln_value *out, int depth,
+                                      kiln_value *thrown);
+static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
+                              int depth, kiln_value *thrown);
+static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                 kiln_value value, int depth, kiln_value *thrown);
+static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                 kiln_value *out, int depth, kiln_value *thrown);
+static int kiln_c99_definition_store(kiln_value target, kiln_value *out);
+static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
+                                      kiln_value *thrown);
+static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, size_t argc);
+static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
+                                    size_t key_len, kiln_value descriptor, int depth,
+                                    kiln_value *thrown);
+static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
+                                      int depth, kiln_value *thrown);
+static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
+                                      size_t key_len, kiln_value *out, int *found, int depth,
+                                      kiln_value *thrown);
+static int kiln_c99_proxy_own_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
+                                   kiln_value *thrown);
+static int kiln_c99_proxy_describe(kiln_host *host, kiln_value proxy, kiln_value key,
+                                   kiln_value *out, int *found, int depth, kiln_value *thrown);
+static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value key,
+                                 kiln_value descriptor, int depth, kiln_value *thrown);
+static int kiln_c99_proxy_all_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
+                                   kiln_value *thrown);
+static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
+                                 kiln_value *thrown);
+static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
+                              const kiln_value *args, size_t argc, int depth, kiln_value *thrown);
+static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                              kiln_value *out, int depth, kiln_value *thrown, int *found);
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
                                  size_t key_len, kiln_value *out, int depth, kiln_value *thrown);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
@@ -1209,13 +1343,20 @@ static int kiln_c99_same_value_zero(kiln_value left, kiln_value right);
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown);
 static kiln_value kiln_c99_hole(void);
-static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer);
-static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer);
+static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,
+                                 size_t key_len, int *answer, int depth, kiln_value *thrown);
+static int kiln_c99_has_computed(kiln_host *host, kiln_value target, kiln_value key, int *answer,
+                                 int depth, kiln_value *thrown);
+static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                    int *answer, int depth, kiln_value *thrown);
+static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                           int *answer, int depth, kiln_value *thrown);
 static void kiln_c99_typed_own(kiln_value target, const char *key, size_t key_len,
                                int *found, int *enumerable);
 static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size_t key_len,
                                         int *found, int *enumerable);
-static int kiln_c99_own_keys(kiln_value target, kiln_value *out);
+static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
+                             kiln_value *thrown);
 static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 /* The containers currently being written, innermost first.
@@ -1749,6 +1890,12 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
     kiln_object *object;
     size_t index;
     int status;
+    if (target.tag == KILN_VALUE_PROXY) {
+        /* Writing to a proxy is a call, exactly as reading one is. */
+        return kiln_c99_proxy_set(host, target,
+                                  kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), value, depth,
+                                  thrown);
+    }
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
         /* `f.prototype = {...}` replaces the object `new f()` links instances to, which is a
@@ -1817,7 +1964,12 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
          * ends the statement with a catchable TypeError rather than dropping the write. The
          * object-like tags that also land here -- a Date, a collection, a promise, a bound
          * function -- are a different thing: those *are* objects a program may write to, and
-         * this backend simply has no store for them yet, so they keep saying so. */
+         * this backend simply has no store for them yet, so they keep saying so.
+         *
+         * A collection has a store, but only for the prototype a subclass gave it: nothing that
+         * enumerates -- `Object.keys`, `JSON.stringify`, a console -- looks in it, so a write
+         * accepted here would read back correctly and be invisible everywhere else. Refusing is
+         * the honest answer until those paths know about it. */
         if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL ||
             target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_NUMBER ||
             target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_BIGINT ||
@@ -1851,7 +2003,12 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                     /* A data property on the *prototype* is shadowed by an own one, not
                      * written through, so only an own hit assigns here. */
                     if (steps == 0) {
-                        walked->properties[index].value = value;
+                        /* Non-writable takes the write and drops it, like a frozen object
+                         * above: a real engine throws in strict mode, but the interpreter is
+                         * silent here and the two have to agree before either can change. */
+                        if (walked->properties[index].writable) {
+                            walked->properties[index].value = value;
+                        }
                         return KILN_C99_OK;
                     }
                     steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
@@ -1872,6 +2029,41 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
                 break;
             }
             current = walked->prototype;
+        }
+    }
+    {
+        kiln_property *slot;
+        status = kiln_c99_own_slot(target, key, key_len, &slot);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        slot->value = value;
+    }
+    return KILN_C99_OK;
+}
+
+/* Find or create the own property named `key`, bypassing the prototype chain entirely.
+ *
+ * An assignment cannot start here -- a setter anywhere above has first claim, and `kiln_c99_put`
+ * walks for one before it arrives -- but a *definition* must: `Object.defineProperty` writes
+ * past an inherited setter rather than through it, and reaching this by way of the assignment
+ * path would call one.
+ *
+ * A fresh slot is what an assignment would have made: writable, configurable, enumerable, data.
+ * A definition then overwrites exactly the fields its descriptor mentions. */
+static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
+                             kiln_property **out) {
+    kiln_object *object;
+    size_t index;
+    int status;
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    object = kiln_c99_object_of(target);
+    for (index = 0; index < object->count; ++index) {
+        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            *out = &object->properties[index];
+            return KILN_C99_OK;
         }
     }
     status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
@@ -1908,10 +2100,13 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
          * language produces this prefix. */
         object->properties[position].enumerable =
             !(key_len >= 2 && key[0] == '@' && key[1] == '@');
+        object->properties[position].writable = 1;
+        object->properties[position].configurable = 1;
         object->properties[position].accessor = 0;
-        object->properties[position].value = value;
+        object->properties[position].value = kiln_c99_undefined();
         object->properties[position].getter = kiln_c99_undefined();
         object->properties[position].setter = kiln_c99_undefined();
+        *out = &object->properties[position];
     }
     object->count += 1;
     return KILN_C99_OK;
@@ -2255,6 +2450,21 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF: return "getPrototypeOf";
     case KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF: return "setPrototypeOf";
     case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES: return "getOwnPropertyNames";
+    case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY: return "defineProperty";
+    case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES: return "defineProperties";
+    case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR: return "getOwnPropertyDescriptor";
+    case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS: return "getOwnPropertyDescriptors";
+    case KILN_C99_METHOD_OBJECT_IS: return "is";
+    case KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE: return "captureStackTrace";
+    case KILN_C99_METHOD_REFLECT_OWN_KEYS: return "ownKeys";
+    case KILN_C99_METHOD_REFLECT_GET: return "get";
+    case KILN_C99_METHOD_REFLECT_SET: return "set";
+    case KILN_C99_METHOD_REFLECT_HAS: return "has";
+    case KILN_C99_METHOD_REFLECT_DELETE_PROPERTY: return "deleteProperty";
+    case KILN_C99_METHOD_REFLECT_APPLY: return "apply";
+    case KILN_C99_METHOD_REFLECT_CONSTRUCT: return "construct";
+    case KILN_C99_METHOD_PROXY_REVOCABLE: return "revocable";
+    case KILN_C99_METHOD_PROXY_REVOKE: return "revoke";
     case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: return "fromEntries";
     case KILN_C99_METHOD_ARRAY_FROM: return "from";
     case KILN_C99_METHOD_SET_TIME: return "setTime";
@@ -2594,8 +2804,12 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_PROMISE: return "Promise";
     case KILN_C99_BUILTIN_BOOLEAN: return "Boolean";
     case KILN_C99_BUILTIN_REFLECT: return "Reflect";
+    case KILN_C99_BUILTIN_PROXY: return "Proxy";
     case KILN_C99_BUILTIN_OBJECT_PROTOTYPE: return "Object";
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE: return "Array";
+    case KILN_C99_BUILTIN_ERROR_PROTOTYPE: return "Error";
+    case KILN_C99_BUILTIN_MAP_PROTOTYPE: return "Map";
+    case KILN_C99_BUILTIN_SET_PROTOTYPE: return "Set";
     case KILN_C99_BUILTIN_STRING_PROTOTYPE: return "String";
     case KILN_C99_BUILTIN_SYMBOL: return "Symbol";
     case KILN_C99_BUILTIN_REGEXP: return "RegExp";
@@ -2728,6 +2942,17 @@ static kiln_value kiln_c99_new_target;
  * compute a fresh one. */
 static int kiln_c99_inheriting_new_target;
 
+/* What a derived constructor's `super()` produced, when a built-in parent produced something
+ * other than the instance `new` allocated.
+ *
+ * A constructor body reassigns its own `receiver` when that happens, but the *caller* -- the
+ * `new` that allocated the abandoned instance, or an outer `super()` one link down the chain --
+ * has no other way to hear about it: a constructor returns undefined, so nothing in the value it
+ * hands back says which object `this` ended up being. This is that channel. Saved and restored
+ * around every construction and every `super()` so a nested one cannot be mistaken for this
+ * one. */
+static kiln_value kiln_c99_adopted_this;
+
 /* The running call's own arguments, and the list an arrow sees instead.
  *
  * An arrow has no `arguments` of its own -- `arguments` inside one is the enclosing function's,
@@ -2791,6 +3016,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"Math", KILN_C99_BUILTIN_MATH},
                         {"JSON", KILN_C99_BUILTIN_JSON},
                         {"Reflect", KILN_C99_BUILTIN_REFLECT},
+                        {"Proxy", KILN_C99_BUILTIN_PROXY},
                         {"Error", KILN_C99_BUILTIN_ERROR},
                         {"TypeError", KILN_C99_BUILTIN_TYPE_ERROR},
                         {"RangeError", KILN_C99_BUILTIN_RANGE_ERROR},
@@ -3094,6 +3320,9 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_REFLECT ||
            builtin == KILN_C99_BUILTIN_OBJECT_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_ERROR_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_SET_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_STRING_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_DATE_PROTOTYPE ||
@@ -3242,6 +3471,13 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 /* A namespace's own methods, by which namespace it is: `Math.min` and `Number.isNaN` are
  * different functions and the ranges keep them apart. */
 static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len) {
+    /* Every error constructor carries it, and `Error.captureStackTrace` is the spelling
+     * libraries use, so it is answered ahead of the per-builtin tables rather than repeated in
+     * one case per kind. */
+    if (kiln_c99_error_name(builtin) != NULL &&
+        kiln_c99_same_name(key, key_len, "captureStackTrace")) {
+        return KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE;
+    }
     switch (builtin) {
     case KILN_C99_BUILTIN_MATH: {
         uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_MATH_RANDOM,
@@ -3284,6 +3520,21 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         if (kiln_c99_same_name(key, key_len, "getOwnPropertyNames")) {
             return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES;
         }
+        if (kiln_c99_same_name(key, key_len, "defineProperty")) {
+            return KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY;
+        }
+        if (kiln_c99_same_name(key, key_len, "defineProperties")) {
+            return KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES;
+        }
+        if (kiln_c99_same_name(key, key_len, "getOwnPropertyDescriptor")) {
+            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR;
+        }
+        if (kiln_c99_same_name(key, key_len, "getOwnPropertyDescriptors")) {
+            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS;
+        }
+        if (kiln_c99_same_name(key, key_len, "is")) {
+            return KILN_C99_METHOD_OBJECT_IS;
+        }
         if (kiln_c99_same_name(key, key_len, "fromEntries")) {
             return KILN_C99_METHOD_OBJECT_FROM_ENTRIES;
         }
@@ -3301,6 +3552,19 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
             return KILN_C99_METHOD_STRING_RAW;
         }
         return 0;
+    case KILN_C99_BUILTIN_PROXY:
+        if (kiln_c99_same_name(key, key_len, "revocable")) {
+            return KILN_C99_METHOD_PROXY_REVOCABLE;
+        }
+        return 0;
+    case KILN_C99_BUILTIN_REFLECT:
+        /* `getOwnPropertyDescriptor` really is the same operation `Object` carries, so it is the
+         * same code; the rest differ from their `Object` namesakes and are their own. */
+        if (kiln_c99_same_name(key, key_len, "getOwnPropertyDescriptor")) {
+            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR;
+        }
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_REFLECT_OWN_KEYS,
+                                      KILN_C99_METHOD_REFLECT_CONSTRUCT);
     case KILN_C99_BUILTIN_JSON:
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_JSON_STRINGIFY,
                                       KILN_C99_METHOD_JSON_PARSE);
@@ -3321,6 +3585,20 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
                                       KILN_C99_METHOD_OBJECT_VALUE_OF);
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE:
         return kiln_c99_array_prototype_method(key, key_len);
+    case KILN_C99_BUILTIN_ERROR_PROTOTYPE:
+        /* `Error.prototype.toString` is the one member that is genuinely the error's rather than
+         * `Object.prototype`'s, and it is what `String(err)` reaches. */
+        if (kiln_c99_same_name(key, key_len, "toString")) {
+            return KILN_C99_METHOD_ERROR_TO_STRING;
+        }
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
+                                      KILN_C99_METHOD_OBJECT_VALUE_OF);
+    case KILN_C99_BUILTIN_MAP_PROTOTYPE:
+    case KILN_C99_BUILTIN_SET_PROTOTYPE:
+        /* The same range a collection's own read uses, so a method reached through the table and
+         * one reached through an instance can never turn out to be different functions. */
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_COLLECTION_GET,
+                                      KILN_C99_METHOD_COLLECTION_SELF);
     case KILN_C99_BUILTIN_STRING_PROTOTYPE:
         return kiln_c99_string_method(key, key_len);
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE:
@@ -3355,6 +3633,9 @@ static kiln_value kiln_c99_builtin(uint64_t code) {
 /* A closure and a builtin are both callable, and every operator that coerces treats them alike:
  * `valueOf` hands the object back, so `toString` decides. */
 static int kiln_c99_is_callable(kiln_value value) {
+    /* A proxy answers for what it stands in front of: `new Proxy(f, {})` is a function and
+     * `new Proxy({}, {})` is not, and `typeof` has to say so before any trap is consulted. */
+    value = kiln_c99_proxy_inner(value);
     return value.tag == KILN_VALUE_FUNCTION || value.tag == KILN_VALUE_BUILTIN ||
            value.tag == KILN_VALUE_METHOD || value.tag == KILN_VALUE_SETTLER ||
            value.tag == KILN_VALUE_BOUND;
@@ -3370,7 +3651,7 @@ static int kiln_c99_is_reference(kiln_value value) {
     return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
            value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR ||
            value.tag == KILN_VALUE_COLLECTION || value.tag == KILN_VALUE_ARRAY_BUFFER ||
-           value.tag == KILN_VALUE_TYPED_ARRAY;
+           value.tag == KILN_VALUE_TYPED_ARRAY || value.tag == KILN_VALUE_PROXY;
 }
 
 /* Whether a value has to be converted before it crosses the embedding boundary.
@@ -3590,6 +3871,39 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                     "Maximum call stack size exceeded");
     }
+    if (callee.tag == KILN_VALUE_PROXY) {
+        /* Calling a proxy is the `apply` trap, which receives the arguments as one array --
+         * that is what lets a handler inspect or rewrite them before forwarding. */
+        kiln_value trap;
+        kiln_value inner = kiln_c99_proxy_of(callee)->target;
+        kiln_value handler = kiln_c99_proxy_of(callee)->handler;
+        int status = kiln_c99_proxy_trap(host, callee, "apply", &trap, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (trap.tag == KILN_VALUE_UNDEFINED) {
+            return kiln_c99_call(host, result, inner, receiver, args, argc, depth, thrown);
+        }
+        {
+            kiln_value list;
+            kiln_value arguments[3];
+            size_t at;
+            status = kiln_c99_new_array(&list);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            for (at = 0; at < argc; ++at) {
+                status = kiln_c99_array_push(list, args[at]);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            arguments[0] = inner;
+            arguments[1] = receiver;
+            arguments[2] = list;
+            return kiln_c99_call(host, result, trap, handler, arguments, 3, depth, thrown);
+        }
+    }
     if (callee.tag == KILN_VALUE_BOUND) {
         /* Binding is transparent to the call: the receiver is the one that was fixed, whatever
          * the target turns out to be, and the fixed arguments come before the call's own. */
@@ -3739,6 +4053,13 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             *result = kiln_c99_boolean(
                 argc == 0 ? 0 : kiln_c99_truthy(args[0]));
             return KILN_C99_OK;
+        /* The two constructors that do the same thing called as they do constructed. Everything
+         * else in this enum either has no call behaviour at all (`Map()` without `new` is a
+         * TypeError) or is a namespace, and both keep saying so. */
+        case KILN_C99_BUILTIN_ARRAY:
+            return kiln_c99_array_constructor(result, args, argc, thrown);
+        case KILN_C99_BUILTIN_OBJECT:
+            return kiln_c99_object_constructor(result, args, argc);
         default:
             return KILN_C99_CONTROL_ERROR;
         }
@@ -3862,6 +4183,10 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_UNDEFINED:
     case KILN_VALUE_NULL:
         return 0;
+    /* Every object is truthy, and a proxy is one however the handler answers: truthiness is not
+     * a trap, so there is nothing here to consult. */
+    case KILN_VALUE_PROXY:
+        return 1;
     case KILN_VALUE_BOOLEAN:
         return value.bits != 0;
     case KILN_VALUE_NUMBER: {
@@ -3928,6 +4253,10 @@ static kiln_value kiln_c99_text(kiln_value value) {
     static const char null_text[] = "null";
     static const char true_text[] = "true";
     static const char false_text[] = "false";
+    /* The unchecked conversion, reached where there is no error to raise: a proxy shows as its
+     * target. The conversions a program can observe go through `kiln_c99_to_primitive`, which
+     * refuses one instead. */
+    value = kiln_c99_proxy_inner(value);
     switch (value.tag) {
     case KILN_VALUE_UNDEFINED:
         return kiln_c99_value(KILN_VALUE_STRING, 0, undefined_text, sizeof(undefined_text) - 1);
@@ -4361,6 +4690,542 @@ static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
 
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
  * error, because that is a TypeError in the language and answering undefined would hide it. */
+/* The handler function a proxy offers for one operation, or undefined when it offers none.
+ *
+ * Undefined is the *ordinary* answer, not a failure: a handler with no `get` is the common case,
+ * and it means the operation runs against the target unchanged. A revoked proxy is the failure,
+ * and it is one for every operation alike -- the capability has been withdrawn, and answering
+ * from the target would hand it back. */
+static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
+                               kiln_value *trap, int depth, kiln_value *thrown) {
+    kiln_proxy *data = kiln_c99_proxy_of(proxy);
+    kiln_value found;
+    int status;
+    *trap = kiln_c99_undefined();
+    if (data->revoked) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot perform operation on a proxy that has been revoked");
+    }
+    if (data->handler.tag != KILN_VALUE_OBJECT) {
+        /* `new Proxy(t, h)` takes any value for the handler and only complains when a trap is
+         * looked up on it. This backend has not modelled that, so it says so rather than
+         * treating a non-object handler as an empty one. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_get(host, data->handler, name, strlen(name), &found, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (kiln_c99_is_callable(found)) {
+        *trap = found;
+    }
+    return KILN_C99_OK;
+}
+
+/* `proxy[key]`, through the `get` trap or through the target.
+ *
+ * The key arrives as a *value* rather than as bytes, because the trap sees what the program
+ * wrote: `p[secret]` where `secret` is a Symbol hands the trap that very symbol, and a library
+ * hiding its state behind one compares it by identity. Converting it to the reserved slot name
+ * first -- which every other read does -- would hand the trap a string it could never match. */
+static int kiln_c99_proxy_get(kiln_host *host, kiln_value proxy, kiln_value key,
+                              kiln_value receiver, kiln_value *out, int depth,
+                              kiln_value *thrown) {
+    kiln_value trap;
+    kiln_value inner = kiln_c99_proxy_of(proxy)->target;
+    kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
+    int status = kiln_c99_proxy_trap(host, proxy, "get", &trap, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (trap.tag == KILN_VALUE_UNDEFINED) {
+        return kiln_c99_get_with_receiver(host, inner, key, receiver, out, depth, thrown);
+    }
+    {
+        /* The receiver is ordinarily the proxy itself; `Reflect.get` is the one caller that
+         * names a different one, and a handler can see the difference. */
+        kiln_value arguments[3];
+        arguments[0] = inner;
+        arguments[1] = key;
+        arguments[2] = receiver;
+        return kiln_c99_call(host, out, trap, handler, arguments, 3, depth, thrown);
+    }
+}
+
+/* `[[Get]]` with the receiver named separately.
+ *
+ * Ordinary bracket access reads with the object itself as the receiver, and the two coincide
+ * everywhere except through `Reflect.get`, whose third argument is what an accessor sees as
+ * `this` and what a proxy's `get` trap is handed. */
+static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_value key,
+                                      kiln_value receiver, kiln_value *out, int depth,
+                                      kiln_value *thrown) {
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_get(host, target, key, receiver, out, depth, thrown);
+    }
+    if (target.tag == KILN_VALUE_OBJECT &&
+        !(receiver.tag == target.tag && receiver.bits == target.bits)) {
+        /* Only an accessor can tell the two apart, so only an accessor is looked for here; a
+         * data property reads the same either way and goes through the ordinary path. */
+        kiln_value name = kiln_c99_property_key(key);
+        kiln_value current = target;
+        size_t steps;
+        if (name.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+            kiln_object *object;
+            size_t index;
+            if (current.tag != KILN_VALUE_OBJECT) {
+                break;
+            }
+            object = kiln_c99_object_of(current);
+            for (index = 0; index < object->count; ++index) {
+                if (!kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
+                    continue;
+                }
+                if (!object->properties[index].accessor) {
+                    steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                    break;
+                }
+                if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                    *out = kiln_c99_undefined();
+                    return KILN_C99_OK;
+                }
+                return kiln_c99_call(host, out, object->properties[index].getter, receiver, NULL,
+                                     0, depth, thrown);
+            }
+            if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
+                break;
+            }
+            current = object->prototype;
+        }
+    }
+    return kiln_c99_get_computed(host, target, key, out, depth, thrown);
+}
+
+/* `proxy[key] = value`, through the `set` trap or through the target. The trap's answer is
+ * discarded: a strict-mode assignment would throw on a falsy one, and neither engine does. */
+static int kiln_c99_proxy_set(kiln_host *host, kiln_value proxy, kiln_value key, kiln_value value,
+                              int depth, kiln_value *thrown) {
+    kiln_value trap;
+    kiln_value inner = kiln_c99_proxy_of(proxy)->target;
+    kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
+    int status = kiln_c99_proxy_trap(host, proxy, "set", &trap, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (trap.tag == KILN_VALUE_UNDEFINED) {
+        return kiln_c99_set_computed(host, inner, key, value, depth, thrown);
+    }
+    {
+        kiln_value arguments[4];
+        kiln_value ignored;
+        arguments[0] = inner;
+        arguments[1] = key;
+        arguments[2] = value;
+        arguments[3] = proxy;
+        return kiln_c99_call(host, &ignored, trap, handler, arguments, 4, depth, thrown);
+    }
+}
+
+/* `key in proxy`, `delete proxy[key]`, `Object.keys(proxy)` and
+ * `Object.getOwnPropertyDescriptor(proxy, key)` -- the four remaining operations a handler can
+ * intercept, each with the same shape: consult the trap, and run against the target when there
+ * is none.
+ *
+ * `ownKeys` is the one that does more than forward. The trap reports *every* own key, including
+ * the ones that are not enumerated, because that is what `Reflect.ownKeys` means -- and
+ * `Object.keys` and `for...in` want only the enumerable ones. So each key the trap named is put
+ * back through `[[GetOwnProperty]]`, which is a second trip through the handler and is exactly
+ * what the language specifies. */
+static int kiln_c99_proxy_has(kiln_host *host, kiln_value proxy, kiln_value key, int *answer,
+                              int depth, kiln_value *thrown) {
+    kiln_value trap;
+    kiln_value inner = kiln_c99_proxy_of(proxy)->target;
+    kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
+    int status = kiln_c99_proxy_trap(host, proxy, "has", &trap, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (trap.tag == KILN_VALUE_UNDEFINED) {
+        return kiln_c99_has_computed(host, inner, key, answer, depth, thrown);
+    }
+    {
+        kiln_value arguments[2];
+        kiln_value answered;
+        arguments[0] = inner;
+        arguments[1] = key;
+        status = kiln_c99_call(host, &answered, trap, handler, arguments, 2, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        *answer = kiln_c99_truthy(answered);
+        return KILN_C99_OK;
+    }
+}
+
+static int kiln_c99_proxy_delete(kiln_host *host, kiln_value proxy, kiln_value key, int *answer,
+                                 int depth, kiln_value *thrown) {
+    kiln_value trap;
+    kiln_value inner = kiln_c99_proxy_of(proxy)->target;
+    kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
+    int status = kiln_c99_proxy_trap(host, proxy, "deleteProperty", &trap, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (trap.tag == KILN_VALUE_UNDEFINED) {
+        return kiln_c99_delete_computed(host, inner, key, answer, depth, thrown);
+    }
+    {
+        kiln_value arguments[2];
+        kiln_value answered;
+        arguments[0] = inner;
+        arguments[1] = key;
+        status = kiln_c99_call(host, &answered, trap, handler, arguments, 2, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        *answer = kiln_c99_truthy(answered);
+        return KILN_C99_OK;
+    }
+}
+
+static int kiln_c99_proxy_describe(kiln_host *host, kiln_value proxy, kiln_value key,
+                                   kiln_value *out, int *found, int depth, kiln_value *thrown) {
+    kiln_value trap;
+    kiln_value inner = kiln_c99_proxy_of(proxy)->target;
+    kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
+    int status = kiln_c99_proxy_trap(host, proxy, "getOwnPropertyDescriptor", &trap, depth,
+                                     thrown);
+    *found = 0;
+    *out = kiln_c99_undefined();
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (trap.tag == KILN_VALUE_UNDEFINED) {
+        kiln_value name = kiln_c99_property_key(key);
+        if (name.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return kiln_c99_describe_property(host, inner, name.ptr, name.len, out, found, depth,
+                                          thrown);
+    }
+    {
+        kiln_value arguments[2];
+        arguments[0] = inner;
+        arguments[1] = key;
+        status = kiln_c99_call(host, out, trap, handler, arguments, 2, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        /* Undefined means the name is not an own property -- the same answer the operation gives
+         * for an ordinary object, and the reason presence is reported separately. */
+        *found = out->tag != KILN_VALUE_UNDEFINED;
+        return KILN_C99_OK;
+    }
+}
+
+static int kiln_c99_proxy_define(kiln_host *host, kiln_value proxy, kiln_value key,
+                                 kiln_value descriptor, int depth, kiln_value *thrown) {
+    kiln_value trap;
+    kiln_value inner = kiln_c99_proxy_of(proxy)->target;
+    kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
+    int status = kiln_c99_proxy_trap(host, proxy, "defineProperty", &trap, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (trap.tag == KILN_VALUE_UNDEFINED) {
+        kiln_value name = kiln_c99_property_key(key);
+        if (name.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        return kiln_c99_define_property(host, inner, name.ptr, name.len, descriptor, depth,
+                                        thrown);
+    }
+    {
+        kiln_value arguments[3];
+        kiln_value ignored;
+        arguments[0] = inner;
+        arguments[1] = key;
+        arguments[2] = descriptor;
+        return kiln_c99_call(host, &ignored, trap, handler, arguments, 3, depth, thrown);
+    }
+}
+
+/* Every own key a proxy reports, unfiltered -- what `Reflect.ownKeys` answers with. */
+static int kiln_c99_proxy_all_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
+                                   kiln_value *thrown) {
+    kiln_value trap;
+    kiln_value inner = kiln_c99_proxy_of(proxy)->target;
+    kiln_value handler = kiln_c99_proxy_of(proxy)->handler;
+    int status = kiln_c99_proxy_trap(host, proxy, "ownKeys", &trap, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (trap.tag == KILN_VALUE_UNDEFINED) {
+        return kiln_c99_all_own_keys(host, inner, out, depth, thrown);
+    }
+    status = kiln_c99_call(host, out, trap, handler, &inner, 1, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (out->tag != KILN_VALUE_ARRAY) {
+        /* The specification requires a list; a handler that returns anything else is a
+         * TypeError there and a gap here rather than a silent empty answer. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_proxy_own_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
+                                   kiln_value *thrown) {
+    kiln_value listed;
+    kiln_value kept;
+    size_t index;
+    int status = kiln_c99_proxy_all_keys(host, proxy, &listed, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_new_array(&kept);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    for (index = 0; index < kiln_c99_array_of(listed)->count; ++index) {
+        kiln_value descriptor;
+        kiln_value enumerable;
+        int found;
+        /* Re-read each time: a `getOwnPropertyDescriptor` trap is a program function and may
+         * have grown the list the handler handed back. */
+        kiln_value key = kiln_c99_array_of(listed)->elements[index];
+        if (key.tag == KILN_VALUE_SYMBOL) {
+            /* `Reflect.ownKeys` reports symbols and this does not: the enumerable string keys
+             * are what `Object.keys` and `for...in` walk. */
+            continue;
+        }
+        status = kiln_c99_proxy_describe(host, proxy, key, &descriptor, &found, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (!found) {
+            continue;
+        }
+        status = kiln_c99_get(host, descriptor, "enumerable", 10, &enumerable, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (!kiln_c99_truthy(enumerable)) {
+            continue;
+        }
+        status = kiln_c99_array_push(kept, kiln_c99_property_key(key));
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    *out = kept;
+    return KILN_C99_OK;
+}
+
+/* The computed forms, which exist so a Symbol reaches the trap as itself rather than as the
+ * reserved slot name every other path reduces it to. */
+static int kiln_c99_has_computed(kiln_host *host, kiln_value target, kiln_value key, int *answer,
+                                 int depth, kiln_value *thrown) {
+    kiln_value name;
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_has(host, target, key, answer, depth, thrown);
+    }
+    name = kiln_c99_property_key(key);
+    if (name.tag != KILN_VALUE_STRING) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    return kiln_c99_has_property(host, target, name.ptr, name.len, answer, depth, thrown);
+}
+
+static int kiln_c99_delete_computed(kiln_host *host, kiln_value target, kiln_value key,
+                                    int *answer, int depth, kiln_value *thrown) {
+    kiln_value name;
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_delete(host, target, key, answer, depth, thrown);
+    }
+    name = kiln_c99_property_key(key);
+    if (name.tag != KILN_VALUE_STRING) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    return kiln_c99_delete(host, target, name.ptr, name.len, answer, depth, thrown);
+}
+
+/* Every name a built-in namespace or prototype table answers to.
+ *
+ * Derived by round-tripping the code space through the same lookup a read uses, rather than
+ * listed a second time: a method added to the table shows up here the day it is added, and one
+ * that is not in the table cannot be reported. This is not the list a real engine would give --
+ * these prototypes are method tables and grow a method at a time -- but everything in it is a
+ * member the program can actually reach, which is the property a caller walking descriptors
+ * depends on. */
+static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
+    kiln_value built;
+    uint64_t code;
+    int status;
+    if (!kiln_c99_is_namespace(builtin)) {
+        /* A constructor's statics are reachable, but its own `name`, `length` and `prototype`
+         * are answered by the read path rather than held as slots -- so a list of just the
+         * statics would be short in a way a caller could not tell from complete. A namespace and
+         * a prototype table have no such properties, and their tables are the whole truth. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+    status = kiln_c99_new_array(&built);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    for (code = 1; code < 256; ++code) {
+        const char *name = kiln_c99_method_name(code);
+        size_t len;
+        if (name == NULL || name[0] == '@') {
+            /* A `@@` name is a reserved slot reached through a Symbol, not a string key. */
+            continue;
+        }
+        len = strlen(name);
+        if (kiln_c99_namespace_method(builtin, name, len) != code) {
+            continue;
+        }
+        status = kiln_c99_array_push(built, kiln_c99_copy_text(name, len));
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    /* A prototype table owns the link back to its constructor, which the read path answers and
+     * the method table does not hold. */
+    {
+        kiln_value owner;
+        if (kiln_c99_get(NULL, kiln_c99_builtin(builtin), "constructor", 11, &owner, 0, NULL) ==
+                KILN_C99_OK &&
+            owner.tag == KILN_VALUE_BUILTIN) {
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("constructor", 11));
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+    }
+    *out = built;
+    return KILN_C99_OK;
+}
+
+/* Every own string key, enumerable or not -- which is the whole difference from `Object.keys`,
+ * and why a function's assigned properties show up here. A proxy answers through its `ownKeys`
+ * trap, which is the one operation that reports the unfiltered list. */
+static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
+                                 kiln_value *thrown) {
+    kiln_object *object;
+    kiln_value built;
+    size_t index;
+    int status;
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_all_keys(host, target, out, depth, thrown);
+    }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        target = kiln_c99_closure_of(target)->properties;
+    }
+    status = kiln_c99_new_array(&built);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+        kiln_typed_array *view = kiln_c99_typed_array_of(target);
+        for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_array_push(built, kiln_c99_text(kiln_c99_number((double)index)));
+        }
+        *out = built;
+        return status;
+    }
+    if (target.tag == KILN_VALUE_BUILTIN) {
+        return kiln_c99_builtin_own_keys(target.bits, out);
+    }
+    if (target.tag != KILN_VALUE_OBJECT) {
+        *out = built;
+        return KILN_C99_OK;
+    }
+    object = kiln_c99_object_of(target);
+    for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
+        /* A `@@` key is the machine's own and is not a property of the program's object, however
+         * un-enumerable the rest of them are. */
+        if (object->properties[index].key_len >= 2 && object->properties[index].key[0] == '@' &&
+            object->properties[index].key[1] == '@') {
+            continue;
+        }
+        status = kiln_c99_array_push(built,
+                                     kiln_c99_copy_text(object->properties[index].key,
+                                                        object->properties[index].key_len));
+    }
+    *out = built;
+    return status;
+}
+
+/* The ordinary property store an exotic value carries, or NULL if its kind has none.
+ *
+ * An array and a collection are not objects here, but `class Stack extends Array {}` gives their
+ * instances both a prototype to inherit from and somewhere for a named write to land. Those are
+ * the same question, so the two kinds answer it in one place rather than each spelling out where
+ * it keeps its store. */
+static kiln_value *kiln_c99_exotic_store(kiln_value target) {
+    if (target.tag == KILN_VALUE_ARRAY) {
+        return &kiln_c99_array_of(target)->properties;
+    }
+    if (target.tag == KILN_VALUE_COLLECTION) {
+        return &kiln_c99_collection_of(target)->properties;
+    }
+    return NULL;
+}
+
+/* Read `key` out of an exotic value's store and the prototype chain above it, reporting whether
+ * anything was there -- because *absent* and *present and undefined* lead to different places at
+ * every call site: one falls through to the refusal that names an unimplemented member, the
+ * other is the answer.
+ *
+ * The receiver stays the exotic value itself, not the store: a getter a subclass declared has to
+ * see the array. */
+static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                              kiln_value *out, int depth, kiln_value *thrown, int *found) {
+    kiln_value *slot = kiln_c99_exotic_store(target);
+    kiln_value current;
+    size_t steps;
+    *found = 0;
+    if (slot == NULL) {
+        return KILN_C99_OK;
+    }
+    current = *slot;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        kiln_object *object;
+        size_t index;
+        /* A chain that reaches a constructor continues into its statics, exactly as an
+         * object's does. */
+        if (current.tag == KILN_VALUE_FUNCTION) {
+            current = kiln_c99_closure_of(current)->properties;
+        }
+        if (current.tag != KILN_VALUE_OBJECT) {
+            return KILN_C99_OK;
+        }
+        object = kiln_c99_object_of(current);
+        for (index = 0; index < object->count; ++index) {
+            if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                continue;
+            }
+            *found = 1;
+            if (!object->properties[index].accessor) {
+                *out = object->properties[index].value;
+                return KILN_C99_OK;
+            }
+            if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
+                *out = kiln_c99_undefined();
+                return KILN_C99_OK;
+            }
+            return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
+                                 depth, thrown);
+        }
+        current = object->prototype;
+    }
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
                                  size_t key_len, kiln_value *out, int depth, kiln_value *thrown) {
     static const char length_key[] = "length";
@@ -4621,19 +5486,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         {
-            /* A property that is not an element: `a.total`, or the `index` a match result
-             * carries. Only a key the store actually holds is answered, so a *missing* name is
-             * still the error below rather than undefined. */
-            kiln_array *self_array = kiln_c99_array_of(target);
-            if (self_array->properties.tag == KILN_VALUE_OBJECT) {
-                kiln_object *store = kiln_c99_object_of(self_array->properties);
-                size_t slot;
-                for (slot = 0; slot < store->count; ++slot) {
-                    if (kiln_c99_same_key(&store->properties[slot], key, key_len)) {
-                        *out = store->properties[slot].value;
-                        return KILN_C99_OK;
-                    }
-                }
+            /* A property that is not an element: `a.total`, the `index` a match result carries,
+             * or a method of the class an array subclass was built from -- the store's chain is
+             * where `class Stack extends Array {}` hangs `Stack.prototype`. Only a key the chain
+             * actually holds is answered, so a *missing* name is still the error below rather
+             * than undefined. */
+            int found;
+            int status = kiln_c99_store_get(host, target, key, key_len, out, depth, thrown,
+                                            &found);
+            if (status != KILN_C99_OK || found) {
+                return status;
             }
         }
         /* A method this backend does not have.  Answering undefined would turn `a.sort(f)` into
@@ -4715,6 +5577,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             (collection->is_map && code == KILN_C99_METHOD_COLLECTION_ADD) ||
             (!collection->is_map && (code == KILN_C99_METHOD_COLLECTION_GET ||
                                      code == KILN_C99_METHOD_COLLECTION_SET))) {
+            /* Not one of the collection's own members, so it is whatever the class a subclass
+             * declared put on the prototype -- and only then the refusal that names a member
+             * this backend has not grown. */
+            int found;
+            int status = kiln_c99_store_get(host, target, key, key_len, out, depth, thrown,
+                                            &found);
+            if (status != KILN_C99_OK || found) {
+                return status;
+            }
             return KILN_C99_CONTROL_ERROR;
         }
         *out = kiln_c99_method(code);
@@ -4898,6 +5769,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 uint64_t constructor;
             } owners[] = {{KILN_C99_BUILTIN_OBJECT_PROTOTYPE, KILN_C99_BUILTIN_OBJECT},
                           {KILN_C99_BUILTIN_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_ARRAY},
+                          {KILN_C99_BUILTIN_ERROR_PROTOTYPE, KILN_C99_BUILTIN_ERROR},
+                          {KILN_C99_BUILTIN_MAP_PROTOTYPE, KILN_C99_BUILTIN_MAP},
+                          {KILN_C99_BUILTIN_SET_PROTOTYPE, KILN_C99_BUILTIN_SET},
                           {KILN_C99_BUILTIN_STRING_PROTOTYPE, KILN_C99_BUILTIN_STRING},
                           {KILN_C99_BUILTIN_REGEXP_PROTOTYPE, KILN_C99_BUILTIN_REGEXP},
                           {KILN_C99_BUILTIN_DATE_PROTOTYPE, KILN_C99_BUILTIN_DATE},
@@ -4965,6 +5839,18 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
             if (target.bits == KILN_C99_BUILTIN_ARRAY) {
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_error_name(target.bits) != NULL) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+                return KILN_C99_OK;
+            }
+            if (target.bits == KILN_C99_BUILTIN_MAP) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_MAP_PROTOTYPE);
+                return KILN_C99_OK;
+            }
+            if (target.bits == KILN_C99_BUILTIN_SET) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_SET_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (target.bits == KILN_C99_BUILTIN_STRING) {
@@ -5095,7 +5981,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
  * function" three frames from the cause. */
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown) {
-    int status = kiln_c99_get_own_kind(host, target, key, key_len, out, depth, thrown);
+    int status;
+    if (target.tag == KILN_VALUE_PROXY) {
+        /* Reading a proxy *is* a call, so it cannot go through the pure walk below. The trap
+         * takes a key value; a name reached by this path was always an ordinary string. */
+        return kiln_c99_proxy_get(host, target,
+                                  kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), target, out,
+                                  depth, thrown);
+    }
+    status = kiln_c99_get_own_kind(host, target, key, key_len, out, depth, thrown);
     if (status == KILN_C99_CONTROL_ERROR && key_len >= 2 && key[0] == '@' && key[1] == '@') {
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
@@ -5105,7 +5999,12 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
 
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value *out, int depth, kiln_value *thrown) {
-    double index = kiln_c99_array_index(key);
+    double index;
+    /* Before the key is reduced to a name: a Symbol reaches the trap as itself. */
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_get(host, target, key, target, out, depth, thrown);
+    }
+    index = kiln_c99_array_index(key);
     if (target.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(target);
         if (index < 0.0) {
@@ -5213,7 +6112,11 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
 
 static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value value, int depth, kiln_value *thrown) {
-    double index = kiln_c99_array_index(key);
+    double index;
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_set(host, target, key, value, depth, thrown);
+    }
+    index = kiln_c99_array_index(key);
     if (target.tag == KILN_VALUE_ARRAY && index >= 0.0) {
         kiln_array *array = kiln_c99_array_of(target);
         size_t slot = (size_t)index;
@@ -5501,6 +6404,9 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
 }
 
 static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
+    /* A console shows what a proxy stands in front of rather than running its traps, which is
+     * both what node does by default and the only thing this can do without a host to call. */
+    value = kiln_c99_proxy_inner(value);
     switch (value.tag) {
     case KILN_VALUE_STRING:
         return kiln_c99_quote(text, value.ptr, value.len);
@@ -6480,6 +7386,64 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     kiln_array *array;
     size_t index;
     int status;
+    /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
+     * `length` and writes an element through the handler's traps, which is how a copy-on-write
+     * layer sees the write at all. Every method here operates on the receiver's own storage
+     * instead, so borrowing one onto a proxy would quietly bypass the handler. */
+    if (receiver.tag == KILN_VALUE_PROXY) {
+        if (code == KILN_C99_METHOD_FUNCTION_CALL || code == KILN_C99_METHOD_FUNCTION_APPLY ||
+            code == KILN_C99_METHOD_FUNCTION_BIND) {
+            /* These three touch no storage at all: each hands the receiver back to
+             * `kiln_c99_call`, which is where the `apply` trap lives. */
+        } else if (code == KILN_C99_METHOD_HAS_OWN_PROPERTY) {
+            /* `Object.prototype.hasOwnProperty.call(p, k)` asks `[[GetOwnProperty]]`, which is a
+             * trap -- so it must not read a store the proxy does not have. */
+            kiln_value descriptor;
+            int found;
+            status = kiln_c99_proxy_describe(host, receiver,
+                                             argc > 0 ? args[0] : kiln_c99_undefined(),
+                                             &descriptor, &found, depth, thrown);
+            *result = kiln_c99_boolean(found);
+            return status;
+        } else if (code == KILN_C99_METHOD_PROXY_REVOKE) {
+            /* Withdrawing the capability. Idempotent, because the program holds an ordinary
+             * function and may call it twice. */
+            kiln_c99_proxy_of(receiver)->revoked = 1;
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        } else if (code == KILN_C99_METHOD_PUSH) {
+            /* `push` written out in terms of the operations a handler can see, which is what the
+             * language actually specifies it as and the reason a copy-on-write layer hears about
+             * the write at all: read `length`, set the element, set the new `length`. The array
+             * implementation below reaches the receiver's own storage instead and would go
+             * straight past the handler. */
+            kiln_value length_value;
+            double length;
+            status = kiln_c99_get(host, receiver, "length", 6, &length_value, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_to_number_checked(host, length_value, &length, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (!(length >= 0.0)) {
+                length = 0.0;
+            }
+            for (index = 0; index < argc; ++index) {
+                status = kiln_c99_set_computed(host, receiver,
+                                               kiln_c99_text(kiln_c99_number(length + (double)index)),
+                                               args[index], depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            *result = kiln_c99_number(length + (double)argc);
+            return kiln_c99_put(host, receiver, "length", 6, *result, depth, thrown);
+        } else {
+            return KILN_C99_CONTROL_ERROR;
+        }
+    }
     if (receiver.tag == KILN_VALUE_STRING &&
         (code == KILN_C99_METHOD_STRING_MATCH || code == KILN_C99_METHOD_STRING_MATCH_ALL ||
          code == KILN_C99_METHOD_STRING_SEARCH ||
@@ -7270,7 +8234,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                                        isfinite(first));
             return KILN_C99_OK;
         case KILN_C99_METHOD_IS_ARRAY:
-            *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_ARRAY);
+            /* Follows a proxy to what it stands in front of, which is what the operation is
+             * specified to do -- a proxy of an array *is* an array to every library that
+             * branches on this. */
+            *result = kiln_c99_boolean(
+                argc > 0 && kiln_c99_proxy_inner(args[0]).tag == KILN_VALUE_ARRAY);
             return KILN_C99_OK;
         case KILN_C99_METHOD_ARRAY_OF: {
             kiln_value built;
@@ -7288,6 +8256,55 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_object *object;
             if (argc == 0) {
                 return KILN_C99_CONTROL_ERROR;
+            }
+            if (args[0].tag == KILN_VALUE_PROXY) {
+                /* A proxy has no store to walk: its keys come from the `ownKeys` trap and each
+                 * value from a `get`, which is the pair of trips the language specifies and the
+                 * reason a logging handler sees both. */
+                kiln_value keys;
+                kiln_array *listed;
+                status = kiln_c99_own_keys(host, args[0], &keys, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                    *result = keys;
+                    return KILN_C99_OK;
+                }
+                status = kiln_c99_new_array(&built);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                listed = kiln_c99_array_of(keys);
+                for (index = 0; index < listed->count; ++index) {
+                    kiln_value read;
+                    kiln_value key = listed->elements[index];
+                    status = kiln_c99_get_computed(host, args[0], key, &read, depth, thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                    if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                        status = kiln_c99_array_push(built, read);
+                    } else {
+                        kiln_value pair;
+                        status = kiln_c99_new_array(&pair);
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(pair, key);
+                        }
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(pair, read);
+                        }
+                        if (status == KILN_C99_OK) {
+                            status = kiln_c99_array_push(built, pair);
+                        }
+                    }
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                    listed = kiln_c99_array_of(keys);
+                }
+                *result = built;
+                return KILN_C99_OK;
             }
             /* An array's own enumerable keys are its indices, as strings, and a hole is not one
              * of them -- which is the same walk `for...in` does, so it is the same code. */
@@ -8083,6 +9100,16 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (key.tag != KILN_VALUE_STRING) {
                 return KILN_C99_CONTROL_ERROR;
             }
+            if (receiver.tag == KILN_VALUE_ARRAY) {
+                /* An array's own properties are its live indices, its `length`, and whatever a
+                 * program put in the store beside them -- the same three the descriptor path
+                 * knows about, so it answers rather than a fourth restatement of them. */
+                kiln_value descriptor;
+                status = kiln_c99_describe_property(host, receiver, key.ptr, key.len, &descriptor,
+                                                    &found, depth, thrown);
+                *result = kiln_c99_boolean(found);
+                return status;
+            }
             if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
                 int enumerable;
                 kiln_c99_typed_own(receiver, key.ptr, key.len, &found, &enumerable);
@@ -8504,8 +9531,21 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                               : linked;
                 return KILN_C99_OK;
             }
-            if (subject.tag == KILN_VALUE_ARRAY) {
-                *result = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_PROTOTYPE);
+            if (subject.tag == KILN_VALUE_ARRAY || subject.tag == KILN_VALUE_COLLECTION) {
+                /* A subclass instance, or one a `setPrototypeOf` relinked, answers with the
+                 * link its store carries. */
+                kiln_value *slot = kiln_c99_exotic_store(subject);
+                kiln_value linked = slot->tag == KILN_VALUE_OBJECT
+                                        ? kiln_c99_object_of(*slot)->prototype
+                                        : kiln_c99_undefined();
+                if (linked.tag != KILN_VALUE_UNDEFINED) {
+                    *result = linked;
+                    return KILN_C99_OK;
+                }
+                *result = kiln_c99_builtin(
+                    subject.tag == KILN_VALUE_ARRAY          ? KILN_C99_BUILTIN_ARRAY_PROTOTYPE
+                    : kiln_c99_collection_of(subject)->is_map ? KILN_C99_BUILTIN_MAP_PROTOTYPE
+                                                             : KILN_C99_BUILTIN_SET_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_STRING) {
@@ -8519,7 +9559,18 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             if (subject.tag == KILN_VALUE_FUNCTION || subject.tag == KILN_VALUE_METHOD ||
                 subject.tag == KILN_VALUE_BOUND) {
-                *result = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
+                /* A function keeps a relinked prototype on its store, which is where
+                 * `Object.setPrototypeOf(f, o)` puts it and where the read walk looks for
+                 * inherited statics -- so this has to report the same link or the two disagree
+                 * about a chain they are both walking. */
+                kiln_value linked =
+                    subject.tag == KILN_VALUE_FUNCTION &&
+                            kiln_c99_closure_of(subject)->properties.tag == KILN_VALUE_OBJECT
+                        ? kiln_c99_object_of(kiln_c99_closure_of(subject)->properties)->prototype
+                        : kiln_c99_undefined();
+                *result = linked.tag == KILN_VALUE_UNDEFINED
+                              ? kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE)
+                              : linked;
                 return KILN_C99_OK;
             }
             if (subject.tag == KILN_VALUE_NUMBER) {
@@ -8558,7 +9609,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
         case KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
-            if (subject.tag != KILN_VALUE_OBJECT) {
+            if (subject.tag != KILN_VALUE_OBJECT && subject.tag != KILN_VALUE_FUNCTION &&
+                kiln_c99_exotic_store(subject) == NULL) {
                 return KILN_C99_CONTROL_ERROR;
             }
             status = kiln_c99_set_prototype(subject, argc > 1 ? args[1] : kiln_c99_undefined());
@@ -8567,47 +9619,185 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = subject;
             return status;
         }
-        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES: {
-            /* Every own string key, enumerable or not -- which is the whole difference from
-             * `Object.keys`, and why a function's assigned properties show up here. */
-            kiln_object *object;
-            kiln_value built;
-            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
-            if (subject.tag == KILN_VALUE_FUNCTION) {
-                subject = kiln_c99_closure_of(subject)->properties;
+        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES:
+            return kiln_c99_all_own_keys(host, argc > 0 ? args[0] : kiln_c99_undefined(), result,
+                                         depth, thrown);
+        case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY: {
+            kiln_value name = argc > 1 ? kiln_c99_property_key(args[1]) : kiln_c99_undefined();
+            if (argc < 3 || name.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
             }
-            status = kiln_c99_new_array(&built);
+            status = kiln_c99_define_property(host, args[0], name.ptr, name.len, args[2], depth,
+                                              thrown);
+            /* The target, so a definition can be inlined into the expression that built it. */
+            *result = args[0];
+            return status;
+        }
+        case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES: {
+            if (argc < 2) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_define_properties(host, args[0], args[1], depth, thrown);
+            *result = args[0];
+            return status;
+        }
+        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR: {
+            kiln_value name = argc > 1 ? kiln_c99_property_key(args[1]) : kiln_c99_undefined();
+            int found;
+            if (argc < 2 || name.tag != KILN_VALUE_STRING) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            return kiln_c99_describe_property(host, args[0], name.ptr, name.len, result, &found,
+                                             depth, thrown);
+        }
+        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS: {
+            /* One object holding every own property's descriptor, which is what a structural
+             * clone reaches for -- accessors and all, where a spread would have called them. */
+            kiln_value built;
+            kiln_object *object;
+            if (argc == 0 || args[0].tag != KILN_VALUE_OBJECT) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
                 return status;
             }
-            if (subject.tag == KILN_VALUE_TYPED_ARRAY) {
-                kiln_typed_array *view = kiln_c99_typed_array_of(subject);
-                for (index = 0; index < view->length && status == KILN_C99_OK; ++index) {
-                    status = kiln_c99_array_push(
-                        built, kiln_c99_text(kiln_c99_number((double)index)));
-                }
-                *result = built;
-                return status;
-            }
-            if (subject.tag != KILN_VALUE_OBJECT) {
-                *result = built;
-                return KILN_C99_OK;
-            }
-            object = kiln_c99_object_of(subject);
-            for (index = 0; index < object->count && status == KILN_C99_OK; ++index) {
-                /* A `@@` key is the machine's own and is not a property of the program's object,
-                 * however un-enumerable the rest of them are. */
-                if (object->properties[index].key_len >= 2 &&
-                    object->properties[index].key[0] == '@' &&
-                    object->properties[index].key[1] == '@') {
+            object = kiln_c99_object_of(args[0]);
+            for (index = 0; index < object->count; ++index) {
+                kiln_value described;
+                int found;
+                const char *key = object->properties[index].key;
+                size_t key_len = object->properties[index].key_len;
+                if (key_len >= 2 && key[0] == '@' && key[1] == '@') {
                     continue;
                 }
-                status = kiln_c99_array_push(built,
-                                             kiln_c99_copy_text(object->properties[index].key,
-                                                                object->properties[index].key_len));
+                status = kiln_c99_describe_property(host, args[0], key, key_len, &described, &found,
+                                                    depth, thrown);
+                if (status == KILN_C99_OK && found) {
+                    status = kiln_c99_put(NULL, built, key, key_len, described, 0, NULL);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                object = kiln_c99_object_of(args[0]);
             }
             *result = built;
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_PROXY_REVOCABLE: {
+            /* A pair: the proxy, and the one function that can retire it. Handing the second out
+             * separately is the whole point -- a caller can be given the proxy without being
+             * given the power to withdraw it, and the other way round. */
+            kiln_value proxy;
+            kiln_value revoke;
+            kiln_value pair;
+            status = kiln_c99_new_proxy(&proxy, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                        argc > 1 ? args[1] : kiln_c99_undefined());
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_bind(&revoke, kiln_c99_method(KILN_C99_METHOD_PROXY_REVOKE),
+                                       proxy);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_new_object(&pair);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, pair, "proxy", 5, proxy, 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, pair, "revoke", 6, revoke, 0, NULL);
+            }
+            *result = pair;
             return status;
+        }
+        case KILN_C99_METHOD_REFLECT_OWN_KEYS:
+        case KILN_C99_METHOD_REFLECT_GET:
+        case KILN_C99_METHOD_REFLECT_SET:
+        case KILN_C99_METHOD_REFLECT_HAS:
+        case KILN_C99_METHOD_REFLECT_DELETE_PROPERTY: {
+            /* Every one of these refuses a primitive target rather than coercing it, which is
+             * the difference from the operator forms: `Reflect.get(1, "x")` is a TypeError where
+             * `(1).x` reads off the string prototype. A library that reaches for `Reflect`
+             * usually does so precisely to get the strict form. */
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value key = argc > 1 ? args[1] : kiln_c99_undefined();
+            int answer;
+            if (!kiln_c99_is_reference(subject) && subject.tag != KILN_VALUE_DATE &&
+                subject.tag != KILN_VALUE_REGEXP && subject.tag != KILN_VALUE_PROMISE) {
+                return kiln_c99_throw_not_a(thrown, subject, "object");
+            }
+            switch (code) {
+            case KILN_C99_METHOD_REFLECT_OWN_KEYS:
+                return kiln_c99_all_own_keys(host, subject, result, depth, thrown);
+            case KILN_C99_METHOD_REFLECT_GET:
+                /* The third argument is what an accessor sees as `this` and what a `get` trap is
+                 * handed; without one it is the target itself. */
+                return kiln_c99_get_with_receiver(host, subject, key,
+                                                  argc > 2 ? args[2] : subject, result, depth,
+                                                  thrown);
+            case KILN_C99_METHOD_REFLECT_SET:
+                status = kiln_c99_set_computed(host, subject, key,
+                                               argc > 2 ? args[2] : kiln_c99_undefined(), depth,
+                                               thrown);
+                /* A boolean, where an assignment evaluates to the value written. */
+                *result = kiln_c99_boolean(status == KILN_C99_OK);
+                return status;
+            case KILN_C99_METHOD_REFLECT_HAS:
+                status = kiln_c99_has_computed(host, subject, key, &answer, depth, thrown);
+                *result = kiln_c99_boolean(answer);
+                return status;
+            default:
+                status = kiln_c99_delete_computed(host, subject, key, &answer, depth, thrown);
+                *result = kiln_c99_boolean(answer);
+                return status;
+            }
+        }
+        case KILN_C99_METHOD_REFLECT_APPLY: {
+            /* `Reflect.apply(f, this, args)` is `f.apply(this, args)` without going through the
+             * function's own `apply`, which a proxy or an override could have replaced. */
+            kiln_array *list;
+            if (argc < 3 || args[2].tag != KILN_VALUE_ARRAY) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            list = kiln_c99_array_of(args[2]);
+            return kiln_c99_call(host, result, args[0], args[1],
+                                 list->count == 0 ? NULL : list->elements, list->count, depth,
+                                 thrown);
+        }
+        case KILN_C99_METHOD_REFLECT_CONSTRUCT: {
+            kiln_array *list;
+            if (argc < 2 || args[1].tag != KILN_VALUE_ARRAY) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            if (argc > 2) {
+                /* A third argument names a `new.target` other than the callee, which changes
+                 * both what the body reads and which prototype the instance gets. */
+                return KILN_C99_CONTROL_ERROR;
+            }
+            list = kiln_c99_array_of(args[1]);
+            return kiln_c99_construct(host, result, args[0],
+                                      list->count == 0 ? NULL : list->elements, list->count,
+                                      depth, thrown);
+        }
+        case KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE:
+            /* A release build strips unwind tables, so there are no frames to read: the
+             * property this would write is one this engine cannot fill in. Answering undefined
+             * and leaving the error's own `stack` header alone is what the interpreter does. */
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_OBJECT_IS: {
+            /* SameValue: `===` except that it separates the two zeroes and finds NaN. The
+             * collections already compare with SameValueZero, which differs from this in
+             * exactly the zero case, so the shared half is reused and only that case is added. */
+            kiln_value left = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value right = argc > 1 ? args[1] : kiln_c99_undefined();
+            if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER &&
+                kiln_c99_as_number(left) == 0.0 && kiln_c99_as_number(right) == 0.0) {
+                *result = kiln_c99_boolean(kiln_c99_signbit(kiln_c99_as_number(left)) ==
+                                           kiln_c99_signbit(kiln_c99_as_number(right)));
+                return KILN_C99_OK;
+            }
+            *result = kiln_c99_boolean(kiln_c99_same_value_zero(left, right));
+            return KILN_C99_OK;
         }
         case KILN_C99_METHOD_STRING_RAW: {
             /* `String.raw` reads the *raw* half of the template object -- the text as written,
@@ -8798,12 +9988,6 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         }
         case KILN_C99_METHOD_OBJECT_CREATE: {
             kiln_value built;
-            /* The descriptor argument can carry accessors, which are functions, so it is
-             * refused rather than half-honoured -- silently ignoring it would give an object
-             * missing every property the program asked for. */
-            if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
-                return KILN_C99_CONTROL_ERROR;
-            }
             status = kiln_c99_new_object(&built);
             if (status != KILN_C99_OK) {
                 return status;
@@ -8815,6 +9999,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             } else if (argc > 0) {
                 return KILN_C99_CONTROL_ERROR;
             }
+            /* The second argument is the same map of descriptors `defineProperties` takes, and
+             * it goes through the same code -- a definition, not an assignment, so an accessor
+             * arrives as an accessor and the prototype's setters are not consulted. */
+            if (argc > 1) {
+                status = kiln_c99_define_properties(host, built, args[1], depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
             *result = built;
             return KILN_C99_OK;
         }
@@ -8824,6 +10017,24 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             int found = 0;
             if (argc == 0 || key.tag != KILN_VALUE_STRING) {
                 return KILN_C99_CONTROL_ERROR;
+            }
+            if (args[0].tag == KILN_VALUE_PROXY) {
+                /* The same question `hasOwnProperty` asks, and the same trap answers it. */
+                kiln_value descriptor;
+                status = kiln_c99_proxy_describe(host, args[0], args[1], &descriptor, &found,
+                                                 depth, thrown);
+                *result = kiln_c99_boolean(found);
+                return status;
+            }
+            if (args[0].tag == KILN_VALUE_ARRAY) {
+                /* An array's own properties are its live indices, its `length`, and whatever a
+                 * program put in the store beside them -- the same three the descriptor path
+                 * knows about, so it answers rather than a fourth restatement of them. */
+                kiln_value descriptor;
+                status = kiln_c99_describe_property(host, args[0], key.ptr, key.len, &descriptor,
+                                                    &found, depth, thrown);
+                *result = kiln_c99_boolean(found);
+                return status;
             }
             if (args[0].tag == KILN_VALUE_TYPED_ARRAY) {
                 int enumerable;
@@ -9883,6 +11094,11 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
     kiln_value iterator;
     size_t index;
     int status;
+    /* Walking a proxy means reading `@@iterator` and then `length` and each index through the
+     * handler, which this path does not do -- so it says so rather than iterating the target. */
+    if (source.tag == KILN_VALUE_PROXY) {
+        return KILN_C99_CONTROL_ERROR;
+    }
     if (source.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(source);
         size_t length = array->count;
@@ -10032,10 +11248,16 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
 
 /* `key in target`: whether the name is reachable, own or inherited. Unlike a read this does not
  * call an accessor -- the question is whether the property exists, not what it produces. */
-static int kiln_c99_has_property(kiln_value target, const char *key, size_t key_len, int *answer) {
+static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char *key,
+                                 size_t key_len, int *answer, int depth, kiln_value *thrown) {
     kiln_value current = target;
     size_t steps;
     *answer = 0;
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_has_computed(host, target,
+                                     kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), answer,
+                                     depth, thrown);
+    }
     if (target.tag == KILN_VALUE_ARRAY_BUFFER) {
         *answer = kiln_c99_same_name(key, key_len, "byteLength") ||
                   kiln_c99_same_name(key, key_len, "constructor");
@@ -10144,10 +11366,16 @@ static int kiln_c99_typed_prototype_own(kiln_value target, const char *key, size
  *
  * A name that was never there deletes successfully, which is what makes `delete` almost always
  * true and why the answer is about the *end state* rather than about work done. */
-static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, int *answer) {
+static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                           int *answer, int depth, kiln_value *thrown) {
     kiln_object *object;
     size_t index;
     *answer = 1;
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_delete_computed(host, target,
+                                        kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len),
+                                        answer, depth, thrown);
+    }
     if (target.tag == KILN_VALUE_STRING) {
         /* `delete "text".length` is false: the property is real and cannot be configured away.
          * Anything else on a string was never there, and deleting what is not there is true. */
@@ -10187,6 +11415,11 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
         if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
             continue;
         }
+        if (!object->properties[index].configurable) {
+            /* `delete` answers about the end state, and the property is still there. */
+            *answer = 0;
+            return KILN_C99_OK;
+        }
         /* Shifted rather than swapped with the last: property order is observable, and a
          * `delete` must not reorder what remains. */
         for (; index + 1 < object->count; ++index) {
@@ -10201,10 +11434,15 @@ static int kiln_c99_delete(kiln_value target, const char *key, size_t key_len, i
 /* An array of a value's own enumerable string keys, in enumeration order: what `for...in` walks
  * and what `Object.keys` reports. A snapshot, which is what the language specifies -- a key added
  * during the loop may or may not be visited, and this chooses not to. */
-static int kiln_c99_own_keys(kiln_value target, kiln_value *out) {
+static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out, int depth,
+                             kiln_value *thrown) {
     kiln_value built;
     size_t index;
-    int status = kiln_c99_new_array(&built);
+    int status;
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_own_keys(host, target, out, depth, thrown);
+    }
+    status = kiln_c99_new_array(&built);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -10273,7 +11511,9 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
     if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
         return KILN_C99_OK;
     }
-    if (target.tag != KILN_VALUE_OBJECT) {
+    if (target.tag != KILN_VALUE_OBJECT || source.tag == KILN_VALUE_PROXY) {
+        /* Spreading a proxy is its `ownKeys` trap followed by a `get` for each key; neither is
+         * reachable from here. */
         return KILN_C99_CONTROL_ERROR;
     }
     /* A primitive has no own enumerable properties, so spreading one contributes nothing:
@@ -10441,6 +11681,381 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
     return KILN_C99_CONTROL_ERROR;
 }
 
+/* The store a *definition* lands in.
+ *
+ * A function keeps its statics in one, an array and a collection keep their non-element
+ * properties in one, and an object is its own. Distinct from the read paths, which each know
+ * where to look: this is the one place that has to create a store that does not exist yet. */
+static int kiln_c99_definition_store(kiln_value target, kiln_value *out) {
+    if (target.tag == KILN_VALUE_OBJECT) {
+        *out = target;
+        return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_FUNCTION) {
+        return kiln_c99_function_store(target, out);
+    }
+    {
+        kiln_value *slot = kiln_c99_exotic_store(target);
+        if (slot != NULL) {
+            if (slot->tag != KILN_VALUE_OBJECT) {
+                int status = kiln_c99_new_object(slot);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            *out = *slot;
+            return KILN_C99_OK;
+        }
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
+/* Whether `descriptor` mentions `name` at all, which is a different question from what it says.
+ *
+ * `{ value: undefined }` and `{}` define different properties, and `{ writable: false }` and a
+ * descriptor silent about writability say different things about an existing one -- so every
+ * field has to be tested for presence before it is read. */
+static int kiln_c99_descriptor_field(kiln_host *host, kiln_value descriptor, const char *name,
+                                     kiln_value *out, int *present, int depth,
+                                     kiln_value *thrown) {
+    size_t len = strlen(name);
+    int status = kiln_c99_has_property(host, descriptor, name, len, present, depth, thrown);
+    *out = kiln_c99_undefined();
+    if (status != KILN_C99_OK || !*present) {
+        return status;
+    }
+    return kiln_c99_get(host, descriptor, name, len, out, depth, thrown);
+}
+
+/* `Object.defineProperty(target, key, descriptor)`.
+ *
+ * Defining is not assigning, and the difference is the whole reason the operation exists. An
+ * assignment consults the prototype chain and hands the write to the first setter it finds; a
+ * definition ignores the chain entirely and installs an own property. An assignment produces a
+ * writable, enumerable, configurable data property; a definition leaves *unmentioned* attributes
+ * false on a property it creates. `Object.defineProperty(o, "k", { value: 1 })` and `o.k = 1`
+ * differ in all four ways, and the lazy-getter idiom -- a prototype accessor that replaces
+ * itself with an own value the first time it is read -- depends on every one of them. */
+static int kiln_c99_define_property(kiln_host *host, kiln_value target, const char *key,
+                                    size_t key_len, kiln_value descriptor, int depth,
+                                    kiln_value *thrown) {
+    kiln_value store;
+    kiln_property *slot;
+    kiln_value getter;
+    kiln_value setter;
+    kiln_value value;
+    kiln_value writable;
+    kiln_value enumerable;
+    kiln_value configurable;
+    int has_getter = 0;
+    int has_setter = 0;
+    int has_value = 0;
+    int has_writable = 0;
+    int has_enumerable = 0;
+    int has_configurable = 0;
+    int existed = 0;
+    int status;
+    size_t at;
+    if (descriptor.tag != KILN_VALUE_OBJECT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Property description must be an object");
+    }
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_define(host, target,
+                                     kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len),
+                                     descriptor, depth, thrown);
+    }
+    if (target.tag != KILN_VALUE_OBJECT) {
+        /* Only an ordinary object, whose every own property really is a slot in one list.
+         *
+         * A function's `name`, `length` and `prototype` are read from the closure rather than
+         * from its store, and an array's elements and `length` from the array itself -- so a
+         * definition of one of those names would land somewhere nothing reads it back, and
+         * `Object.defineProperty(f, "name", ...)` would look as though it had worked. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+    /* Every field is read before anything is written, because a descriptor may be a program's
+     * object with getters on it: one of them running mid-update could reallocate the very
+     * property list the slot below points into. */
+    status = kiln_c99_descriptor_field(host, descriptor, "get", &getter, &has_getter, depth,
+                                       thrown);
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_descriptor_field(host, descriptor, "set", &setter, &has_setter, depth,
+                                           thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_descriptor_field(host, descriptor, "value", &value, &has_value, depth,
+                                           thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_descriptor_field(host, descriptor, "writable", &writable, &has_writable,
+                                           depth, thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_descriptor_field(host, descriptor, "enumerable", &enumerable,
+                                           &has_enumerable, depth, thrown);
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_descriptor_field(host, descriptor, "configurable", &configurable,
+                                           &has_configurable, depth, thrown);
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_definition_store(target, &store);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(store);
+        for (at = 0; at < object->count; ++at) {
+            if (kiln_c99_same_key(&object->properties[at], key, key_len)) {
+                existed = 1;
+                break;
+            }
+        }
+    }
+    status = kiln_c99_own_slot(store, key, key_len, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (!existed) {
+        /* What a descriptor does not say about a *new* property is false, where the fresh slot
+         * arrives as what an assignment would have made. */
+        slot->enumerable = 0;
+        slot->writable = 0;
+        slot->configurable = 0;
+    }
+    if (has_getter || has_setter) {
+        if (!slot->accessor) {
+            slot->accessor = 1;
+            slot->getter = kiln_c99_undefined();
+            slot->setter = kiln_c99_undefined();
+            slot->value = kiln_c99_undefined();
+        }
+        if (has_getter) {
+            slot->getter = getter;
+        }
+        if (has_setter) {
+            slot->setter = setter;
+        }
+    } else if (has_value) {
+        slot->accessor = 0;
+        slot->getter = kiln_c99_undefined();
+        slot->setter = kiln_c99_undefined();
+        slot->value = value;
+    }
+    if (has_writable) {
+        slot->writable = kiln_c99_truthy(writable);
+    }
+    if (has_enumerable) {
+        slot->enumerable = kiln_c99_truthy(enumerable);
+    }
+    if (has_configurable) {
+        slot->configurable = kiln_c99_truthy(configurable);
+    }
+    return KILN_C99_OK;
+}
+
+/* Every own property of `descriptors`, defined onto `target`. The shared half of
+ * `Object.defineProperties` and the two-argument `Object.create`. */
+static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
+                                      int depth, kiln_value *thrown) {
+    kiln_object *source;
+    size_t index;
+    if (descriptors.tag == KILN_VALUE_UNDEFINED) {
+        return KILN_C99_OK;
+    }
+    if (descriptors.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    source = kiln_c99_object_of(descriptors);
+    for (index = 0; index < source->count; ++index) {
+        /* Only the enumerable own ones, which is what the language walks -- and the machine's
+         * own `@@` keys are never among them. */
+        kiln_value descriptor;
+        int status;
+        if (!source->properties[index].enumerable) {
+            continue;
+        }
+        status = kiln_c99_get(host, descriptors, source->properties[index].key,
+                              source->properties[index].key_len, &descriptor, depth, thrown);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_define_property(host, target, source->properties[index].key,
+                                              source->properties[index].key_len, descriptor,
+                                              depth, thrown);
+        }
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        /* A descriptor's getters may have grown the list; re-reading its length each time would
+         * be wrong for the opposite reason, so the snapshot the loop started with stands and a
+         * property added during it is not visited. */
+        source = kiln_c99_object_of(descriptors);
+    }
+    return KILN_C99_OK;
+}
+
+/* `Object.getOwnPropertyDescriptor`: the property as a plain object, or undefined if the name is
+ * not an own property.
+ *
+ * The field order is the order a console prints, so it is the specification's: value and
+ * writable for a data property, get and set for an accessor, then enumerable and configurable
+ * for both. */
+static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
+                                      size_t key_len, kiln_value *out, int *found, int depth,
+                                      kiln_value *thrown) {
+    kiln_value built;
+    int status;
+    kiln_value store = target;
+    *found = 0;
+    *out = kiln_c99_undefined();
+    if (target.tag == KILN_VALUE_PROXY) {
+        return kiln_c99_proxy_describe(host, target,
+                                       kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), out,
+                                       found, depth, thrown);
+    }
+    if (target.tag == KILN_VALUE_BUILTIN &&
+        kiln_c99_namespace_method(target.bits, key, key_len) != 0) {
+        /* An intrinsic prototype's methods are real own properties even though this backend
+         * keeps them in a table: writable and configurable, never enumerated. A walker looking
+         * for the method it should invoke -- which is what a copy-on-write layer does before it
+         * forwards -- has to find one here or it forwards nothing. */
+        kiln_value method;
+        *found = 1;
+        status = kiln_c99_get(host, target, key, key_len, &method, depth, thrown);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_new_object(&built);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "value", 5, method, 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(1), 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+        }
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0, NULL);
+        }
+        *out = built;
+        return status;
+    }
+    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY) {
+        /* Undefined is a *real answer* here -- it means the name is not an own property -- so
+         * this can only be asked of a value whose own properties are all modelled. A function
+         * carries `name`, `length` and `prototype` outside its store, and a built-in carries
+         * members this backend has not grown; answering undefined for either would be a wrong
+         * answer indistinguishable from a right one. The built-in members that *are* modelled
+         * are answered above, where the table can be asked. */
+        return KILN_C99_CONTROL_ERROR;
+    }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        kiln_array *array = kiln_c99_array_of(target);
+        double at = kiln_c99_key_index(key, key_len);
+        if (kiln_c99_same_name(key, key_len, "length")) {
+            status = kiln_c99_new_object(&built);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* `length` is real, writable and neither enumerated nor configurable -- the one
+             * property of an array that is not an element. */
+            status = kiln_c99_put(NULL, built, "value", 5,
+                                  kiln_c99_number((double)array->count), 0, NULL);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(1), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(0), 0,
+                                      NULL);
+            }
+            *out = built;
+            *found = 1;
+            return status;
+        }
+        if (at >= 0.0) {
+            if ((size_t)at >= array->count || kiln_c99_is_hole(array->elements[(size_t)at])) {
+                return KILN_C99_OK;
+            }
+            status = kiln_c99_new_object(&built);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_put(NULL, built, "value", 5, array->elements[(size_t)at], 0, NULL);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "writable", 8,
+                                      kiln_c99_boolean(!array->frozen), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(1), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "configurable", 12,
+                                      kiln_c99_boolean(!array->frozen), 0, NULL);
+            }
+            *out = built;
+            *found = 1;
+            return status;
+        }
+    }
+    {
+        kiln_value *slot = kiln_c99_exotic_store(target);
+        if (slot != NULL) {
+            store = *slot;
+        }
+    }
+    if (store.tag != KILN_VALUE_OBJECT) {
+        return KILN_C99_OK;
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(store);
+        size_t index;
+        for (index = 0; index < object->count; ++index) {
+            kiln_property property;
+            if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                continue;
+            }
+            property = object->properties[index];
+            status = kiln_c99_new_object(&built);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            if (property.accessor) {
+                status = kiln_c99_put(NULL, built, "get", 3, property.getter, 0, NULL);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(NULL, built, "set", 3, property.setter, 0, NULL);
+                }
+            } else {
+                status = kiln_c99_put(NULL, built, "value", 5, property.value, 0, NULL);
+                if (status == KILN_C99_OK) {
+                    /* A frozen object reports every property as fixed without having rewritten
+                     * each one, which is where the flag and the bits have to agree. */
+                    status = kiln_c99_put(NULL, built, "writable", 8,
+                                          kiln_c99_boolean(property.writable && !object->frozen),
+                                          0, NULL);
+                }
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "enumerable", 10,
+                                      kiln_c99_boolean(property.enumerable), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "configurable", 12,
+                                      kiln_c99_boolean(property.configurable && !object->frozen),
+                                      0, NULL);
+            }
+            *out = built;
+            *found = 1;
+            return status;
+        }
+    }
+    return KILN_C99_OK;
+}
+
 /* Define a method: a data property that is reachable by name and never enumerated.
  *
  * `kiln_c99_put` is an assignment and creates an enumerated property, which is right for an
@@ -10549,7 +12164,9 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
      * is nowhere for one to have been put -- and asking would reach the array method table,
      * which reports an unknown name as an error rather than as absence. A Date is asked because
      * carrying one is the whole reason the step exists. */
-    if (value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_DATE) {
+    if (value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_DATE ||
+        (value.tag == KILN_VALUE_PROXY &&
+         kiln_c99_proxy_inner(value).tag == KILN_VALUE_OBJECT)) {
         kiln_value method;
         status = kiln_c99_get(host, value, "toJSON", 6, &method, depth, thrown);
         if (status != KILN_C99_OK) {
@@ -10595,7 +12212,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         break;
     }
     if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY &&
-        value.tag != KILN_VALUE_TYPED_ARRAY) {
+        value.tag != KILN_VALUE_TYPED_ARRAY && value.tag != KILN_VALUE_PROXY) {
         *serialised = 0;
         return KILN_C99_OK;
     }
@@ -10710,6 +12327,99 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         }
         free(nested.bytes);
         return kiln_c99_text_append_c(text, "}");
+    }
+    if (value.tag == KILN_VALUE_PROXY) {
+        /* Read entirely through the handler: an `ownKeys` for the shape and a `get` per member,
+         * which is what the language specifies and what makes a virtual object serialise as the
+         * thing it presents rather than as the target hiding behind it.
+         *
+         * Whether it is written as an array or as an object follows the target, exactly as
+         * `Array.isArray` does -- the two must agree or a proxy of an array serialises with
+         * quoted indices. */
+        int is_array = kiln_c99_proxy_inner(value).tag == KILN_VALUE_ARRAY;
+        kiln_value keys;
+        size_t count = 0;
+        size_t written = 0;
+        for (ancestor = parents; ancestor != NULL; ancestor = ancestor->parent) {
+            if (ancestor->container == (const void *)kiln_c99_proxy_of(value)) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Converting circular structure to JSON");
+            }
+        }
+        frame.parent = parents;
+        frame.container = (const void *)kiln_c99_proxy_of(value);
+        if (is_array) {
+            kiln_value length_value;
+            double length;
+            status = kiln_c99_get(host, value, "length", 6, &length_value, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                return status;
+            }
+            length = kiln_c99_as_number(length_value);
+            if (!(length >= 0.0)) {
+                length = 0.0;
+            }
+            count = (size_t)length;
+            keys = kiln_c99_undefined();
+        } else {
+            status = kiln_c99_own_keys(host, value, &keys, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                return status;
+            }
+            count = kiln_c99_array_of(keys)->count;
+        }
+        KILN_JSON_OPEN(is_array ? "[" : "{");
+        for (index = 0; index < count; ++index) {
+            kiln_value key = is_array ? kiln_c99_text(kiln_c99_number((double)index))
+                                      : kiln_c99_array_of(keys)->elements[index];
+            kiln_value member;
+            kiln_text member_text = {NULL, 0, 0};
+            int wrote;
+            status = kiln_c99_get_computed(host, value, key, &member, depth, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                return status;
+            }
+            status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
+                                         nested.bytes, nested.len, &wrote, depth, &frame, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                free(member_text.bytes);
+                return status;
+            }
+            /* An element with no JSON spelling holds its position as null; a *member* with none
+             * is dropped, separator and all, which is why the member is built aside first. */
+            if (!wrote && !is_array) {
+                free(member_text.bytes);
+                continue;
+            }
+            KILN_JSON_BREAK(written == 0);
+            written += 1;
+            if (!is_array && (kiln_c99_json_quote(text, key.ptr, key.len) != KILN_C99_OK ||
+                              kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") !=
+                                  KILN_C99_OK)) {
+                free(nested.bytes);
+                free(member_text.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            if ((wrote ? kiln_c99_text_append(text, member_text.bytes, member_text.len)
+                       : kiln_c99_text_append_c(text, "null")) != KILN_C99_OK) {
+                free(nested.bytes);
+                free(member_text.bytes);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            free(member_text.bytes);
+        }
+        if (indent_len != 0 && written != 0 &&
+            (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
+             kiln_c99_text_append(text, current, current_len) != KILN_C99_OK)) {
+            free(nested.bytes);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        free(nested.bytes);
+        return kiln_c99_text_append_c(text, is_array ? "]" : "}");
     }
     {
         kiln_object *object = kiln_c99_object_of(value);
@@ -11281,6 +12991,38 @@ static kiln_collection *kiln_c99_collection_of(kiln_value value) {
     return (kiln_collection *)(uintptr_t)value.bits;
 }
 
+static kiln_proxy *kiln_c99_proxy_of(kiln_value value) {
+    return (kiln_proxy *)(uintptr_t)value.bits;
+}
+
+/* The thing a proxy ultimately stands in front of, following a chain of them.
+ *
+ * Only for the questions that are about the *kind* of value rather than about its properties --
+ * `Array.isArray`, `typeof`, whether a call is possible. A property read must never take this
+ * shortcut: skipping the handler is exactly the bug a proxy exists to make impossible. */
+static kiln_value kiln_c99_proxy_inner(kiln_value value) {
+    size_t steps;
+    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        if (value.tag != KILN_VALUE_PROXY) {
+            return value;
+        }
+        value = kiln_c99_proxy_of(value)->target;
+    }
+    return value;
+}
+
+static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
+    kiln_proxy *proxy = (kiln_proxy *)malloc(sizeof *proxy);
+    if (proxy == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    proxy->target = target;
+    proxy->handler = handler;
+    proxy->revoked = 0;
+    *out = kiln_c99_value(KILN_VALUE_PROXY, (uint64_t)(uintptr_t)proxy, NULL, 0);
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_new_collection(kiln_value *out, int is_map) {
     kiln_collection *collection = (kiln_collection *)malloc(sizeof *collection);
     if (collection == NULL) {
@@ -11291,6 +13033,7 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map) {
     collection->live = 0;
     collection->capacity = 0;
     collection->is_map = is_map;
+    collection->properties = kiln_c99_undefined();
     *out = kiln_c99_value(KILN_VALUE_COLLECTION, (uint64_t)(uintptr_t)collection, NULL, 0);
     return KILN_C99_OK;
 }
@@ -12135,6 +13878,70 @@ static double kiln_c99_parse_date(const char *bytes, size_t len) {
            (double)fields[5] * 1000.0 + (double)fields[6];
 }
 
+/* `Array(...)`, which is `new Array(...)`: the two are the same operation, and the ambiguity in
+ * it belongs to the language rather than to this backend. Exactly one *numeric* argument is a
+ * length and produces that many holes; anything else is the elements, so `new Array('3')` is one
+ * string and `new Array(3)` is three empty slots. */
+static int kiln_c99_array_constructor(kiln_value *out, const kiln_value *args, size_t argc,
+                                      kiln_value *thrown) {
+    kiln_value built;
+    size_t index;
+    int status;
+    if (argc == 1 && args[0].tag == KILN_VALUE_NUMBER) {
+        double length = kiln_c99_as_number(args[0]);
+        kiln_array *array;
+        if (!(length >= 0.0) || length != (double)(uint32_t)length) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "Invalid array length");
+        }
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        array = kiln_c99_array_of(built);
+        status = kiln_c99_reserve((void **)&array->elements, &array->capacity, (size_t)length,
+                                  sizeof *array->elements);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        for (index = 0; index < (size_t)length; ++index) {
+            array->elements[index] = kiln_c99_hole();
+        }
+        array->count = (size_t)length;
+        *out = built;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_array(&built);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    for (index = 0; index < argc; ++index) {
+        status = kiln_c99_array_push(built, args[index]);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    *out = built;
+    return KILN_C99_OK;
+}
+
+/* `Object(x)`, which is `new Object(x)`: nothing becomes an empty object and a reference is
+ * handed straight back -- the identity `Object(o) === o` is what makes it usable as a coercion.
+ * A primitive would become a wrapper object, which this backend does not have, so it refuses
+ * rather than handing back the primitive and calling it an object. */
+static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, size_t argc) {
+    kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+    if (subject.tag == KILN_VALUE_UNDEFINED || subject.tag == KILN_VALUE_NULL) {
+        return kiln_c99_new_object(out);
+    }
+    if (!kiln_c99_is_reference(subject) && subject.tag != KILN_VALUE_DATE &&
+        subject.tag != KILN_VALUE_REGEXP && subject.tag != KILN_VALUE_PROMISE) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    *out = subject;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth,
                               kiln_value *thrown) {
@@ -12142,6 +13949,8 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     kiln_value instance;
     kiln_value produced;
     kiln_value saved_new_target;
+    kiln_value saved_adopted;
+    kiln_value adopted;
     int status;
     /* `new 5` is a TypeError the program can catch, not a fault that stops it. Reaching the
      * prototype lookup below with a non-callable answered "a method this backend does not have"
@@ -12149,6 +13958,43 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
      * where `Thing` came from a table and turned out not to be a constructor -- could not be
      * written. Every callable is treated as constructible, which is the same latitude the
      * interpreter takes. */
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_PROXY) {
+        /* `new Proxy(target, handler)` is the constructor; a proxy *of* something constructible
+         * is the `construct` trap below. */
+        return kiln_c99_new_proxy(result, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                  argc > 1 ? args[1] : kiln_c99_undefined());
+    }
+    if (callee.tag == KILN_VALUE_PROXY) {
+        kiln_value trap;
+        kiln_value inner = kiln_c99_proxy_of(callee)->target;
+        kiln_value handler = kiln_c99_proxy_of(callee)->handler;
+        status = kiln_c99_proxy_trap(host, callee, "construct", &trap, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        if (trap.tag == KILN_VALUE_UNDEFINED) {
+            return kiln_c99_construct(host, result, inner, args, argc, depth, thrown);
+        }
+        {
+            kiln_value list;
+            kiln_value arguments[3];
+            size_t at;
+            status = kiln_c99_new_array(&list);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            for (at = 0; at < argc; ++at) {
+                status = kiln_c99_array_push(list, args[at]);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            arguments[0] = inner;
+            arguments[1] = list;
+            arguments[2] = callee;
+            return kiln_c99_call(host, result, trap, handler, arguments, 3, depth, thrown);
+        }
+    }
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "constructor");
     }
@@ -12209,7 +14055,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
          * plain `new Error(m)` has no such property at all. Non-enumerable like the other three,
          * which is what keeps `JSON.stringify(error)` at `{}`. */
         if (argc > 1 && args[1].tag == KILN_VALUE_OBJECT) {
-            status = kiln_c99_has_property(args[1], "cause", 5, &present);
+            status = kiln_c99_has_property(host, args[1], "cause", 5, &present, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -12233,6 +14079,12 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
             }
         }
         return KILN_C99_OK;
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_ARRAY) {
+        return kiln_c99_array_constructor(result, args, argc, thrown);
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_OBJECT) {
+        return kiln_c99_object_constructor(result, args, argc);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_ARRAY_BUFFER) {
         size_t length;
@@ -12355,16 +14207,111 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
      * the call below is the one that installs it, so the flag that makes `super()` keep it has to
      * be off here whatever the caller was in the middle of. */
     saved_new_target = kiln_c99_new_target;
+    saved_adopted = kiln_c99_adopted_this;
+    kiln_c99_adopted_this = kiln_c99_undefined();
     kiln_c99_new_target = callee;
     kiln_c99_inheriting_new_target = 1;
     status = kiln_c99_call(host, &produced, callee, instance, args, argc, depth, thrown);
     kiln_c99_inheriting_new_target = 0;
     kiln_c99_new_target = saved_new_target;
+    adopted = kiln_c99_adopted_this;
+    kiln_c99_adopted_this = saved_adopted;
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* An explicit `return someObject` wins, as the language says. Otherwise a derived
+     * constructor whose `super()` built something exotic yields *that* -- the instance allocated
+     * above was abandoned the moment `this` was rebound, and returning it would hand back an
+     * ordinary object wearing the subclass's prototype. */
     *result = produced.tag == KILN_VALUE_OBJECT || produced.tag == KILN_VALUE_ARRAY ? produced
-                                                                                   : instance;
+              : adopted.tag != KILN_VALUE_UNDEFINED                                 ? adopted
+                                                                                    : instance;
+    return KILN_C99_OK;
+}
+
+/* `super(...)`: run the parent against the instance being built.
+ *
+ * A parent written in JavaScript *initialises* the instance -- an ordinary call with `this`
+ * threaded through, keeping the `new.target` of the call that is building it, which is how a
+ * base constructor can name the subclass it is being built for.
+ *
+ * A built-in parent *constructs* instead, and the difference is not cosmetic: calling a built-in
+ * as a function is a different operation from constructing one. `Map()` without `new` is a
+ * TypeError where `new Map()` is a map, and there is no spelling of `Error` as a call that
+ * produces the object `super("boom")` has to hand back. So a built-in parent goes through the
+ * construction path, and `kiln_c99_adopt_super` installs what it produced as `this`. */
+static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent,
+                               kiln_value receiver, const kiln_value *args, size_t argc,
+                               int depth, kiln_value *thrown) {
+    int status;
+    if (parent.tag == KILN_VALUE_BUILTIN) {
+        return kiln_c99_construct(host, produced, parent, args, argc, depth, thrown);
+    }
+    {
+        kiln_value saved = kiln_c99_adopted_this;
+        kiln_c99_adopted_this = kiln_c99_undefined();
+        kiln_c99_inheriting_new_target = 1;
+        status = kiln_c99_call(host, produced, parent, receiver, args, argc, depth, thrown);
+        kiln_c99_inheriting_new_target = 0;
+        /* The parent was itself derived from a built-in and adopted what that produced. It
+         * returned undefined, like every constructor, so the adoption has to be handed on here
+         * or `class B extends A extends Array` would lose the array at the second link. */
+        if (status == KILN_C99_OK && produced->tag == KILN_VALUE_UNDEFINED) {
+            *produced = kiln_c99_adopted_this;
+        }
+        kiln_c99_adopted_this = saved;
+    }
+    return status;
+}
+
+/* What `super()` produced becomes `this`.
+ *
+ * A derived constructor does not initialise the instance `new` allocated -- the language has
+ * `super()` *produce* it. For a parent written in JavaScript the two coincide, because a
+ * constructor returns undefined and the instance already in hand stands. A built-in parent is
+ * the case that differs: it builds an Error, an Array, a Map of its own, and that value is what
+ * `this` has to be from there on. `class Stack extends Array` is only subclassing at all if its
+ * instances *are* arrays -- an ordinary object wearing `Stack.prototype` with elements copied
+ * onto it fails `Array.isArray`, has no live `length`, and stringifies as an object.
+ *
+ * The prototype the `new` chose moves across, or the subclass's own methods would be
+ * unreachable and `instanceof Stack` false about an instance the class demonstrably made. A
+ * kind with no prototype field of its own keeps it on the store, which is where the read and
+ * the `instanceof` walk both look.
+ *
+ * Only one level deep, which is what the interpreter also does: the parent's frame is an
+ * ordinary call and has no way to report an adoption back to *its* caller, so
+ * `class B extends A extends Array` loses the array at the second link. Both engines lose it in
+ * the same place, which is the property this backend is measured on. */
+static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
+    kiln_value prototype;
+    kiln_value *slot;
+    /* A parent that produced nothing -- every JavaScript constructor -- leaves `this` alone. */
+    if (produced.tag != KILN_VALUE_OBJECT && produced.tag != KILN_VALUE_ARRAY &&
+        produced.tag != KILN_VALUE_COLLECTION) {
+        return KILN_C99_OK;
+    }
+    if (receiver->tag != KILN_VALUE_OBJECT ||
+        (produced.tag == receiver->tag && produced.bits == receiver->bits)) {
+        return KILN_C99_OK;
+    }
+    prototype = kiln_c99_object_of(*receiver)->prototype;
+    if (produced.tag == KILN_VALUE_OBJECT) {
+        kiln_c99_object_of(produced)->prototype = prototype;
+        *receiver = produced;
+        kiln_c99_adopted_this = produced;
+        return KILN_C99_OK;
+    }
+    slot = kiln_c99_exotic_store(produced);
+    if (slot->tag != KILN_VALUE_OBJECT) {
+        int status = kiln_c99_new_object(slot);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    kiln_c99_object_of(*slot)->prototype = prototype;
+    *receiver = produced;
+    kiln_c99_adopted_this = produced;
     return KILN_C99_OK;
 }
 
@@ -12376,9 +14323,12 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
         kiln_c99_object_of(target)->prototype = prototype;
         return KILN_C99_OK;
     }
-    if (target.tag == KILN_VALUE_FUNCTION) {
+    if (target.tag == KILN_VALUE_FUNCTION || kiln_c99_exotic_store(target) != NULL) {
+        /* A function, an array and a collection all keep the link on the store they already use
+         * for named properties, because none of them has a prototype field of its own -- and it
+         * is the store the read walk and `instanceof` both consult. */
         kiln_value store;
-        int status = kiln_c99_function_store(target, &store);
+        int status = kiln_c99_definition_store(target, &store);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -12395,6 +14345,12 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
     kiln_value current;
     size_t steps;
     int status;
+    /* `x instanceof p` runs the proxy's `get` for `@@hasInstance` and then its `getPrototypeOf`,
+     * and `p instanceof C` walks the chain the handler reports rather than the target's. Neither
+     * is a walk this can do, so both refuse. */
+    if (value.tag == KILN_VALUE_PROXY || constructor.tag == KILN_VALUE_PROXY) {
+        return KILN_C99_CONTROL_ERROR;
+    }
     /* A builtin constructor has no prototype object here; the question it answers is about the
      * tag instead, which is the same question and a shorter walk. */
     if (constructor.tag == KILN_VALUE_BUILTIN) {
@@ -12466,6 +14422,16 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
     }
     *answer = 0;
     current = value;
+    {
+        /* An array or a collection built by `super()` in a derived constructor carries its
+         * prototype on the store rather than on itself, because the value has no prototype field
+         * of its own. The walk has to begin there or `stack instanceof Stack` is false about an
+         * instance the class demonstrably made. */
+        kiln_value *slot = kiln_c99_exotic_store(value);
+        if (slot != NULL) {
+            current = *slot;
+        }
+    }
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         if (current.tag != KILN_VALUE_OBJECT) {
             return KILN_C99_OK;
@@ -12488,6 +14454,8 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
     static const char function_text[] = "function";
     static const char symbol_text[] = "symbol";
     static const char bigint_text[] = "bigint";
+    /* A proxy is transparent to `typeof`: the answer is about what it stands in front of. */
+    value = kiln_c99_proxy_inner(value);
     switch (value.tag) {
     case KILN_VALUE_BIGINT:
         return kiln_c99_value(KILN_VALUE_STRING, 0, bigint_text, sizeof(bigint_text) - 1);
@@ -12670,6 +14638,11 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
     static const char *const value_first[2] = {"valueOf", "toString"};
     const char *const *order = string_hint ? string_first : value_first;
     int step;
+    /* `${p}` and `p + 1` read `@@toPrimitive`, `valueOf` and `toString` off the proxy, which are
+     * three trap calls whose results this backend has nowhere to put yet. */
+    if (value.tag == KILN_VALUE_PROXY) {
+        return KILN_C99_CONTROL_ERROR;
+    }
     if (!kiln_c99_is_reference(value)) {
         *out = value;
         return KILN_C99_OK;
@@ -13149,6 +15122,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::DecodeUri
             | kiln_ir::Builtin::DecodeUriComponent
             | kiln_ir::Builtin::Reflect
+            | kiln_ir::Builtin::Proxy
             | kiln_ir::Builtin::QueueMicrotask
             | kiln_ir::Builtin::SetTimeout
             | kiln_ir::Builtin::SetInterval
@@ -13179,6 +15153,23 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         // is a different instruction and is unaffected.
         Instruction::DirectEval(_) => Err(EmitError::Unsupported {
             feature: "a direct `eval` call in the native backend".to_owned(),
+        }),
+        // `import(specifier)` resolves and loads a module while the program runs. A generated
+        // unit is a closed object file: the module graph was settled when it was emitted, and
+        // there is nothing at run time to resolve a specifier against or to compile what it
+        // names. Refused rather than answered with a rejected promise, which would be a wrong
+        // answer wearing the right shape.
+        Instruction::DynamicImport => Err(EmitError::Unsupported {
+            feature: "a dynamic `import()` in the native backend".to_owned(),
+        }),
+        // `with (x) { ... }` puts an object in front of the scope chain, so every name in the
+        // body is resolved at run time against whatever properties that object turns out to
+        // have -- and against `Symbol.unscopables`, which can hide one. The backend resolves
+        // names when it emits, into slots; there is no scope left at run time for an object to
+        // sit in front of. Both halves are refused together, because half of a `with` is not a
+        // smaller feature but a wrong one.
+        Instruction::ToObject | Instruction::WithHas(_) => Err(EmitError::Unsupported {
+            feature: "a `with` statement in the native backend".to_owned(),
         }),
         Instruction::Const(_)
         | Instruction::LoadLocal(_)
@@ -13486,6 +15477,16 @@ fn stack_effect(
                 Err(underflow(needed))
             } else {
                 Ok((height - needed + 1, false))
+            }
+        }
+        // Refused by `validate_supported_instruction` as well; the specifier becomes the
+        // promise, so the height is unchanged. `with`'s two are the same shape: each replaces
+        // the value on top with one derived from it.
+        Instruction::DynamicImport | Instruction::ToObject | Instruction::WithHas(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
             }
         }
         // Both write a slot in place and touch no stack.
@@ -14422,6 +16423,12 @@ fn emit_instruction(
         Instruction::DirectEval(_) => {
             unreachable!("verification rejects a direct `eval` before emission")
         }
+        Instruction::DynamicImport => {
+            unreachable!("verification rejects a dynamic `import()` before emission")
+        }
+        Instruction::ToObject | Instruction::WithHas(_) => {
+            unreachable!("verification rejects a `with` statement before emission")
+        }
         Instruction::NewRegExp { pattern, flags } => {
             let (Constant::String(source), Constant::String(letters)) =
                 (&constants[*pattern as usize], &constants[*flags as usize])
@@ -14763,7 +16770,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; kiln_c99_inheriting_new_target = 1; status = kiln_c99_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); kiln_c99_inheriting_new_target = 0; if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_super_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
                 argc + 1
             )
             .unwrap();
@@ -14775,7 +16782,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status; kiln_c99_inheriting_new_target = 1; status = kiln_c99_call(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); kiln_c99_inheriting_new_target = 0; if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
+                "    {{ kiln_value produced; int status = kiln_c99_super_call(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
             )
             .unwrap();
         }
@@ -14816,25 +16823,32 @@ fn emit_instruction(
         // keys its reserved slot, so `Symbol.iterator in x` has to ask about `@@iterator` rather
         // than about the property literally spelled "Symbol(Symbol.iterator)", which nothing has.
         Instruction::Binary(BinaryOp::In) => {
-            output.push_str(
-                "    { kiln_value container = stack[--sp]; kiln_value key = kiln_c99_property_key(stack[sp - 1]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_has_property(container, key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
-            );
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value container = stack[--sp]; int answer; int status = kiln_c99_has_computed(host, container, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
+            )
+            .unwrap();
         }
         Instruction::DeleteProperty(name) => {
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
+            let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int answer; if (kiln_c99_delete(stack[sp - 1], {symbol}_constant_{name}, {}, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                "    {{ int answer; int status = kiln_c99_delete(host, stack[sp - 1], {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
                 text.len()
             )
             .unwrap();
         }
         Instruction::DeleteComputed => {
-            output.push_str(
-                "    { kiln_value key = kiln_c99_property_key(stack[--sp]); int answer; if (key.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_delete(stack[sp - 1], key.ptr, key.len, &answer) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
-            );
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value key = stack[--sp]; int answer; int status = kiln_c99_delete_computed(host, stack[sp - 1], key, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
+            )
+            .unwrap();
         }
         // `arguments` is every argument this frame was given, as an array. A real one is an
         // exotic object that aliases the parameters; a copy is what almost every use of it wants,
@@ -14859,9 +16873,12 @@ fn emit_instruction(
         // `NewArray` is the only thing that consumes it.
         Instruction::PushHole => output.push_str("    stack[sp++] = kiln_c99_hole();\n"),
         Instruction::EnumerateKeys => {
-            output.push_str(
-                "    { kiln_value keys; if (kiln_c99_own_keys(stack[sp - 1], &keys) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; stack[sp - 1] = keys; }\n",
-            );
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value keys; int status = kiln_c99_own_keys(host, stack[sp - 1], &keys, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = keys; }}"
+            )
+            .unwrap();
         }
         // The arity comes from an array the program built, so the arguments are read out of it
         // rather than off the stack.
@@ -14879,7 +16896,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = stack[--sp]; kiln_value parent = stack[--sp]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); kiln_c99_inheriting_new_target = 1; status = kiln_c99_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); kiln_c99_inheriting_new_target = 0; if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
+                "    {{ kiln_value list = stack[--sp]; kiln_value parent = stack[--sp]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
             )
             .unwrap();
         }
@@ -15003,6 +17020,7 @@ fn emit_instruction(
                 kiln_ir::Builtin::IsNaN => "kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_NAN)",
                 kiln_ir::Builtin::IsFinite => "kiln_c99_method(KILN_C99_METHOD_GLOBAL_IS_FINITE)",
                 kiln_ir::Builtin::Reflect => "kiln_c99_builtin(KILN_C99_BUILTIN_REFLECT)",
+                kiln_ir::Builtin::Proxy => "kiln_c99_builtin(KILN_C99_BUILTIN_PROXY)",
                 kiln_ir::Builtin::Symbol => "kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL)",
                 kiln_ir::Builtin::RegExp => "kiln_c99_builtin(KILN_C99_BUILTIN_REGEXP)",
                 kiln_ir::Builtin::Function => "kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION)",
@@ -15293,6 +17311,12 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             // 62: the next free tag. Never reuse one -- two programs hashing alike would serve
             // one's object file for the other.
             Instruction::DirectEval(_) => byte(&mut hash, 62),
+            Instruction::DynamicImport => byte(&mut hash, 63),
+            Instruction::ToObject => byte(&mut hash, 64),
+            Instruction::WithHas(name) => {
+                byte(&mut hash, 65);
+                word(&mut hash, u64::from(*name));
+            }
             Instruction::EnumerateKeys => byte(&mut hash, 50),
             Instruction::PushHole => byte(&mut hash, 55),
             Instruction::ThrowReference(value) => {
@@ -16666,14 +18690,14 @@ int main(void) {{
             vec![Constant::Boolean(true)],
             vec![
                 Instruction::Jump(2),
-                Instruction::LoadBuiltin(kiln_ir::Builtin::Proxy),
+                Instruction::LoadBuiltin(kiln_ir::Builtin::WeakMap),
                 Instruction::Const(0),
                 Instruction::Return,
             ],
             0,
         ));
         assert!(
-            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("Proxy")),
+            matches!(result, Err(EmitError::Unsupported { feature }) if feature.contains("WeakMap")),
             "dead code must not bypass the native builtin allowlist"
         );
     }
@@ -17409,7 +19433,7 @@ int main(void) {{
     if (!found || !enumerable) return 19;
     kiln_c99_typed_own(bytes, "length", 6, &found, &enumerable);
     if (found || enumerable) return 20;
-    if (kiln_c99_own_keys(bytes, &keys) != KILN_C99_OK ||
+    if (kiln_c99_own_keys(NULL, bytes, &keys, 0, NULL) != KILN_C99_OK ||
         kiln_c99_array_of(keys)->count != 8) return 21;
     if (kiln_c99_get(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_ARRAY), "prototype", 9,
                      &prototype, 0, &thrown) != KILN_C99_OK ||
