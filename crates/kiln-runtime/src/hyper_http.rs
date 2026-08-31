@@ -7,7 +7,8 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use http_body_util::BodyExt;
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -31,6 +32,90 @@ pub(crate) struct ResponseCommand {
     pub(crate) status: u16,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) body: ResponseBody,
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientRequestCommand {
+    pub(crate) method: String,
+    pub(crate) target: String,
+    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) body: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub(crate) enum ClientEvent {
+    Response {
+        status: u16,
+        reason: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    },
+    Error(String),
+    Closed,
+}
+
+pub(crate) fn client_connection<I>(
+    io: I,
+    mut requests: tokio::sync::mpsc::UnboundedReceiver<ClientRequestCommand>,
+    events: tokio::sync::mpsc::UnboundedSender<ClientEvent>,
+) -> ConnectionFuture
+where
+    I: AsyncRead + AsyncWrite + Unpin + 'static,
+{
+    Box::pin(async move {
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
+        let connection_task = tokio::task::spawn_local(connection);
+        if let Some(command) = requests.recv().await {
+            let mut builder = Request::builder()
+                .method(command.method.as_str())
+                .uri(command.target.as_str());
+            for (name, value) in command.headers {
+                builder = builder.header(name, value);
+            }
+            let request = match builder.body(Full::new(Bytes::from(command.body))) {
+                Ok(request) => request,
+                Err(error) => {
+                    let _ = events.send(ClientEvent::Error(error.to_string()));
+                    return Ok(());
+                }
+            };
+            match sender.send_request(request).await {
+                Ok(response) => {
+                    let status = response.status();
+                    let headers = response
+                        .headers()
+                        .iter()
+                        .filter_map(|(name, value)| {
+                            value
+                                .to_str()
+                                .ok()
+                                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                        })
+                        .collect();
+                    let body = response
+                        .into_body()
+                        .collect()
+                        .await
+                        .map(|body| body.to_bytes().to_vec())?;
+                    let _ = events.send(ClientEvent::Response {
+                        status: status.as_u16(),
+                        reason: status.canonical_reason().unwrap_or_default().to_owned(),
+                        headers,
+                        body,
+                    });
+                }
+                Err(error) => {
+                    let _ = events.send(ClientEvent::Error(error.to_string()));
+                    return Ok(());
+                }
+            }
+        }
+        drop(sender);
+        connection_task.abort();
+        let _ = events.send(ClientEvent::Closed);
+        Ok(())
+    })
 }
 
 async fn serve_http1_service<I, F, Fut>(io: I, service: F) -> Result<(), hyper::Error>
