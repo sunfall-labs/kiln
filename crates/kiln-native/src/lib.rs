@@ -5695,6 +5695,83 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         assert_eq!(rest, "POST /echo 1.1\nabc123\n");
     }
 
+    /// Serving a request and *reading the reply* are two different claims, and the corpus only
+    /// covered the first. `setEncoding` is the seam: it is the one method name a `net.Socket`, an
+    /// `http.IncomingMessage` and a `stream.Readable` all own, so the compiled dispatch has to
+    /// pick a handler from the receiver rather than from a category. When it picked by category
+    /// instead, every `res.setEncoding("utf8")` threw `a object is not a Socket` -- with the whole
+    /// live-request suite still green, because none of it ever read a response as text.
+    ///
+    /// The assertion is node's observable, not the absence of a throw: after `setEncoding("utf8")`
+    /// a `data` chunk is a string, and `typeof` says so.
+    #[test]
+    fn native_node_http_client_response_set_encoding_delivers_text_chunks() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::process::Command;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native setEncoding integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-http-client-set-encoding");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import http from "node:http";
+const server = http.createServer((request, response) => {
+  response.writeHead(200, { "content-type": "text/plain" });
+  response.end("kiln");
+});
+server.listen(0, "127.0.0.1", () => {
+  const { port } = server.address();
+  http.get({ host: "127.0.0.1", port, path: "/" }, (response) => {
+    response.setEncoding("utf8");
+    let body = "";
+    let kinds = "";
+    response.on("data", chunk => { kinds += typeof chunk; body += chunk; });
+    response.on("end", () => {
+      console.log(response.statusCode, response.headers["content-type"], kinds, body);
+      server.close();
+    });
+  });
+});
+"#,
+        )
+        .expect("write node:http setEncoding fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("client"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native node:http setEncoding graph builds");
+        let output = Command::new(&report.output)
+            .output()
+            .expect("run native node:http setEncoding program");
+        assert!(
+            output.status.success(),
+            "status={} stdout={} stderr={}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Recorded from node v25: `200 text/plain string kiln`.
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "200 text/plain string kiln\n"
+        );
+    }
+
     #[test]
     fn native_node_http_server_close_waits_for_delayed_response_after_half_close() {
         use kiln_module_resolver::NodeRuntimeResolver;
