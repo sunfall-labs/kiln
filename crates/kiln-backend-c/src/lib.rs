@@ -1913,6 +1913,8 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
                                    int depth, kiln_value *thrown);
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method);
+static int kiln_c99_set_function_name(kiln_value function, kiln_value key,
+                                     const char *prefix);
 static double kiln_c99_key_index(const char *key, size_t key_len);
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 /* The containers currently being written, innermost first.
@@ -15835,6 +15837,78 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
  * `kiln_c99_put` is an assignment and creates an enumerated property, which is right for an
  * object literal and wrong for a class body -- `for (const k in new C())` visits the fields the
  * constructor assigned and nothing the class declared. */
+/* `SetFunctionName(function, key, prefix)`.
+ *
+ * A method, a getter and a setter are each created anonymous and named by the definition that
+ * installs them, which is also the only place a computed key is known: `{ get [k]() {} }` can
+ * only be named once `k` has been evaluated. The name is written onto the closure because that
+ * is where `f.name` is read from; the store beside it holds what a program assigned.
+ *
+ * A symbol names the property after its description, in brackets, and one with no description
+ * names it nothing -- while the prefix is applied to that nothing all the same. A private name
+ * is spelled the way the program wrote it, `#m`, rather than as the scope-numbered reservation
+ * the store keys it under. */
+static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
+    static const char private_prefix[] = "@@private:";
+    kiln_closure *closure;
+    kiln_text text;
+    if (function.tag != KILN_VALUE_FUNCTION) {
+        return KILN_C99_OK;
+    }
+    text.bytes = NULL;
+    text.len = 0;
+    text.capacity = 0;
+    if (prefix != NULL) {
+        if (kiln_c99_text_append_c(&text, prefix) != KILN_C99_OK
+            || kiln_c99_text_append(&text, " ", 1) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    if (key.tag == KILN_VALUE_SYMBOL) {
+        kiln_symbol *symbol = kiln_c99_symbol_of(key);
+        if (symbol->description_len != 0) {
+            if (kiln_c99_text_append(&text, "[", 1) != KILN_C99_OK
+                || kiln_c99_text_append(&text, symbol->description, symbol->description_len)
+                       != KILN_C99_OK
+                || kiln_c99_text_append(&text, "]", 1) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+    } else {
+        kiln_value name = kiln_c99_property_key(key);
+        const char *bytes = name.ptr;
+        size_t len = name.len;
+        if (name.tag != KILN_VALUE_STRING) {
+            return KILN_C99_CONTROL_ERROR;
+        }
+        if (len >= sizeof(private_prefix) - 1
+            && memcmp(bytes, private_prefix, sizeof(private_prefix) - 1) == 0) {
+            size_t index = sizeof(private_prefix) - 1;
+            while (index < len && bytes[index] != ':') {
+                ++index;
+            }
+            if (index < len) {
+                ++index;
+            }
+            /* A character rather than a literal: the runtime prelude lives in a raw string
+             * whose terminator is a quote followed by a hash, so the two must not meet here. */
+            char hash = 0x23;
+            bytes += index;
+            len -= index;
+            if (kiln_c99_text_append(&text, &hash, 1) != KILN_C99_OK) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+        }
+        if (kiln_c99_text_append(&text, bytes, len) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
+    closure = kiln_c99_closure_of(function);
+    closure->name = text.bytes;
+    closure->name_len = text.len;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method) {
     kiln_object *object;
@@ -20872,10 +20946,11 @@ fn emit_instruction(
         } => {
             let half = if *setter { "setter" } else { "getter" };
             let other = if *setter { "getter" } else { "setter" };
+            let prefix = if *setter { "set" } else { "get" };
             let enumerable = i32::from(*enumerable);
             writeln!(
                 output,
-                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -20883,7 +20958,7 @@ fn emit_instruction(
         // `SetProperty` an object literal's methods lower to.
         Instruction::DefineMethod => {
             output.push_str(
-                "    { kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }\n",
+                "    { kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }\n",
             );
         }
         // `in` asks whether the property exists, not what it produces, so unlike a read it does
