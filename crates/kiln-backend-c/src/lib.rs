@@ -20110,6 +20110,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::NewRegExp { .. }
         | Instruction::New { .. }
         | Instruction::SetPrototype
+        | Instruction::LoadPrototype
+        | Instruction::LoadSuperProperty(_)
         | Instruction::LoadGlobal(_)
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
@@ -20368,6 +20370,22 @@ fn stack_effect(
                 Err(underflow(2))
             } else {
                 Ok((height - 1, false))
+            }
+        }
+        // The property replaces the prototype it was read from.
+        Instruction::LoadSuperProperty(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
+        // The link replaces the value it was read from.
+        Instruction::LoadPrototype => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height, false))
             }
         }
         // The receiver sits under the arguments, exactly where a callee would, and the result
@@ -22016,6 +22034,31 @@ fn emit_instruction(
                 "    { kiln_value prototype = stack[--sp]; int status = kiln_c99_set_prototype(stack[sp - 1], prototype); if (status != KILN_C99_OK) return status; }\n",
             );
         }
+        // `super.x` reads the link the method's home object carries *now*, which is the same
+        // question `Object.getPrototypeOf` answers -- so it is asked through the same
+        // implementation rather than a second one that could drift from it.
+        // The receiver is the frame's own, not the prototype the name was found on -- which is
+        // the one thing that separates `super.x` from an ordinary read of the same name.
+        Instruction::LoadSuperProperty(name) => {
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string property name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, stack[sp - 1], kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {}), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                text.len()
+            )
+            .unwrap();
+        }
+        Instruction::LoadPrototype => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ kiln_value subject = stack[sp - 1]; int status = kiln_c99_invoke_method(host, &stack[sp - 1], KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, kiln_c99_undefined(), &subject, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
         // The stack height is recorded with the handler, because a `catch` starts from the
         // height the `try` began at however deep the expression that threw had got.
         Instruction::PushHandler(target) => {
@@ -22416,6 +22459,11 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::SuperForward => byte(&mut hash, 36),
             Instruction::SetPrototype => byte(&mut hash, 34),
+            Instruction::LoadPrototype => byte(&mut hash, 71),
+            Instruction::LoadSuperProperty(value) => {
+                byte(&mut hash, 72);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::SuperCall { argc } => {
                 byte(&mut hash, 35);
                 word(&mut hash, u64::from(*argc));
