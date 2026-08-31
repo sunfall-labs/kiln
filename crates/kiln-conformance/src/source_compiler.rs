@@ -9,7 +9,7 @@
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
 use kiln_interpreter::{EvalCompileError, EvalSource, install_source_compiler};
-use kiln_ir::{EvalOptions, Program};
+use kiln_ir::{EvalOptions, Program, Strictness};
 
 /// Give this thread's VMs a compiler, so `eval` and `Function` can build a program at run time.
 ///
@@ -19,7 +19,7 @@ pub(crate) fn install() {
     install_source_compiler(compile_source);
 }
 
-fn compile_source(request: &EvalSource<'_>) -> Result<Program, EvalCompileError> {
+fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError> {
     // A strict eval is prepended with the directive rather than told about it, because the
     // *parser* is where strict-mode early errors live -- `delete x`, `with`, a duplicate
     // parameter -- and it takes its answer from the source it is given. The directive itself
@@ -40,7 +40,7 @@ fn compile_source(request: &EvalSource<'_>) -> Result<Program, EvalCompileError>
             "source could not be parsed as a program".to_owned(),
         ));
     }
-    kiln_ir::compile_eval(
+    kiln_ir::compile_eval_with_strictness(
         &module,
         &EvalOptions {
             outer: request.outer.to_vec(),

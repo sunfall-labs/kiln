@@ -11,10 +11,16 @@ console.log(person.full);
 person.full = "Grace";
 console.log(person.full, person.first, person);
 
-// A getter with no setter swallows the write rather than shadowing it, which is the difference
-// between a silent no-op and a silently wrong object.
+// A getter with no setter does not shadow the write, and a module is always strict, so the write
+// throws rather than being swallowed. The distinction matters: a silent no-op and a TypeError are
+// different programs, and the engine that picks the wrong one is silently wrong rather than loud.
 const readOnly = { get fixed(): number { return 7; } };
-readOnly.fixed = 99;
+try {
+  readOnly.fixed = 99;
+  console.log("no throw", readOnly.fixed);
+} catch (error) {
+  console.log("threw", error instanceof TypeError);
+}
 console.log(readOnly.fixed, Object.hasOwn(readOnly, "fixed"), readOnly);
 
 // An accessor on a class lives on the prototype, so the write walks the chain to find it.

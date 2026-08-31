@@ -97,8 +97,6 @@ mod realm {
         pub target_len: u64,
         pub headers: *const u8,
         pub headers_len: u64,
-        pub body: *const u8,
-        pub body_len: u64,
     }
 
     #[repr(C)]
@@ -1008,6 +1006,12 @@ mod realm {
                         };
                         for event in events {
                             let (kind, status, reason, headers, data) = match event {
+                                RuntimeHttpClientEvent::Drain => {
+                                    (HTTP_EVENT_DRAIN, 0, Vec::new(), Vec::new(), Vec::new())
+                                }
+                                RuntimeHttpClientEvent::Finish => {
+                                    (HTTP_EVENT_FINISH, 0, Vec::new(), Vec::new(), Vec::new())
+                                }
                                 RuntimeHttpClientEvent::ResponseHead {
                                     status,
                                     reason,
@@ -1556,9 +1560,10 @@ mod realm {
     }
 
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_realm_http_client_send_active(
+    pub unsafe extern "C" fn kiln_realm_http_client_start_active(
         resource: u64,
         request: *const HttpRequestView,
+        high_water_mark: u64,
     ) -> i32 {
         ffi(|| {
             if request.is_null() {
@@ -1586,9 +1591,6 @@ mod realm {
             else {
                 return INVALID_ARGUMENT;
             };
-            let Some(body) = (unsafe { borrowed_bytes(request.body, request.body_len) }) else {
-                return INVALID_ARGUMENT;
-            };
             let Some(headers) = (unsafe { parse_headers(request.headers, request.headers_len) })
             else {
                 return INVALID_ARGUMENT;
@@ -1598,6 +1600,9 @@ mod realm {
             else {
                 return INVALID_ARGUMENT;
             };
+            let Ok(high_water_mark) = usize::try_from(high_water_mark) else {
+                return INVALID_ARGUMENT;
+            };
             // SAFETY: active_runtime is this active realm's exclusively-entered runtime.
             if unsafe { &mut *runtime }.send_http1_client_request(
                 resource,
@@ -1605,14 +1610,60 @@ mod realm {
                     method: method.to_owned(),
                     target: target.to_owned(),
                     headers,
-                    body: body.to_vec(),
                 },
+                high_water_mark,
             ) {
                 0
             } else {
                 RUNTIME_ERROR
             }
         })
+    }
+
+    fn write_http_client_request(resource: u64, data: *const u8, data_len: u64, end: bool) -> i32 {
+        ffi(|| {
+            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: the generated adapter keeps this span live until this call copies it.
+            let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: active_runtime is exclusively owned by this active realm callback.
+            let disposition = if end {
+                unsafe { &mut *runtime }.end_http1_client_request(
+                    kiln_host_abi::ResourceId::new(resource),
+                    data.to_vec(),
+                )
+            } else {
+                unsafe { &mut *runtime }.write_http1_client_request(
+                    kiln_host_abi::ResourceId::new(resource),
+                    data.to_vec(),
+                )
+            };
+            match disposition {
+                Some(disposition) => i32::from(!disposition.ready),
+                None => RUNTIME_ERROR,
+            }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_client_write_active(
+        resource: u64,
+        data: *const u8,
+        data_len: u64,
+    ) -> i32 {
+        write_http_client_request(resource, data, data_len, false)
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_client_end_active(
+        resource: u64,
+        data: *const u8,
+        data_len: u64,
+    ) -> i32 {
+        write_http_client_request(resource, data, data_len, true)
     }
 
     #[unsafe(no_mangle)]
@@ -4367,20 +4418,45 @@ mod temporal {
 
     /// Order two values of the same type: -1, 0 or 1, as `compare` answers.
     ///
+    /// Two durations are the exception, and they take the options: whether one month is longer
+    /// than thirty days depends on *which* month, so `Temporal.Duration.compare` needs a
+    /// `relativeTo` and refuses without one rather than picking an average month.
+    ///
     /// # Safety
     ///
-    /// Both handles must be live, and `out_order` a writable slot.
+    /// Both handles must be live, a non-null `relative_to` must be live, the packed options must
+    /// satisfy [`unpack`], and `out_order` must be a writable slot.
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_temporal_compare(
         left: *const TemporalValue,
         right: *const TemporalValue,
+        relative_to: *const TemporalValue,
+        option_text: *const u8,
+        option_text_lengths: *const i64,
+        option_text_count: usize,
         out_order: *mut i32,
     ) -> i32 {
         if left.is_null() || right.is_null() || out_order.is_null() {
             return INVALID_ARGUMENT;
         }
         // SAFETY: the caller contract guarantees both handles are live.
-        match kiln_temporal::compare(unsafe { &*left }, unsafe { &*right }) {
+        let (left, right) = unsafe { (&*left, &*right) };
+        let ordered = if left.kind() == Kind::Duration && right.kind() == Kind::Duration {
+            // SAFETY: the caller contract guarantees the packed options satisfy `unpack`.
+            let Some(mut options) =
+                (unsafe { option_strings(option_text, option_text_lengths, option_text_count) })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            if !relative_to.is_null() {
+                // SAFETY: the caller contract guarantees a non-null handle is live.
+                options.relative_to = Some(unsafe { &*relative_to }.clone());
+            }
+            kiln_temporal::compare_durations(left, right, &options)
+        } else {
+            kiln_temporal::compare(left, right)
+        };
+        match ordered {
             Ok(order) => {
                 // SAFETY: `out_order` is a writable slot by the caller contract.
                 unsafe { out_order.write(order) };

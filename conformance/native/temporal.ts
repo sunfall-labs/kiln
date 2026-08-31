@@ -44,6 +44,20 @@ console.log(Temporal.PlainDate.compare("2020-01-01", "2021-01-01"));
 console.log(Temporal.PlainDate.compare(date, date));
 console.log(Temporal.PlainDate.compare({ year: 2030, month: 1, day: 1 }, "2021-01-01"));
 
+// Two durations are the one comparison that needs a reference point: whether one month is longer
+// than thirty days depends on which month, and the answer flips between January and February. It
+// refuses without one rather than picking an average month.
+const month = Temporal.Duration.from({ months: 1 });
+const thirty = Temporal.Duration.from({ days: 30 });
+try {
+	Temporal.Duration.compare(month, thirty);
+	console.log("no throw");
+} catch (error) {
+	console.log("durations without a reference point:", error instanceof RangeError);
+}
+console.log(Temporal.Duration.compare(month, thirty, { relativeTo: "2024-02-01" }));
+console.log(Temporal.Duration.compare(month, thirty, { relativeTo: "2024-01-01" }));
+
 // The type keeps its identity as far as both engines agree it does. `typeof` is "object" in both.
 //
 // Three neighbouring questions are deliberately *not* asked here, because the two engines answer

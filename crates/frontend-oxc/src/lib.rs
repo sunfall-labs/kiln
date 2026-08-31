@@ -19,9 +19,9 @@ use kiln_hir::{
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     Argument, ArrowFunctionBody, ArrowFunctionExpression, AssignmentTarget, BindingPattern, Class,
-    ClassElement, Declaration, ExportDefaultDeclarationKind, Expression, FormalParameters,
-    Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind, PropertyKind, Statement,
-    VariableDeclaration, VariableDeclarationKind,
+    ClassElement, Declaration, Directive, ExportDefaultDeclarationKind, Expression,
+    FormalParameters, Function, MethodDefinitionKind, ObjectExpression, ObjectPropertyKind,
+    PropertyKind, Statement, VariableDeclaration, VariableDeclarationKind,
 };
 use oxc_ast::ast::{
     ArrayExpressionElement, ForStatementInit, ForStatementLeft, SimpleAssignmentTarget,
@@ -161,6 +161,7 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         } else {
             SourceGoal::Script
         },
+        strict: opens_strict(&parsed.program.directives),
         items: parsed
             .program
             .body
@@ -177,6 +178,18 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         diagnostics,
         panicked: parsed.panicked,
     }
+}
+
+/// Whether a directive prologue opens with `"use strict"`.
+///
+/// The *raw* text is what counts, not the string the literal denotes: `"use\u0020strict"` spells
+/// the same characters and is deliberately not a directive, because the language reads a prologue
+/// before it has evaluated anything -- including an escape. Oxc keeps both spellings, so this
+/// reads the one the source wrote.
+fn opens_strict(directives: &[Directive<'_>]) -> bool {
+    directives
+        .iter()
+        .any(|directive| directive.directive.as_str() == "use strict")
 }
 
 /// Lower one Oxc diagnostic into HIR, preferring the span Oxc marked primary.
@@ -1667,6 +1680,11 @@ impl Lowerer {
             parameters,
             rest,
             body,
+            // A concise body has no prologue to open with, so only the braced form can say so.
+            strict: match &arrow.body {
+                ArrowFunctionBody::FunctionBody(block) => opens_strict(&block.directives),
+                _ => false,
+            },
             span: expression_span,
         })
     }
@@ -1691,6 +1709,7 @@ impl Lowerer {
             parameters,
             rest,
             body: statements,
+            strict: opens_strict(&body.directives),
             span: statement_span,
         })
     }

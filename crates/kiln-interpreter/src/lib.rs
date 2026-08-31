@@ -9,7 +9,8 @@ use kiln_host_abi::{
     ActiveAsyncHostOps, AsyncHostOp, AsyncHostValue, Completion, HostOps, HostValue, RequestId,
 };
 use kiln_ir::{
-    BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
+    BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, Program, Strictness,
+    UnaryOp, Upvalue,
 };
 use kiln_runtime::{
     ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
@@ -1816,6 +1817,7 @@ struct HttpClientRequestState {
     socket: Option<Rc<RefCell<NetSocketState>>>,
     object: Option<Rc<RefCell<ObjectData>>>,
     ended: bool,
+    started: bool,
 }
 
 #[derive(Debug)]
@@ -3619,6 +3621,12 @@ pub struct Closure {
     /// against the importer's function table and find someone else's body, or nothing at all.
     pub program: Rc<Program>,
     pub function: u32,
+    /// Which of `program`'s bodies are strict code.
+    ///
+    /// Carried with the program for the same reason `program` is: a function value that crossed
+    /// a module boundary is indexed against its own table, and answering from the caller's would
+    /// report someone else's body. Whether *this* body is strict is `strictness.function`.
+    pub strictness: Rc<Strictness>,
     /// The declared name, for a console to show. Shared with every other closure over the same
     /// proto rather than copied, because a function expression in a loop makes one closure per
     /// pass and the name is the same every time.
@@ -3713,6 +3721,16 @@ impl CommonJsRequire {
     /// Return the currently cached value for a statically discovered specifier.
     pub fn cached_value(&self, specifier: &str) -> Option<Value> {
         self.get(specifier)
+    }
+}
+
+impl Closure {
+    /// Whether this body is strict code.
+    ///
+    /// A property of the source text the body was written in, not of the call: a strict function
+    /// called from sloppy code is still strict, and a sloppy one called from strict code is not.
+    pub fn is_strict(&self) -> bool {
+        self.strictness.function(self.function)
     }
 }
 
@@ -4576,7 +4594,7 @@ pub enum EvalCompileError {
 /// clear of the frontend, so an `eval` that parsed its own source would pull Oxc into every build
 /// of the VM. The frontend is injected instead -- the same shape ADR 0006 gives `kiln-db`, one
 /// function pointer over owned data -- and a host that installs none simply has no `eval`.
-pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<Program, EvalCompileError>;
+pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError>;
 
 thread_local! {
     /// Per thread rather than per VM, because it is a property of the *build* -- which frontend
@@ -5543,10 +5561,26 @@ pub fn execute<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
+    let strictness = Rc::new(Strictness::sloppy(&program));
+    execute_with_strictness(program, strictness, host, limits)
+}
+
+/// [`execute`], told which of the program's bodies the compiler compiled as strict code.
+///
+/// The strictness table is not in the bytecode -- see [`Strictness`] -- so a caller that has one
+/// has to hand it over, and a caller that does not gets sloppy mode, where a refused write is
+/// discarded rather than raised.
+pub fn execute_with_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+) -> Result<ExecutionResult, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut runtime = realm_runtime()?;
     let mut vm = Vm::with_entropy_seed(
         program,
+        strictness,
         host,
         locals,
         limits,
@@ -5579,10 +5613,22 @@ pub fn execute_node<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<ExecutionResult, ExecutionError> {
+    let strictness = Rc::new(Strictness::sloppy(&program));
+    execute_node_with_strictness(program, strictness, host, limits)
+}
+
+/// [`execute_node`], told which of the program's bodies are strict code.
+pub fn execute_node_with_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = realm_runtime()?;
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
+        strictness,
         host,
         locals,
         limits,
@@ -5612,10 +5658,22 @@ pub fn execute_reclaiming<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<u64, ExecutionError> {
+    let strictness = Rc::new(Strictness::sloppy(&program));
+    execute_reclaiming_with_strictness(program, strictness, host, limits)
+}
+
+/// [`execute_reclaiming`], told which of the program's bodies are strict code.
+pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+) -> Result<u64, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut runtime = realm_runtime()?;
     let mut vm = Vm::with_entropy_seed(
         program,
+        strictness,
         host,
         locals,
         limits,
@@ -6001,8 +6059,13 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     // Cloned into an `Rc` because a function value this module exports outlives the run that
     // made it: the importer calls it against *this* table, and holding it by reference would tie
     // every exported function to one module execution.
+    // A Module goal is strict whatever its text says, and so is everything written inside one,
+    // so the table is the constant one rather than something the linker has to carry.
+    let program = Rc::new(module.program.clone());
+    let strictness = Rc::new(Strictness::always(&program));
     let mut vm = Vm::with_entropy_seed(
-        Rc::new(module.program.clone()),
+        program,
+        strictness,
         host,
         locals,
         limits,
@@ -6315,6 +6378,10 @@ struct Handler {
 struct Frame {
     /// The program that was running, restored with the frame.
     program: Rc<Program>,
+    /// Its strictness table, restored with it.
+    strictness: Rc<Strictness>,
+    /// Whether the caller was strict code, restored with the frame.
+    strict: bool,
     /// `new.target` in the caller, restored with the frame.
     new_target: Value,
     /// The closure that was running, or `None` for the module body.
@@ -6344,6 +6411,15 @@ struct Frame {
 struct Vm<'host, H: HostOps + ?Sized> {
     /// The program the *running* frame belongs to, swapped on every call and restored on return.
     program: Rc<Program>,
+    /// Which of `program`'s bodies the compiler compiled as strict code. Swapped with `program`,
+    /// because a function that crossed a module boundary is indexed against its own program.
+    strictness: Rc<Strictness>,
+    /// Whether the *running* frame is strict code.
+    ///
+    /// The one thing the machine cannot work out for itself at the point of a write: a refused
+    /// assignment is silently discarded in sloppy mode and a `TypeError` in strict mode, and the
+    /// two are the same instruction. Saved and restored with the frame.
+    strict: bool,
     host: &'host mut H,
     stack: Vec<Value>,
     locals: Vec<Value>,
@@ -6519,6 +6595,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     /// language machine while making ADR 0031 authoritative for every entropy consumer.
     fn with_entropy_seed(
         program: Rc<Program>,
+        strictness: Rc<Strictness>,
         host: &'host mut H,
         locals: Vec<Value>,
         limits: ExecutionLimits,
@@ -6526,6 +6603,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     ) -> Self {
         Self {
             program,
+            strict: strictness.body,
+            strictness,
             host,
             stack: Vec::new(),
             locals,
@@ -7148,6 +7227,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     socket: None,
                     object: None,
                     ended: false,
+                    started: false,
                 }));
                 let request_object = node_http_client_request_object(&state);
                 let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
@@ -7865,6 +7945,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let event_count = events.len();
         for event in events {
             match event {
+                RuntimeHttpClientEvent::Drain | RuntimeHttpClientEvent::Finish => {
+                    let name = if matches!(event, RuntimeHttpClientEvent::Drain) {
+                        "drain"
+                    } else {
+                        "finish"
+                    };
+                    let request = owner
+                        .borrow()
+                        .streams
+                        .iter()
+                        .find(|stream| stream.resource() == resource)
+                        .and_then(|stream| stream.request.clone())
+                        .unwrap_or(Value::Undefined);
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        &request,
+                        &[Value::String(name.into())],
+                        instruction,
+                    )?;
+                }
                 RuntimeHttpClientEvent::ResponseHead {
                     status,
                     reason,
@@ -8467,11 +8567,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match native {
             Native::NodeClientRequestWrite => {
                 let bytes = node_body_bytes(arguments.first())?;
-                let mut state = state.borrow_mut();
-                if state.ended {
+                let (resource, started) = {
+                    let mut state = state.borrow_mut();
+                    if state.ended {
+                        return Ok(Value::Boolean(false));
+                    }
+                    let resource = state
+                        .socket
+                        .as_ref()
+                        .and_then(|socket| socket.borrow().resource);
+                    if resource.is_none() || !state.started {
+                        state.body.extend(bytes.clone());
+                    }
+                    (resource, state.started)
+                };
+                if let Some(resource) = resource.filter(|_| started) {
+                    let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "node:http client requires the realm HTTP runtime".into(),
+                    })?;
+                    let disposition = unsafe {
+                        ActiveHttpRuntime::write_client_request(&mut *runtime, resource, bytes)
+                    }
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "Hyper lost the HTTP client request body".into(),
+                    })?;
+                    self.poll_runtime_http_writes(resource, instruction)?;
+                    return Ok(Value::Boolean(disposition.ready));
+                }
+                if state.borrow().ended {
                     return Ok(Value::Boolean(false));
                 }
-                state.body.extend(bytes);
                 Ok(Value::Boolean(true))
             }
             Native::NodeClientRequestEnd => {
@@ -8511,8 +8638,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "HTTP client request is not connected".into(),
             })?
         };
-        let request = {
-            let state = state.borrow();
+        let (request, body, ended, already_started) = {
+            let mut state = state.borrow_mut();
             let mut headers = state.headers.clone();
             if !headers
                 .iter()
@@ -8526,23 +8653,61 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 headers.push(("connection".into(), "close".into()));
             }
-            RuntimeHttpClientRequest {
+            let request = RuntimeHttpClientRequest {
                 method: state.method.clone(),
                 target: state.path.clone(),
                 headers,
-                body: state.body.clone(),
-            }
+            };
+            let body = std::mem::take(&mut state.body);
+            (request, body, state.ended, state.started)
         };
+        if already_started {
+            if ended {
+                let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http client requires the realm HTTP runtime".into(),
+                })?;
+                unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, body) }
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: "Hyper lost the HTTP client request body".into(),
+                    })?;
+                self.poll_runtime_http_writes(resource, instruction)?;
+            }
+            return Ok(());
+        }
         let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
             instruction,
             message: "node:http client requires the realm HTTP runtime".into(),
         })?;
-        if !unsafe { ActiveHttpRuntime::send_client_request(&mut *runtime, resource, request) } {
+        if !unsafe {
+            ActiveHttpRuntime::send_client_request(
+                &mut *runtime,
+                resource,
+                request,
+                DEFAULT_HIGH_WATER_MARK,
+            )
+        } {
             return Err(ExecutionError::Host {
                 instruction,
                 message: "Hyper rejected the HTTP client request".into(),
             });
         }
+        state.borrow_mut().started = true;
+        if ended {
+            unsafe { ActiveHttpRuntime::end_client_request(&mut *runtime, resource, body) }
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "Hyper lost the HTTP client request body".into(),
+                })?;
+        } else if !body.is_empty() {
+            unsafe { ActiveHttpRuntime::write_client_request(&mut *runtime, resource, body) }
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "Hyper lost the HTTP client request body".into(),
+                })?;
+        }
+        self.poll_runtime_http_writes(resource, instruction)?;
         Ok(())
     }
 
@@ -9578,7 +9743,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let assigned = self.set_computed(&target, &key, value.clone(), current);
+                    let assigned = self.assign(&target, &key, value.clone(), current);
                     if self.catchable(assigned, current)?.is_none() {
                         continue;
                     }
@@ -10226,7 +10391,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::DeleteComputed => {
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
-                    let removed = self.delete(&target, &key, current);
+                    let removed = self.remove(&target, &key, current);
                     let Some(removed) = self.catchable(removed, current)? else {
                         continue;
                     };
@@ -10235,7 +10400,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::DeleteProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
-                    let removed = self.delete(&target, &Value::String(name), current);
+                    let removed = self.remove(&target, &Value::String(name), current);
                     let Some(removed) = self.catchable(removed, current)? else {
                         continue;
                     };
@@ -10267,11 +10432,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
-                    // Assigning a property of a primitive is silently discarded in sloppy mode
-                    // and a TypeError in strict mode. Modules are always strict, and there is
-                    // nowhere to throw yet, so it is an execution error.
                     let assigned =
-                        self.set_computed(&target, &Value::String(name), value.clone(), current);
+                        self.assign(&target, &Value::String(name), value.clone(), current);
                     if self.catchable(assigned, current)?.is_none() {
                         continue;
                     }
@@ -10439,6 +10601,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.locals = frame.locals;
                     self.program = frame.program;
+                    self.strictness = frame.strictness;
+                    self.strict = frame.strict;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
                     self.new_target = frame.new_target;
@@ -10512,6 +10676,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let frame = self.frames.pop().expect("checked by the loop condition");
                 self.locals = frame.locals;
                 self.program = frame.program;
+                self.strictness = frame.strictness;
+                self.strict = frame.strict;
                 self.function = frame.function;
                 self.this_value = frame.this_value;
                 self.new_target = frame.new_target;
@@ -10527,6 +10693,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let frame = self.frames.pop().expect("checked by the loop condition");
             self.locals = frame.locals;
             self.program = frame.program;
+            self.strictness = frame.strictness;
+            self.strict = frame.strict;
             self.function = frame.function;
             self.this_value = frame.this_value;
             self.new_target = frame.new_target;
@@ -10635,6 +10803,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let stack_base = self.stack.len();
         self.frames.push(Frame {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
+            strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
+            strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             new_target: std::mem::replace(&mut self.new_target, new_target.clone()),
@@ -10755,6 +10925,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         self.frames.push(Frame {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
+            strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
+            strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
@@ -11045,6 +11217,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .expect("a resumption always pushes a frame");
         self.locals = frame.locals;
         self.program = frame.program;
+        self.strictness = frame.strictness;
+        self.strict = frame.strict;
         self.function = frame.function;
         self.this_value = frame.this_value;
         self.new_target = frame.new_target;
@@ -18249,13 +18423,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// Whether an ordinary `[[Set]]` of `name` would take, which is what decides whether the
     /// throwing spelling throws.
+    ///
+    /// `OrdinarySetWithOwnDescriptor` does not stop at the own property. When there is none the
+    /// chain answers instead, and both of the ways it can refuse are inherited: a non-writable
+    /// data property on a prototype forbids shadowing it, and a getter-only accessor there
+    /// swallows the write rather than creating anything. Only when the chain has nothing to say
+    /// does it come down to whether the receiver will take a new property at all.
     fn write_accepted(&self, target: &Value, name: &str) -> bool {
-        match own_property_state(&self.intrinsics, target, name) {
-            Some((Property::Value(_), attributes)) => attributes.writable,
-            // A setter-less accessor discards the write, which the throwing spelling reports.
-            Some((Property::Accessor { set, .. }, _)) => set.is_some(),
-            None => is_extensible_target(&self.intrinsics, target),
+        // `__proto__` is an accessor on `Object.prototype` with a setter, and the setter is what
+        // decides -- it refuses a cycle and a non-extensible target by throwing, in sloppy mode
+        // as well as strict. So the write is always "accepted" here and `set_computed` answers.
+        if name == "__proto__" && is_reflect_target(target) {
+            return true;
         }
+        match own_property_state(&self.intrinsics, target, name) {
+            Some((Property::Value(_), attributes)) => return attributes.writable,
+            // A setter-less accessor discards the write, which the throwing spelling reports.
+            Some((Property::Accessor { set, .. }, _)) => return set.is_some(),
+            None => {}
+        }
+        // Only the chain of objects the *program* built. A built-in prototype table answers for
+        // names it does not really carry as own properties -- a well-known symbol, the arity of
+        // a callable -- and reading a refusal out of one turned `obj[Symbol.species] = x` on a
+        // plain object into a TypeError. What is left is exactly the case the language means
+        // here: a prototype the program itself froze or defined a property on.
+        let mut current = prototype_of(target);
+        while matches!(
+            current,
+            Value::Object(_) | Value::Array(_) | Value::Function(_) | Value::Bound(_)
+        ) {
+            match own_property_state(&self.intrinsics, &current, name) {
+                // A non-writable data property on a prototype cannot be shadowed by an
+                // assignment: `Object.create(Object.freeze({x: 1})).x = 2` is refused.
+                Some((Property::Value(_), attributes)) if !attributes.writable => return false,
+                // A writable one is shadowed, which the receiver has to have room for.
+                Some((Property::Value(_), _)) => break,
+                Some((Property::Accessor { set, .. }, _)) => return set.is_some(),
+                None => {}
+            }
+            current = prototype_of(&current);
+        }
+        is_extensible_target(&self.intrinsics, target)
     }
 
     fn write_refused(key: &Value) -> ExecutionError {
@@ -20414,6 +20622,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None
             },
             program: Rc::clone(&self.program),
+            strictness: Rc::clone(&self.strictness),
             captured_new_target: proto.arrow.then(|| self.new_target.clone()),
             captured_arguments: if proto.arrow {
                 // What `arguments` means *here*, which for an arrow defined inside another
@@ -21557,7 +21766,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // here rather than in each table because the answer is the same question for all of
         // them, and because `new x.constructor(...)` is how a library clones a value whose type
         // it was handed rather than told.
+        //
+        // An own property of that name wins, because it is one: `a.constructor = {}` is an
+        // ordinary assignment and reading it back has to see what was written, which is exactly
+        // what `ArraySpeciesCreate` consults.
         if name == "constructor"
+            && own_property_state(&self.intrinsics, target, name).is_none()
             && let Some(constructor) = intrinsic_constructor(target)
         {
             return constructor;
@@ -22511,6 +22725,65 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    /// `PutValue` for an assignment the program wrote: `Set(O, P, V, strict)`.
+    ///
+    /// The whole of what strictness changes about a write. Sloppy code discards a refused
+    /// assignment -- to a frozen object, a non-writable property, a getter with no setter, a
+    /// property of a primitive -- and strict code raises a `TypeError` for the same refusal.
+    /// The two are one instruction, so the running frame is what says which.
+    fn assign(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        value: Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        if !self.strict {
+            return self.set_computed(target, key, value, instruction);
+        }
+        // A primitive has no property store, so an ordinary assignment onto one creates
+        // nothing -- which sloppy code cannot tell from a write and strict code must.
+        // An inherited setter is the exception: it is a call, and the primitive is its receiver.
+        if matches!(
+            target,
+            Value::String(_) | Value::Number(_) | Value::Boolean(_) | Value::BigInt(_)
+        ) {
+            let name = self.computed_key(key, instruction)?.property_key();
+            let setter = match own_property_state(&self.intrinsics, &prototype_of(target), &name) {
+                Some((Property::Accessor { set, .. }, _)) => set,
+                _ => None,
+            };
+            return match setter {
+                Some(setter) => self
+                    .call_value(&setter, target.clone(), vec![value], instruction)
+                    .map(|_| ()),
+                None => Err(Self::write_refused(key)),
+            };
+        }
+        self.set_or_throw(target, key, value, instruction)
+    }
+
+    /// `DeletePropertyOrThrow` where the program wrote `delete` in strict code, and the plain
+    /// `[[Delete]]` where it did not: a refused delete is `false` in sloppy mode and a
+    /// `TypeError` in strict.
+    fn remove(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let removed = self.delete(target, key, instruction)?;
+        if !removed && self.strict {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "Cannot delete property '{}' of an object",
+                    self.computed_key(key, instruction)?.property_key()
+                ),
+            });
+        }
+        Ok(removed)
+    }
+
     fn set_computed(
         &mut self,
         target: &Value,
@@ -22905,6 +23178,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // captured list instead.
         self.frames.push(Frame {
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
+            strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
+            strict: std::mem::replace(&mut self.strict, closure.is_strict()),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, entering),
             new_target: std::mem::replace(&mut self.new_target, target),
@@ -22950,7 +23225,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .collect()
             })
             .unwrap_or_default();
-        let program = compile(&EvalSource {
+        let (program, program_strictness) = compile(&EvalSource {
             source,
             outer: &outer,
             strict,
@@ -22996,8 +23271,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // the global object -- the one place a sloppy call still gets one.
             None => (self.global_object(), Vec::new(), Value::Undefined),
         };
+        let program_is_strict = program_strictness.body;
         self.frames.push(Frame {
             program: std::mem::replace(&mut self.program, Rc::new(program)),
+            strictness: std::mem::replace(&mut self.strictness, Rc::new(program_strictness)),
+            strict: std::mem::replace(&mut self.strict, program_is_strict),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
@@ -23234,8 +23512,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             native_depth: self.native_depth,
         });
         let depth = self.frames.len();
+        let strictness = Rc::new(Strictness::always(&program));
         self.frames.push(Frame {
             program: std::mem::replace(&mut self.program, program),
+            strictness: std::mem::replace(&mut self.strictness, strictness),
+            strict: std::mem::replace(&mut self.strict, true),
             function: self.function.take(),
             // A module body is always strict, so its `this` is `undefined` rather than the
             // global object.
@@ -33155,6 +33436,7 @@ mod tests {
                 local_count: 0,
                 functions: Vec::new(),
             }),
+            Rc::new(Strictness::default()),
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
@@ -33219,6 +33501,7 @@ mod tests {
                 local_count: 0,
                 functions: Vec::new(),
             }),
+            Rc::new(Strictness::default()),
             &mut host,
             Vec::new(),
             ExecutionLimits::default(),
@@ -33314,6 +33597,7 @@ mod tests {
     fn test_vm<'a>(program: &'a Program, host: &'a mut TestHost) -> Vm<'a, TestHost> {
         Vm::with_entropy_seed(
             Rc::new(program.clone()),
+            Rc::new(Strictness::sloppy(program)),
             host,
             vec![Value::Undefined; program.local_count as usize],
             ExecutionLimits::default(),
@@ -33529,26 +33813,31 @@ mod tests {
     /// a test of the *machine* side of `eval` has to supply the program directly. What is being
     /// checked here is the plumbing: that the eval'd program runs in a frame of its own, and
     /// that slot 0 is the caller's cell rather than a copy of the value in it.
-    fn stub_eval_compiler(request: &EvalSource<'_>) -> Result<Program, EvalCompileError> {
+    fn stub_eval_compiler(
+        request: &EvalSource<'_>,
+    ) -> Result<(Program, Strictness), EvalCompileError> {
         assert_eq!(
             request.outer.len(),
             1,
             "the direct eval hands over the one binding in scope"
         );
         assert_eq!(request.outer[0].name, "x");
-        Ok(Program {
-            version: kiln_ir::BYTECODE_VERSION,
-            // `x = 2; x` against the cell installed in slot 0.
-            constants: vec![Constant::Number(2.0f64.to_bits())],
-            code: vec![
-                Instruction::Const(0),
-                Instruction::StoreCell(0),
-                Instruction::LoadCell(0),
-                Instruction::Return,
-            ],
-            local_count: 1,
-            functions: Vec::new(),
-        })
+        Ok((
+            Program {
+                version: kiln_ir::BYTECODE_VERSION,
+                // `x = 2; x` against the cell installed in slot 0.
+                constants: vec![Constant::Number(2.0f64.to_bits())],
+                code: vec![
+                    Instruction::Const(0),
+                    Instruction::StoreCell(0),
+                    Instruction::LoadCell(0),
+                    Instruction::Return,
+                ],
+                local_count: 1,
+                functions: Vec::new(),
+            },
+            Strictness::default(),
+        ))
     }
 
     /// A direct eval writes the caller's binding, not a copy of it.
@@ -33868,6 +34157,7 @@ mod tests {
         let parent = Rc::new(Closure {
             name: None,
             program: no_program(),
+            strictness: Rc::new(Strictness::default()),
             captured_new_target: None,
             function: 0,
             upvalues: Vec::new(),
@@ -33883,6 +34173,7 @@ mod tests {
         let child = Rc::new(Closure {
             name: None,
             program: no_program(),
+            strictness: Rc::new(Strictness::default()),
             captured_new_target: None,
             function: 1,
             upvalues: Vec::new(),
@@ -33910,6 +34201,7 @@ mod tests {
         let unrelated = Rc::new(Closure {
             name: None,
             program: no_program(),
+            strictness: Rc::new(Strictness::default()),
             captured_new_target: None,
             function: 2,
             upvalues: Vec::new(),
