@@ -1488,6 +1488,13 @@ struct Compiler {
     private_scopes: Vec<u32>,
     /// The next unused class identity for `private_scopes`.
     next_private_scope: u32,
+    /// The private names each of those classes declares, innermost last.
+    ///
+    /// A private name is resolved lexically, like any other binding: `Outer.#x` written inside a
+    /// class nested in `Outer` names *Outer's* element. Keying every mention to the innermost
+    /// class made the nested mention a reservation no object carries, which the brand check then
+    /// reported as a class that did not declare its own field.
+    private_declarations: Vec<HashSet<String>>,
     /// Scratch used while re-emitting cleanups, so the stack is restored afterwards.
     pending_finalizers: Vec<Cleanup>,
     /// A label written immediately before the statement now being compiled, waiting for that
@@ -1577,6 +1584,7 @@ impl Compiler {
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
             next_private_scope: 0,
+            private_declarations: Vec::new(),
             finalizers: Vec::new(),
             pending_finalizers: Vec::new(),
             function_finalizer_depth: 0,
@@ -1704,6 +1712,15 @@ impl Compiler {
     /// per name would have made those the same slot, which is a wrong answer -- and the one
     /// `#v in b` would have reported as a match.
     fn private_key(&self, name: &str) -> String {
+        // The innermost class that *declares* the name, which is not always the innermost class:
+        // a nested class does not shadow a name it never mentioned.
+        for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
+            if declared.contains(name) {
+                return private_key(self.private_scopes[depth], name);
+            }
+        }
+        // Undeclared anywhere. A syntax error in its own right, reported where the name is used
+        // rather than invented into some other class's scope.
         private_key(self.private_scopes.last().copied().unwrap_or(0), name)
     }
 
@@ -4827,6 +4844,18 @@ impl Compiler {
         // class nested inside one -- names its private fields in this class's own scope.
         self.private_scopes.push(self.next_private_scope);
         self.next_private_scope += 1;
+        self.private_declarations.push(
+            class
+                .fields
+                .iter()
+                .map(|field| &field.key)
+                .chain(class.methods.iter().map(|method| &method.key))
+                .filter_map(|key| match key {
+                    ObjectKey::Private(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         // A derived class evaluates its parent once, into a binding its members capture.
         //
         // The name carries a character an identifier cannot contain, so it can never collide
@@ -5028,6 +5057,9 @@ impl Compiler {
         self.private_scopes
             .pop()
             .expect("this class pushed its own private scope");
+        self.private_declarations
+            .pop()
+            .expect("this class pushed its own private names");
     }
 
     /// Push the parent constructor of the class currently being compiled.
@@ -8348,6 +8380,91 @@ mod tests {
             "an exported method must carry its module binding instead of indexing its caller"
         );
         assert!(program.code.contains(&Instruction::NewCell(0)));
+    }
+
+    #[test]
+    fn a_nested_class_resolves_the_private_name_declared_by_its_outer_class() {
+        let read = kiln_hir::Function {
+            strict: true,
+            binds_own_name: false,
+            asynchronous: false,
+            name: Some("read".to_owned()),
+            arrow: false,
+            generator: false,
+            parameters: Vec::new(),
+            rest: None,
+            body: vec![statement(StatementKind::Return(Some(Expression {
+                kind: ExpressionKind::PrivateMember {
+                    object: Box::new(identifier("Outer")),
+                    name: "x".to_owned(),
+                },
+                span: Span::default(),
+            })))],
+            span: Span::default(),
+        };
+        let inner = kiln_hir::Class {
+            name: Some("Inner".to_owned()),
+            superclass: None,
+            constructor: None,
+            methods: vec![kiln_hir::ClassMethod {
+                key: ObjectKey::Static("read".to_owned()),
+                function: read,
+                is_static: true,
+                kind: kiln_hir::MethodKind::Normal,
+            }],
+            fields: Vec::new(),
+            span: Span::default(),
+        };
+        let make = kiln_hir::Function {
+            strict: true,
+            binds_own_name: false,
+            asynchronous: false,
+            name: Some("make".to_owned()),
+            arrow: false,
+            generator: false,
+            parameters: Vec::new(),
+            rest: None,
+            body: vec![statement(StatementKind::Class(Box::new(inner)))],
+            span: Span::default(),
+        };
+        let program = compile(&module(vec![statement(StatementKind::Class(Box::new(
+            kiln_hir::Class {
+                name: Some("Outer".to_owned()),
+                superclass: None,
+                constructor: None,
+                methods: vec![kiln_hir::ClassMethod {
+                    key: ObjectKey::Static("make".to_owned()),
+                    function: make,
+                    is_static: true,
+                    kind: kiln_hir::MethodKind::Normal,
+                }],
+                fields: vec![ClassField {
+                    key: ObjectKey::Private("x".to_owned()),
+                    value: Some(number(1.0)),
+                    is_static: true,
+                }],
+                span: Span::default(),
+            },
+        )))]))
+        .expect("nested class compiles");
+        program
+            .functions
+            .iter()
+            .find(|proto| proto.name.as_deref() == Some("read"))
+            .expect("nested read method");
+        assert!(
+            program
+                .constants
+                .contains(&Constant::String("@@private:0:x".to_owned())),
+            "the nested class reads the private key declared by Outer: {:?}",
+            program.constants
+        );
+        assert!(
+            !program
+                .constants
+                .contains(&Constant::String("@@private:1:x".to_owned())),
+            "the nested class must not invent a private key of its own"
+        );
     }
 
     #[test]
