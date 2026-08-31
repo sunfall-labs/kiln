@@ -175,6 +175,13 @@ fn change_set_for_tests<'a, I>(paths: &[String], tests: I) -> ChangeSet
 where
     I: IntoIterator<Item = &'a ConformanceTest>,
 {
+    // These crates own the changed-test coordinator, discovery/runners, and selector itself. A
+    // crate edit can therefore change the result for any discovered case, even when no test's
+    // source or metadata names that crate. `kiln-proto` is deliberately not included: it carries
+    // the Test request and summary over the wire, but has no selection or conformance semantics.
+    const CONFORMANCE_SELECTION_CRATES: &[&str] =
+        &["kiln-daemon", "kiln-conformance", "kiln-test-selector"];
+
     let mut changes = ChangeSet::new();
     let test_paths = tests
         .into_iter()
@@ -208,6 +215,9 @@ where
             && let Some(compiler_crate) = components.get(1)
         {
             changes.add_compiler_crate(*compiler_crate);
+            if CONFORMANCE_SELECTION_CRATES.contains(compiler_crate) {
+                changes.force_full_run();
+            }
         }
         if let Some(index) = components
             .iter()
@@ -369,6 +379,51 @@ expected_stdout = "bundle\n"
             )
             .full_run
         );
+    }
+
+    #[test]
+    fn changed_selection_crates_select_every_case_including_ordinary_tests() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let corpus = repo.join("conformance/guard");
+        let discovered = kiln_conformance::discover(&corpus).expect("fixture corpus is valid");
+        let metadata = discovered
+            .iter()
+            .map(|test| selector_metadata(test, TestMode::Parse))
+            .collect::<Vec<_>>();
+        let ordinary = metadata
+            .iter()
+            .find(|test| !test.smoke)
+            .expect("guard corpus has an ordinary case");
+
+        for crate_name in ["kiln-daemon", "kiln-conformance", "kiln-test-selector"] {
+            let changed = format!("crates/{crate_name}/src/lib.rs");
+            let changes = change_set_for_tests(&[changed], discovered.iter());
+            assert!(
+                changes.full_run,
+                "{crate_name} must invalidate the whole corpus"
+            );
+
+            let selection = select(&metadata, &changes, &FailureState::new());
+            assert_eq!(selection.len(), discovered.len(), "{crate_name}");
+            assert!(
+                selection
+                    .tests
+                    .iter()
+                    .any(|selected| selected.id == ordinary.id),
+                "{crate_name} must include ordinary case {}",
+                ordinary.id
+            );
+        }
+
+        // `kiln-proto` transports Test requests and summaries but does not participate in
+        // discovery, execution, or selection, so a proto-only edit retains ordinary changed-test
+        // behavior rather than broadening the run.
+        let proto_changes = change_set_for_tests(
+            &["crates/kiln-proto/src/lib.rs".to_owned()],
+            discovered.iter(),
+        );
+        assert!(!proto_changes.full_run);
+        assert!(proto_changes.compiler_crates.contains("kiln-proto"));
     }
 
     /// The point of the index-keyed collection: the summary must not be able to observe which
