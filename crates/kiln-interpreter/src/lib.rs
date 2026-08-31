@@ -2413,6 +2413,55 @@ fn is_an_object(value: &Value) -> bool {
 /// where a program's `preventExtensions` on one is recorded -- so this asks the store rather
 /// than answering `false` for everything it has no slot for. Test262 checks the claim on every
 /// built-in it reaches: "Built-in objects must be extensible" is its own assertion.
+/// The store an exotic object keeps its ordinary named properties in.
+///
+/// A typed array, a buffer, a view and a regexp are each exotic in exactly *one* respect -- the
+/// elements a view answers for itself, the bytes a buffer holds, the search position a regexp
+/// carries -- and an ordinary object in every other. `sample.constructor = C` is not a special
+/// case of anything: it is a property write, and while there was nowhere to put one the write
+/// was dropped and the read afterwards answered the intrinsic the program had just replaced.
+///
+/// One function rather than a match arm per operation, so that a read, a write, `in`, `delete`,
+/// a descriptor, an own-key walk and a definition cannot disagree about where a name lives.
+fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> {
+    Some(match target {
+        Value::TypedArray(view) => &view.properties,
+        Value::ArrayBuffer(buffer) => &buffer.properties,
+        Value::DataView(view) => &view.properties,
+        Value::RegExp(regexp) => &regexp.properties,
+        _ => return None,
+    })
+}
+
+/// Whether the value answers this name from its own exotic behaviour rather than from the store
+/// beside it.
+///
+/// For a typed array the line is `CanonicalNumericIndexString`, which is the specification's own
+/// and is wider than "an index": `"1.5"` and `"-0"` reach no element and are still the view's to
+/// answer, so a write to one is discarded rather than stored, while `"01"` is an ordinary name
+/// and is stored. A regexp claims `lastIndex`, which lives in a slot of its own so that a search
+/// and a read of it cannot disagree about where the next match starts.
+fn exotic_reserved_name(target: &Value, key: &str) -> bool {
+    match target {
+        Value::TypedArray(_) => canonical_numeric_index(key).is_some(),
+        Value::RegExp(_) => key == "lastIndex",
+        _ => false,
+    }
+}
+
+/// Remove a name from an exotic object's property store, answering whether it is gone.
+fn remove_exotic_property(store: &RefCell<ObjectData>, key: &str) -> bool {
+    if store
+        .borrow()
+        .get_own_attributes(key)
+        .is_some_and(|attributes| !attributes.configurable)
+    {
+        return false;
+    }
+    store.borrow_mut().remove(key);
+    true
+}
+
 fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
     match target {
         Value::Object(object) => object.borrow().is_extensible(),
@@ -2420,9 +2469,15 @@ fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
         Value::Array(items) => items.properties.borrow().is_extensible(),
         Value::Bound(bound) => bound.properties.borrow().is_extensible(),
         Value::Native(_) | Value::Callback(_) | Value::Settler(..) => intrinsics.extensible(target),
-        // Every other object here is exotic and has no property store of its own to close. A
-        // definition on one is dropped rather than refused, and reporting it closed would turn
-        // that silence into a throw the specification does not ask for.
+        // An exotic object carries an ordinary store for its named properties, and closing it is
+        // what `Object.preventExtensions(sample)` has to mean: the elements are not properties
+        // of that store and are unaffected, which is what the specification says too.
+        Value::TypedArray(_) | Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+            exotic_properties(target).is_none_or(|store| store.borrow().is_extensible())
+        }
+        // Everything left is a primitive or a shape with no store at all. A definition on one is
+        // dropped rather than refused, and reporting it closed would turn that silence into a
+        // throw the specification does not ask for.
         _ => true,
     }
 }
@@ -2459,9 +2514,19 @@ fn own_property_state(
             Err(_) if key == "length" => array_own_property(items, key),
             Err(_) => items.properties.borrow().get_own_property(key).cloned(),
         },
-        Value::TypedArray(view) => canonical_index(key)
-            .and_then(|index| view.get(index))
-            .map(Property::Value),
+        // An element key is the view's own answer and a named one is the store's, and which is
+        // which is `CanonicalNumericIndexString` rather than "is it an index": `"1.5"` names no
+        // element and is still not a property, while `"01"` is an ordinary name.
+        Value::TypedArray(view) => match canonical_numeric_index(key) {
+            Some(index) => valid_integer_index(view, index)
+                .and_then(|at| view.get(at))
+                .map(Property::Value),
+            None => view.properties.borrow().get_own_property(key).cloned(),
+        },
+        // A buffer, a view and a regexp have no exotic keys at all: everything they publish is
+        // an accessor on the prototype, so every own property of one is a stored one.
+        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(target)
+            .and_then(|store| store.borrow().get_own_property(key).cloned()),
         // A built-in keeps what a program changed in the realm's store and everything else in
         // the tables, so a property it has never touched still reads as the specification built
         // it. `own_attributes` has already decided which of the two is answering.
@@ -2631,8 +2696,18 @@ fn install_property(
         Value::Native(_) | Value::Callback(_) => {
             intrinsics.install(target, key, property, attributes);
         }
-        // Every other object here is exotic and keeps no property store, so the definition is
-        // dropped. A primitive cannot reach this: the caller rejected it before ToPropertyKey.
+        // An exotic object takes an ordinary named property in the store beside its own state.
+        // An element key never reaches here: `define_own_property` answers those itself, the
+        // way it answers an array's `length` itself, because their flags are the specification's
+        // rather than the store's.
+        Value::TypedArray(_) | Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+            if let Some(store) = exotic_properties(target)
+                && !exotic_reserved_name(target, key)
+            {
+                store.borrow_mut().install(key, property, attributes);
+            }
+        }
+        // A primitive cannot reach this: the caller rejected it before ToPropertyKey.
         _ => {}
     }
     Ok(())
@@ -2760,6 +2835,29 @@ fn define_own_property(
         && key == "length"
     {
         return array_set_length(items, descriptor);
+    }
+    // An integer-indexed exotic object answers `[[DefineOwnProperty]]` itself for every element
+    // key, and it too has to run *instead of* the ordinary one: the flags of such a property are
+    // the specification's rather than the store's, so a descriptor that asks for any of them
+    // differently is refused whatever the current state says, and an element key the view cannot
+    // reach is refused rather than created as a named property.
+    if let Value::TypedArray(view) = target
+        && let Some(index) = canonical_numeric_index(key)
+    {
+        let Some(at) = valid_integer_index(view, index) else {
+            return Ok(false);
+        };
+        if descriptor.is_accessor()
+            || descriptor.configurable == Some(false)
+            || descriptor.enumerable == Some(false)
+            || descriptor.writable == Some(false)
+        {
+            return Ok(false);
+        }
+        if let Some(value) = &descriptor.value {
+            view.set(at, value)?;
+        }
+        return Ok(true);
     }
     let Some((current, attributes)) = own_property_state(intrinsics, target, key) else {
         if !is_extensible_target(intrinsics, target) {
@@ -3392,6 +3490,9 @@ pub struct BufferData {
     /// a buffer that any number of views are already pointing at, and every one of them has to
     /// see it happen.
     detached: std::cell::Cell<bool>,
+    /// The properties a program put on the buffer by name. The bytes are reached only through a
+    /// view, so a buffer has no exotic keys either and every name lands here.
+    properties: RefCell<ObjectData>,
 }
 
 /// Identity, not contents: two buffers holding the same bytes are still two buffers, and a
@@ -3410,6 +3511,7 @@ impl BufferData {
             max_byte_length: None,
             shared: false,
             detached: std::cell::Cell::new(false),
+            properties: RefCell::new(ObjectData::default()),
         })
     }
 
@@ -3506,6 +3608,15 @@ pub struct TypedArrayData {
     /// through any handle is visible through it immediately instead of leaving it addressing
     /// bytes that are no longer there.
     length: Option<usize>,
+    /// The properties that are not elements.
+    ///
+    /// An integer-indexed exotic object answers `[[Get]]`, `[[Set]]` and the rest itself for
+    /// every *canonical numeric index string*, and is an ordinary object for every other name --
+    /// so `u8.constructor = C` and `u8["01"] = 1` are ordinary property writes that have to go
+    /// somewhere. Which names those are is [`canonical_index_name`], not "is it an index":
+    /// `"1.5"` and `"-0"` reach no element and are still element keys, so they are discarded
+    /// rather than stored here.
+    properties: RefCell<ObjectData>,
 }
 
 impl PartialEq for TypedArrayData {
@@ -3614,6 +3725,10 @@ pub struct DataViewData {
     /// a view created without an explicit length over a resizable buffer is. The same
     /// distinction [`TypedArrayData`] draws, and for the same reason.
     length: Option<usize>,
+    /// The properties a program put on the view by name. A `DataView` is an ordinary object in
+    /// every respect except the buffer it wraps: it has no exotic keys at all, so every name
+    /// lands here.
+    properties: RefCell<ObjectData>,
 }
 
 impl PartialEq for DataViewData {
@@ -4160,6 +4275,10 @@ pub struct RegExpData {
     /// Where the next `g` or `y` search starts, in UTF-16 units. Mutable and program-visible,
     /// which is why two evaluations of one literal must not share an object.
     last_index: std::cell::Cell<usize>,
+    /// The properties a program put on the regexp by name. `lastIndex` is not one of them: it
+    /// lives in the slot above so that the search and a read of `r.lastIndex` cannot disagree
+    /// about where the next match starts.
+    properties: RefCell<ObjectData>,
 }
 
 impl PartialEq for RegExpData {
@@ -14126,8 +14245,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         self.intrinsics.close(&target, false);
                         true
                     }
-                    // Nothing to close: an exotic value has no property store of its own, so
-                    // this reports the refusal rather than claiming a shape it cannot keep.
+                    other if exotic_properties(other).is_some() => {
+                        if let Some(store) = exotic_properties(other) {
+                            store.borrow_mut().prevent_extensions();
+                        }
+                        true
+                    }
+                    // Nothing to close: what is left has no property store of its own, so this
+                    // reports the refusal rather than claiming a shape it cannot keep.
                     _ => false,
                 };
                 Ok(Value::Boolean(closed))
@@ -14469,6 +14594,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 max_byte_length: None,
                 shared,
                 detached: std::cell::Cell::new(false),
+                properties: RefCell::new(ObjectData::default()),
             })));
         };
         // The ceiling is what a later `resize` may reach, so it is the figure the allocation
@@ -14493,6 +14619,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             max_byte_length: Some(max),
             shared,
             detached: std::cell::Cell::new(false),
+            properties: RefCell::new(ObjectData::default()),
         })))
     }
 
@@ -15436,6 +15563,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             buffer,
             offset,
             length,
+            properties: RefCell::new(ObjectData::default()),
         })))
     }
 
@@ -24141,7 +24269,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Overridden::Held(property, _) => Some(property),
                 Overridden::Removed | Overridden::Untouched => None,
             },
-            _ => None,
+            // An exotic object's named properties live in a store beside its own state,
+            // accessors included: `Object.defineProperty(sample, "x", { get })` has to run its
+            // getter here rather than read as undefined.
+            _ => exotic_properties(target)
+                .filter(|_| !exotic_reserved_name(target, name))
+                .and_then(|store| store.borrow().lookup(name)),
         }
     }
 
@@ -24227,6 +24360,45 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(true)
     }
 
+    /// Route a write up the prototype chain a value's *kind* gives it, answering whether the
+    /// chain consumed it.
+    ///
+    /// [`Vm::inherited_setter`] walks a store, and an exotic object's chain is not one: it ends
+    /// at an intrinsic prototype whose accessors are match arms rather than slots. Every
+    /// measurement such a prototype publishes -- a view's `length`, a buffer's `byteLength`, a
+    /// regexp's `source` -- is getter-only, so a write to one is swallowed there. Without this
+    /// the write would shadow the accessor with an own property, and `sample.length = 9` would
+    /// answer 9 for a view of four elements.
+    fn chain_setter(
+        &mut self,
+        target: &Value,
+        name: &str,
+        value: &Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        let mut current = prototype_of(target);
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            if matches!(current, Value::Null | Value::Undefined) {
+                return Ok(false);
+            }
+            match own_property_state(&self.intrinsics, &current, name) {
+                Some((Property::Accessor { set, .. }, _)) => {
+                    // The receiver is the exotic object the program wrote to, not the prototype
+                    // the setter was found on.
+                    if let Some(setter) = set {
+                        self.call_value(&setter, target.clone(), vec![value.clone()], instruction)?;
+                    }
+                    return Ok(true);
+                }
+                // A data property up the chain does not take the write -- an own one is created
+                // to shadow it -- unless it refused to be written at all.
+                Some((Property::Value(_), attributes)) => return Ok(!attributes.writable),
+                None => current = prototype_of(&current),
+            }
+        }
+        Ok(false)
+    }
+
     fn property(&self, target: &Value, name: &str) -> Value {
         // Every intrinsic kind answers `constructor` with the built-in that makes it. Handled
         // here rather than in each table because the answer is the same question for all of
@@ -24255,6 +24427,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         ) && canonical_index(name).is_some()
         {
             return self.computed(target, &Value::String(name.to_owned()));
+        }
+        // An exotic object is an ordinary object for every name its own behaviour does not
+        // claim, and an own property shadows the prototype's exactly as it does anywhere else:
+        // `sample.constructor = C` has to read back as `C` rather than as the view's own kind.
+        if let Some(store) = exotic_properties(target)
+            && !exotic_reserved_name(target, name)
+            && let Some(found) = store.borrow().get(name)
+        {
+            return found;
         }
         match target {
             // A `Temporal` value's fields and methods both come from its own table: `day` is a
@@ -25427,19 +25608,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 None => self.set_computed(&inner, key, value, instruction),
             };
         }
-        if let Value::TypedArray(view) = target {
-            if let Some(index) = array_index(key) {
-                let view = Rc::clone(view);
-                // Coerced before the write, and by the machine, because the coercion is what a
-                // `BigInt64Array` refuses a Number in: `big[0] = 1` is a TypeError where
-                // `big[0] = 1n` is a write, and neither is a rounding.
-                let element = self.as_element(view.kind, &value, instruction)?;
-                view.set(index, &element)?;
-                return Ok(());
+        if let Value::TypedArray(view) = target
+            && let Some(index) = canonical_numeric_index(&key.property_key())
+        {
+            let view = Rc::clone(view);
+            // Coerced before the bounds check, and by the machine, because the coercion is what
+            // a `BigInt64Array` refuses a Number in: `big[0] = 1` is a TypeError where
+            // `big[0] = 1n` is a write, and neither is a rounding. An element key that reaches
+            // no slot -- `"1.5"`, `"-0"`, an index past the end -- is discarded after the
+            // conversion has run, which is what the specification's ordering makes observable.
+            let element = self.as_element(view.kind, &value, instruction)?;
+            if let Some(at) = valid_integer_index(&view, index) {
+                view.set(at, &element)?;
             }
-            // A named property of a typed array is silently discarded rather than stored: the
-            // view has nowhere to put one, and inventing a store would make `u8.x = 1` look like
-            // it worked.
             return Ok(());
         }
         // The other half of `Object.prototype.__proto__`. A value that is neither an object nor
@@ -25564,17 +25745,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(())
                 }
             },
-            // `lastIndex` is the one writable property a regexp has, and writing it is how a
-            // program drives a sticky or global search by hand.
-            Value::RegExp(regexp) => {
-                if key.property_key() == "lastIndex" {
-                    let index = value.as_number();
-                    regexp.last_index.set(if index.is_finite() && index > 0.0 {
-                        index as usize
-                    } else {
-                        0
-                    });
+            // `lastIndex` is the one property a regexp keeps outside its store, and writing it
+            // is how a program drives a sticky or global search by hand.
+            Value::RegExp(regexp) if key.property_key() == "lastIndex" => {
+                let index = value.as_number();
+                regexp.last_index.set(if index.is_finite() && index > 0.0 {
+                    index as usize
+                } else {
+                    0
+                });
+                Ok(())
+            }
+            // Every other name on an exotic object is an ordinary property of an ordinary
+            // object, so the write walks the chain exactly as it would on one: an own accessor
+            // takes it, the chain's accessor takes it, a getter-only accessor swallows it, and
+            // anything left becomes an own property of the store beside the value. Discarding it
+            // outright made `sample.constructor = C` look like it worked and read back as the
+            // view's own kind.
+            Value::TypedArray(_)
+            | Value::ArrayBuffer(_)
+            | Value::DataView(_)
+            | Value::RegExp(_) => {
+                let name = key.property_key();
+                let Some(store) = exotic_properties(target) else {
+                    return Ok(());
+                };
+                if self.inherited_setter(store, target, &name, &value, instruction)? {
+                    return Ok(());
                 }
+                if self.chain_setter(target, &name, &value, instruction)? {
+                    return Ok(());
+                }
+                store.borrow_mut().set(&name, value);
                 Ok(())
             }
             Value::Object(object) => {
@@ -27179,6 +27381,7 @@ fn node_bytes_value(bytes: Vec<u8>) -> Value {
         offset: 0,
         length: Some(length),
         kind: TypedKind::Uint8,
+        properties: RefCell::new(ObjectData::default()),
     }))
 }
 
@@ -28213,6 +28416,18 @@ fn call_native(
             }
             Value::String(String::from_utf16_lossy(&units))
         }
+        // `SetIntegrityLevel` defines every own property afresh, and an integer-indexed one
+        // refuses every flag it would ask for: an element cannot be made non-writable or
+        // non-configurable, so a view with anything in it cannot be frozen or sealed at all.
+        // Answering `undefined` and quietly doing less made `Object.isFrozen` disagree with the
+        // call right above it.
+        Native::ObjectFreeze | Native::ObjectSeal
+            if matches!(arguments.first(), Some(Value::TypedArray(view)) if view.len() > 0) =>
+        {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Cannot freeze array buffer views with elements".to_owned(),
+            });
+        }
         Native::ObjectFreeze => {
             match arguments.first().unwrap_or(&Value::Undefined) {
                 Value::Object(object) => object.borrow_mut().freeze(),
@@ -28227,6 +28442,15 @@ fn call_native(
                 }
                 Value::Function(closure) => closure.properties.borrow_mut().freeze(),
                 Value::Bound(bound) => bound.properties.borrow_mut().freeze(),
+                // An exotic object's named properties freeze like any other. Its elements do
+                // not go with them: an integer-indexed property cannot be made non-writable,
+                // which is why `Object.freeze` on a non-empty typed array is a `TypeError` in
+                // the specification rather than a freeze that silently does less than it says.
+                target if exotic_properties(target).is_some() => {
+                    if let Some(store) = exotic_properties(target) {
+                        store.borrow_mut().freeze();
+                    }
+                }
                 _ => {}
             }
             // Returns its argument, which is what makes `const o = Object.freeze({…})` read well.
@@ -28237,6 +28461,13 @@ fn call_native(
             Some(Value::Array(items)) => items.properties.borrow().is_frozen(),
             Some(Value::Function(closure)) => closure.properties.borrow().is_frozen(),
             Some(Value::Bound(bound)) => bound.properties.borrow().is_frozen(),
+            // A view with any element in it is never frozen: an integer-indexed property is
+            // writable and stays writable, so there is a property that can still change.
+            Some(Value::TypedArray(view)) => {
+                view.len() == 0 && view.properties.borrow().is_frozen()
+            }
+            Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
+                .is_some_and(|store| store.borrow().is_frozen()),
             // A primitive cannot be changed at all, so it is frozen by definition.
             _ => true,
         }),
@@ -28314,6 +28545,14 @@ fn call_native(
                 Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
                     intrinsics.close(&target, sealing);
                 }
+                // An exotic object closes its named store. Its elements are not slots of that
+                // store and keep the flags the specification fixes for them, which is why a
+                // sealed view with elements still reports itself unsealed.
+                other if exotic_properties(other).is_some() => {
+                    if let Some(store) = exotic_properties(other) {
+                        close(&mut store.borrow_mut());
+                    }
+                }
                 _ => {}
             }
             target
@@ -28337,6 +28576,13 @@ fn call_native(
                             .is_none_or(|attributes| !attributes.configurable)
                     })
             }
+            // A view with any element in it is never sealed: an integer-indexed property is
+            // configurable and stays configurable, so its shape can still change.
+            Some(Value::TypedArray(view)) => {
+                view.len() == 0 && view.properties.borrow().is_sealed()
+            }
+            Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
+                .is_some_and(|store| store.borrow().is_sealed()),
             _ => false,
         }),
         // Symbol keys are stored as reserved strings, and a string cannot be turned back into
@@ -28424,9 +28670,30 @@ fn call_native(
                     .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
                     .map(|(index, _)| Value::String(index.to_string()))
                     .collect(),
+                // The elements, and then whatever the program hung on the view by name: an
+                // exotic object enumerates both, in the order its own-key walk lists them.
                 Some(Value::TypedArray(view)) => (0..view.len())
                     .map(|index| Value::String(index.to_string()))
+                    .chain(
+                        view.properties
+                            .borrow()
+                            .entries()
+                            .map(|(key, _)| key)
+                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .map(|key| Value::String(key.to_owned())),
+                    )
                     .collect(),
+                Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
+                    .map(|store| {
+                        store
+                            .borrow()
+                            .entries()
+                            .map(|(key, _)| key)
+                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .map(|key| Value::String(key.to_owned()))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
                 _ => Vec::new(),
             };
             Value::Array(ArrayData::new(keys))
@@ -28533,6 +28800,7 @@ fn call_native(
                 max_byte_length,
                 shared: false,
                 detached: std::cell::Cell::new(false),
+                properties: RefCell::new(ObjectData::default()),
             }))
         }
         Native::ArrayBufferSlice => {
@@ -28556,6 +28824,7 @@ fn call_native(
                 // could not hand to another holder would have lost the only property it wanted.
                 shared: buffer.shared,
                 detached: std::cell::Cell::new(false),
+                properties: RefCell::new(ObjectData::default()),
             }))
         }
         Native::TypedArrayConstructor(kind) => construct_typed_array(kind, arguments)?,
@@ -28614,6 +28883,7 @@ fn call_native(
                 buffer: Rc::clone(&view.buffer),
                 offset: view.offset + start * view.kind.width(),
                 length: (!tracking).then(|| end.saturating_sub(start)),
+                properties: RefCell::new(ObjectData::default()),
             }))
         }
         Native::TypedArrayFill => {
@@ -30323,9 +30593,11 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                     max_byte_length: None,
                     shared: false,
                     detached: std::cell::Cell::new(false),
+                    properties: RefCell::new(ObjectData::default()),
                 }),
                 offset: 0,
                 length: Some(length),
+                properties: RefCell::new(ObjectData::default()),
             }))
         }
         AsyncHostValue::FileStat(stat) => {
@@ -30681,10 +30953,12 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         // A hole is the absence of an own property, so the question carries on up the chain.
         return array_inherited_index(intrinsics, items, &key.property_key()).is_some();
     }
+    // Every element key is the view's own answer, whether or not it reaches a slot: `"1.5" in
+    // sample` is false because no view has such an element, not because the store is empty.
     if let Value::TypedArray(view) = target
-        && let Some(index) = typed_array_index(key)
+        && let Some(index) = canonical_numeric_index(&key.property_key())
     {
-        return index < view.len();
+        return valid_integer_index(view, index).is_some();
     }
     let name = key.property_key();
     // Every intrinsic kind answers `constructor` with the built-in that makes it, so `in` has to
@@ -30742,14 +31016,28 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                     Value::Undefined
                 )
         }
+        // Every element key was answered above, so what is left is a named one: the store
+        // beside the view first, so `in` agrees with the read that finds it, and then the chain.
         Value::TypedArray(view) => {
-            if let Some(index) = array_index(key) {
-                return view.get(index).is_some();
-            }
-            matches!(
-                name.as_str(),
-                "length" | "byteLength" | "byteOffset" | "BYTES_PER_ELEMENT" | "buffer"
-            ) || !matches!(typed_array_method(&name), Value::Undefined)
+            view.properties.borrow().lookup(&name).is_some()
+                || matches!(
+                    name.as_str(),
+                    "length" | "byteLength" | "byteOffset" | "BYTES_PER_ELEMENT" | "buffer"
+                )
+                || !matches!(typed_array_method(&name), Value::Undefined)
+                || !matches!(
+                    inherited_object_property(intrinsics, &name),
+                    Value::Undefined
+                )
+        }
+        // A buffer, a view and a regexp answer from their store and then from the prototype
+        // their kind links to, which is where every accessor and method they publish lives.
+        // Answering `false` for all of them made `"byteLength" in buffer` deny a property the
+        // read right beside it produces.
+        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+            exotic_properties(target).is_some_and(|store| store.borrow().lookup(&name).is_some())
+                || exotic_reserved_name(target, &name)
+                || own_attributes(intrinsics, &prototype_of(target), &name).is_some()
                 || !matches!(
                     inherited_object_property(intrinsics, &name),
                     Value::Undefined
@@ -32056,7 +32344,22 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
             }
             true
         }
-        Value::TypedArray(view) => typed_array_index(key).is_none_or(|index| index >= view.len()),
+        Value::TypedArray(view) => match canonical_numeric_index(&key.property_key()) {
+            // An element that is really there will not go -- the specification gives an
+            // integer-indexed property no way to be configured away -- and an element key that
+            // reaches no slot was never there to remove, so `delete` reports it gone.
+            Some(index) => valid_integer_index(view, index).is_none(),
+            None => remove_exotic_property(&view.properties, &key.property_key()),
+        },
+        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+            let key = key.property_key();
+            match exotic_properties(target) {
+                Some(store) if !exotic_reserved_name(target, &key) => {
+                    remove_exotic_property(store, &key)
+                }
+                _ => true,
+            }
+        }
         Value::String(text) => {
             let key = key.property_key();
             let indexed =
@@ -32107,12 +32410,32 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
             .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
             .collect(),
-        Value::TypedArray(view) => (0..view.len())
-            .filter_map(|index| {
-                view.get(index)
-                    .map(|value| (index.to_string(), Property::Value(value)))
+        // The elements, and then whatever the program hung on the view: a spread copies both,
+        // in the order the own-key walk lists them.
+        Value::TypedArray(view) => {
+            let mut entries: Vec<(String, Property)> = (0..view.len())
+                .filter_map(|index| {
+                    view.get(index)
+                        .map(|value| (index.to_string(), Property::Value(value)))
+                })
+                .collect();
+            entries.extend(
+                view.properties
+                    .borrow()
+                    .entries()
+                    .map(|(key, property)| (key.to_owned(), property.clone())),
+            );
+            entries
+        }
+        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(value)
+            .map(|store| {
+                store
+                    .borrow()
+                    .entries()
+                    .map(|(key, property)| (key.to_owned(), property.clone()))
+                    .collect()
             })
-            .collect(),
+            .unwrap_or_default(),
         Value::String(text) => text
             .chars()
             .enumerate()
@@ -32934,6 +33257,7 @@ fn build_regexp(pattern: &str, flags: &str) -> Option<Value> {
         global: flags.contains('g'),
         sticky: flags.contains('y'),
         last_index: std::cell::Cell::new(0),
+        properties: RefCell::new(ObjectData::default()),
     })))
 }
 
@@ -34498,6 +34822,7 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
                 buffer: Rc::clone(buffer),
                 offset,
                 length,
+                properties: RefCell::new(ObjectData::default()),
             }))
         }
         Some(Value::Array(_) | Value::TypedArray(_)) => {
@@ -34508,6 +34833,7 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
                 buffer: BufferData::fixed(bounded_buffer(items.len() as f64, width)? * width),
                 offset: 0,
                 length: Some(items.len()),
+                properties: RefCell::new(ObjectData::default()),
             };
             for (index, item) in items.into_iter().enumerate() {
                 view.set(index, &item)?;
@@ -34521,6 +34847,7 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
                 buffer: BufferData::fixed(length * width),
                 offset: 0,
                 length: Some(length),
+                properties: RefCell::new(ObjectData::default()),
             }))
         }
     })
@@ -36224,7 +36551,17 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             keys.extend(from_object(&items.properties.borrow()));
             keys
         }
-        Value::TypedArray(view) => (0..view.len()).map(|index| index.to_string()).collect(),
+        // The elements first, in index order, and then whatever the program hung on the view --
+        // the order `OrdinaryOwnPropertyKeys` gives, where integer indices always precede the
+        // rest.
+        Value::TypedArray(view) => {
+            let mut keys: Vec<String> = (0..view.len()).map(|index| index.to_string()).collect();
+            keys.extend(from_object(&view.properties.borrow()));
+            keys
+        }
+        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(target)
+            .map(|store| from_object(&store.borrow()))
+            .unwrap_or_default(),
         _ => Vec::new(),
     }
 }
@@ -36453,6 +36790,11 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
             .keys()
             .map(str::to_owned)
             .collect(),
+        Value::TypedArray(_) | Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => {
+            exotic_properties(target)
+                .map(|store| store.borrow().keys().map(str::to_owned).collect())
+                .unwrap_or_default()
+        }
         Value::Native(_) | Value::Callback(_) | Value::Settler(..) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics
@@ -36557,9 +36899,16 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
             }
             Err(_) => items.properties.borrow().get_own_attributes(key),
         },
-        Value::TypedArray(view) => canonical_index(key)
-            .filter(|index| *index < view.len())
-            .map(|_| Attributes::DEFAULT),
+        // An integer-indexed property's flags are fixed by the specification rather than
+        // stored: every live element is writable, enumerable and configurable, and every other
+        // element key is simply absent.
+        Value::TypedArray(view) => match canonical_numeric_index(key) {
+            Some(index) => valid_integer_index(view, index).map(|_| Attributes::DEFAULT),
+            None => view.properties.borrow().get_own_attributes(key),
+        },
+        Value::ArrayBuffer(_) | Value::DataView(_) | Value::RegExp(_) => exotic_properties(target)
+            .filter(|_| !exotic_reserved_name(target, key))
+            .and_then(|store| store.borrow().get_own_attributes(key)),
         // A string's characters are own properties, and immovable ones: nothing can rewrite or
         // delete `"abc"[1]`, which is why they are the one shape here with no writable slot.
         Value::String(text) => string_index_attributes(text, key),
@@ -40335,6 +40684,7 @@ mod tests {
             max_byte_length,
             shared,
             detached: std::cell::Cell::new(false),
+            properties: RefCell::new(ObjectData::default()),
         }))
     }
 
@@ -40438,6 +40788,7 @@ mod tests {
             buffer: Rc::clone(source_data),
             offset: 0,
             length: Some(4),
+            properties: RefCell::new(ObjectData::default()),
         }));
 
         call_native(
