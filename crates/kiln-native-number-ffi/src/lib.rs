@@ -850,7 +850,16 @@ mod realm {
                     realm.http_connections.borrow_mut().remove(&resource);
                 }
                 StreamAction::Event(_) => {}
-                StreamAction::Error(_) => return RUNTIME_ERROR,
+                StreamAction::Error(error) => {
+                    eprintln!(
+                        "native HTTP transport error on resource {}: {} ({} {})",
+                        resource.get(),
+                        error.message,
+                        error.code,
+                        error.syscall
+                    );
+                    return RUNTIME_ERROR;
+                }
                 StreamAction::Data(_) => {
                     return RUNTIME_ERROR;
                 }
@@ -1631,6 +1640,29 @@ mod realm {
                 }
                 AgentDecision::Queued => HTTP_AGENT_QUEUED,
             }
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_client_owner_active(
+        resource: u64,
+        out_owner: *mut *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let (Some(realm), Some(out_owner)) = (active_realm(), unsafe { out_owner.as_mut() })
+            else {
+                return INVALID_ARGUMENT;
+            };
+            let resource = ResourceId::new(resource);
+            let connections = realm.http_connections.borrow();
+            let Some(connection) = connections.get(&resource) else {
+                return INVALID_ARGUMENT;
+            };
+            if connection.role != HttpRole::Client {
+                return INVALID_ARGUMENT;
+            }
+            *out_owner = connection.events.pointer;
+            0
         })
     }
 
