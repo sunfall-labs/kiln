@@ -857,6 +857,7 @@ impl Lowerer {
             Expression::PrivateFieldExpression(member) => HirExpressionKind::PrivateMember {
                 object: Box::new(self.expression(&member.object)),
                 name: member.field.name.to_string(),
+                optional: member.optional,
             },
             Expression::CallExpression(_) => {
                 return self.unsupported_expression("optional call", expression_span);
@@ -1594,6 +1595,9 @@ impl Lowerer {
 
         Ok(kiln_hir::Class {
             name: class.id.as_ref().map(|id| id.name.to_string()),
+            // Supplied by the named evaluation that encloses this, if any: the parser sees only
+            // that the class is anonymous.
+            inferred_name: None,
             superclass: class
                 .heritage
                 .as_ref()
@@ -1785,6 +1789,7 @@ impl Lowerer {
                 HirExpressionKind::PrivateMember {
                     object: Box::new(self.expression(&member.object)),
                     name: member.field.name.to_string(),
+                    optional: member.optional,
                 }
             }
         };
@@ -2102,21 +2107,25 @@ fn span(value: Span) -> HirSpan {
     HirSpan::new(value.start, value.end)
 }
 
-/// Give an anonymous function expression the name of the binding it is being assigned to.
+/// Give an anonymous function or class expression the name of the binding it is being assigned
+/// to.
 ///
-/// Only functions: a class expression's name becomes a binding inside its own body, so inventing
-/// one would invent a scope the program did not write. A function expression's name is metadata
-/// -- `f.name` and a stack frame -- which is exactly what is missing without this.
-///
-/// That leaves `var C = class {}` reporting an empty name, which no engine does. Fixing it needs
-/// the two to be told apart below this crate: `kiln_hir::Class` has no counterpart to
-/// [`kiln_hir::Function::binds_own_name`], and `kiln-ir` derives the binding a class expression
-/// scopes itself in from the same `name` field it reports.
+/// A function's written name becomes a binding inside its own body and an inferred one does not,
+/// which is why a class carries the two apart in [`kiln_hir::Class::inferred_name`]: writing an
+/// inferred name into `name` would make `var C = class { m() { return C } }` resolve `C` from a
+/// scope the program never wrote. With the field there, both kinds of anonymous definition can
+/// be named -- and `var C = class {}` stops reporting the empty string, which no engine does.
 fn name_anonymous_function(value: &mut kiln_hir::Expression, name: &str) {
-    if let kiln_hir::ExpressionKind::Function(function) = &mut value.kind
-        && function.name.is_none()
-    {
-        function.name = Some(name.to_owned());
+    match &mut value.kind {
+        kiln_hir::ExpressionKind::Function(function) if function.name.is_none() => {
+            function.name = Some(name.to_owned());
+        }
+        kiln_hir::ExpressionKind::Class(class)
+            if class.name.is_none() && class.inferred_name.is_none() =>
+        {
+            class.inferred_name = Some(name.to_owned());
+        }
+        _ => {}
     }
 }
 
@@ -2738,6 +2747,57 @@ mod tests {
             };
             assert_eq!(function.name.as_deref(), expected, "{source}");
         }
+    }
+
+    #[test]
+    fn named_evaluation_infers_an_anonymous_class_name_without_creating_a_binding() {
+        let module = parse_with_goal("class-name.js", "let C = class {};", SourceGoal::Script);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
+            panic!("expected a variable declaration");
+        };
+        let Some(initializer) = &declarations[0].initializer else {
+            panic!("expected a class initializer");
+        };
+        let HirExpressionKind::Class(class) = &initializer.kind else {
+            panic!("expected a class initializer, got {:?}", initializer.kind);
+        };
+        assert_eq!(class.name, None);
+        assert_eq!(class.inferred_name.as_deref(), Some("C"));
+    }
+
+    #[test]
+    fn optional_private_member_lowering_preserves_the_short_circuit_marker() {
+        let module = parse_with_goal(
+            "optional-private.js",
+            "class C { #x; read(value) { return value?.#x; } }",
+            SourceGoal::Script,
+        );
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        let HirStatementKind::Class(class) = &module.body[0].kind else {
+            panic!("expected a class declaration");
+        };
+        let method = class
+            .methods
+            .iter()
+            .find(|method| matches!(method.key, kiln_hir::ObjectKey::Static(ref name) if name == "read"))
+            .expect("read method");
+        let Some(statement) = method.function.body.first() else {
+            panic!("expected a return statement");
+        };
+        let HirStatementKind::Return(Some(value)) = &statement.kind else {
+            panic!("expected a return expression");
+        };
+        let HirExpressionKind::Chain { expression } = &value.kind else {
+            panic!("expected an optional chain, got {:?}", value.kind);
+        };
+        let HirExpressionKind::PrivateMember { optional, .. } = &expression.kind else {
+            panic!(
+                "expected an optional private member, got {:?}",
+                expression.kind
+            );
+        };
+        assert!(*optional);
     }
 
     #[test]
