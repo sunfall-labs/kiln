@@ -77,10 +77,38 @@ temporal_rs = { version = "0.2.6", default-features = false, features = ["std", 
 icu_locale_core = { version = "2.3", default-features = false, features = ["alloc"] }
 icu_locale = { version = "2.3", default-features = false, features = ["compiled_data"] }
 icu_decimal = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
-icu_plurals = { version = "2.3", default-features = false, features = ["compiled_data"] }
+# `unstable` here is not a nightly switch either: it gates `PluralRulesWithRanges`, the CLDR
+# plural *range* table `Intl.PluralRules.prototype.selectRange` answers from. A range's category is
+# not a function of its two ends -- Russian sorts `0-2` into `few` although neither end is -- so
+# without the table the method would have to guess.
+icu_plurals = { version = "2.3", default-features = false, features = ["compiled_data", "unstable"] }
 icu_list = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
 icu_collator = { version = "2.3", default-features = false, features = ["compiled_data"] }
 icu_segmenter = { version = "2.3", default-features = false, features = ["compiled_data", "auto"] }
+# `Intl.DateTimeFormat`. This is the one formatter whose data is a *pattern* rather than a table:
+# which fields a locale shows, in what order, with which separators and in which calendar is CLDR
+# skeleton data, and `formatRange`'s "Jan 1 - 5, 2020" is a second table of interval patterns
+# again. `unstable` is not a "nightly" switch -- it is what gates `icu_datetime::range`, the
+# interval formatter. Without it `formatRange` would have to concatenate two formatted dates,
+# which is a wrong answer in every locale that has an interval pattern, so the feature is required
+# rather than speculative (ADR 0029 adoption rule 3). `default-features = false` drops `ixdtf`,
+# the RFC 9557 string parser, which the adapter never reaches: instants arrive as a Number.
+icu_datetime = { version = "2.3", default-features = false, features = ["compiled_data", "unstable"] }
+# The IANA identifier table `timeZone` is validated and case-normalized against, the zone-offset
+# periods behind it, and the `DateTime`/`ZonedDateTime` input types `icu_datetime` formats. ICU4X
+# ships identifiers and offset *periods*, not a transition database, which is why the adapter can
+# render a fixed-offset zone and refuses a daylight-observing one rather than guessing -- ADR 0015
+# would rather have an implausible answer than a plausible wrong one.
+icu_time = { version = "2.3", default-features = false, features = ["compiled_data", "alloc"] }
+# The calendar systems `Intl.DateTimeFormat`'s `calendar` option selects between. `Date`'s own
+# arithmetic stays proleptic Gregorian in the interpreter; this is only the formatter's.
+icu_calendar = { version = "2.3", default-features = false, features = ["compiled_data"] }
+# `Intl.RelativeTimeFormat` and `Intl.DisplayNames`. ICU4X keeps these in one pre-1.0 crate rather
+# than promoting them individually; the data behind them (the "3 days ago" plural-selected
+# patterns, the language/region/script name tables) is CLDR-shaped in exactly the way the rest of
+# this list is, and hand-transcribing either would be the wrong-answer failure mode again. The
+# version is pinned to a patch line because a 0.x minor is a breaking change here.
+icu_experimental = { version = "0.6", default-features = false, features = ["compiled_data"] }
 # The decimal type ICU4X's formatter takes, named directly because ECMAScript's own rounding is
 # implemented over it: `fixed_decimal`'s five unsigned and four signed rounding modes are exactly
 # ECMA-402's nine, and its rounding increments are exactly the {1,2,5,25}x10^k the language allows.
