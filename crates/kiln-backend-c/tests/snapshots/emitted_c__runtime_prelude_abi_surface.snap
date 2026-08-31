@@ -24,6 +24,7 @@ static size_t kiln_c99_diagnostic_instruction = 0;
 static uint64_t kiln_c99_diagnostic_method = 0;
 static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
 static int kiln_c99_diagnostic_has_method = 0;
+static const char *kiln_c99_diagnostic_detail = NULL;
 #define KILN_C99_MAX_CALL_DEPTH 256
 enum kiln_value_tag {
 KILN_VALUE_UNDEFINED = 0,
