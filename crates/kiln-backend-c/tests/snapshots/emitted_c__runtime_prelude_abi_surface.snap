@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 152
+assertion_line: 300
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -675,6 +675,7 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
+static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_can_be_prototype(kiln_value value);
@@ -985,6 +986,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
 static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_value descriptors,
 static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
+static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
