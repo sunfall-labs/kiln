@@ -62,6 +62,13 @@ pub fn parse_with_goal(path: &str, source: &str, goal: SourceGoal) -> Module {
     parse_source(source, source_type)
 }
 
+/// Parse a CommonJS file under the Script goal while preserving the owned HIR boundary.
+/// Package-format policy belongs to the Node resolver/graph; the frontend only selects grammar.
+pub fn parse_commonjs(path: &str, source: &str) -> Module {
+    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
+    parse_source(source, inferred.with_script(true))
+}
+
 fn parse_source(source: &str, source_type: SourceType) -> Module {
     let allocator = Allocator::default();
     // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
@@ -2062,6 +2069,24 @@ fn name_anonymous_default(inner: &kiln_hir::Pattern, default: &mut kiln_hir::Exp
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commonjs_uses_script_grammar_and_preserves_wrapper_references() {
+        let module = parse_commonjs(
+            "fixture.cjs",
+            "module.exports = function () { return require('./dep.cjs') + __filename.length + __dirname.length + exports.x; };",
+        );
+        assert_eq!(module.source_goal, SourceGoal::Script);
+        assert!(module.diagnostics.is_empty(), "{:?}", module.diagnostics);
+        assert!(module.runtime_requested_modules().is_empty());
+        assert!(matches!(
+            module.body[0].kind,
+            HirStatementKind::Expression(HirExpression {
+                kind: HirExpressionKind::MemberAssignment { .. },
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn parses_real_javascript_export_forms_without_scanning_comments_or_strings() {
