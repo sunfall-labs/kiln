@@ -1836,7 +1836,9 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
-                                  int writing);
+                                  int mode);
+static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value function, int kind);
 static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_can_be_prototype(kiln_value value);
@@ -15909,6 +15911,33 @@ static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const
     return KILN_C99_OK;
 }
 
+/* Install a private method or accessor half, carrying the kind the class body declared.
+ *
+ * A method is stored not-writable, which is what tells it from a private *field* on a later
+ * write: the language refuses the one and allows the other, and a plain slot cannot say which it
+ * is. An accessor half goes through the ordinary accessor definition, which merges `get #x` with
+ * the `set #x` written beside it -- two definitions describing one element. */
+static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value function, int kind) {
+    kiln_property *slot;
+    int status;
+    if (kind != 0) {
+        return kiln_c99_define_accessor(target, key, key_len,
+                                        kind == 1 ? function : kiln_c99_undefined(),
+                                        kind == 2 ? function : kiln_c99_undefined(), 0);
+    }
+    status = kiln_c99_define_method(target, key, key_len, function);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot = kiln_c99_own_private(target, key, key_len);
+    if (slot == NULL) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    slot->writable = 0;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method) {
     kiln_object *object;
@@ -17199,18 +17228,29 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     return NULL;
 }
 
-/* A private name on an object that does not carry it: a TypeError naming the member.
+/* A private element refusing what was asked of it: a TypeError naming the member.
  *
  * The stored key is `@@private:<scope>:<name>` -- reserved so nothing that enumerates own string
  * properties can see it and no computed access can spell it -- and the message wants the `<name>`
- * half, spelled the way the program spells it. */
+ * half, spelled the way the program spells it.
+ *
+ * Five refusals rather than two, because a private element has a *kind*: the object may not carry
+ * the name at all (0 reading, 1 writing), or carry it as an accessor with only the other half
+ * (2 reading, 3 writing), or carry it as a method, which is readable and never writable (4). The
+ * wording is the interpreter's, exactly: `error.message` is program-visible, so a fault the two
+ * engines word differently is a divergence like any other. */
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
-                                  int writing) {
+                                  int mode) {
     kiln_text text = {NULL, 0, 0};
     kiln_value error;
     size_t at = 0;
     size_t colons = 0;
     int status;
+    /* A character rather than a literal, for the reason `kiln_c99_set_function_name` gives: the
+     * runtime prelude lives in a raw string whose terminator is a quote followed by a hash. */
+    char hash = 0x23;
+    const char *before;
+    const char *after;
     while (at < key_len && colons < 2) {
         if (key[at] == ':') {
             colons += 1;
@@ -17220,13 +17260,32 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t ke
     if (colons < 2) {
         at = 0;
     }
-    if (kiln_c99_text_append_c(&text, writing ? "Cannot write private member #"
-                                              : "Cannot read private member #") != KILN_C99_OK ||
+    switch (mode) {
+    case 1:
+        before = "Cannot write private member ";
+        after = " to an object whose class did not declare it";
+        break;
+    case 2:
+        before = "'";
+        after = "' was defined without a getter";
+        break;
+    case 3:
+        before = "'";
+        after = "' was defined without a setter";
+        break;
+    case 4:
+        before = "Private method '";
+        after = "' is not writable";
+        break;
+    default:
+        before = "Cannot read private member ";
+        after = " from an object whose class did not declare it";
+        break;
+    }
+    if (kiln_c99_text_append_c(&text, before) != KILN_C99_OK ||
+        kiln_c99_text_append(&text, &hash, 1) != KILN_C99_OK ||
         kiln_c99_text_append(&text, key + at, key_len - at) != KILN_C99_OK ||
-        kiln_c99_text_append_c(&text,
-                               writing ? " to an object whose class did not declare it"
-                                       : " from an object whose class did not declare it") !=
-            KILN_C99_OK) {
+        kiln_c99_text_append_c(&text, after) != KILN_C99_OK) {
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -19296,6 +19355,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::DefineMethod
+        | Instruction::DefinePrivate { .. }
         | Instruction::SpreadObject
         | Instruction::SpreadInto
         | Instruction::ConstructSpread
@@ -19482,6 +19542,15 @@ fn stack_effect(
                 Err(underflow(3))
             } else {
                 Ok((height - 2, false))
+            }
+        }
+        // Same shape with the key in the operand rather than on the stack: the function is
+        // consumed and the target stays.
+        Instruction::DefinePrivate { .. } => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
             }
         }
         // Replaces the value with an array of its own enumerable keys.
@@ -20651,9 +20720,8 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 0); {unwind} }} stack[sp - 1] = slot->value; }}",
-                text.len(),
-                text.len()
+                "    {{ kiln_value receiver = stack[sp - 1]; kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }} else {{ stack[sp - 1] = slot->value; }} }}",
+                len = text.len()
             )
             .unwrap();
         }
@@ -20664,9 +20732,8 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 1); {unwind} }} slot->value = member; stack[sp - 1] = member; }}",
-                text.len(),
-                text.len()
+                "    {{ kiln_value member = stack[--sp]; kiln_value receiver = stack[sp - 1]; kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = member; }}",
+                len = text.len()
             )
             .unwrap();
         }
@@ -21024,6 +21091,25 @@ fn emit_instruction(
             writeln!(
                 output,
                 "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
+        // A private element is installed with its kind rather than as a slot holding a function,
+        // and on the *object* rather than on a prototype: the presence of the name is the brand,
+        // so an instance element belongs to each instance.
+        Instruction::DefinePrivate { name, kind } => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            let (tag, prefix) = match kind {
+                kiln_ir::PrivateKind::Method => (0, "NULL"),
+                kiln_ir::PrivateKind::Getter => (1, "\"get\""),
+                kiln_ir::PrivateKind::Setter => (2, "\"set\""),
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value function = stack[--sp]; kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_private(stack[sp - 1], {symbol}_constant_{name}, {len}, function, {tag}) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }}",
+                len = text.len()
             )
             .unwrap();
         }
@@ -21633,6 +21719,18 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, u8::from(*enumerable));
             }
             Instruction::DefineMethod => byte(&mut hash, 43),
+            Instruction::DefinePrivate { name, kind } => {
+                byte(&mut hash, 70);
+                word(&mut hash, u64::from(*name));
+                byte(
+                    &mut hash,
+                    match kind {
+                        kiln_ir::PrivateKind::Method => 0,
+                        kiln_ir::PrivateKind::Getter => 1,
+                        kiln_ir::PrivateKind::Setter => 2,
+                    },
+                );
+            }
             Instruction::MarkUninitialized(value) => {
                 byte(&mut hash, 51);
                 word(&mut hash, u64::from(*value));

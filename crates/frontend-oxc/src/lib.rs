@@ -997,6 +997,14 @@ impl Lowerer {
                         self.expression(&member.object),
                         kiln_hir::ObjectKey::Computed(self.expression(&member.expression)),
                     ),
+                    // `this.#n++`. A private name is a member target like any other here; only
+                    // the key differs, and it is one the compiler already knows how to read and
+                    // write. Refusing it made the ordinary way of incrementing a private counter
+                    // a compile error rather than a missing optimisation.
+                    SimpleAssignmentTarget::PrivateFieldExpression(member) => (
+                        self.expression(&member.object),
+                        kiln_hir::ObjectKey::Private(member.field.name.to_string()),
+                    ),
                     _ => {
                         return self
                             .unsupported_expression("update of that target", expression_span);

@@ -84,6 +84,21 @@ pub enum BinaryOp {
     GreaterThanOrEqual,
 }
 
+/// Which kind of element a private definition installs.
+///
+/// A private name is not a property name with a reserved spelling: `#m` and `get #m` behave
+/// differently on both a read and a write, so the kind travels with the definition rather than
+/// being guessed from what the slot happens to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PrivateKind {
+    /// `#m() {}` -- readable, and a write to it is a TypeError.
+    Method,
+    /// `get #x() {}` -- a read calls it; with no setter beside it a write is a TypeError.
+    Getter,
+    /// `set #x(v) {}` -- a write calls it; with no getter beside it a read is a TypeError.
+    Setter,
+}
+
 /// Stack bytecode instructions.
 ///
 /// Conditional jumps consume their condition.  The compiler uses [`Instruction::Dup`] before a
@@ -304,6 +319,17 @@ pub enum Instruction {
     GetPrivate(u32),
     /// Write `object.#name = value`. Stack: `[object, value] -> [value]`.
     SetPrivate(u32),
+    /// Install a private method or accessor half. Stack: `[target, function] -> [target]`.
+    ///
+    /// Separate from [`Instruction::DefineMethod`] because a private element has a *kind* and an
+    /// ordinary property does not: `get #x` reads through a call and `#m` refuses a write, and
+    /// storing either as a plain slot answers both questions wrongly and silently. An instance
+    /// element is installed on each instance rather than on the prototype, because the presence
+    /// of the name on the object *is* the brand check.
+    DefinePrivate {
+        name: u32,
+        kind: PrivateKind,
+    },
     /// Define an accessor half on an object. Stack: `[target, key, function] -> [target]`.
     ///
     /// Two halves written separately describe one property, so this merges with whichever half
@@ -4878,32 +4904,32 @@ impl Compiler {
             },
         };
         let synthesized_derived = class.constructor.is_none() && class.superclass.is_some();
-        // A private instance method is installed on each *instance*, not on the prototype: that
-        // is what carries the brand, and what makes `D.f()` on a sibling class a TypeError rather
-        // than a call. Modelled as a field whose value is the function, so the constructor
-        // prologue that already installs fields installs these too.
-        let private_methods: Vec<ClassField> = class
+        // A private instance method or accessor is installed on each *instance*, not on the
+        // prototype: that is what carries the brand, and what makes `D.f()` on a sibling class a
+        // TypeError rather than a call. The kind travels with it, because an accessor read is a
+        // call and a method write is a refusal -- neither of which a plain slot can express.
+        //
+        // Installed *before* the field initialisers rather than after, which is the order the
+        // language specifies and an observable one: a field initialiser may call `this.#m()`.
+        let private_elements: Vec<(String, PrivateKind, Function)> = class
             .methods
             .iter()
-            .filter(|method| {
-                !method.is_static
-                    && matches!(method.key, ObjectKey::Private(_))
-                    && matches!(method.kind, kiln_hir::MethodKind::Normal)
-            })
-            .map(|method| ClassField {
-                key: method.key.clone(),
-                value: Some(Expression {
-                    kind: ExpressionKind::Function(Box::new(method.function.clone())),
-                    span: method.function.span,
-                }),
-                is_static: false,
+            .filter(|method| !method.is_static)
+            .filter_map(|method| {
+                let ObjectKey::Private(name) = &method.key else {
+                    return None;
+                };
+                Some((
+                    name.clone(),
+                    private_kind(method.kind),
+                    method.function.clone(),
+                ))
             })
             .collect();
         let instance_fields: Vec<&ClassField> = class
             .fields
             .iter()
             .filter(|field| !field.is_static)
-            .chain(private_methods.iter())
             .collect();
         let Some(index) = self.compile_constructor(
             &constructor,
@@ -4912,6 +4938,7 @@ impl Compiler {
             // the parent. Without that, `class F extends Error {}` would construct an error with
             // no message.
             synthesized_derived,
+            &private_elements,
             &instance_fields,
         ) else {
             return;
@@ -4982,15 +5009,23 @@ impl Compiler {
 
             let accessor = !matches!(method.kind, kiln_hir::MethodKind::Normal);
             match &method.key {
-                // Installed on each instance by the constructor prologue instead.
-                ObjectKey::Private(_) if !method.is_static && !accessor => {
+                // Installed on each instance by the constructor prologue instead -- an accessor
+                // as much as a method, because both carry the brand and the brand is per object.
+                ObjectKey::Private(_) if !method.is_static => {
                     self.code.push(Instruction::Pop);
                     continue;
                 }
+                // A static private element lives on the constructor, and with its kind: a static
+                // private getter read as a slot answered with the getter *function*, which is a
+                // wrong answer rather than a missing feature.
                 ObjectKey::Private(name) => {
-                    self.push_constant(Constant::String(self.private_key(name)));
+                    let key = self.private_key(name);
+                    let name = self.constant_index(Constant::String(key));
                     self.code.push(Instruction::MakeFunction(body));
-                    self.code.push(Instruction::DefineMethod);
+                    self.code.push(Instruction::DefinePrivate {
+                        name,
+                        kind: private_kind(method.kind),
+                    });
                 }
                 ObjectKey::Static(key) if !accessor => {
                     self.push_constant(Constant::String(key.clone()));
@@ -5126,7 +5161,7 @@ impl Compiler {
         span: Span,
         forwards_to_super: bool,
     ) -> Option<u32> {
-        self.compile_constructor(function, span, forwards_to_super, &[])
+        self.compile_constructor(function, span, forwards_to_super, &[], &[])
     }
 
     /// Compile a constructor, whose prologue initialises the class's instance fields.
@@ -5139,6 +5174,7 @@ impl Compiler {
         function: &Function,
         span: Span,
         forwards_to_super: bool,
+        private_elements: &[(String, PrivateKind, Function)],
         fields: &[&ClassField],
     ) -> Option<u32> {
         if function.parameters.len() > u32::MAX as usize {
@@ -5330,6 +5366,19 @@ impl Compiler {
         if forwards_to_super {
             self.load_super();
             self.code.push(Instruction::SuperForward);
+            self.code.push(Instruction::Pop);
+        }
+        // Methods and accessors first, then fields: a field initialiser may call `this.#m()`, and
+        // the language installs the elements that make that call possible before it runs any
+        // initialiser.
+        for (name, kind, function) in private_elements {
+            let key = self.private_key(name);
+            let name = self.constant_index(Constant::String(key));
+            let body = self.compile_function(function, span)?;
+            self.code.push(Instruction::LoadThis);
+            self.code.push(Instruction::MakeFunction(body));
+            self.code
+                .push(Instruction::DefinePrivate { name, kind: *kind });
             self.code.push(Instruction::Pop);
         }
         for field in fields {
@@ -5713,9 +5762,41 @@ impl Compiler {
         property: &ObjectKey,
         span: Span,
     ) {
+        // A private name has no computed half and no prototype to fall through to, so the general
+        // path below -- which exists to evaluate an object and a key exactly once each -- reduces
+        // to holding the receiver. Refusing it outright made `this.#n++` a compile error, which
+        // is the ordinary way a private counter is incremented.
         if let ObjectKey::Private(name) = property {
-            self.error(Some(span), format!("update of the private name `#{name}`"));
-            self.push_constant(Constant::Undefined);
+            let key = self.private_key(name);
+            let name = self.constant_index(Constant::String(key));
+            let receiver = format!("%upd{}", self.hidden_bindings);
+            let old_binding = format!("%old{}", self.hidden_bindings);
+            self.hidden_bindings += 1;
+            self.scopes.push(HashMap::new());
+
+            self.expression(object);
+            self.declare_hidden(&receiver, span);
+
+            // `ToNumeric` for the same reason the general path uses it: the value a postfix
+            // update yields is the conversion's result, and a BigInt must not narrow.
+            self.load_hidden(&receiver);
+            self.code.push(Instruction::GetPrivate(name));
+            self.code.push(Instruction::Unary(UnaryOp::ToNumeric));
+            self.declare_hidden(&old_binding, span);
+
+            self.load_hidden(&receiver);
+            self.load_hidden(&old_binding);
+            self.code.push(Instruction::Unary(if increment {
+                UnaryOp::Increment
+            } else {
+                UnaryOp::Decrement
+            }));
+            self.code.push(Instruction::SetPrivate(name));
+            if !prefix {
+                self.code.push(Instruction::Pop);
+                self.load_hidden(&old_binding);
+            }
+            self.scopes.pop().expect("update scope was just pushed");
             return;
         }
 
@@ -7133,6 +7214,15 @@ fn short_circuit_jump(operator: AssignmentOperator) -> Instruction {
         AssignmentOperator::LogicalOr => Instruction::JumpIfTruthy(0),
         AssignmentOperator::Nullish => Instruction::JumpIfNotNullish(0),
         _ => unreachable!("only a short-circuiting assignment skips its store"),
+    }
+}
+
+/// The kind an installed private element carries, from the syntax that declared it.
+fn private_kind(kind: kiln_hir::MethodKind) -> PrivateKind {
+    match kind {
+        kiln_hir::MethodKind::Normal => PrivateKind::Method,
+        kiln_hir::MethodKind::Get => PrivateKind::Getter,
+        kiln_hir::MethodKind::Set => PrivateKind::Setter,
     }
 }
 
