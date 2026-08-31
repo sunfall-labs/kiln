@@ -1975,6 +1975,14 @@ pub struct ObjectData {
     /// `Object.freeze`. A frozen object silently ignores every write, which is what sloppy mode
     /// does; strict mode throws, and reaching that needs the write path to know which it is in.
     frozen: bool,
+    /// A module namespace object, whose `[[Set]]` is defined to refuse.
+    ///
+    /// Not the same fact as `frozen`, which is why it is not spelled with it: a namespace
+    /// reports each export as *writable* -- a program reading the descriptor is told so, and
+    /// `Object.isFrozen` of one is `false` -- while the write itself never lands. That pair is
+    /// the specification's own, and collapsing it either way is a wrong answer: freezing makes
+    /// the descriptor lie, and leaving it ordinary lets a program overwrite an export.
+    module_namespace: bool,
     /// The `[[Prototype]]` link. Reads fall through it; writes never do -- assigning a property
     /// that exists only on the prototype creates an own property rather than mutating the shared
     /// one, which is what keeps two instances of a class independent.
@@ -2166,6 +2174,7 @@ impl Default for ObjectData {
             // Objects start open; closing one is always something a program asked for.
             extensible: true,
             frozen: false,
+            module_namespace: false,
             prototype: None,
             primitive: None,
             node_events: None,
@@ -2430,7 +2439,7 @@ impl ObjectData {
     /// written. Ordering on insert rather than on read means `Object.keys`, `JSON.stringify`,
     /// spread and `for-in` are all correct without any of them knowing the rule.
     pub fn set(&mut self, key: &str, value: Value) {
-        if self.frozen {
+        if self.frozen || self.module_namespace {
             return;
         }
         if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
@@ -2488,6 +2497,23 @@ impl ObjectData {
 
     pub fn is_frozen(&self) -> bool {
         self.frozen
+    }
+
+    /// Whether this is a module namespace, whose `[[Set]]` refuses.
+    pub fn is_module_namespace(&self) -> bool {
+        self.module_namespace
+    }
+
+    /// Close a module namespace: no new properties, and no write to an existing one.
+    ///
+    /// Deliberately weaker than [`ObjectData::freeze`] in what it *says* and exactly as strong
+    /// in what it *does*. A namespace's exports are writable and non-configurable, so a program
+    /// reading a descriptor is told the truth, and `Object.isFrozen` of one is false; the write
+    /// is refused all the same, because `[[Set]]` on a namespace is defined to return false
+    /// whatever the flags say.
+    pub fn close_as_module_namespace(&mut self) {
+        self.extensible = false;
+        self.module_namespace = true;
     }
 
     /// Refuse new properties, leaving the existing ones writable.
@@ -7065,6 +7091,17 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
     Ok(vm.steps)
 }
 
+/// Whether this value's `[[Set]]` is defined to refuse, whatever its properties' flags say.
+///
+/// One predicate rather than a check in each of the two spellings of a write, because the two
+/// have to agree: `ns.x = 1` throws in strict code exactly when `Reflect.set(ns, "x", 1)`
+/// answers false, and a module namespace is where the flags cannot be asked -- its exports
+/// report `writable: true` so that a program reading a descriptor is told the truth, while the
+/// write never lands.
+fn refuses_every_write(target: &Value) -> bool {
+    matches!(target, Value::Object(object) if object.borrow().is_module_namespace())
+}
+
 /// The object `import * as ns` binds: one property per export of the provider.
 ///
 /// Built by the linker rather than by the module itself, because the module does not know it is
@@ -7075,9 +7112,39 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
     for (name, value) in exports {
         // A namespace object holds values, so an exported cell is read through here. Node's
         // namespace objects are live; this one is a snapshot taken when the provider finished.
-        data.set(&name, read_through_cell(&value));
+        //
+        // Writable and non-configurable, which is the one combination no ordinary object is
+        // built with and the one the specification gives every export: the binding cannot be
+        // removed or redefined, and its *value* is expected to change, because the module it
+        // came from may still assign to it.
+        data.define_value(
+            &name,
+            read_through_cell(&value),
+            Attributes {
+                writable: true,
+                enumerable: true,
+                configurable: false,
+            },
+        );
     }
-    data.freeze();
+    // The tag is what `Object.prototype.toString` reads, and it is the only own property a
+    // namespace has that is not an export -- so `String(ns)` is "[object Module]" rather than
+    // "[object Object]", which is how a program tells a namespace from an object of exports.
+    data.define_value(
+        WellKnown::ToStringTag.property_key(),
+        Value::String("Module".to_owned()),
+        Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: false,
+        },
+    );
+    // A namespace inherits from nothing. `ns.toString` is `undefined`, `ns.hasOwnProperty` is
+    // `undefined`, and a name a module did not export is absent rather than answered by
+    // `Object.prototype` -- which is what stops an importer from reading someone else's
+    // furniture through a module it imported.
+    data.set_prototype(Value::Null);
+    data.close_as_module_namespace();
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
@@ -7115,6 +7182,10 @@ pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
         .borrow()
         .entries()
         .filter_map(|(name, property)| match property {
+            // The tag is the namespace's own furniture, not one of the module's exports. A star
+            // re-export expanded through here would otherwise hand `@@toStringTag` on to the
+            // importer as a name the provider had exported.
+            _ if name == WellKnown::ToStringTag.property_key() => None,
             Property::Value(value) => Some((name.to_owned(), value.clone())),
             Property::Accessor { .. } => None,
         })
@@ -21364,6 +21435,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// swallows the write rather than creating anything. Only when the chain has nothing to say
     /// does it come down to whether the receiver will take a new property at all.
     fn write_accepted(&self, target: &Value, name: &str) -> bool {
+        if refuses_every_write(target) {
+            return false;
+        }
         if let Value::Function(closure) = target
             && name == "prototype"
         {
@@ -28171,6 +28245,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         receiver: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
+        if refuses_every_write(target) {
+            return Ok(false);
+        }
         let own = own_property_state(&self.intrinsics, target, name);
         if let Some((property, attributes)) = own {
             match property {
