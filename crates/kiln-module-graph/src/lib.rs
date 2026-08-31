@@ -13,11 +13,11 @@ use std::path::{Path, PathBuf};
 use kiln_hir::{Module, commonjs_literal_requires};
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
-    Cell, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult, ModuleBinding,
-    ModulePlan, ModuleRealmSession, ModuleValueRef, PlannedModule, Value,
-    execute_module_in_runtime, execute_node_module_in_session, node_builtin_commonjs_value,
-    node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
-    parse_json_module, read_through_cell,
+    Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult,
+    ModuleBinding, ModulePlan, ModuleRealmSession, ModuleValueRef, PlannedModule, Value,
+    execute_module_in_runtime_with_loader, execute_node_module_in_session_with_loader,
+    node_builtin_commonjs_value, node_builtin_export_names, node_builtin_exports, ordinary_object,
+    own_data_property, parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -704,7 +704,8 @@ impl ModuleGraph {
         )
     }
 
-    /// Execute every module once, dependencies first, and return the entry's value.
+    /// Execute the graph in deterministic module order, loading CommonJS dependencies only when
+    /// their `require` call runs, and return the entry's value.
     ///
     /// The returned `steps` is the total across the graph; its `value` is the entry module's
     /// result. Side-effect-only dependencies are present in `order` and are therefore evaluated.
@@ -891,7 +892,18 @@ impl ModuleGraph {
         // holds its ESM bindings; this table holds Node's historical CommonJS `module.exports`
         // value so a later `require()` never has to reverse-engineer one projection from the
         // other.
-        let mut builtin_commonjs: HashMap<PathBuf, Value> = HashMap::new();
+        let builtin_commonjs: HashMap<PathBuf, Value> = self
+            .modules
+            .iter()
+            .filter_map(|(path, node)| match node.source {
+                ModuleSource::NodeBuiltin(builtin) => Some((
+                    path.clone(),
+                    node_builtin_commonjs_value(builtin.specifier())
+                        .expect("a linkable builtin has a CommonJS projection"),
+                )),
+                _ => None,
+            })
+            .collect();
         // Allocated for every CommonJS node before any body runs. This is the module cache's
         // identity seam: every require edge names the same mutable export cell.
         let commonjs_cache: HashMap<PathBuf, Cell> = self
@@ -915,6 +927,26 @@ impl ModuleGraph {
             },
         })?;
         let mut node_session = node.then(ModuleRealmSession::default);
+        let cache_targets = commonjs_cache
+            .iter()
+            .map(|(path, cell)| (std::rc::Rc::as_ptr(cell), path.clone()))
+            .collect();
+        let mut commonjs_states = HashMap::new();
+        let mut commonjs_loader = CommonJsLoader {
+            graph: self,
+            builtin_commonjs: &builtin_commonjs,
+            commonjs_cache: &commonjs_cache,
+            cache_targets,
+            values: &mut values as *mut _,
+            states: &mut commonjs_states as *mut _,
+            total_steps: &mut total_steps as *mut _,
+            entry_result: &mut entry_result as *mut _,
+            host: host as *mut _,
+            runtime: &mut runtime as *mut _,
+            node_session: &mut node_session as *mut _,
+            limits,
+            node,
+        };
 
         for path in &self.order {
             let module_node = self
@@ -924,11 +956,6 @@ impl ModuleGraph {
             if let ModuleSource::NodeBuiltin(builtin) = module_node.source {
                 let exports = node_builtin_exports(builtin.specifier())
                     .expect("only materializable builtins have linkable exports");
-                builtin_commonjs.insert(
-                    path.clone(),
-                    node_builtin_commonjs_value(builtin.specifier())
-                        .expect("a linkable builtin has a CommonJS projection"),
-                );
                 values.insert(path.clone(), exports.into_iter().collect());
                 continue;
             }
@@ -950,114 +977,13 @@ impl ModuleGraph {
                 continue;
             }
             if module_node.source == ModuleSource::CommonJs {
-                let exports_cell = commonjs_cache.get(path).ok_or_else(|| {
-                    ModuleGraphError::InternalMissingModule { path: path.clone() }
-                })?;
-                let initial_exports = exports_cell.borrow().clone();
-                let mut targets = Vec::with_capacity(module_node.dependencies.len());
-                for dependency in &module_node.dependencies {
-                    let value = if let Some(cell) = commonjs_cache.get(&dependency.target) {
-                        std::rc::Rc::clone(cell)
-                    } else if let Some(provider) = values.get(&dependency.target) {
-                        if let Some(value) = builtin_commonjs.get(&dependency.target) {
-                            std::rc::Rc::new(std::cell::RefCell::new(value.clone()))
-                        } else if self
-                            .modules
-                            .get(&dependency.target)
-                            .is_some_and(|node| node.source == ModuleSource::Json)
-                        {
-                            let value = provider.get("default").cloned().ok_or_else(|| {
-                                ModuleGraphError::InternalMissingModule {
-                                    path: dependency.target.clone(),
-                                }
-                            })?;
-                            std::rc::Rc::new(std::cell::RefCell::new(value))
-                        } else {
-                            let mut entries: Vec<_> = provider
-                                .iter()
-                                .map(|(name, value)| (name.clone(), read_through_cell(value)))
-                                .collect();
-                            entries.sort_by(|left, right| left.0.cmp(&right.0));
-                            std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
-                        }
-                    } else {
-                        return Err(ModuleGraphError::InternalMissingModule {
-                            path: dependency.target.clone(),
-                        });
-                    };
-                    targets.push((
-                        dependency.specifier.clone(),
-                        dependency.target.to_string_lossy().into_owned(),
-                        value,
-                    ));
-                }
-                let module_object =
-                    ordinary_object([("exports".to_owned(), initial_exports.clone())]);
-                let imports = vec![
-                    initial_exports,
-                    Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::new(targets))),
-                    module_object.clone(),
-                    Value::String(path.to_string_lossy().into_owned()),
-                    Value::String(
-                        path.parent()
-                            .unwrap_or_else(|| Path::new(""))
-                            .to_string_lossy()
-                            .into_owned(),
-                    ),
-                ];
-                if total_steps >= limits.max_steps {
-                    return Err(ModuleGraphError::Execution {
-                        module: path.clone(),
-                        error: ExecutionError::StepLimitExceeded {
-                            steps: total_steps,
-                            limit: limits.max_steps,
-                        },
-                    });
-                }
-                let remaining_limits = ExecutionLimits {
-                    max_steps: limits.max_steps - total_steps,
-                    ..limits
-                };
-                let result = if node {
-                    execute_node_module_in_session(
-                        &module_node.program,
-                        &imports,
-                        host,
-                        remaining_limits,
-                        &mut runtime,
-                        node_session.as_mut().expect("Node mode owns a session"),
-                        path == &self.entry,
-                    )
-                } else {
-                    execute_module_in_runtime(
-                        &module_node.program,
-                        &imports,
-                        host,
-                        remaining_limits,
-                        &mut runtime,
-                    )
-                }
-                .map_err(|error| ModuleGraphError::Execution {
-                    module: path.clone(),
-                    error,
-                })?;
-                total_steps = total_steps
-                    .checked_add(result.execution.steps)
-                    .ok_or(ModuleGraphError::StepOverflow)?;
-                // `module.exports` is an ordinary property, not necessarily a data property.
-                // Packages such as `abstract-logging` deliberately publish it through a getter
-                // so every `require` receives a fresh facade. Reading only the backing data slot
-                // made that module export `undefined`, and the first consumer mutation failed.
-                let final_exports = result.commonjs_exports.unwrap_or_else(|| {
-                    own_data_property(&module_object, "exports").unwrap_or(Value::Undefined)
-                });
-                *exports_cell.borrow_mut() = final_exports.clone();
-                values.insert(
-                    path.clone(),
-                    HashMap::from([("default".to_owned(), final_exports)]),
-                );
                 if path == &self.entry {
-                    entry_result = Some(result.execution);
+                    commonjs_loader
+                        .execute_target(path, true)
+                        .map_err(|error| ModuleGraphError::Execution {
+                            module: path.clone(),
+                            error,
+                        })?;
                 }
                 continue;
             }
@@ -1087,6 +1013,19 @@ impl ModuleGraph {
                     }
                     imports.push(Value::Undefined);
                     continue;
+                }
+                if !values.contains_key(&dependency.target)
+                    && self
+                        .modules
+                        .get(&dependency.target)
+                        .is_some_and(|node| node.source == ModuleSource::CommonJs)
+                {
+                    commonjs_loader
+                        .execute_target(&dependency.target, true)
+                        .map_err(|error| ModuleGraphError::Execution {
+                            module: dependency.target.clone(),
+                            error,
+                        })?;
                 }
                 let provider = values.get(&dependency.target).ok_or_else(|| {
                     ModuleGraphError::InternalMissingModule {
@@ -1129,7 +1068,7 @@ impl ModuleGraph {
                 ..limits
             };
             let result = if node {
-                execute_node_module_in_session(
+                execute_node_module_in_session_with_loader(
                     &module_node.program,
                     &imports,
                     host,
@@ -1137,14 +1076,18 @@ impl ModuleGraph {
                     &mut runtime,
                     node_session.as_mut().expect("Node mode owns a session"),
                     path == &self.entry,
+                    &mut commonjs_loader,
+                    true,
                 )
             } else {
-                execute_module_in_runtime(
+                execute_module_in_runtime_with_loader(
                     &module_node.program,
                     &imports,
                     host,
                     remaining_limits,
                     &mut runtime,
+                    &mut commonjs_loader,
+                    true,
                 )
             }
             .map_err(|error| {
@@ -1206,6 +1149,214 @@ impl ModuleGraph {
         })?;
         result.steps = total_steps;
         Ok(result)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CommonJsExecutionState {
+    Executing,
+    Done,
+}
+
+/// The graph-owned half of lazy CommonJS execution.
+//
+// The interpreter can call back into this loader while `execute_mode` is still holding the
+// graph's host, runtime, session, and result state. These pointers are scoped to that one
+// synchronous execution, and the loader never escapes it; reentrant callbacks therefore do not
+// outlive the pointed-to values.
+struct CommonJsLoader<'graph, H: HostOps + ?Sized> {
+    graph: &'graph ModuleGraph,
+    builtin_commonjs: &'graph HashMap<PathBuf, Value>,
+    commonjs_cache: &'graph HashMap<PathBuf, Cell>,
+    cache_targets: HashMap<*const std::cell::RefCell<Value>, PathBuf>,
+    values: *mut HashMap<PathBuf, HashMap<String, Value>>,
+    states: *mut HashMap<PathBuf, CommonJsExecutionState>,
+    total_steps: *mut u64,
+    entry_result: *mut Option<ExecutionResult>,
+    host: *mut H,
+    runtime: *mut RealmRuntime,
+    node_session: *mut Option<ModuleRealmSession>,
+    limits: ExecutionLimits,
+    node: bool,
+}
+
+impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
+    fn execute_target(&mut self, path: &Path, enter_runtime: bool) -> Result<(), ExecutionError> {
+        match unsafe { (&*self.states).get(path).copied() } {
+            Some(CommonJsExecutionState::Executing | CommonJsExecutionState::Done) => return Ok(()),
+            None => {}
+        }
+        let Some(module_node) = self.graph.modules.get(path) else {
+            return Err(ExecutionError::Host {
+                instruction: 0,
+                message: format!("CommonJS target `{}` is not in the graph", path.display()),
+            });
+        };
+        if module_node.source != ModuleSource::CommonJs {
+            return Ok(());
+        }
+        unsafe {
+            (&mut *self.states).insert(path.to_path_buf(), CommonJsExecutionState::Executing);
+        }
+        let initial_exports = self
+            .commonjs_cache
+            .get(path)
+            .ok_or_else(|| ExecutionError::Host {
+                instruction: 0,
+                message: format!("CommonJS cache has no entry for `{}`", path.display()),
+            })?
+            .borrow()
+            .clone();
+        let mut targets = Vec::with_capacity(module_node.dependencies.len());
+        for dependency in &module_node.dependencies {
+            let value =
+                if let Some(cell) = self.commonjs_cache.get(&dependency.target) {
+                    std::rc::Rc::clone(cell)
+                } else if let Some(provider) = unsafe { (&*self.values).get(&dependency.target) } {
+                    if let Some(value) = self.builtin_commonjs.get(&dependency.target) {
+                        std::rc::Rc::new(std::cell::RefCell::new(value.clone()))
+                    } else if self
+                        .graph
+                        .modules
+                        .get(&dependency.target)
+                        .is_some_and(|node| node.source == ModuleSource::Json)
+                    {
+                        let value = provider.get("default").cloned().ok_or_else(|| {
+                            ExecutionError::Host {
+                                instruction: 0,
+                                message: format!(
+                                    "JSON target `{}` has no default",
+                                    dependency.target.display()
+                                ),
+                            }
+                        })?;
+                        std::rc::Rc::new(std::cell::RefCell::new(value))
+                    } else {
+                        let mut entries: Vec<_> = provider
+                            .iter()
+                            .map(|(name, value)| (name.clone(), read_through_cell(value)))
+                            .collect();
+                        entries.sort_by(|left, right| left.0.cmp(&right.0));
+                        std::rc::Rc::new(std::cell::RefCell::new(ordinary_object(entries)))
+                    }
+                } else {
+                    return Err(ExecutionError::Host {
+                        instruction: 0,
+                        message: format!(
+                            "CommonJS target `{}` has not been evaluated",
+                            dependency.target.display()
+                        ),
+                    });
+                };
+            targets.push((
+                dependency.specifier.clone(),
+                dependency.target.to_string_lossy().into_owned(),
+                value,
+            ));
+        }
+        let module_object = ordinary_object([("exports".to_owned(), initial_exports.clone())]);
+        let imports = vec![
+            initial_exports,
+            Value::CommonJsRequire(std::rc::Rc::new(CommonJsRequire::new(targets))),
+            module_object.clone(),
+            Value::String(path.to_string_lossy().into_owned()),
+            Value::String(
+                path.parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+        ];
+        let total_steps = unsafe { *self.total_steps };
+        if total_steps >= self.limits.max_steps {
+            return Err(ExecutionError::StepLimitExceeded {
+                steps: total_steps,
+                limit: self.limits.max_steps,
+            });
+        }
+        let remaining_limits = ExecutionLimits {
+            max_steps: self.limits.max_steps - total_steps,
+            ..self.limits
+        };
+        let is_entry = path == self.graph.entry;
+        let result = unsafe {
+            if self.node {
+                execute_node_module_in_session_with_loader(
+                    &module_node.program,
+                    &imports,
+                    &mut *self.host,
+                    remaining_limits,
+                    &mut *self.runtime,
+                    (&mut *self.node_session)
+                        .as_mut()
+                        .expect("Node mode owns a session"),
+                    is_entry,
+                    self,
+                    enter_runtime,
+                )
+            } else {
+                execute_module_in_runtime_with_loader(
+                    &module_node.program,
+                    &imports,
+                    &mut *self.host,
+                    remaining_limits,
+                    &mut *self.runtime,
+                    self,
+                    enter_runtime,
+                )
+            }
+        }?;
+        unsafe {
+            *self.total_steps = (*self.total_steps)
+                .checked_add(result.execution.steps)
+                .ok_or(ExecutionError::Host {
+                    instruction: 0,
+                    message: "CommonJS execution step count overflow".to_owned(),
+                })?;
+            let final_exports = result.commonjs_exports.unwrap_or_else(|| {
+                own_data_property(&module_object, "exports").unwrap_or(Value::Undefined)
+            });
+            let cache = self
+                .commonjs_cache
+                .get(path)
+                .expect("cache entry checked above");
+            *cache.borrow_mut() = final_exports.clone();
+            (&mut *self.values).insert(
+                path.to_path_buf(),
+                HashMap::from([("default".to_owned(), final_exports)]),
+            );
+            (&mut *self.states).insert(path.to_path_buf(), CommonJsExecutionState::Done);
+            if path == self.graph.entry {
+                *self.entry_result = Some(result.execution);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<H: HostOps + ?Sized> CommonJsModuleLoader for CommonJsLoader<'_, H> {
+    fn load(
+        &mut self,
+        require: &CommonJsRequire,
+        specifier: &str,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Some(cell) = require.target_cell(specifier) else {
+            return Err(ExecutionError::Host {
+                instruction,
+                message: format!("CommonJS require target `{specifier}` is not in the graph"),
+            });
+        };
+        if let Some(path) = self.cache_targets.get(&std::rc::Rc::as_ptr(&cell)).cloned() {
+            self.execute_target(&path, false)?;
+            return Ok(cell.borrow().clone());
+        }
+        require
+            .cached_value(specifier)
+            .ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: format!("CommonJS require target `{specifier}` is not in the graph"),
+            })
     }
 }
 
@@ -1994,6 +2145,93 @@ mod tests {
     }
 
     #[test]
+    fn node_commonjs_require_is_lazy_in_dead_branches_and_unused_functions() {
+        let project = TempProject::new();
+        let dependency = project.write("dep.cjs", "console.log('executed'); module.exports = 42;");
+        let bridge = project.write(
+            "bridge.cjs",
+            "if (false) { require('./dep.cjs'); } function load() { return require('./dep.cjs'); } module.exports = 1;",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import value from './bridge.cjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build lazy CommonJS graph");
+        let bridge_node = graph.module(&bridge).expect("bridge node");
+        assert_eq!(bridge_node.program.dependencies, ["./dep.cjs"]);
+        assert_eq!(
+            bridge_node.dependencies[0].target,
+            fs::canonicalize(dependency).expect("canonical dependency")
+        );
+
+        let mut host = TestHost::default();
+        graph
+            .execute(&mut host, ExecutionLimits::default())
+            .expect("execute lazy CommonJS graph");
+        assert_eq!(host.output, ["1"]);
+    }
+
+    #[test]
+    fn node_commonjs_require_executes_a_target_once_and_reuses_its_identity() {
+        let project = TempProject::new();
+        project.write("dep.cjs", "exports.count = (exports.count || 0) + 1;");
+        project.write(
+            "bridge.cjs",
+            "const first = require('./dep.cjs'); const second = require('./dep.cjs'); module.exports = first === second && first.count;",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import value from './bridge.cjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build cached CommonJS graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute cached CommonJS graph");
+        assert_eq!(host.into_stdout(), "1\n");
+    }
+
+    #[test]
+    fn node_commonjs_require_remains_lazy_when_a_captured_loader_is_called_later() {
+        let project = TempProject::new();
+        project.write("dep.cjs", "console.log('executed'); module.exports = 42;");
+        project.write("bridge.cjs", "module.exports = () => require('./dep.cjs');");
+        let entry = project.write(
+            "main.mjs",
+            "import load from './bridge.cjs'; console.log(load());",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build captured CommonJS loader graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute captured CommonJS loader graph");
+        assert_eq!(host.into_stdout(), "executed\n42\n");
+    }
+
+    #[test]
     fn node_commonjs_require_reads_esm_export_values() {
         let project = TempProject::new();
         project.write("dep.mjs", "export let answer = 41;");
@@ -2060,7 +2298,7 @@ mod tests {
         graph
             .execute_node(&mut host, ExecutionLimits::default())
             .expect("execute CommonJS cycle");
-        assert_eq!(host.into_stdout(), "1 1 undefined 1\n");
+        assert_eq!(host.into_stdout(), "1 1 1 1\n");
     }
 
     #[test]
