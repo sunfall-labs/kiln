@@ -493,6 +493,7 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
     Module {
         source_kind: SourceKind::JavaScript,
         source_goal: kiln_hir::SourceGoal::Module,
+        strict: false,
         items: text
             .lines()
             .enumerate()

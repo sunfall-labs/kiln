@@ -7510,6 +7510,69 @@ mod tests {
         );
     }
 
+    /// Strictness is inherited into every nested body, and a class body raises it.
+    ///
+    /// The store instructions carry no strictness of their own, so the interpreter reads it off
+    /// the body a write was written in. That table is only right if the compiler propagates the
+    /// flag the way the language does: outward-in for a `"use strict"` prologue, and
+    /// unconditionally through a class -- whose methods are strict in the sloppiest of files.
+    #[test]
+    fn strictness_reaches_every_body_written_inside_a_strict_one() {
+        let mut inner = kiln_hir::Function {
+            name: Some("inner".to_owned()),
+            binds_own_name: true,
+            arrow: false,
+            generator: false,
+            asynchronous: false,
+            parameters: Vec::new(),
+            rest: None,
+            body: Vec::new(),
+            strict: false,
+            span: Span::default(),
+        };
+        let mut outer = inner.clone();
+        outer.name = Some("outer".to_owned());
+        outer.strict = true;
+        outer.body = vec![statement(StatementKind::Function(Box::new(inner.clone())))];
+
+        let (_, strictness) = compile_with_strictness(
+            &module(vec![statement(StatementKind::Function(Box::new(outer)))]),
+            CompileOptions::default(),
+        )
+        .expect("the program compiles");
+        assert_eq!(
+            strictness.functions,
+            vec![true, true],
+            "the nested body is strict because the one around it said so"
+        );
+        assert!(!strictness.body, "and the file around them both is not");
+
+        inner.name = Some("m".to_owned());
+        let class = kiln_hir::Class {
+            name: Some("C".to_owned()),
+            superclass: None,
+            constructor: None,
+            methods: vec![kiln_hir::ClassMethod {
+                key: ObjectKey::Static("m".to_owned()),
+                function: inner,
+                is_static: false,
+                kind: kiln_hir::MethodKind::Normal,
+            }],
+            fields: Vec::new(),
+            span: Span::default(),
+        };
+        let (_, strictness) = compile_with_strictness(
+            &module(vec![statement(StatementKind::Class(Box::new(class)))]),
+            CompileOptions::default(),
+        )
+        .expect("the class compiles");
+        assert!(
+            strictness.functions.iter().all(|strict| *strict),
+            "a class body is strict code whatever encloses it: {:?}",
+            strictness.functions
+        );
+    }
+
     /// Strictness decides whose binding a `var` in eval code is.
     ///
     /// A sloppy direct eval declares into the caller's variable environment, so `var x` over a
