@@ -61,6 +61,8 @@ KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
 		crates/kiln-native-number-ffi/src/lib.rs \
+		crates/kiln-native-number-abi/Cargo.toml \
+		crates/kiln-native-number-abi/src/lib.rs \
 		crates/kiln-temporal/Cargo.toml \
 		crates/kiln-temporal/src/lib.rs \
 		crates/kiln-runtime/Cargo.toml \
@@ -103,7 +105,7 @@ fi
 
 # Exercise the same package through the product resolver/linker. The explicit manifest wins over
 # source fallback, so a schema, target, digest, cache-key, or archive-link regression fails here.
-env KILN_NATIVE_NUMBER_PROVIDER_MANIFEST="$KILN_NUMBER_MANIFEST" \
+KILN_NATIVE_NUMBER_PROVIDER_MANIFEST="$KILN_NUMBER_MANIFEST" \
 	kiln_cargo run --quiet --locked -p kiln-cli --bin kiln -- \
 	--one-shot build examples/hello.ts --output "$KILN_NUMBER_TEMP/native-probe" >/dev/null
 "$KILN_NUMBER_TEMP/native-probe" >/dev/null

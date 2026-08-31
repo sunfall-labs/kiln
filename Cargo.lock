@@ -1168,6 +1168,7 @@ dependencies = [
  "kiln-module-graph",
  "kiln-module-resolver",
  "kiln-native-number",
+ "kiln-native-number-abi",
  "kiln-native-runtime",
  "kiln-native-toolchain",
  "kiln-runtime",
@@ -1184,10 +1185,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-native-number-abi"
+version = "0.0.0"
+
+[[package]]
 name = "kiln-native-number-ffi"
 version = "0.0.0"
 dependencies = [
  "kiln-host-abi",
+ "kiln-native-number-abi",
  "kiln-number-core",
  "kiln-runtime",
  "kiln-temporal",
