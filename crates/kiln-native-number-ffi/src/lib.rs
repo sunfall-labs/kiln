@@ -3567,7 +3567,7 @@ mod temporal {
             return INVALID_ARGUMENT;
         };
         if bytes.len() > capacity || buffer.is_null() {
-            return -length;
+            return length.checked_neg().unwrap_or(INVALID_ARGUMENT);
         }
         // SAFETY: `buffer` is writable for `capacity >= bytes.len()` by the caller contract, and
         // the source is a distinct allocation owned by this side.
