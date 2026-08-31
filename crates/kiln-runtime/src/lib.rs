@@ -32,6 +32,19 @@ use tokio::sync::mpsc;
 
 use crate::http_transport::HttpTransportDriver;
 
+/// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
+/// objects and stream events. No Hyper or Tokio type crosses this seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeHttpEvent {
+    Request {
+        id: u64,
+        request: node_http::HttpRequest,
+        body: Vec<u8>,
+    },
+    Error(String),
+    Closed,
+}
+
 /// Default deterministic entropy seed from ADR 0026.
 pub const DEFAULT_ENTROPY_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
@@ -488,27 +501,28 @@ impl RealmRuntime {
     }
 
     /// Install one Hyper HTTP/1 connection on an existing portable TCP resource.
-    ///
-    /// This runtime-owned entry point is intentionally Kiln-shaped: callers receive HostOps
-    /// actions and never a Tokio task, Hyper service, or socket. The temporary response callback
-    /// is the migration seam; Node request events replace it before public compatibility is
-    /// advertised through this path.
-    #[doc(hidden)]
-    pub fn start_http1_connection<F>(
+    pub fn start_http1_connection(
         &mut self,
         resource: ResourceId,
-        handler: F,
-    ) -> Vec<node_stream::StreamAction>
-    where
-        F: Fn(node_http::HttpRequest) -> node_http::HttpResponse + Clone + 'static,
-    {
+    ) -> Vec<node_stream::StreamAction> {
         let (io, mut transport) = HttpTransportDriver::new(resource);
-        let task = self
-            .local
-            .spawn_local(hyper_http::http1_connection(io, handler));
+        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let (response_sender, response_receiver) = mpsc::unbounded_channel();
+        let task = self.local.spawn_local(hyper_http::event_connection(
+            io,
+            event_sender,
+            response_receiver,
+        ));
         let actions = transport.start();
-        self.http_connections
-            .insert(resource, RuntimeHttpConnection { transport, task });
+        self.http_connections.insert(
+            resource,
+            RuntimeHttpConnection {
+                transport,
+                task,
+                events: event_receiver,
+                responses: response_sender,
+            },
+        );
         actions
     }
 
@@ -548,6 +562,41 @@ impl RealmRuntime {
         self.http_connections
             .get_mut(&resource)
             .map(|connection| connection.transport.pump_write())
+    }
+
+    /// Drain protocol events already selected at this realm checkpoint.
+    pub fn take_http_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
+        let Some(connection) = self.http_connections.get_mut(&resource) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        while let Ok(event) = connection.events.try_recv() {
+            events.push(match event {
+                hyper_http::EngineEvent::Request { id, request, body } => {
+                    RuntimeHttpEvent::Request { id, request, body }
+                }
+                hyper_http::EngineEvent::Error(message) => RuntimeHttpEvent::Error(message),
+                hyper_http::EngineEvent::Closed => RuntimeHttpEvent::Closed,
+            });
+        }
+        events
+    }
+
+    /// Resume the matching Hyper service after the Node request listener finishes its turn.
+    pub fn respond_http1(
+        &mut self,
+        resource: ResourceId,
+        id: u64,
+        response: node_http::HttpResponse,
+    ) -> bool {
+        self.http_connections
+            .get(&resource)
+            .is_some_and(|connection| {
+                connection
+                    .responses
+                    .send(hyper_http::ResponseCommand { id, response })
+                    .is_ok()
+            })
     }
 
     /// Drives `realm` until it has no microtasks or timers left.
@@ -601,6 +650,8 @@ impl RealmRuntime {
 struct RuntimeHttpConnection {
     transport: HttpTransportDriver,
     task: tokio::task::JoinHandle<Result<(), hyper::Error>>,
+    events: mpsc::UnboundedReceiver<hyper_http::EngineEvent>,
+    responses: mpsc::UnboundedSender<hyper_http::ResponseCommand>,
 }
 
 impl Drop for RuntimeHttpConnection {
@@ -3014,15 +3065,7 @@ mod tests {
         }
         let server = server.expect("accepted stream exists");
         let client = client.expect("client stream exists");
-        let start = runtime.start_http1_connection(server.id, |request| {
-            assert_eq!(request.target, "/health");
-            HttpResponse {
-                status: 200,
-                reason: Some("OK".into()),
-                headers: vec![("content-type".into(), "text/plain".into())],
-                body: b"kiln".to_vec(),
-            }
-        });
+        let start = runtime.start_http1_connection(server.id);
         let [StreamAction::Start(read)] = start.as_slice() else {
             panic!("HTTP connection starts one read")
         };
@@ -3031,7 +3074,7 @@ mod tests {
         runtime.start_host_op(
             AsyncHostOp::TcpWrite {
                 stream: client.id,
-                data: b"GET /health HTTP/1.1\r\nhost: kiln\r\nconnection: close\r\n\r\n".to_vec(),
+                data: b"POST /health HTTP/1.1\r\nhost: kiln\r\ncontent-length: 4\r\nconnection: close\r\n\r\nping".to_vec(),
             },
             false,
         );
@@ -3051,6 +3094,24 @@ mod tests {
                 assert!(runtime.http_connection_started(server.id, &operation, request));
             }
         }
+        runtime.poll_http_connection(server.id);
+        let events = runtime.take_http_events(server.id);
+        let [RuntimeHttpEvent::Request { id, request, body }] = events.as_slice() else {
+            panic!("Hyper emits one request event")
+        };
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, "/health");
+        assert_eq!(body, b"ping");
+        assert!(runtime.respond_http1(
+            server.id,
+            *id,
+            HttpResponse {
+                status: 200,
+                reason: Some("OK".into()),
+                headers: vec![("content-type".into(), "text/plain".into())],
+                body: b"kiln".to_vec(),
+            }
+        ));
         let writes = runtime
             .poll_http_connection(server.id)
             .expect("connection exists");
@@ -3089,6 +3150,67 @@ mod tests {
             runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
             runtime.next_host_completion().expect("close completes");
         }
+    }
+
+    #[test]
+    fn runtime_owned_hyper_connection_is_deterministic_over_scripted_completions() {
+        use crate::node_http::HttpResponse;
+        use crate::node_stream::StreamAction;
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let resource = ResourceId::new(91);
+        let start = runtime.start_http1_connection(resource);
+        let [StreamAction::Start(read)] = start.as_slice() else {
+            panic!("HTTP connection starts one read")
+        };
+        assert!(runtime.http_connection_started(resource, read, RequestId::new(1)));
+        let actions = runtime
+            .complete_http_connection(
+                resource,
+                Completion {
+                    request: RequestId::new(1),
+                    sequence: 0,
+                    result: Ok(AsyncHostValue::Bytes(
+                        b"POST /echo HTTP/1.1\r\nhost: kiln\r\ncontent-length: 4\r\nconnection: close\r\n\r\nping"
+                            .to_vec(),
+                    )),
+                },
+            )
+            .expect("scripted completion belongs to connection");
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            StreamAction::Start(AsyncHostOp::TcpRead { stream, .. }) if *stream == resource
+        )));
+        runtime.poll_http_connection(resource);
+        let events = runtime.take_http_events(resource);
+        let [RuntimeHttpEvent::Request { id, request, body }] = events.as_slice() else {
+            panic!("script emits one request event: {events:?}")
+        };
+        assert_eq!(request.target, "/echo");
+        assert_eq!(body, b"ping");
+        assert!(runtime.respond_http1(
+            resource,
+            *id,
+            HttpResponse {
+                status: 201,
+                reason: None,
+                headers: vec![("content-type".into(), "text/plain".into())],
+                body: body.clone(),
+            }
+        ));
+        let writes = runtime
+            .poll_http_connection(resource)
+            .expect("connection exists");
+        let [StreamAction::Start(AsyncHostOp::TcpWrite { stream, data })] = writes.as_slice()
+        else {
+            panic!("script selects one write: {writes:?}")
+        };
+        assert_eq!(*stream, resource);
+        let response = String::from_utf8(data.clone()).expect("HTTP is ASCII");
+        assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+        assert!(response.contains("content-type: text/plain\r\n"));
+        assert!(response.ends_with("\r\n\r\nping"));
+        assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
     }
 
     fn drive(realm: &mut Realm, events: &Rc<RefCell<Vec<String>>>) {
