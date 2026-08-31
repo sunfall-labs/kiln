@@ -5373,61 +5373,7 @@ pub enum Value {
 /// and `process.getBuiltinModule`, so the two access paths cannot acquire different native
 /// implementations.
 pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static str]> {
-    Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
-        "assert" | "assert/strict" => &["default", "ok", "strict"],
-        "buffer" => &["Buffer", "constants", "default"],
-        "async_hooks" => &["AsyncResource", "default"],
-        "crypto" => &["createHash", "default", "randomUUID"],
-        "diagnostics_channel" => &["channel", "default", "hasSubscribers", "tracingChannel"],
-        "dns" => &["default", "lookup"],
-        "events" => &["EventEmitter", "default"],
-        "fs/promises" => &["readFile", "stat", "writeFile"],
-        "fs" => &["default", "existsSync", "promises"],
-        "net" => &["connect", "createConnection", "createServer", "default"],
-        "http" => &[
-            "IncomingMessage",
-            "METHODS",
-            "Server",
-            "ServerResponse",
-            "createServer",
-            "default",
-            "get",
-            "request",
-        ],
-        "https" => &["createServer", "default"],
-        "http2" => &["createSecureServer", "createServer", "default"],
-        "module" => &["createRequire", "default"],
-        "path" => &["default", "isAbsolute", "join", "resolve", "sep"],
-        "worker_threads" => &["Worker", "default"],
-        "perf_hooks" => &["default", "performance"],
-        "os" => &["default", "hostname", "networkInterfaces"],
-        "tty" => &["default", "isatty"],
-        "zlib" => &[
-            "createBrotliDecompress",
-            "createGunzip",
-            "createInflate",
-            "default",
-        ],
-        "stream" => &[
-            "Readable",
-            "Writable",
-            "addAbortSignal",
-            "default",
-            "finished",
-        ],
-        "string_decoder" => &["StringDecoder", "default"],
-        "util" => &[
-            "debuglog",
-            "default",
-            "deprecate",
-            "format",
-            "inherits",
-            "inspect",
-        ],
-        "querystring" => &["decode", "default", "parse"],
-        "url" => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
-        _ => return None,
-    })
+    kiln_node_abi::builtin_abi(specifier).map(|builtin| builtin.exports)
 }
 
 fn node_builtin_namespace(specifier: &str) -> Option<Value> {
@@ -5501,17 +5447,24 @@ pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
     let Value::Native(native) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
-    // Only Node's historically callable CommonJS modules project their default binding as
-    // `module.exports`. Namespace modules must retain the namespace: for example,
-    // `require('node:async_hooks').AsyncResource` is a named property, not a property on the
-    // AsyncResource constructor. Keeping this choice explicit prevents a newly-added `default`
-    // export from silently changing the CommonJS shape of a builtin.
-    match specifier.strip_prefix("node:").unwrap_or(specifier) {
-        "assert" | "assert/strict" | "events" => {
-            Some(native.property("default").unwrap_or(Value::Native(native)))
-        }
-        _ => Some(Value::Native(native)),
+    if let Some(abi) = kiln_node_abi::builtin_abi(specifier) {
+        return match abi.commonjs {
+            kiln_node_abi::CommonJsProjection::Namespace => Some(Value::Native(native)),
+            kiln_node_abi::CommonJsProjection::Callable { export, properties } => {
+                let callable = native.property(export)?;
+                for (property, target) in properties {
+                    let value = native.property(target)?;
+                    if let Some(store) = prototype_slot(&callable) {
+                        store.borrow_mut().set(property, value);
+                    } else if native.property(property) != Some(value) {
+                        return None;
+                    }
+                }
+                Some(callable)
+            }
+        };
     }
+    None
 }
 
 impl Value {
