@@ -1508,6 +1508,7 @@ int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_even
 int kiln_realm_http_server_attach_with_options_active(
     uint64_t resource, int allow_half_close, kiln_realm_http_event_fn run,
     kiln_realm_drop_fn drop, void *work);
+int kiln_realm_http_server_close_active(uint64_t resource);
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work);
 int kiln_realm_http_client_request_id_active(uint64_t *out_id);
@@ -8959,6 +8960,10 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     socket->closing = 1;
     kiln_c99_node_cancel_request(&socket->connect_request);
     kiln_c99_node_cancel_request(&socket->read_request);
+    if (!force && socket->server != NULL && socket->server->protocol_http) {
+        int status = kiln_realm_http_server_close_active(socket->resource);
+        if (status != KILN_C99_INVALID_ARGUMENT) return status;
+    }
     if (!force && socket->server != NULL && socket->server->protocol_http &&
         socket->write_request != 0) {
         socket->close_after_write = 1;
@@ -22198,6 +22203,10 @@ int kiln_realm_http_server_attach_with_options_active(
     kiln_realm_drop_fn drop, void *work) {
     (void)allow_half_close;
     return kiln_realm_http_server_attach_active(resource, run, drop, work);
+}
+int kiln_realm_http_server_close_active(uint64_t resource) {
+    (void)resource;
+    return KILN_C99_INVALID_ARGUMENT;
 }
 int kiln_realm_http_client_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
                                          kiln_realm_drop_fn drop, void *work) {

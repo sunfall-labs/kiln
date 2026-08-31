@@ -1163,6 +1163,21 @@ mod realm {
         Ok(made_progress)
     }
 
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_http_server_close_active(resource: u64) -> i32 {
+        ffi(|| {
+            let (Some(realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+                return INVALID_ARGUMENT;
+            };
+            let resource = kiln_host_abi::ResourceId::new(resource);
+            // SAFETY: this private ABI call runs synchronously in the active realm callback.
+            let Some(actions) = (unsafe { &mut *runtime }).close_http_connection(resource) else {
+                return INVALID_ARGUMENT;
+            };
+            apply_http_actions(&realm, resource, actions, true)
+        })
+    }
+
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         loop {
             let microtask = realm.work.borrow_mut().pop_microtask();

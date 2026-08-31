@@ -12,7 +12,7 @@ use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-pub(crate) const PROVIDER_ABI_VERSION: u32 = 12;
+pub(crate) const PROVIDER_ABI_VERSION: u32 = 13;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
@@ -27,7 +27,7 @@ const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// 0025), and the temporal twelve joined them when the calendar engine did (ADR 0029 §4). The
 /// list is part of the identity below, so an archive built before them is rejected rather than
 /// linked and found wanting.
-const REQUIRED_EXPORTS: [&str; 52] = [
+const REQUIRED_EXPORTS: [&str; 53] = [
     "kiln_realm_create",
     "kiln_realm_enter",
     "kiln_realm_is_active",
@@ -45,6 +45,7 @@ const REQUIRED_EXPORTS: [&str; 52] = [
     "kiln_realm_cancel_request",
     "kiln_realm_cancel_active_request",
     "kiln_realm_http_server_attach_active",
+    "kiln_realm_http_server_close_active",
     "kiln_realm_http_client_attach_active",
     "kiln_realm_http_client_start_active",
     "kiln_realm_http_client_write_active",
