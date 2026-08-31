@@ -341,6 +341,49 @@ fn function_call_with_closure() {
     insta::assert_snapshot!(body(&unit));
 }
 
+#[test]
+fn typed_array_borrowed_generic_methods() {
+    let callback = FunctionProto {
+        code: vec![
+            Instruction::LoadArguments,
+            Instruction::Const(6),
+            Instruction::GetComputed,
+            Instruction::Return,
+        ],
+        ..function("receiver", 0, 0, Vec::new(), Vec::new())
+    };
+    let unit = emit(&Program {
+        version: BYTECODE_VERSION,
+        constants: vec![
+            number(1.0),
+            number(2.0),
+            Constant::String("prototype".into()),
+            Constant::String("map".into()),
+            Constant::String("call".into()),
+            Constant::String("constructor".into()),
+            Constant::String("2".into()),
+        ],
+        code: vec![
+            Instruction::LoadBuiltin(Builtin::Array),
+            Instruction::GetProperty(2),
+            Instruction::GetProperty(3),
+            Instruction::LoadBuiltin(Builtin::Uint8Array),
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::NewArray { count: 2 },
+            Instruction::New { argc: 1 },
+            Instruction::MakeFunction(0),
+            Instruction::CallMethod { name: 4, argc: 2 },
+            Instruction::GetProperty(5),
+            Instruction::Return,
+        ],
+        local_count: 0,
+        functions: vec![callback],
+    })
+    .expect("borrowed typed-array method emits");
+    insta::assert_snapshot!(body(&unit));
+}
+
 // -- strings ------------------------------------------------------------------------------
 
 #[test]

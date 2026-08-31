@@ -635,6 +635,10 @@ enum kiln_value_tag {
  * begins at 240, which `kiln_c99_invoke_method` routes by range. */
 #define KILN_C99_METHOD_TYPED_OF 233
 #define KILN_C99_METHOD_TYPED_FROM 234
+/* `Array.prototype.map/filter` keep their generic semantics when borrowed onto a typed array.
+ * They need distinct codes from the intrinsic typed-array methods, which return a typed view. */
+#define KILN_C99_METHOD_ARRAY_GENERIC_MAP 235
+#define KILN_C99_METHOD_ARRAY_GENERIC_FILTER 236
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -2025,6 +2029,19 @@ static int kiln_c99_reads_only(uint64_t code) {
            code != KILN_C99_METHOD_ARRAY_COPY_WITHIN;
 }
 
+/* The method object obtained from `Array.prototype` retains Array's generic species: unlike
+ * `view.map`, `Array.prototype.map.call(view, fn)` returns an ordinary Array. */
+static uint64_t kiln_c99_array_prototype_method(const char *key, size_t key_len) {
+    uint64_t code = kiln_c99_array_method(key, key_len);
+    if (code == KILN_C99_METHOD_MAP) {
+        return KILN_C99_METHOD_ARRAY_GENERIC_MAP;
+    }
+    if (code == KILN_C99_METHOD_FILTER) {
+        return KILN_C99_METHOD_ARRAY_GENERIC_FILTER;
+    }
+    return code;
+}
+
 static kiln_value kiln_c99_method(uint64_t code) {
     return kiln_c99_value(KILN_VALUE_METHOD, code, NULL, 0);
 }
@@ -2063,6 +2080,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_ARRAY_REDUCE_RIGHT: return "reduceRight";
     case KILN_C99_METHOD_MAP: return "map";
     case KILN_C99_METHOD_FILTER: return "filter";
+    case KILN_C99_METHOD_ARRAY_GENERIC_MAP: return "map";
+    case KILN_C99_METHOD_ARRAY_GENERIC_FILTER: return "filter";
     case KILN_C99_METHOD_FOR_EACH: return "forEach";
     case KILN_C99_METHOD_REDUCE: return "reduce";
     case KILN_C99_METHOD_STRING_MATCH: return "match";
@@ -3301,7 +3320,7 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                       KILN_C99_METHOD_OBJECT_VALUE_OF);
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE:
-        return kiln_c99_array_method(key, key_len);
+        return kiln_c99_array_prototype_method(key, key_len);
     case KILN_C99_BUILTIN_STRING_PROTOTYPE:
         return kiln_c99_string_method(key, key_len);
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE:
@@ -8843,6 +8862,46 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
         kiln_typed_array *view = kiln_c99_typed_array_of(receiver);
+        if (code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
+            code == KILN_C99_METHOD_ARRAY_GENERIC_FILTER) {
+            /* A method borrowed from Array.prototype is generic: its result is an ordinary
+             * Array, even when the receiver is a typed view. Keep the original receiver in the
+             * callback's third argument as well; materialising a snapshot here would make
+             * `Array.prototype.map.call(view, (value, index, seen) => seen === view)` observe
+             * the implementation detail instead of the language value. */
+            kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value self_value = argc > 1 ? args[1] : kiln_c99_undefined();
+            kiln_value built;
+            if (!kiln_c99_is_callable(callback)) {
+                return kiln_c99_throw_not_a(thrown, callback, "function");
+            }
+            status = kiln_c99_new_array(&built);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            for (index = 0; index < view->length; ++index) {
+                kiln_value visit[3];
+                kiln_value produced;
+                visit[0] = kiln_c99_number(kiln_c99_typed_get(view, index));
+                visit[1] = kiln_c99_number((double)index);
+                visit[2] = receiver;
+                status = kiln_c99_call(host, &produced, callback, self_value, visit, 3, depth,
+                                       thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
+                    status = kiln_c99_array_push(built, produced);
+                } else if (kiln_c99_truthy(produced)) {
+                    status = kiln_c99_array_push(built, visit[0]);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
+            *result = built;
+            return KILN_C99_OK;
+        }
         switch (code) {
         case KILN_C99_METHOD_JOIN: {
             kiln_text joined = {NULL, 0, 0};
@@ -9450,7 +9509,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     case KILN_C99_METHOD_ARRAY_FLAT_MAP:
     case KILN_C99_METHOD_MAP:
+    case KILN_C99_METHOD_ARRAY_GENERIC_MAP:
     case KILN_C99_METHOD_FILTER:
+    case KILN_C99_METHOD_ARRAY_GENERIC_FILTER:
     case KILN_C99_METHOD_FOR_EACH: {
         kiln_value built = kiln_c99_undefined();
         kiln_value callback = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -9472,7 +9533,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                  * *leave* one: its result has an entry per input position, and skipping would
                  * shift everything after it. */
                 if (kiln_c99_is_hole(array->elements[index])) {
-                    if (code == KILN_C99_METHOD_MAP) {
+                    if (code == KILN_C99_METHOD_MAP ||
+                        code == KILN_C99_METHOD_ARRAY_GENERIC_MAP) {
                         status = kiln_c99_array_push(built, kiln_c99_hole());
                         if (status != KILN_C99_OK) {
                             return status;
@@ -9487,9 +9549,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                if (code == KILN_C99_METHOD_MAP || code == KILN_C99_METHOD_ARRAY_FLAT_MAP) {
+                if (code == KILN_C99_METHOD_MAP ||
+                    code == KILN_C99_METHOD_ARRAY_GENERIC_MAP ||
+                    code == KILN_C99_METHOD_ARRAY_FLAT_MAP) {
                     status = kiln_c99_array_push(built, produced);
-                } else if (code == KILN_C99_METHOD_FILTER && kiln_c99_truthy(produced)) {
+                } else if ((code == KILN_C99_METHOD_FILTER ||
+                            code == KILN_C99_METHOD_ARRAY_GENERIC_FILTER) &&
+                           kiln_c99_truthy(produced)) {
                     status = kiln_c99_array_push(built, visit[0]);
                 } else {
                     status = KILN_C99_OK;
@@ -15523,6 +15589,7 @@ fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_ir::Builtin;
     use std::io::Write as _;
     use std::process::{Command, Stdio};
 
@@ -16642,6 +16709,118 @@ int main(void) {{
             .expect("generated executable runs");
         let _ = std::fs::remove_file(&executable);
         run
+    }
+
+    #[test]
+    fn borrowed_array_map_and_filter_keep_generic_typed_array_semantics() {
+        let callback = FunctionProto {
+            /* Return the callback's third argument, the receiver. This makes a snapshot receiver
+             * observably different from the original typed view. */
+            code: vec![
+                Instruction::LoadArguments,
+                Instruction::Const(8),
+                Instruction::GetComputed,
+                Instruction::Return,
+            ],
+            ..function(Vec::new())
+        };
+        let constants = vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+            Constant::String("prototype".into()),
+            Constant::String("map".into()),
+            Constant::String("filter".into()),
+            Constant::String("call".into()),
+            Constant::String("constructor".into()),
+            Constant::String("length".into()),
+            Constant::String("2".into()),
+            Constant::Number(0.0f64.to_bits()),
+            Constant::Boolean(true),
+            Constant::Boolean(false),
+        ];
+        let mut code = vec![
+            // typed = new Uint8Array([1, 2])
+            Instruction::LoadBuiltin(Builtin::Uint8Array),
+            Instruction::Const(0),
+            Instruction::Const(1),
+            Instruction::NewArray { count: 2 },
+            Instruction::New { argc: 1 },
+            Instruction::StoreLocal(0),
+            // mapped = Array.prototype.map.call(typed, callback)
+            Instruction::LoadBuiltin(Builtin::Array),
+            Instruction::GetProperty(2),
+            Instruction::GetProperty(3),
+            Instruction::LoadLocal(0),
+            Instruction::MakeFunction(0),
+            Instruction::CallMethod { name: 5, argc: 2 },
+            Instruction::StoreLocal(1),
+            // The borrowed method returns an ordinary Array and passes the original typed view.
+            Instruction::LoadLocal(1),
+            Instruction::GetProperty(6),
+            Instruction::LoadBuiltin(Builtin::Array),
+            Instruction::Binary(BinaryOp::StrictEqual),
+        ];
+        let mut failed = Vec::new();
+        failed.push(code.len());
+        code.push(Instruction::JumpIfFalse(0));
+        code.extend([
+            Instruction::LoadLocal(1),
+            Instruction::Const(9),
+            Instruction::GetComputed,
+            Instruction::LoadLocal(0),
+            Instruction::Binary(BinaryOp::StrictEqual),
+        ]);
+        failed.push(code.len());
+        code.push(Instruction::JumpIfFalse(0));
+        code.extend([
+            // filtered = Array.prototype.filter.call(typed, callback)
+            Instruction::LoadBuiltin(Builtin::Array),
+            Instruction::GetProperty(2),
+            Instruction::GetProperty(4),
+            Instruction::LoadLocal(0),
+            Instruction::MakeFunction(0),
+            Instruction::CallMethod { name: 5, argc: 2 },
+            Instruction::StoreLocal(2),
+            Instruction::LoadLocal(2),
+            Instruction::GetProperty(6),
+            Instruction::LoadBuiltin(Builtin::Array),
+            Instruction::Binary(BinaryOp::StrictEqual),
+        ]);
+        failed.push(code.len());
+        code.push(Instruction::JumpIfFalse(0));
+        code.extend([
+            Instruction::LoadLocal(2),
+            Instruction::GetProperty(7),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::StrictEqual),
+        ]);
+        failed.push(code.len());
+        code.push(Instruction::JumpIfFalse(0));
+        code.extend([Instruction::Const(10), Instruction::Return]);
+        let failure = code.len() as u32;
+        code.extend([Instruction::Const(11), Instruction::Return]);
+        for jump in failed {
+            code[jump] = Instruction::JumpIfFalse(failure);
+        }
+
+        let generated = emit(&Program {
+            version: BYTECODE_VERSION,
+            constants,
+            code,
+            local_count: 3,
+            functions: vec![callback],
+        })
+        .expect("borrowed typed-array methods emit");
+        let wrapper = format!(
+            "int main(void) {{ kiln_value result; int status = {}(NULL, &result); if (status != KILN_C99_OK) return 2; return result.tag == KILN_VALUE_BOOLEAN && result.bits ? 0 : 1; }}\n",
+            generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "typed-array-borrowed-generic");
+        assert!(
+            run.status.success(),
+            "borrowed Array.prototype map/filter changed typed-array semantics (exit {:?})",
+            run.status.code()
+        );
     }
 
     /// A closure over a module-level binding, which is the shape every counter has: the module
