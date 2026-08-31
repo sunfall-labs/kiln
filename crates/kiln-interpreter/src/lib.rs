@@ -2440,6 +2440,12 @@ fn tabulated_property(target: &Value, key: &str) -> Option<Property> {
     if let Some(accessor) = intrinsic_accessor(target, key) {
         return Some(accessor);
     }
+    if let Some(accessor) = machine_accessor(target, key) {
+        return Some(Property::Accessor {
+            get: Some(Value::Native(Native::BuiltinAccessor(accessor))),
+            set: None,
+        });
+    }
     match key {
         "name" => intrinsic_identity(target).map(|(name, _)| Property::Value(Value::String(name))),
         "length" => {
@@ -12987,8 +12993,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let items = self
                         .own_keys(&source, instruction)?
                         .into_iter()
-                        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
-                        .map(Value::String)
+                        .map(reflection_key_value)
                         .collect();
                     return Ok(Value::Array(ArrayData::new(items)));
                 }
@@ -13167,6 +13172,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     described,
                     Value::Undefined | Value::Null
                 )))
+            }
+            // `Object.prototype.propertyIsEnumerable.call(proxy, key)` is the same own-property
+            // query as `hasOwnProperty`, with one flag read from the descriptor. Going through
+            // `own_attributes` here would bypass a proxy's `getOwnPropertyDescriptor` trap.
+            Native::ObjectPropertyIsEnumerable if matches!(receiver, Value::Proxy(_)) => {
+                let key = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let described = self.proxy_descriptor(receiver, &key, instruction)?;
+                if !is_an_object(&described) {
+                    return Ok(Value::Boolean(false));
+                }
+                let descriptor = self.read_descriptor(&described, instruction)?;
+                Ok(Value::Boolean(descriptor.enumerable.unwrap_or(false)))
             }
             Native::ObjectHasOwn if matches!(arguments.first(), Some(Value::Proxy(_))) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -13544,6 +13561,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let key = arguments
                     .get(1)
                     .map_or_else(String::new, Value::property_key);
+                if matches!(target, Value::Proxy(_)) {
+                    return self.proxy_descriptor(&target, &Value::String(key), instruction);
+                }
                 Ok(own_descriptor(&self.intrinsics, &target, &key).unwrap_or(Value::Undefined))
             }
             Native::ReflectDeleteProperty => {
@@ -22404,36 +22424,59 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                  not have",
             ));
         }
-        let described = self.read_descriptor(&answered, instruction)?;
-        if described.configurable == Some(false) {
-            match &held {
-                // Claiming a property is locked when the target's is not, or has none at all,
-                // is the lie the invariant exists to catch: a caller may rely on the claim.
-                None => {
+        let mut described = self.read_descriptor(&answered, instruction)?;
+        // `FromPropertyDescriptor` completes the two boolean axes before this result reaches a
+        // caller. In particular, `{ value: 1 }` means configurable/enumerable/writable false,
+        // not three unconstrained fields. The proxy invariant checks must see those defaults too:
+        // a configurable target cannot be reported as non-configurable, and a writable locked
+        // target cannot be reported as non-writable merely by omitting `writable`.
+        described.configurable = Some(described.configurable.unwrap_or(false));
+        described.enumerable = Some(described.enumerable.unwrap_or(false));
+        if described.is_data() {
+            described.writable = Some(described.writable.unwrap_or(false));
+        }
+        match &held {
+            None if !extensible => {
+                return Err(Self::proxy_invariant(
+                    "getOwnPropertyDescriptor cannot report a property a non-extensible target \
+                     does not have",
+                ));
+            }
+            None if described.configurable == Some(false) => {
+                return Err(Self::proxy_invariant(
+                    "getOwnPropertyDescriptor cannot report a non-configurable property the \
+                     target does not have",
+                ));
+            }
+            None => {}
+            Some((property, attributes)) => {
+                if !Self::descriptor_is_compatible(&described, property, *attributes) {
                     return Err(Self::proxy_invariant(
-                        "getOwnPropertyDescriptor cannot report a non-configurable property the \
-                         target does not have",
+                        "getOwnPropertyDescriptor cannot report a descriptor incompatible with \
+                         the target",
                     ));
                 }
-                Some((_, attributes)) if attributes.configurable => {
+                if described.configurable == Some(false) && attributes.configurable {
                     return Err(Self::proxy_invariant(
                         "getOwnPropertyDescriptor cannot report a configurable property of the \
                          target as non-configurable",
                     ));
                 }
-                Some((Property::Value(_), attributes))
-                    if described.writable == Some(false) && attributes.writable =>
+                if matches!(property, Property::Value(_))
+                    && !attributes.configurable
+                    && attributes.writable
+                    && described.writable == Some(false)
                 {
                     return Err(Self::proxy_invariant(
                         "getOwnPropertyDescriptor cannot report a writable property of the \
                          target as non-writable",
                     ));
                 }
-                Some(_) => {}
             }
         }
-        // Completed, which is what `[[GetOwnProperty]]` answers with: a trap may report only
-        // `value`, and every caller after this reads all six fields.
+        // Completed, which is what `[[GetOwnProperty]]` answers with: data and accessor results
+        // carry their complete kind-specific fields, while a generic descriptor is completed as
+        // a data descriptor with an undefined value.
         Ok(Self::completed_descriptor(&described))
     }
 
@@ -24068,13 +24111,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let handler = proxy.handler.clone();
         let listed = self.call_value(&trap, handler, vec![inner.clone()], instruction)?;
         // `CreateListFromArrayLike(trapResult, « String, Symbol »)`: a list of keys, and only
-        // keys. Anything else -- a number, an object, a hole -- is not a property name, and a
-        // caller that took one for a name would ask the target about a property nothing has.
-        let Value::Array(items) = &listed else {
+        // keys. The result is any object with a length and indexed properties, not only an Array;
+        // reading it through the VM also preserves observable length/index getters. An array
+        // hole reads as undefined and is rejected below just like any other non-key.
+        if !is_an_object(&listed) {
             return Err(Self::proxy_invariant("ownKeys must report a list of keys"));
-        };
+        }
+        let length = bounded_length(
+            self.read_property(&listed, "length", instruction)?
+                .as_number(),
+        )?;
         let mut keys: Vec<String> = Vec::new();
-        for entry in dense_items(&items.borrow()) {
+        for index in 0..length {
+            let entry = self.read_property(&listed, &index.to_string(), instruction)?;
             if !matches!(entry, Value::String(_) | Value::Symbol(_)) {
                 return Err(Self::proxy_invariant(
                     "ownKeys must report strings and symbols only",
@@ -24086,7 +24135,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             keys.push(key);
         }
-        let held = own_property_keys_including_symbols(&self.intrinsics, &inner);
+        // A proxy target has its own `[[OwnPropertyKeys]]` operation. Calling the ordinary
+        // store helper on it would lose keys hidden behind an inner proxy, and would make the
+        // outer proxy's invariant check accept a list that the target itself could not report.
+        let held = if matches!(inner, Value::Proxy(_)) {
+            self.own_keys(&inner, instruction)?
+        } else {
+            own_property_keys_including_symbols(&self.intrinsics, &inner)
+        };
         let extensible = self.target_extensible(&inner, instruction)?;
         for key in &held {
             let locked = self
@@ -34357,6 +34413,16 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             // What it does see is everything a program put there and nothing it deleted, which
             // is the part the realm's store knows.
             intrinsics.reshape(target, &mut keys);
+            // Native constructors are functions too. Their static methods live in the compact
+            // `Native::property` table rather than a mutable ObjectData, so they need the same
+            // own-key walk as `Array`/`Object` when used as a proxy target.
+            for key in intrinsic_static_property_names(target) {
+                if !keys.iter().any(|listed| listed == key)
+                    && own_attributes(intrinsics, target, key).is_some()
+                {
+                    keys.push((*key).to_owned());
+                }
+            }
             keys
         }
         Value::Array(items) => {
@@ -34395,6 +34461,180 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     }
 }
 
+/// Names supplied by a native constructor/namespace's compact property table.
+///
+/// Native values do not carry an `ObjectData`, so `own_property_keys` cannot discover these by
+/// walking a store. Keep this candidate list next to the own-key walk and filter it through
+/// `own_attributes`: a name is included only when the same property machinery can describe it.
+fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
+    match target {
+        Value::Native(Native::ArrayConstructor) => {
+            &["isArray", "from", "fromAsync", "of", "@@species"]
+        }
+        Value::Native(Native::ObjectConstructor) => &[
+            "keys",
+            "getOwnPropertyNames",
+            "assign",
+            "entries",
+            "values",
+            "freeze",
+            "isFrozen",
+            "create",
+            "defineProperty",
+            "fromEntries",
+            "hasOwn",
+            "groupBy",
+            "is",
+            "getOwnPropertySymbols",
+            "defineProperties",
+            "getOwnPropertyDescriptor",
+            "getOwnPropertyDescriptors",
+            "setPrototypeOf",
+            "getPrototypeOf",
+            "preventExtensions",
+            "isExtensible",
+            "seal",
+            "isSealed",
+        ],
+        Value::Native(Native::StringConstructor) => &["raw", "fromCharCode", "fromCodePoint"],
+        Value::Native(Native::NumberConstructor) => &[
+            "isInteger",
+            "isSafeInteger",
+            "isNaN",
+            "isFinite",
+            "parseInt",
+            "parseFloat",
+            "MAX_SAFE_INTEGER",
+            "MIN_SAFE_INTEGER",
+            "MAX_VALUE",
+            "MIN_VALUE",
+            "EPSILON",
+            "POSITIVE_INFINITY",
+            "NEGATIVE_INFINITY",
+            "NaN",
+        ],
+        Value::Native(Native::DateConstructor) => &["now", "UTC", "parse"],
+        Value::Native(Native::PromiseConstructor) => &[
+            "resolve",
+            "reject",
+            "all",
+            "allSettled",
+            "race",
+            "any",
+            "withResolvers",
+            "try",
+        ],
+        Value::Native(Native::Json) => &[
+            "parse",
+            "rawJSON",
+            "isRawJSON",
+            "stringify",
+            "@@toStringTag",
+        ],
+        Value::Native(Native::Reflect) => &[
+            "defineProperty",
+            "deleteProperty",
+            "apply",
+            "construct",
+            "get",
+            "getOwnPropertyDescriptor",
+            "getPrototypeOf",
+            "has",
+            "isExtensible",
+            "ownKeys",
+            "preventExtensions",
+            "set",
+            "setPrototypeOf",
+            "@@toStringTag",
+        ],
+        Value::Native(Native::ProxyConstructor) => &["revocable"],
+        Value::Native(Native::ArrayBufferConstructor) => &["isView"],
+        Value::Native(Native::BigIntConstructor) => &["asIntN", "asUintN"],
+        Value::Native(Native::MapConstructor) => &["groupBy"],
+        Value::Native(Native::TypedArrayIntrinsic) => &["@@species"],
+        Value::Native(Native::TypedArrayConstructor(_)) => &["of", "from", "BYTES_PER_ELEMENT"],
+        Value::Native(Native::SymbolConstructor) => &[
+            "for",
+            "keyFor",
+            "asyncIterator",
+            "hasInstance",
+            "isConcatSpreadable",
+            "iterator",
+            "match",
+            "matchAll",
+            "replace",
+            "search",
+            "species",
+            "split",
+            "toPrimitive",
+            "toStringTag",
+            "unscopables",
+        ],
+        Value::Native(Native::IteratorConstructor) => &["from", "concat", "zip", "zipKeyed"],
+        Value::Native(Native::Math) => &[
+            "abs",
+            "floor",
+            "ceil",
+            "round",
+            "trunc",
+            "sign",
+            "sqrt",
+            "cbrt",
+            "random",
+            "sinh",
+            "cosh",
+            "tanh",
+            "asinh",
+            "acosh",
+            "atanh",
+            "log1p",
+            "expm1",
+            "fround",
+            "clz32",
+            "imul",
+            "hypot",
+            "atan2",
+            "sin",
+            "cos",
+            "tan",
+            "asin",
+            "acos",
+            "atan",
+            "pow",
+            "min",
+            "max",
+            "log",
+            "log2",
+            "log10",
+            "exp",
+            "PI",
+            "E",
+            "LN2",
+            "LN10",
+            "SQRT2",
+            "SQRT1_2",
+            "LOG2E",
+            "LOG10E",
+            "@@toStringTag",
+        ],
+        _ => &[],
+    }
+}
+
+/// Reify a reserved well-known symbol key when a reflection operation returns it to JavaScript.
+///
+/// Internal own-key walks use strings for compactness, but `Reflect.ownKeys` must hand a symbol
+/// back to the program. Unique symbols cannot be reconstructed from their opaque serial here;
+/// well-known symbols are stable and cover the built-in keys that the realm publishes.
+fn reflection_key_value(key: String) -> Value {
+    WellKnown::ALL
+        .into_iter()
+        .find(|symbol| symbol.property_key() == key)
+        .map_or(Value::String(key), |symbol| {
+            Value::Symbol(Symbol::WellKnown(symbol))
+        })
+}
+
 /// The own-key walk used by operations whose specification includes symbol keys.
 ///
 /// Most reflection helpers in this interpreter intentionally return only names because the
@@ -34402,7 +34642,11 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
 /// slot. Internal algorithms do not need that reconstruction: preserving the slot is enough to
 /// read and define the same symbol-keyed property without losing its identity.
 fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
-    match target {
+    let mut keys = own_property_keys(intrinsics, target);
+    // Ordinary reflection intentionally hides symbol slots, but internal operations such as
+    // proxy invariants and `Object.defineProperties` consume the full own-key list. Append the
+    // reserved slots after the ordinary names, preserving each store's insertion order.
+    let stored = match target {
         Value::Object(object) => object.borrow().keys().map(str::to_owned).collect(),
         Value::Function(closure) => closure
             .properties
@@ -34422,8 +34666,30 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
             .keys()
             .map(str::to_owned)
             .collect(),
-        _ => own_property_keys(intrinsics, target),
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => intrinsic_key(target)
+            .and_then(|identity| {
+                intrinsics
+                    .entries
+                    .borrow()
+                    .iter()
+                    .find_map(|(held, slots)| {
+                        (*held == identity).then(|| slots.held.keys().map(str::to_owned).collect())
+                    })
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    keys.extend(stored);
+    // A derived key such as an array's `length` may also be present in its store. The target's
+    // own-key operation cannot return duplicates, so preserve the first occurrence from the
+    // specification order and discard later copies.
+    let mut stable = Vec::with_capacity(keys.len());
+    for key in keys {
+        if !stable.iter().any(|listed| listed == &key) {
+            stable.push(key);
+        }
     }
+    stable
 }
 
 /// The three flags an own property carries, or `None` when there is no such own property.
@@ -34551,6 +34817,13 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     // An accessor carries no `writable` at all -- the flag is not part of its descriptor -- so
     // the `false` here is the absence of one rather than a claim about assignment.
     if intrinsic_accessor(target, key).is_some() {
+        return Some(Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        });
+    }
+    if machine_accessor(target, key).is_some() {
         return Some(Attributes {
             writable: false,
             enumerable: false,
@@ -35165,6 +35438,35 @@ mod tests {
             "these natives assert that the machine dispatches them, but `dispatch_native` has no \
              route to them, so calling one aborts the process: {missing:?}"
         );
+    }
+
+    #[test]
+    fn proxy_own_key_invariant_source_includes_exotic_and_native_keys() {
+        let intrinsics = Intrinsics::default();
+        let array = Value::Array(ArrayData::new(vec![Value::Number(1.0), Value::Number(2.0)]));
+        assert_eq!(
+            own_property_keys_including_symbols(&intrinsics, &array),
+            vec!["0", "1", "length"]
+        );
+
+        let mut boxed_data = ObjectData::default();
+        boxed_data.primitive = Some(Value::String("ab".to_owned()));
+        let boxed = Value::Object(Rc::new(RefCell::new(boxed_data)));
+        assert_eq!(
+            own_property_keys_including_symbols(&intrinsics, &boxed),
+            vec!["0", "1", "length"]
+        );
+
+        let constructor = Value::Native(Native::ArrayConstructor);
+        let keys = own_property_keys_including_symbols(&intrinsics, &constructor);
+        assert!(keys.starts_with(&[
+            "length".to_owned(),
+            "name".to_owned(),
+            "prototype".to_owned()
+        ]));
+        assert!(keys.contains(&"isArray".to_owned()));
+        assert!(keys.contains(&"from".to_owned()));
+        assert!(keys.contains(&"@@species".to_owned()));
     }
     use super::*;
     use kiln_host_abi::{HostError, HostOp};
