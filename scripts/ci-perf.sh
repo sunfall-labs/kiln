@@ -11,15 +11,16 @@
 # came from a different machine than the run. Gating on that number would produce red builds
 # that mean nothing and teach everyone to hit re-run.
 #
-# The other is the recompute counters from kiln_proto::Stats: how many queries the pipeline had
-# to recompute for a given edit. That is a property of the dependency graph, it is identical on
-# every machine, and it is the thing design.md §2 and §3 are actually about. It is worth
-# blocking a merge on, and it is what this job blocks on.
+# The other is the exact work counters from kiln_proto::Stats: how many query results the
+# pipeline recomputed and how much entry-rooted graph-cache work (misses, evictions, and
+# invalidations) a given edit caused. Those are properties of the dependency/cache graphs,
+# identical on every machine, and worth blocking a merge on alongside the design.md §2 and §3
+# query counts.
 #
 # The mechanism is KILN_PERF_THRESHOLD, which is handed to `--compare` as its wall-clock
 # regression threshold. The CI default is large enough to switch wall-clock gating off, leaving
-# the counter comparison as the only thing that can fail the job; the per-measurement percentage
-# deltas are still printed, so the trend stays visible in the job summary. A developer running
+# exact counter comparison as the only thing that can fail the job; the per-measurement
+# percentage deltas are still printed, so the trend stays visible in the job summary. A developer running
 # `kiln-bench --compare bench/results/baseline.json` on their own machine gets the harness's own
 # 15% default, which is where a wall-clock threshold means something.
 set -euo pipefail
@@ -87,9 +88,9 @@ kiln_say "**\`kiln-bench --compare\` reported a regression.**"
 kiln_say ""
 kiln_say "The comparison ran with a ${THRESHOLD}% wall-clock threshold; the lines marked"
 kiln_say "REGRESSION above say which measurements moved and in which column. At the CI default"
-kiln_say "that threshold is high enough that only the recompute counts can trip the gate - an"
-kiln_say "edit invalidating more queries than it did at the baseline, which is machine-"
-kiln_say "independent and is the property design.md §3 exists to protect."
+kiln_say "that threshold is high enough that only exact work counters can trip the gate - an"
+kiln_say "edit recomputing more queries or doing more graph-cache work than it did at the baseline,"
+kiln_say "which is machine-independent and is the property design.md §3 exists to protect."
 kiln_say ""
 kiln_say "§13 asks that a regression require explicit justification. Either fix it, or"
 kiln_say "re-baseline with \`scripts/update-baseline.sh\` and say in the pull request why the"

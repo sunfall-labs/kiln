@@ -1,6 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 152
+assertion_line: 293
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -95,6 +95,8 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_BUILTIN_TEMPORAL_INSTANT 60
 #define KILN_C99_BUILTIN_TEMPORAL_ZONED_DATE_TIME 61
 #define KILN_C99_BUILTIN_TEMPORAL_NOW 62
+#define KILN_C99_BUILTIN_URL 63
+#define KILN_C99_BUILTIN_BUFFER 64
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
@@ -361,6 +363,45 @@ KILN_VALUE_TEMPORAL = 25
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
 #define KILN_C99_METHOD_NODE_NET_CONNECT 336
+#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 337
+#define KILN_C99_METHOD_BUFFER_FROM 338
+#define KILN_C99_METHOD_BUFFER_ALLOC 339
+#define KILN_C99_METHOD_BUFFER_IS_BUFFER 340
+#define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 341
+#define KILN_C99_METHOD_BUFFER_CONCAT 342
+#define KILN_C99_METHOD_BUFFER_TO_STRING 343
+#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 344
+#define KILN_C99_METHOD_NODE_UTIL_NOOP 345
+#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 346
+#define KILN_C99_METHOD_NODE_UTIL_INSPECT 347
+#define KILN_C99_METHOD_NODE_UTIL_INHERITS 348
+#define KILN_C99_METHOD_NODE_UTIL_FORMAT 349
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 350
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 351
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 352
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 353
+#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 354
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 355
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 356
+#define KILN_C99_METHOD_NODE_DNS_LOOKUP 357
+#define KILN_C99_METHOD_NODE_OS_HOSTNAME 358
+#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 359
+#define KILN_C99_METHOD_NODE_STREAM 360
+#define KILN_C99_METHOD_NODE_READABLE 361
+#define KILN_C99_METHOD_NODE_WRITABLE 362
+#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 363
+#define KILN_C99_METHOD_NODE_STREAM_FINISHED 364
+#define KILN_C99_METHOD_NODE_READABLE_PUSH 365
+#define KILN_C99_METHOD_NODE_READABLE_READ 366
+#define KILN_C99_METHOD_NODE_READABLE_DESTROY 367
+#define KILN_C99_METHOD_NODE_READABLE_PAUSE 368
+#define KILN_C99_METHOD_NODE_READABLE_RESUME 369
+#define KILN_C99_METHOD_NODE_READABLE_PIPE 370
+#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 371
+#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 372
+#define KILN_C99_METHOD_NODE_WRITABLE_END 373
+#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 374
+#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 375
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -635,6 +676,16 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places);
 static int kiln_c99_hex_digit(char character);
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width);
 static int kiln_c99_valid_utf8(const char *bytes, size_t len);
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
+static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
+static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
+static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown);
+static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -718,12 +769,20 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
 static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
+static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
 static kiln_array *kiln_c99_array_of(kiln_value value) {
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
 static int kiln_c99_new_object(kiln_value *out) {
+static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *thrown) {
+static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value receiver,
+static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
+static int kiln_c99_node_channel(kiln_value *out) {
+static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t code,
+static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
+format_oom:
 static int kiln_c99_new_array(kiln_value *out) {
 static size_t kiln_c99_typed_width(kiln_typed_kind kind) {
 static const char *kiln_c99_typed_name(kiln_typed_kind kind) {
@@ -765,6 +824,8 @@ static int kiln_c99_random(kiln_host *host, double *out) {
 static int kiln_c99_hex_digit(char character) {
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width) {
 static int kiln_c99_valid_utf8(const char *bytes, size_t len) {
+static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_t argc,
+static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
 static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
 static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
 static const char *kiln_c99_builtin_name(uint64_t builtin) {

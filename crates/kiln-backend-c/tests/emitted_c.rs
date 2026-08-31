@@ -28,6 +28,8 @@
 //! claim directly rather than assuming it; running the suite twice checks it across processes,
 //! where a hash seed differs.
 
+use std::collections::BTreeMap;
+
 use kiln_backend_c::{
     CModule, EmitError, emit, emit_c, emit_module, emit_module_with_logical_path,
 };
@@ -145,11 +147,166 @@ fn abi_surface(prelude: &str) -> String {
     surface
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct NumericIdDefine {
+    name: String,
+    value: u64,
+}
+
+/// Parse the numeric ID declarations from the emitted prelude rather than duplicating the
+/// registry in this test. A malformed declaration must be an error: silently skipping one would
+/// make the uniqueness checks appear to cover the whole prelude while leaving a collision free to
+/// reach C compilation.
+fn parse_numeric_id_defines(prelude: &str) -> Result<Vec<NumericIdDefine>, String> {
+    const PREFIXES: [&str; 2] = ["#define KILN_C99_METHOD_", "#define KILN_C99_BUILTIN_"];
+    let mut defines = Vec::new();
+    for (line_index, line) in prelude.lines().enumerate() {
+        let trimmed = line.trim_start();
+        let Some(prefix) = PREFIXES.iter().find(|prefix| trimmed.starts_with(**prefix)) else {
+            continue;
+        };
+        if trimmed != line {
+            return Err(format!(
+                "line {} indents numeric ID define `{line}`",
+                line_index + 1
+            ));
+        }
+        let rest = &line[prefix.len()..];
+        let mut fields = rest.split_whitespace();
+        let suffix = fields
+            .next()
+            .ok_or_else(|| format!("line {} has no numeric ID name", line_index + 1))?;
+        if suffix.is_empty()
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+        {
+            return Err(format!(
+                "line {} has malformed numeric ID name `{suffix}`",
+                line_index + 1
+            ));
+        }
+        let value = fields
+            .next()
+            .ok_or_else(|| format!("line {} has no numeric ID value", line_index + 1))?
+            .parse::<u64>()
+            .map_err(|error| {
+                format!(
+                    "line {} has malformed numeric ID value: {error}",
+                    line_index + 1
+                )
+            })?;
+        if let Some(extra) = fields.next() {
+            return Err(format!(
+                "line {} has unexpected text after numeric ID: `{extra}`",
+                line_index + 1
+            ));
+        }
+        defines.push(NumericIdDefine {
+            name: format!("{}{}", prefix.strip_prefix("#define ").unwrap(), suffix),
+            value,
+        });
+    }
+    Ok(defines)
+}
+
+fn assert_numeric_id_invariants(prelude: &str) {
+    let defines = parse_numeric_id_defines(prelude).expect("numeric ID declarations parse");
+    let mut by_name = BTreeMap::<String, u64>::new();
+    let mut methods = BTreeMap::<u64, Vec<String>>::new();
+    let mut builtins = BTreeMap::<u64, Vec<String>>::new();
+    for define in defines {
+        assert!(define.value > 0, "numeric ID `{}` is zero", define.name);
+        assert!(
+            by_name.insert(define.name.clone(), define.value).is_none(),
+            "numeric ID `{}` is defined more than once",
+            define.name
+        );
+        let ids = if define.name.starts_with("KILN_C99_METHOD_") {
+            &mut methods
+        } else {
+            assert!(
+                define.name.starts_with("KILN_C99_BUILTIN_"),
+                "unexpected numeric ID family `{}`",
+                define.name
+            );
+            &mut builtins
+        };
+        ids.entry(define.value).or_default().push(define.name);
+    }
+
+    const TEMPORAL_ALIASES: [&str; 2] = [
+        "KILN_C99_METHOD_TEMPORAL_LAST",
+        "KILN_C99_METHOD_TEMPORAL_OP_LAST",
+    ];
+    for (value, names) in &methods {
+        if names.len() > 1 {
+            let mut sorted = names.clone();
+            sorted.sort();
+            assert_eq!(
+                sorted,
+                TEMPORAL_ALIASES,
+                "duplicate method ID {value} is claimed by {}",
+                names.join(", ")
+            );
+            assert_eq!(*value, 335, "Temporal method aliases moved from ID 335");
+        }
+    }
+
+    let builtin_values: Vec<_> = builtins.keys().copied().collect();
+    let builtin_max = *builtin_values
+        .last()
+        .expect("prelude declares at least one builtin ID");
+    let missing_builtins: Vec<_> = (1..=builtin_max)
+        .filter(|value| !builtins.contains_key(value))
+        .collect();
+    assert!(
+        missing_builtins.is_empty(),
+        "builtin IDs missing {missing_builtins:?}; declared IDs are {builtin_values:?}"
+    );
+
+    // 336 is the first ID appended after the historical receiver/range layout. New runtime
+    // facade methods must append at max+1, never fill an old gap or reuse an old value.
+    const APPEND_ONLY_METHOD_BASE: u64 = 336;
+    let custom_values: Vec<_> = methods
+        .keys()
+        .copied()
+        .filter(|value| *value >= APPEND_ONLY_METHOD_BASE)
+        .collect();
+    let custom_max = *custom_values
+        .last()
+        .expect("prelude declares the append-only method tail");
+    let missing_custom: Vec<_> = (APPEND_ONLY_METHOD_BASE..=custom_max)
+        .filter(|value| !methods.contains_key(value))
+        .collect();
+    assert!(
+        missing_custom.is_empty(),
+        "custom method IDs missing {missing_custom:?}; declared IDs are {custom_values:?}"
+    );
+}
+
 #[test]
 fn runtime_prelude_abi_surface() {
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
+    assert_numeric_id_invariants(prelude);
     insta::assert_snapshot!(abi_surface(prelude));
+}
+
+#[test]
+fn numeric_id_parser_rejects_malformed_definitions() {
+    for source in [
+        "#define KILN_C99_METHOD_BROKEN\n",
+        "#define KILN_C99_METHOD_BROKEN nope\n",
+        "#define KILN_C99_METHOD_BROKEN 1 trailing\n",
+        " #define KILN_C99_METHOD_BROKEN 1\n",
+        "#define KILN_C99_METHOD_broken 1\n",
+    ] {
+        assert!(
+            parse_numeric_id_defines(source).is_err(),
+            "malformed definition was accepted: {source:?}"
+        );
+    }
 }
 
 #[test]
