@@ -252,6 +252,11 @@ pub enum Native {
     NodeEventListeners,
     NodeEventRemoveAllListeners,
     NodeEventSetMaxListeners,
+    NodeNet,
+    NodeNetCreateServer,
+    NodeSocketWrite,
+    NodeSocketEnd,
+    NodeSocketDestroy,
     NodeHttp,
     NodeHttpCreateServer,
     NodeServerListen,
@@ -895,6 +900,7 @@ impl Native {
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
             }
+            (Self::NodeNet, "createServer") => Some(Value::Native(Self::NodeNetCreateServer)),
             (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
             (Self::NodeEventEmitter, "prototype") => Some(Value::Native(Self::PrototypeOf(
                 PrototypeTable::EventEmitter,
@@ -1368,15 +1374,29 @@ pub struct ObjectData {
 #[derive(Clone, Debug)]
 enum NodeObject {
     HttpServer(Rc<RefCell<HttpServerState>>),
+    NetSocket(Rc<RefCell<NetSocketState>>),
     HttpResponse(Rc<RefCell<HttpResponseState>>),
+}
+
+#[derive(Debug)]
+struct NetSocketState {
+    server: Weak<RefCell<HttpServerState>>,
+    resource: kiln_host_abi::ResourceId,
 }
 
 #[derive(Debug)]
 struct HttpServerState {
     driver: TcpServerDriver,
     handler: Value,
+    protocol: ServerProtocol,
     streams: Vec<HttpConnection>,
     object: Option<Weak<RefCell<ObjectData>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServerProtocol {
+    Net,
+    Http,
 }
 
 #[derive(Debug)]
@@ -3169,6 +3189,7 @@ pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static s
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
+        "net" => &["createServer"],
         "http" => &["createServer"],
         _ => return None,
     })
@@ -3179,6 +3200,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "events" => Native::NodeEvents,
             "fs/promises" => Native::NodeFsPromises,
+            "net" => Native::NodeNet,
             "http" => Native::NodeHttp,
             _ => return None,
         },
@@ -5018,6 +5040,92 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
+    fn dispatch_node_net(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        match native {
+            Native::NodeNetCreateServer => {
+                let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&handler) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "The connection listener must be a function".into(),
+                    });
+                }
+                let state = Rc::new(RefCell::new(HttpServerState {
+                    driver: TcpServerDriver::default(),
+                    handler,
+                    protocol: ServerProtocol::Net,
+                    streams: Vec::new(),
+                    object: None,
+                }));
+                let object = node_server_object(&state);
+                self.http_servers.push(Rc::clone(&state));
+                Ok(object)
+            }
+            Native::NodeSocketWrite | Native::NodeSocketEnd | Native::NodeSocketDestroy => {
+                self.dispatch_node_socket(native, receiver, arguments, instruction)
+            }
+            _ => unreachable!("only node:net natives dispatch here"),
+        }
+    }
+
+    fn dispatch_node_socket(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let state = node_net_socket_state(receiver)?;
+        let (server, resource) = {
+            let state = state.borrow();
+            let server = state.server.upgrade().ok_or_else(|| ExecutionError::Host {
+                instruction,
+                message: "node:net socket lost its server".into(),
+            })?;
+            (server, state.resource)
+        };
+        let (result, actions) = {
+            let mut server_state = server.borrow_mut();
+            let connection = server_state
+                .streams
+                .iter_mut()
+                .find(|stream| stream.driver.resource() == resource)
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:net socket lost its stream".into(),
+                })?;
+            match native {
+                Native::NodeSocketWrite => {
+                    let (disposition, actions) =
+                        connection.driver.write(node_body_bytes(arguments.first())?);
+                    (Value::Boolean(disposition.ready), actions)
+                }
+                Native::NodeSocketEnd => {
+                    let data = arguments
+                        .first()
+                        .filter(|value| !matches!(value, Value::Undefined))
+                        .map(|value| node_body_bytes(Some(value)))
+                        .transpose()?;
+                    let (_, actions) = connection.driver.end(data);
+                    (receiver.clone(), actions)
+                }
+                Native::NodeSocketDestroy => {
+                    (receiver.clone(), vec![connection.driver.close()])
+                }
+                _ => unreachable!("only socket natives dispatch here"),
+            }
+        };
+        for action in actions {
+            self.start_http_stream_action(&server, resource, action, instruction)?;
+        }
+        Ok(result)
+    }
+
     fn dispatch_node_http(
         &mut self,
         native: Native,
@@ -5036,22 +5144,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let state = Rc::new(RefCell::new(HttpServerState {
                     driver: TcpServerDriver::default(),
                     handler,
+                    protocol: ServerProtocol::Http,
                     streams: Vec::new(),
                     object: None,
                 }));
-                let mut data = ObjectData::default();
-                data.node_events = Some(Vec::new());
-                data.node_object = Some(NodeObject::HttpServer(Rc::clone(&state)));
-                data.set("listen", Value::Native(Native::NodeServerListen));
-                data.set("close", Value::Native(Native::NodeServerClose));
-                data.set("address", Value::Native(Native::NodeServerAddress));
-                data.set("on", Value::Native(Native::NodeEventOn));
-                data.set("once", Value::Native(Native::NodeEventOnce));
-                data.set("emit", Value::Native(Native::NodeEventEmit));
-                let object = Rc::new(RefCell::new(data));
-                state.borrow_mut().object = Some(Rc::downgrade(&object));
+                let object = node_server_object(&state);
                 self.http_servers.push(Rc::clone(&state));
-                Ok(Value::Object(object))
+                Ok(object)
             }
             Native::NodeServerListen => {
                 let state = node_http_server(receiver)?;
@@ -5174,6 +5273,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             ServerAction::Close => self.emit_http_server(state, "close", vec![], instruction),
             ServerAction::Connection(accepted) => {
+                let protocol = state.borrow().protocol;
                 let mut stream = HttpConnection {
                     driver: StreamDriver::new(accepted.resource.id, DEFAULT_HIGH_WATER_MARK),
                     decoder: Http1Decoder::default(),
@@ -5183,6 +5283,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 let actions = stream.driver.start_reading();
                 state.borrow_mut().streams.push(stream);
+                if protocol == ServerProtocol::Net {
+                    let socket = node_net_socket(state, accepted.resource.id);
+                    let handler = state.borrow().handler.clone();
+                    self.call_value(
+                        &handler,
+                        Value::Undefined,
+                        vec![socket],
+                        instruction,
+                    )?;
+                }
                 for action in actions {
                     self.start_http_stream_action(
                         state,
@@ -5283,6 +5393,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             StreamAction::Data(bytes) => {
+                if server.borrow().protocol == ServerProtocol::Net {
+                    let socket = node_net_socket_value(server, resource).ok_or_else(|| {
+                        ExecutionError::Host {
+                            instruction,
+                            message: "node:net received data for an unknown stream".into(),
+                        }
+                    })?;
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        &socket,
+                        &[Value::String("data".into()), node_bytes_value(bytes)],
+                        instruction,
+                    )?;
+                    return Ok(());
+                }
                 let events = {
                     let mut server_state = server.borrow_mut();
                     let connection = server_state
@@ -5307,6 +5432,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             StreamAction::Event(StreamEvent::Finish) => {
+                if server.borrow().protocol == ServerProtocol::Net {
+                    if let Some(socket) = node_net_socket_value(server, resource) {
+                        self.dispatch_node_event(
+                            Native::NodeEventEmit,
+                            &socket,
+                            &[Value::String("finish".into())],
+                            instruction,
+                        )?;
+                    }
+                    return Ok(());
+                }
                 let close = server
                     .borrow()
                     .streams
@@ -5329,6 +5465,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             StreamAction::Event(StreamEvent::Close) => {
+                let socket = (server.borrow().protocol == ServerProtocol::Net)
+                    .then(|| node_net_socket_value(server, resource))
+                    .flatten();
                 if let Some(stream) = server
                     .borrow_mut()
                     .streams
@@ -5337,9 +5476,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 {
                     stream.closed = true;
                 }
+                if let Some(socket) = socket {
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        &socket,
+                        &[Value::String("close".into())],
+                        instruction,
+                    )?;
+                }
                 Ok(())
             }
-            StreamAction::Event(_) => Ok(()),
+            StreamAction::Event(StreamEvent::Drain | StreamEvent::End) => {
+                if let Some(socket) = node_net_socket_value(server, resource) {
+                    let event = match action {
+                        StreamAction::Event(StreamEvent::Drain) => "drain",
+                        StreamAction::Event(StreamEvent::End) => "end",
+                        _ => unreachable!(),
+                    };
+                    self.dispatch_node_event(
+                        Native::NodeEventEmit,
+                        &socket,
+                        &[Value::String(event.into())],
+                        instruction,
+                    )?;
+                }
+                Ok(())
+            }
+            StreamAction::Event(StreamEvent::Error) => Ok(()),
             StreamAction::Error(error) => {
                 let error = self.node_error_value(error);
                 self.emit_http_server(server, "clientError", vec![error], instruction)
@@ -7663,6 +7826,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeEventSetMaxListeners
         ) {
             return self.dispatch_node_event(native, receiver, arguments, instruction);
+        }
+        if matches!(
+            native,
+            Native::NodeNetCreateServer
+                | Native::NodeSocketWrite
+                | Native::NodeSocketEnd
+                | Native::NodeSocketDestroy
+        ) {
+            return self.dispatch_node_net(native, receiver, arguments, instruction);
         }
         if matches!(
             native,
@@ -14365,6 +14537,79 @@ fn node_event_emitter() -> Value {
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
+fn node_server_object(state: &Rc<RefCell<HttpServerState>>) -> Value {
+    let mut data = ObjectData::default();
+    data.node_events = Some(Vec::new());
+    data.node_object = Some(NodeObject::HttpServer(Rc::clone(state)));
+    data.set("listen", Value::Native(Native::NodeServerListen));
+    data.set("close", Value::Native(Native::NodeServerClose));
+    data.set("address", Value::Native(Native::NodeServerAddress));
+    data.set("on", Value::Native(Native::NodeEventOn));
+    data.set("once", Value::Native(Native::NodeEventOnce));
+    data.set("emit", Value::Native(Native::NodeEventEmit));
+    let object = Rc::new(RefCell::new(data));
+    state.borrow_mut().object = Some(Rc::downgrade(&object));
+    Value::Object(object)
+}
+
+fn node_net_socket(
+    server: &Rc<RefCell<HttpServerState>>,
+    resource: kiln_host_abi::ResourceId,
+) -> Value {
+    let mut data = ObjectData::default();
+    data.node_events = Some(Vec::new());
+    data.node_object = Some(NodeObject::NetSocket(Rc::new(RefCell::new(
+        NetSocketState {
+            server: Rc::downgrade(server),
+            resource,
+        },
+    ))));
+    data.set("on", Value::Native(Native::NodeEventOn));
+    data.set("once", Value::Native(Native::NodeEventOnce));
+    data.set("emit", Value::Native(Native::NodeEventEmit));
+    data.set("write", Value::Native(Native::NodeSocketWrite));
+    data.set("end", Value::Native(Native::NodeSocketEnd));
+    data.set("destroy", Value::Native(Native::NodeSocketDestroy));
+    let socket = Value::Object(Rc::new(RefCell::new(data)));
+    if let Some(connection) = server
+        .borrow_mut()
+        .streams
+        .iter_mut()
+        .find(|stream| stream.driver.resource() == resource)
+    {
+        connection.request = Some(socket.clone());
+    }
+    socket
+}
+
+fn node_net_socket_value(
+    server: &Rc<RefCell<HttpServerState>>,
+    resource: kiln_host_abi::ResourceId,
+) -> Option<Value> {
+    server
+        .borrow()
+        .streams
+        .iter()
+        .find(|stream| stream.driver.resource() == resource)
+        .and_then(|stream| stream.request.clone())
+}
+
+fn node_net_socket_state(
+    receiver: &Value,
+) -> Result<Rc<RefCell<NetSocketState>>, ExecutionError> {
+    let Value::Object(object) = receiver else {
+        return Err(ExecutionError::TypeErrorMessage {
+            message: "Socket method called on an incompatible receiver".into(),
+        });
+    };
+    match &object.borrow().node_object {
+        Some(NodeObject::NetSocket(state)) => Ok(Rc::clone(state)),
+        _ => Err(ExecutionError::TypeErrorMessage {
+            message: "Socket method called on an incompatible receiver".into(),
+        }),
+    }
+}
+
 fn node_http_server(receiver: &Value) -> Result<Rc<RefCell<HttpServerState>>, ExecutionError> {
     let Value::Object(object) = receiver else {
         return Err(ExecutionError::TypeErrorMessage {
@@ -16968,7 +17213,12 @@ fn call_native(
             _ => Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         },
         Native::NodeEventEmitter => node_event_emitter(),
-        Native::NodeHttp
+        Native::NodeNet
+        | Native::NodeNetCreateServer
+        | Native::NodeSocketWrite
+        | Native::NodeSocketEnd
+        | Native::NodeSocketDestroy
+        | Native::NodeHttp
         | Native::NodeHttpCreateServer
         | Native::NodeServerListen
         | Native::NodeServerClose

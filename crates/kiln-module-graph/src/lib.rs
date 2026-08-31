@@ -1512,6 +1512,78 @@ mod tests {
         assert!(response.ends_with("POST 12"));
     }
 
+    #[test]
+    fn node_net_server_echoes_over_the_shared_tokio_stream_driver() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { createServer } from 'node:net';",
+                "let server;",
+                "server = createServer(socket => {",
+                "  socket.on('data', chunk => socket.end(chunk));",
+                "  socket.on('finish', () => server.close());",
+                "});",
+                "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build net graph");
+
+        let (port_sender, port_receiver) = mpsc::channel();
+        struct ServerHost(Option<mpsc::Sender<u16>>);
+        impl HostOps for ServerHost {
+            fn call(
+                &mut self,
+                operation: HostOp,
+                arguments: &[HostValue],
+            ) -> Result<HostValue, HostError> {
+                assert_eq!(operation, HostOp::WriteStdout);
+                let port = arguments[0]
+                    .to_js_string()
+                    .parse::<u16>()
+                    .expect("numeric port");
+                if let Some(sender) = self.0.take() {
+                    sender.send(port).expect("publish port");
+                }
+                Ok(HostValue::Undefined)
+            }
+        }
+        let client = std::thread::spawn(move || {
+            let port = port_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("server announces port");
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+            stream.write_all(b"tokio net").expect("write payload");
+            stream.shutdown(Shutdown::Write).expect("finish request");
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut echoed = Vec::new();
+            stream.read_to_end(&mut echoed).expect("read echo");
+            echoed
+        });
+        let mut host = ServerHost(Some(port_sender));
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("run net server");
+        assert_eq!(client.join().expect("client completes"), b"tokio net");
+    }
+
     /// A function value survives the module boundary it was exported across.
     ///
     /// A closure indexes its own program's function table, and every module compiles to its own
