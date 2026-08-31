@@ -866,73 +866,72 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE 282
 #define KILN_C99_METHOD_NODE_CLIENT_REQUEST_END 283
 #define KILN_C99_METHOD_NODE_READABLE_SET_ENCODING 284
-#define KILN_C99_METHOD_NODE_NET_CONNECT 336
-#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 337
-#define KILN_C99_METHOD_BUFFER_FROM 338
-#define KILN_C99_METHOD_BUFFER_ALLOC 339
-#define KILN_C99_METHOD_BUFFER_IS_BUFFER 340
-#define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 341
-#define KILN_C99_METHOD_BUFFER_CONCAT 342
-#define KILN_C99_METHOD_BUFFER_TO_STRING 343
-#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 344
-#define KILN_C99_METHOD_NODE_UTIL_NOOP 345
-#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 346
-#define KILN_C99_METHOD_NODE_UTIL_INSPECT 347
-#define KILN_C99_METHOD_NODE_UTIL_INHERITS 348
-#define KILN_C99_METHOD_NODE_UTIL_FORMAT 349
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 350
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 351
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 352
-#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 353
-#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 354
-#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 355
-#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 356
-#define KILN_C99_METHOD_NODE_DNS_LOOKUP 357
-#define KILN_C99_METHOD_NODE_OS_HOSTNAME 358
-#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 359
-#define KILN_C99_METHOD_NODE_STREAM 360
-#define KILN_C99_METHOD_NODE_READABLE 361
-#define KILN_C99_METHOD_NODE_WRITABLE 362
-#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 363
-#define KILN_C99_METHOD_NODE_STREAM_FINISHED 364
-#define KILN_C99_METHOD_NODE_READABLE_PUSH 365
-#define KILN_C99_METHOD_NODE_READABLE_READ 366
-#define KILN_C99_METHOD_NODE_READABLE_DESTROY 367
-#define KILN_C99_METHOD_NODE_READABLE_PAUSE 368
-#define KILN_C99_METHOD_NODE_READABLE_RESUME 369
-#define KILN_C99_METHOD_NODE_READABLE_PIPE 370
-#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 371
-#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 372
-#define KILN_C99_METHOD_NODE_WRITABLE_END 373
-#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 374
-#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 375
-#define KILN_C99_METHOD_NODE_FS_EXISTS_SYNC 376
-#define KILN_C99_METHOD_NODE_FS_READ_FILE 377
-#define KILN_C99_METHOD_NODE_FS_STAT 378
-#define KILN_C99_METHOD_NODE_FS_WRITE_FILE 379
-#define KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE 380
-#define KILN_C99_METHOD_NODE_PATH_JOIN 381
-#define KILN_C99_METHOD_NODE_PATH_RESOLVE 382
-#define KILN_C99_METHOD_NODE_ASSERT_OK 383
-#define KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR 384
-#define KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE 385
-#define KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH 386
-#define KILN_C99_METHOD_NODE_URL_PARSE 387
-#define KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL 388
-#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE 389
-#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND 390
-#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY 391
-#define KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID 392
-#define KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH 393
-#define KILN_C99_METHOD_PROCESS_NEXT_TICK 394
-#define KILN_C99_METHOD_PROCESS_HRTIME 395
-#define KILN_C99_METHOD_PROCESS_HRTIME_BIGINT 396
-#define KILN_C99_METHOD_PROCESS_CWD 397
-#define KILN_C99_METHOD_ATOMICS_UNAVAILABLE 398
-#define KILN_C99_METHOD_SET_IMMEDIATE 399
-#define KILN_C99_METHOD_CLEAR_IMMEDIATE 400
-#define KILN_C99_METHOD_NODE_HTTP_SERVER 401
-
+#define KILN_C99_METHOD_NODE_NET_CONNECT 338
+#define KILN_C99_METHOD_URL_SEARCH_PARAMS_GET 339
+#define KILN_C99_METHOD_BUFFER_FROM 340
+#define KILN_C99_METHOD_BUFFER_ALLOC 341
+#define KILN_C99_METHOD_BUFFER_IS_BUFFER 342
+#define KILN_C99_METHOD_BUFFER_BYTE_LENGTH 343
+#define KILN_C99_METHOD_BUFFER_CONCAT 344
+#define KILN_C99_METHOD_BUFFER_TO_STRING 345
+#define KILN_C99_METHOD_NODE_UTIL_DEBUGLOG 346
+#define KILN_C99_METHOD_NODE_UTIL_NOOP 347
+#define KILN_C99_METHOD_NODE_UTIL_DEPRECATE 348
+#define KILN_C99_METHOD_NODE_UTIL_INSPECT 349
+#define KILN_C99_METHOD_NODE_UTIL_INHERITS 350
+#define KILN_C99_METHOD_NODE_UTIL_FORMAT 351
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_CHANNEL 352
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_TRACING_CHANNEL 353
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH 354
+#define KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES 355
+#define KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER 356
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SERVER 357
+#define KILN_C99_METHOD_NODE_HTTP2_CREATE_SECURE_SERVER 358
+#define KILN_C99_METHOD_NODE_DNS_LOOKUP 359
+#define KILN_C99_METHOD_NODE_OS_HOSTNAME 360
+#define KILN_C99_METHOD_NODE_OS_NETWORK_INTERFACES 361
+#define KILN_C99_METHOD_NODE_STREAM 362
+#define KILN_C99_METHOD_NODE_READABLE 363
+#define KILN_C99_METHOD_NODE_WRITABLE 364
+#define KILN_C99_METHOD_NODE_STREAM_ADD_ABORT_SIGNAL 365
+#define KILN_C99_METHOD_NODE_STREAM_FINISHED 366
+#define KILN_C99_METHOD_NODE_READABLE_PUSH 367
+#define KILN_C99_METHOD_NODE_READABLE_READ 368
+#define KILN_C99_METHOD_NODE_READABLE_DESTROY 369
+#define KILN_C99_METHOD_NODE_READABLE_PAUSE 370
+#define KILN_C99_METHOD_NODE_READABLE_RESUME 371
+#define KILN_C99_METHOD_NODE_READABLE_PIPE 372
+#define KILN_C99_METHOD_NODE_READABLE_UNPIPE 373
+#define KILN_C99_METHOD_NODE_WRITABLE_WRITE 374
+#define KILN_C99_METHOD_NODE_WRITABLE_END 375
+#define KILN_C99_METHOD_NODE_WRITABLE_DESTROY 376
+#define KILN_C99_METHOD_NODE_PERFORMANCE_NOW 377
+#define KILN_C99_METHOD_NODE_FS_EXISTS_SYNC 378
+#define KILN_C99_METHOD_NODE_FS_READ_FILE 379
+#define KILN_C99_METHOD_NODE_FS_STAT 380
+#define KILN_C99_METHOD_NODE_FS_WRITE_FILE 381
+#define KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE 382
+#define KILN_C99_METHOD_NODE_PATH_JOIN 383
+#define KILN_C99_METHOD_NODE_PATH_RESOLVE 384
+#define KILN_C99_METHOD_NODE_ASSERT_OK 385
+#define KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR 386
+#define KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE 387
+#define KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH 388
+#define KILN_C99_METHOD_NODE_URL_PARSE 389
+#define KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL 390
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE 391
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_BIND 392
+#define KILN_C99_METHOD_NODE_ASYNC_RESOURCE_DESTROY 393
+#define KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID 394
+#define KILN_C99_METHOD_NODE_CRYPTO_CREATE_HASH 395
+#define KILN_C99_METHOD_PROCESS_NEXT_TICK 396
+#define KILN_C99_METHOD_PROCESS_HRTIME 397
+#define KILN_C99_METHOD_PROCESS_HRTIME_BIGINT 398
+#define KILN_C99_METHOD_PROCESS_CWD 399
+#define KILN_C99_METHOD_ATOMICS_UNAVAILABLE 400
+#define KILN_C99_METHOD_SET_IMMEDIATE 401
+#define KILN_C99_METHOD_CLEAR_IMMEDIATE 402
+#define KILN_C99_METHOD_NODE_HTTP_SERVER 403
 /* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
 /* `from` and `compare` are one function per type in the language -- `Temporal.PlainDate.from`
@@ -957,7 +956,12 @@ enum kiln_value_tag {
  * read from either end (`KILN_C99_TEMPORAL_OPS` below). */
 #define KILN_C99_METHOD_TEMPORAL_OP 313
 #define KILN_C99_METHOD_TEMPORAL_OP_LAST 335
-#define KILN_C99_METHOD_TEMPORAL_LAST 335
+/* `Temporal.Instant`'s two epoch constructors. Statics rather than `from`, and one code each
+ * rather than a kind-bearing range, because only `Instant` has them: an epoch count names a point
+ * on the timeline, and no other one of the eight is a point on a timeline by itself. */
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS 336
+#define KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS 337
+#define KILN_C99_METHOD_TEMPORAL_LAST 337
 
 /* The writers that mirror the readers at 74..82. Contiguous, because a range is how a receiver's
  * methods are found by name, and numbered here rather than beside the readers because that block
@@ -1721,6 +1725,11 @@ int32_t kiln_bigint_binary(uint32_t operation, const void *left, const void *rig
 int32_t kiln_bigint_negate(const void *handle, void **out);
 int32_t kiln_bigint_compare(const void *left, const void *right);
 int32_t kiln_bigint_is_zero(const void *handle);
+/* The exact 128-bit value, split into a signed top half and an unsigned bottom half because C99
+ * has no portable 128-bit integer. Non-zero when it does not fit, never a truncated answer:
+ * `Temporal.Instant.fromEpochNanoseconds` is the caller, and an instant off by 2^128 nanoseconds
+ * would be a wrong answer that prints rather than the RangeError the language specifies. */
+int32_t kiln_bigint_to_i128(const void *handle, int64_t *out_high, uint64_t *out_low);
 /* `Temporal`, over the same `kiln-temporal` adapter the interpreter links (ADR 0025, ADR 0029 section 4).
  *
  * The handles are opaque and every readback is a scalar, exactly as the BigInt block above. The
@@ -1733,6 +1742,12 @@ int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t fi
                                   void **out_handle);
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
                                            void **out_handle);
+/* `Temporal.Instant`'s two epoch constructors. The nanosecond count arrives in the same two
+ * halves `kiln_temporal_now` takes, read out of the BigInt provider: the two providers are
+ * independent features of one archive and only scalars pass between them. */
+int32_t kiln_temporal_instant_from_epoch_milliseconds(double milliseconds, void **out_handle);
+int32_t kiln_temporal_instant_from_epoch_nanoseconds(int64_t high, uint64_t low,
+                                                     void **out_handle);
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
                             const unsigned char *option_text,
                             const int64_t *option_text_lengths, size_t option_text_count,
@@ -1994,7 +2009,9 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
-                                  int writing);
+                                  int mode);
+static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value function, int kind);
 static int kiln_c99_is_node_pointer_key(const char *key, size_t key_len);
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype);
 static int kiln_c99_can_be_prototype(kiln_value value);
@@ -3583,6 +3600,10 @@ static const char *kiln_c99_method_name(uint64_t code) {
     switch (code) {
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
+    case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
+        return "fromEpochMilliseconds";
+    case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS:
+        return "fromEpochNanoseconds";
     case KILN_C99_METHOD_PUSH: return "push";
     case KILN_C99_METHOD_POP: return "pop";
     case KILN_C99_METHOD_JOIN: return "join";
@@ -7242,32 +7263,44 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
         case 2:
-            if (length >= 0) {
-                *out = kiln_c99_copy_text(inline_buffer, (size_t)length);
-                return KILN_C99_OK;
-            }
-            {
+        case 5: {
+            /* Two shapes, one buffer. Shape 2 is text the language shows as a string; shape 5 is
+             * `epochNanoseconds`, whose exact value only a BigInt can hold, so it arrives as its
+             * decimal digits and is parsed into one rather than read out of the double slot --
+             * a `Temporal` instant carries more precision than a double, and rounding it would be
+             * a wrong answer that prints. */
+            const int wide = shape == 5;
+            const char *digits = inline_buffer;
+            char *spilled = NULL;
+            void *big = NULL;
+            if (length < 0) {
                 size_t wanted = (size_t)(-length);
-                char *spilled = (char *)malloc(wanted);
+                spilled = (char *)malloc(wanted);
                 if (spilled == NULL) {
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 shape = kiln_temporal_get(kiln_c99_temporal_of(target),
                                           (const unsigned char *)key, key_len, &number,
                                           (unsigned char *)spilled, wanted, &length);
-                if (shape != 2 || length < 0) {
+                if (shape != (wide ? 5 : 2) || length < 0) {
                     free(spilled);
                     return KILN_C99_CONTROL_ERROR;
                 }
-                *out = kiln_c99_copy_text(spilled, (size_t)length);
+                digits = spilled;
+            }
+            if (!wide) {
+                *out = kiln_c99_copy_text(digits, (size_t)length);
                 free(spilled);
                 return KILN_C99_OK;
             }
-        case 5:
-            /* `epochNanoseconds`, which only a BigInt can hold. Refused by name rather than
-             * rounded through a double, because a rounded answer is a wrong answer that prints. */
-            return kiln_c99_temporal_unsupported(thrown, kiln_c99_temporal_tag(target), key,
-                                                 key_len);
+            if (kiln_bigint_parse((const unsigned char *)digits, (size_t)length, 10, &big) != 0) {
+                free(spilled);
+                return KILN_C99_CONTROL_ERROR;
+            }
+            free(spilled);
+            *out = kiln_c99_bigint_value(big);
+            return KILN_C99_OK;
+        }
         default:
             break;
         }
@@ -7774,11 +7807,36 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                         : kiln_c99_copy_text(bare, strlen(bare));
                     return KILN_C99_OK;
                 }
-                /* `prototype` and the rest of the static surface exist in the language and are not
-                 * here, so they say which rather than reading as undefined. */
-                if (kiln_c99_same_name(key, key_len, "prototype") ||
-                    kiln_c99_same_name(key, key_len, "fromEpochMilliseconds") ||
-                    kiln_c99_same_name(key, key_len, "fromEpochNanoseconds")) {
+                /* `Temporal.Instant` alone has the two epoch constructors: an epoch count names a
+                 * point on the timeline, and no other of the eight *is* a point on a timeline. On
+                 * the other seven these names do not exist in the language at all, so they read as
+                 * undefined below rather than saying which. */
+                if (constructed == 6) {
+                    if (kiln_c99_same_name(key, key_len, "fromEpochMilliseconds")) {
+                        *out = kiln_c99_method(
+                            KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS);
+                        return KILN_C99_OK;
+                    }
+                    if (kiln_c99_same_name(key, key_len, "fromEpochNanoseconds")) {
+                        *out = kiln_c99_method(
+                            KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS);
+                        return KILN_C99_OK;
+                    }
+                }
+                /* `prototype` exists in the language and is not here, so it says which rather
+                 * than reading as undefined.
+                 *
+                 * It stays a refusal on purpose rather than for want of effort. In the language it
+                 * is an ordinary object with a property store, and neither engine has one for it:
+                 * the interpreter answers a `Native::Temporal(Op::Prototype(kind))`, which carries
+                 * `constructor`, the tag and the methods but cannot hold a name a program writes,
+                 * and which reports `typeof` as "function" where the specification and `deno` say
+                 * "object". Reproducing that here would make the two engines agree on a wrong
+                 * answer, which is the one outcome this arrangement exists to prevent; answering
+                 * correctly instead would diverge from the interpreter until it gives `Temporal`
+                 * the property store the other exotic objects already have. Either way the move is
+                 * the interpreter's, so this names the missing member and waits for it. */
+                if (kiln_c99_same_name(key, key_len, "prototype")) {
                     const char *owner = kiln_c99_temporal_builtin_name(target.bits);
                     return kiln_c99_temporal_unsupported(thrown, owner == NULL ? "Temporal" : owner,
                                                          key, key_len);
@@ -11799,6 +11857,49 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
             (uint32_t)kind, high, low,
             zone.tag == KILN_VALUE_STRING ? (const unsigned char *)zone.ptr : NULL,
             zone.tag == KILN_VALUE_STRING ? zone.len : 0, &handle);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *result = kiln_c99_temporal_value(handle);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS) {
+        /* `ToNumber` first, and through the checked path, because the argument may be an object
+         * with a `valueOf` and running it is observable. A fractional or out-of-range count is the
+         * engine's RangeError, not a truncation. */
+        double milliseconds = 0.0;
+        void *handle = NULL;
+        int32_t answered;
+        int status = kiln_c99_to_number_checked(host, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                                &milliseconds, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        answered = kiln_temporal_instant_from_epoch_milliseconds(milliseconds, &handle);
+        if (answered != 0) {
+            return kiln_c99_temporal_raise(thrown, answered);
+        }
+        *result = kiln_c99_temporal_value(handle);
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS) {
+        /* A BigInt and nothing else -- not a number coerced to one. Nanoseconds since the epoch
+         * pass what a double holds exactly within four months of 1970, so the language refuses a
+         * number here rather than accepting one it would have to round. */
+        kiln_value argument = argc > 0 ? args[0] : kiln_c99_undefined();
+        int64_t high = 0;
+        uint64_t low = 0;
+        void *handle = NULL;
+        int32_t answered;
+        if (argument.tag != KILN_VALUE_BIGINT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "Temporal.Instant.fromEpochNanoseconds needs a BigInt");
+        }
+        if (kiln_bigint_to_i128((const void *)(uintptr_t)argument.bits, &high, &low) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "epochNanoseconds is outside the representable range");
+        }
+        answered = kiln_temporal_instant_from_epoch_nanoseconds(high, low, &handle);
         if (answered != 0) {
             return kiln_c99_temporal_raise(thrown, answered);
         }
@@ -17197,6 +17298,33 @@ static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const
     return KILN_C99_OK;
 }
 
+/* Install a private method or accessor half, carrying the kind the class body declared.
+ *
+ * A method is stored not-writable, which is what tells it from a private *field* on a later
+ * write: the language refuses the one and allows the other, and a plain slot cannot say which it
+ * is. An accessor half goes through the ordinary accessor definition, which merges `get #x` with
+ * the `set #x` written beside it -- two definitions describing one element. */
+static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
+                                   kiln_value function, int kind) {
+    kiln_property *slot;
+    int status;
+    if (kind != 0) {
+        return kiln_c99_define_accessor(target, key, key_len,
+                                        kind == 1 ? function : kiln_c99_undefined(),
+                                        kind == 2 ? function : kiln_c99_undefined(), 0);
+    }
+    status = kiln_c99_define_method(target, key, key_len, function);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot = kiln_c99_own_private(target, key, key_len);
+    if (slot == NULL) {
+        return KILN_C99_CONTROL_ERROR;
+    }
+    slot->writable = 0;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method) {
     kiln_object *object;
@@ -18489,18 +18617,29 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     return NULL;
 }
 
-/* A private name on an object that does not carry it: a TypeError naming the member.
+/* A private element refusing what was asked of it: a TypeError naming the member.
  *
  * The stored key is `@@private:<scope>:<name>` -- reserved so nothing that enumerates own string
  * properties can see it and no computed access can spell it -- and the message wants the `<name>`
- * half, spelled the way the program spells it. */
+ * half, spelled the way the program spells it.
+ *
+ * Five refusals rather than two, because a private element has a *kind*: the object may not carry
+ * the name at all (0 reading, 1 writing), or carry it as an accessor with only the other half
+ * (2 reading, 3 writing), or carry it as a method, which is readable and never writable (4). The
+ * wording is the interpreter's, exactly: `error.message` is program-visible, so a fault the two
+ * engines word differently is a divergence like any other. */
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
-                                  int writing) {
+                                  int mode) {
     kiln_text text = {NULL, 0, 0};
     kiln_value error;
     size_t at = 0;
     size_t colons = 0;
     int status;
+    /* A character rather than a literal, for the reason `kiln_c99_set_function_name` gives: the
+     * runtime prelude lives in a raw string whose terminator is a quote followed by a hash. */
+    char hash = 0x23;
+    const char *before;
+    const char *after;
     while (at < key_len && colons < 2) {
         if (key[at] == ':') {
             colons += 1;
@@ -18510,13 +18649,32 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t ke
     if (colons < 2) {
         at = 0;
     }
-    if (kiln_c99_text_append_c(&text, writing ? "Cannot write private member #"
-                                              : "Cannot read private member #") != KILN_C99_OK ||
+    switch (mode) {
+    case 1:
+        before = "Cannot write private member ";
+        after = " to an object whose class did not declare it";
+        break;
+    case 2:
+        before = "'";
+        after = "' was defined without a getter";
+        break;
+    case 3:
+        before = "'";
+        after = "' was defined without a setter";
+        break;
+    case 4:
+        before = "Private method '";
+        after = "' is not writable";
+        break;
+    default:
+        before = "Cannot read private member ";
+        after = " from an object whose class did not declare it";
+        break;
+    }
+    if (kiln_c99_text_append_c(&text, before) != KILN_C99_OK ||
+        kiln_c99_text_append(&text, &hash, 1) != KILN_C99_OK ||
         kiln_c99_text_append(&text, key + at, key_len - at) != KILN_C99_OK ||
-        kiln_c99_text_append_c(&text,
-                               writing ? " to an object whose class did not declare it"
-                                       : " from an object whose class did not declare it") !=
-            KILN_C99_OK) {
+        kiln_c99_text_append_c(&text, after) != KILN_C99_OK) {
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -20185,6 +20343,17 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
             if (status != KILN_C99_OK) {
                 return status;
             }
+            /* `ToNumeric(lhs)` completes before the right operand is reduced at all, for the
+             * operators with no string reading to choose first: `Symbol() * f()` refuses here
+             * rather than after calling `f`'s `valueOf`, which is one observable call the
+             * language says does not happen. `+` and the four relational operators are absent
+             * deliberately -- each decides between a string and a numeric reading, and cannot
+             * know which conversion it is performing until both sides are reduced. */
+            if (left.tag == KILN_VALUE_SYMBOL &&
+                ((operation >= 2 && operation <= 6) || (operation >= 17 && operation <= 22))) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert a Symbol value to a number");
+            }
             status = kiln_c99_to_primitive(host, right, 0, &right, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
@@ -20650,6 +20819,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::DefineMethod
+        | Instruction::DefinePrivate { .. }
         | Instruction::SpreadObject
         | Instruction::SpreadInto
         | Instruction::ConstructSpread
@@ -20836,6 +21006,15 @@ fn stack_effect(
                 Err(underflow(3))
             } else {
                 Ok((height - 2, false))
+            }
+        }
+        // Same shape with the key in the operand rather than on the stack: the function is
+        // consumed and the target stays.
+        Instruction::DefinePrivate { .. } => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height - 1, false))
             }
         }
         // Replaces the value with an array of its own enumerable keys.
@@ -22022,9 +22201,8 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 0); {unwind} }} stack[sp - 1] = slot->value; }}",
-                text.len(),
-                text.len()
+                "    {{ kiln_value receiver = stack[sp - 1]; kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }} else {{ stack[sp - 1] = slot->value; }} }}",
+                len = text.len()
             )
             .unwrap();
         }
@@ -22035,9 +22213,8 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_property *slot = kiln_c99_own_private(stack[sp - 1], {symbol}_constant_{name}, {}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {}, 1); {unwind} }} slot->value = member; stack[sp - 1] = member; }}",
-                text.len(),
-                text.len()
+                "    {{ kiln_value member = stack[--sp]; kiln_value receiver = stack[sp - 1]; kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = member; }}",
+                len = text.len()
             )
             .unwrap();
         }
@@ -22395,6 +22572,25 @@ fn emit_instruction(
             writeln!(
                 output,
                 "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
+        // A private element is installed with its kind rather than as a slot holding a function,
+        // and on the *object* rather than on a prototype: the presence of the name is the brand,
+        // so an instance element belongs to each instance.
+        Instruction::DefinePrivate { name, kind } => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string private name before emission")
+            };
+            let (tag, prefix) = match kind {
+                kiln_ir::PrivateKind::Method => (0, "NULL"),
+                kiln_ir::PrivateKind::Getter => (1, "\"get\""),
+                kiln_ir::PrivateKind::Setter => (2, "\"set\""),
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value function = stack[--sp]; kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_private(stack[sp - 1], {symbol}_constant_{name}, {len}, function, {tag}) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }}",
+                len = text.len()
             )
             .unwrap();
         }
@@ -23039,6 +23235,18 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, u8::from(*enumerable));
             }
             Instruction::DefineMethod => byte(&mut hash, 43),
+            Instruction::DefinePrivate { name, kind } => {
+                byte(&mut hash, 70);
+                word(&mut hash, u64::from(*name));
+                byte(
+                    &mut hash,
+                    match kind {
+                        kiln_ir::PrivateKind::Method => 0,
+                        kiln_ir::PrivateKind::Getter => 1,
+                        kiln_ir::PrivateKind::Setter => 2,
+                    },
+                );
+            }
             Instruction::MarkUninitialized(value) => {
                 byte(&mut hash, 51);
                 word(&mut hash, u64::from(*value));
@@ -23650,6 +23858,10 @@ int32_t kiln_bigint_compare(const void *left, const void *right) {
     return 0;
 }
 int32_t kiln_bigint_is_zero(const void *handle) { (void)handle; return 1; }
+int32_t kiln_bigint_to_i128(const void *handle, int64_t *out_high, uint64_t *out_low) {
+    (void)handle; (void)out_high; (void)out_low;
+    return -1;
+}
 int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t field_count,
                                   const unsigned char *text, const int64_t *text_lengths,
                                   size_t text_count, const unsigned char *option_text,
@@ -23676,6 +23888,15 @@ int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t le
 int32_t kiln_temporal_now(uint32_t kind, int64_t high, uint64_t low, const unsigned char *zone,
                           size_t zone_len, void **out_handle) {
     (void)kind; (void)high; (void)low; (void)zone; (void)zone_len; (void)out_handle;
+    return -1;
+}
+int32_t kiln_temporal_instant_from_epoch_milliseconds(double milliseconds, void **out_handle) {
+    (void)milliseconds; (void)out_handle;
+    return -1;
+}
+int32_t kiln_temporal_instant_from_epoch_nanoseconds(int64_t high, uint64_t low,
+                                                     void **out_handle) {
+    (void)high; (void)low; (void)out_handle;
     return -1;
 }
 void kiln_temporal_free(void *handle) { (void)handle; }

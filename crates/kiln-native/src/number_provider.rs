@@ -24,10 +24,10 @@ const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
 /// What a packaged archive has to define.
 ///
 /// The regexp five joined the number two when the provider grew a second semantic core (ADR
-/// 0025), and the temporal twelve joined them when the calendar engine did (ADR 0029 §4). The
+/// 0025), and the temporal fourteen joined them when the calendar engine did (ADR 0029 §4). The
 /// list is part of the identity below, so an archive built before them is rejected rather than
 /// linked and found wanting.
-const REQUIRED_EXPORTS: [&str; 53] = [
+const REQUIRED_EXPORTS: [&str; 56] = [
     "kiln_realm_create",
     "kiln_realm_enter",
     "kiln_realm_is_active",
@@ -69,10 +69,13 @@ const REQUIRED_EXPORTS: [&str; 53] = [
     "kiln_bigint_negate",
     "kiln_bigint_compare",
     "kiln_bigint_is_zero",
+    "kiln_bigint_to_i128",
     "kiln_temporal_from_fields",
     "kiln_temporal_duration_from_fields",
     "kiln_temporal_parse",
     "kiln_temporal_now",
+    "kiln_temporal_instant_from_epoch_milliseconds",
+    "kiln_temporal_instant_from_epoch_nanoseconds",
     "kiln_temporal_free",
     "kiln_temporal_kind",
     "kiln_temporal_get",
@@ -486,6 +489,13 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-number-core/src/lib.rs",
         "crates/kiln-native-number-ffi/Cargo.toml",
         "crates/kiln-native-number-ffi/src/lib.rs",
+        // The calendar engine's adapter. It is compiled *into* this archive under the `temporal`
+        // feature, so a change to it changes the archive -- and leaving it out of the identity is
+        // how a native run keeps linking yesterday's calendar while the interpreter, which links
+        // the crate directly, has already moved. That is a divergence nothing in the build fails
+        // to warn about, which is the worst kind.
+        "crates/kiln-temporal/Cargo.toml",
+        "crates/kiln-temporal/src/lib.rs",
         "crates/kiln-runtime/Cargo.toml",
         "crates/kiln-runtime/src/http_body.rs",
         "crates/kiln-runtime/src/http_transport.rs",
@@ -715,6 +725,8 @@ mod tests {
                 "crates/kiln-native-number-ffi/src/lib.rs",
                 b"ffi\n".as_slice(),
             ),
+            ("crates/kiln-temporal/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
             ("crates/kiln-runtime/src/http_body.rs", b"body\n"),
             ("crates/kiln-runtime/src/http_transport.rs", b"transport\n"),
@@ -732,7 +744,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("fb0939463d8cd5e50c3a2afc865825ca7e8c251d09403dee10ffb27b650dc9a8")
+            Digest::from_hex("03536597f5f3e8bb3aefaf2b484d268e9c5ae9698f8741daf499c851d92d16df")
                 .expect("fixture digest")
         );
     }
