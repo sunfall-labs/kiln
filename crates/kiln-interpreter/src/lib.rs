@@ -27608,8 +27608,10 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
     };
 
     let name = kind.name();
-    let mut data = ObjectData::default();
-    data.error_brand = true;
+    let mut data = ObjectData {
+        error_brand: true,
+        ..ObjectData::default()
+    };
     // Every own property of an error is non-enumerable, which is why `JSON.stringify(err)` is
     // `{}` and `Object.keys(err)` is empty -- an error is meant to be *read*, not walked, and a
     // program that serialises one is asking for the fields it names rather than all of them.
