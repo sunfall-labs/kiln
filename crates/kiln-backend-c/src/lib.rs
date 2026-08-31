@@ -24,6 +24,15 @@ pub const C_ABI_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EmissionPolicy {
     pub host_clock: bool,
+    pub entropy: EmissionEntropyPolicy,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmissionEntropyPolicy {
+    #[default]
+    Deterministic,
+    Seeded(u64),
+    Host,
 }
 
 const _: () = assert!(NUMBER_FORMAT_VERSION == 1);
@@ -3085,17 +3094,42 @@ static const char *kiln_c99_method_name(uint64_t code) {
  * what a language builtin needs. Seeded from a constant rather than from the environment, so the
  * same program produces the same sequence in both engines and on every machine -- the same trade
  * the virtual clock makes, and the reason an artifact hash stays honest. See ADR 0026. */
-static uint64_t kiln_c99_random_state = UINT64_C(0x9E3779B97F4A7C15);
+#ifndef KILN_REALM_ENTROPY_SEED
+#define KILN_REALM_ENTROPY_SEED UINT64_C(0x9E3779B97F4A7C15)
+#endif
+static uint64_t kiln_c99_random_state = KILN_REALM_ENTROPY_SEED;
 
-static double kiln_c99_random(void) {
+static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
+#if KILN_REALM_HOST_ENTROPY
+    kiln_value answer;
+    if (host == NULL || host->call == NULL || out == NULL ||
+        host->call(host->context, UINT16_C(3), UINT16_C(0), NULL, &answer) != 0 ||
+        answer.tag != KILN_VALUE_NUMBER) {
+        return KILN_C99_HOST_ERROR;
+    }
+    *out = answer.bits;
+    return KILN_C99_OK;
+#else
     uint64_t mixed;
+    (void)host;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
     kiln_c99_random_state += UINT64_C(0x9E3779B97F4A7C15);
     mixed = kiln_c99_random_state;
     mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
     mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94D049BB133111EB);
     mixed = mixed ^ (mixed >> 31);
+    *out = mixed;
+    return KILN_C99_OK;
+#endif
+}
+
+static int kiln_c99_random(kiln_host *host, double *out) {
+    uint64_t word;
+    int status = kiln_c99_entropy_word(host, &word);
+    if (status != KILN_C99_OK || out == NULL) return status;
     /* 53 random bits, which is every bit the mantissa has. */
-    return (double)(mixed >> 11) / 9007199254740992.0;
+    *out = (double)(word >> 11) / 9007199254740992.0;
+    return KILN_C99_OK;
 }
 
 /* One hex digit's value, or -1. Used by every unescaping path, none of which may accept the
@@ -11528,9 +11562,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 return status;
             }
         }
-        case KILN_C99_METHOD_MATH_RANDOM:
-            *result = kiln_c99_number(kiln_c99_random());
+        case KILN_C99_METHOD_MATH_RANDOM: {
+            double random;
+            int status = kiln_c99_random(host, &random);
+            if (status != KILN_C99_OK) return status;
+            *result = kiln_c99_number(random);
             return KILN_C99_OK;
+        }
         case KILN_C99_METHOD_MATH_HYPOT: {
             /* A fold of `hypot` rather than `sqrt(x*x + y*y)`: squaring overflows for arguments
              * whose result is perfectly representable, which is the whole reason it exists. */
@@ -19993,6 +20031,15 @@ fn render_emission_policy(output: &mut String, policy: EmissionPolicy) {
         u8::from(policy.host_clock)
     )
     .unwrap();
+    match policy.entropy {
+        EmissionEntropyPolicy::Deterministic => {}
+        EmissionEntropyPolicy::Seeded(seed) => {
+            writeln!(output, "#define KILN_REALM_ENTROPY_SEED UINT64_C({seed})").unwrap();
+        }
+        EmissionEntropyPolicy::Host => {
+            output.push_str("#define KILN_REALM_HOST_ENTROPY 1\n");
+        }
+    }
 }
 
 fn render(program: &Program, program_hash: u64, symbol: &str, policy: EmissionPolicy) -> String {
@@ -21174,9 +21221,20 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: EmissionPolicy, 
     if policy == EmissionPolicy::default() {
         return hash;
     }
-    for value in [0x70, u8::from(policy.host_clock)] {
+    let (entropy_tag, entropy_seed) = match policy.entropy {
+        EmissionEntropyPolicy::Deterministic => (0, None),
+        EmissionEntropyPolicy::Seeded(seed) => (1, Some(seed)),
+        EmissionEntropyPolicy::Host => (2, None),
+    };
+    for value in [0x70, u8::from(policy.host_clock), entropy_tag] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
+    }
+    if let Some(seed) = entropy_seed {
+        for value in seed.to_le_bytes() {
+            hash ^= u64::from(value);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
     }
     hash
 }
@@ -21539,9 +21597,20 @@ fn hash_module_with_policy_and_seed(
     if policy == EmissionPolicy::default() {
         return hash;
     }
-    for value in [0x71, u8::from(policy.host_clock)] {
+    let (entropy_tag, entropy_seed) = match policy.entropy {
+        EmissionEntropyPolicy::Deterministic => (0, None),
+        EmissionEntropyPolicy::Seeded(seed) => (1, Some(seed)),
+        EmissionEntropyPolicy::Host => (2, None),
+    };
+    for value in [0x71, u8::from(policy.host_clock), entropy_tag] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
+    }
+    if let Some(seed) = entropy_seed {
+        for value in seed.to_le_bytes() {
+            hash ^= u64::from(value);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
     }
     hash
 }
@@ -21632,8 +21701,30 @@ mod tests {
         let legacy = emit(&program).expect("default program emits");
         let explicit_default =
             emit_with_policy(&program, EmissionPolicy::default()).expect("default policy emits");
-        let host_clock = emit_with_policy(&program, EmissionPolicy { host_clock: true })
-            .expect("host-clock policy emits");
+        let host_clock = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                host_clock: true,
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("host-clock policy emits");
+        let seeded = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                entropy: EmissionEntropyPolicy::Seeded(7),
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("seeded policy emits");
+        let host_entropy = emit_with_policy(
+            &program,
+            EmissionPolicy {
+                entropy: EmissionEntropyPolicy::Host,
+                ..EmissionPolicy::default()
+            },
+        )
+        .expect("host entropy policy emits");
 
         assert_eq!(legacy, explicit_default);
         assert_ne!(legacy.symbol, host_clock.symbol);
@@ -21645,6 +21736,19 @@ mod tests {
                 .contains("#define KILN_REALM_HOST_CLOCK 1")
         );
         assert!(host_clock.source.contains("UINT16_C(2)"));
+        assert_ne!(legacy.symbol, seeded.symbol);
+        assert_ne!(seeded.symbol, host_entropy.symbol);
+        assert!(
+            seeded
+                .source
+                .contains("#define KILN_REALM_ENTROPY_SEED UINT64_C(7)")
+        );
+        assert!(
+            host_entropy
+                .source
+                .contains("#define KILN_REALM_HOST_ENTROPY 1")
+        );
+        assert!(host_entropy.source.contains("UINT16_C(3)"));
     }
 
     #[test]
