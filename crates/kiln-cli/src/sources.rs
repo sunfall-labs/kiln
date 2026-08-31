@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::error::{Error, Result};
-use kiln_module_resolver::{NodePackageResolver, ResolutionKind};
+use kiln_module_resolver::{NodeModuleFormat, NodePackageResolver, ResolutionKind, ResolutionPolicy};
 use kiln_proto::{PackageResolution, source_digest};
 use rayon::prelude::*;
 
@@ -164,23 +164,45 @@ pub(crate) fn include_reachable_dependencies(
         let importer_path = importer.to_str().ok_or_else(|| {
             Error::BadInput(format!("path is not valid UTF-8: {}", importer.display()))
         })?;
-        let module = frontend_oxc::parse(importer_path, importer_text);
+        let resolved_importer = kiln_module_resolver::ResolvedModule::new(
+            importer.clone(),
+            ResolutionKind::Relative,
+        );
+        let commonjs = node
+            && resolver
+                .node_format(&resolved_importer)
+                .map_err(|error| Error::BadInput(error.to_string()))?
+                == Some(NodeModuleFormat::CommonJs);
+        let module = if commonjs {
+            frontend_oxc::parse_commonjs(importer_path, importer_text)
+        } else {
+            frontend_oxc::parse(importer_path, importer_text)
+        };
+        let requests = if commonjs {
+            kiln_hir::commonjs_literal_requires(&module)
+        } else {
+            module
+                .runtime_requested_modules()
+                .into_iter()
+                .map(|request| request.specifier.clone())
+                .collect()
+        };
 
-        for request in module.runtime_requested_modules() {
-            if node && kiln_module_resolver::NodeBuiltin::parse(&request.specifier).is_some() {
+        for specifier in requests {
+            if node && kiln_module_resolver::NodeBuiltin::parse(&specifier).is_some() {
                 // Builtins are typed virtual graph nodes. They have no source bytes or package
                 // metadata to synchronize, and the daemon's Node resolver materializes them.
                 continue;
             }
             let resolved = resolver
-                .resolve_with_metadata(&request.specifier, &importer)
+                .resolve_with_metadata(&specifier, &importer)
                 .map_err(|error| Error::BadInput(error.to_string()))?;
             let target = resolved.module.path;
             if resolved.module.kind == ResolutionKind::Package {
                 let package_json = resolved.package_json.ok_or_else(|| {
                     Error::BadInput(format!(
                         "package request `{}` resolved without a package manifest",
-                        request.specifier
+                        specifier
                     ))
                 })?;
                 let package_json_text =
@@ -194,10 +216,10 @@ pub(crate) fn include_reachable_dependencies(
                     ))
                 })?;
                 resolutions.insert(
-                    (importer_path.to_owned(), request.specifier.clone()),
+                    (importer_path.to_owned(), specifier.clone()),
                     PackageResolution {
                         importer: importer_path.to_owned(),
-                        specifier: request.specifier.clone(),
+                        specifier: specifier.clone(),
                         target: target.to_string_lossy().into_owned(),
                         package_json: package_json.to_owned(),
                         package_json_hash: source_digest(&package_json_text),

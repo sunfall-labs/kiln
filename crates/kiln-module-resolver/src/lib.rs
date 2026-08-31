@@ -734,6 +734,17 @@ impl ResolutionPolicy for PinnedPackageResolver {
     fn resolve(&self, specifier: &str, importer: &Path) -> Result<ResolvedModule, ResolveError> {
         PinnedPackageResolver::resolve(self, specifier, importer)
     }
+
+    fn node_format(
+        &self,
+        module: &ResolvedModule,
+    ) -> Result<Option<NodeModuleFormat>, ResolveError> {
+        if !self.node_builtins || module.kind == ResolutionKind::Builtin {
+            Ok(None)
+        } else {
+            Ok(Some(node_module_format_for_path(&module.path)?))
+        }
+    }
 }
 
 fn map_package_error(

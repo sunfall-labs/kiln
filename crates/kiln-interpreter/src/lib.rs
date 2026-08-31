@@ -3207,6 +3207,30 @@ pub struct Closure {
 /// the enclosing function after they run.
 pub type Cell = Rc<RefCell<Value>>;
 
+/// One statically resolved CommonJS `require` environment.
+///
+/// Targets are cells rather than copied values so insertion-before-evaluation and reassignment
+/// of `module.exports` have the same identity semantics as Node's module cache.
+#[derive(Debug, PartialEq)]
+pub struct CommonJsRequire {
+    targets: Vec<(String, Cell)>,
+}
+
+impl CommonJsRequire {
+    pub fn new(targets: impl IntoIterator<Item = (String, Cell)>) -> Self {
+        Self {
+            targets: targets.into_iter().collect(),
+        }
+    }
+
+    fn get(&self, specifier: &str) -> Option<Value> {
+        self.targets
+            .iter()
+            .find(|(candidate, _)| candidate == specifier)
+            .map(|(_, value)| value.borrow().clone())
+    }
+}
+
 /// Two closures are equal when they are the same object, which is what `===` asks.
 ///
 /// Structural equality would be wrong: two closures over different cells can have identical
@@ -3494,6 +3518,8 @@ pub enum Value {
     /// function fixes more arguments and leaves the first receiver in place, which falls out of
     /// nesting these and is awkward any other way.
     Bound(Rc<BoundFunction>),
+    /// A module-scoped CommonJS loader bound to already-resolved graph edges.
+    CommonJsRequire(Rc<CommonJsRequire>),
     /// A well-known symbol. User-created symbols need a realm-wide registry and do not exist yet.
     Symbol(Symbol),
     /// An object. Shared by `Rc` because objects have identity: `a === b` asks whether two
@@ -3603,6 +3629,7 @@ impl Value {
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
+            Self::CommonJsRequire(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
             Self::Proxy(proxy) => proxy.target.type_of(),
@@ -3640,6 +3667,7 @@ impl Value {
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
+            Self::CommonJsRequire(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
             Self::TypedArray(view) => view.kind.name(),
             Self::ArrayBuffer(_) => "arraybuffer",
@@ -3685,7 +3713,8 @@ impl Value {
             | Self::Promise(_)
             | Self::RegExp(_)
             | Self::Settler(..)
-            | Self::Bound(_) => f64::NAN,
+            | Self::Bound(_)
+            | Self::CommonJsRequire(_) => f64::NAN,
             // Coercion is defined on the target: the traps that could change it are `get` on
             // `valueOf` and `toString`, which this pure path cannot call anyway.
             Self::Proxy(proxy) => proxy.target.as_number(),
@@ -3740,6 +3769,7 @@ impl Value {
             | Self::Date(_)
             | Self::Settler(..)
             | Self::Bound(_)
+            | Self::CommonJsRequire(_)
             | Self::Proxy(_)
             | Self::TypedArray(_)
             | Self::ArrayBuffer(_)
@@ -3808,6 +3838,7 @@ impl Value {
             // No `n` suffix: that is the literal's spelling, not the value's.
             Self::BigInt(value) => value.to_string(),
             Self::Settler(..) | Self::Bound(_) => "function () { [native code] }".to_owned(),
+            Self::CommonJsRequire(_) => "function require() { [native code] }".to_owned(),
             Self::Proxy(proxy) => proxy.target.to_display_string(),
             // Like an array: `String(new Uint8Array([1, 2]))` is "1,2".
             Self::TypedArray(view) => join(&view.items(), ",").unwrap_or_default(),
@@ -4894,6 +4925,23 @@ pub fn namespace_entries(value: &Value) -> Vec<(String, Value)> {
             Property::Accessor { .. } => None,
         })
         .collect()
+}
+
+/// Construct an ordinary mutable object for a host-defined module wrapper.
+pub fn ordinary_object(entries: impl IntoIterator<Item = (String, Value)>) -> Value {
+    let mut data = ObjectData::default();
+    for (name, value) in entries {
+        data.set(&name, value);
+    }
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// Read one own data property from an interpreter object without invoking program code.
+pub fn own_data_property(value: &Value, name: &str) -> Option<Value> {
+    let Value::Object(object) = value else {
+        return None;
+    };
+    object.borrow().get_own(name).cloned()
 }
 
 /// Execute one linkage-aware module after its acyclic dependencies have completed.
@@ -8298,7 +8346,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // Both defer to `call_value`: a bound function knows its own receiver,
                         // and a proxy has to consult its `apply` trap before anything else can
                         // happen.
-                        Value::Bound(_) | Value::Proxy(_) => {
+                        Value::Bound(_) | Value::Proxy(_) | Value::CommonJsRequire(_) => {
                             let callee = callee.clone();
                             let arguments = self.take_arguments(argc, current)?;
                             let called =
@@ -14093,6 +14141,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let this_value = bound.this_value.clone();
                 self.call_value(&target, this_value, all, instruction)
             }
+            Value::CommonJsRequire(require) => {
+                let specifier = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                require.get(&specifier).ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: format!("CommonJS require target `{specifier}` is not in the graph"),
+                })
+            }
             Value::Function(closure) => {
                 let depth = self.frames.len();
                 // The shared call path expects a callee beneath the arguments and pops it.
@@ -19115,7 +19173,11 @@ fn json_stringify(
         Value::Native(Native::PrototypeOf(table)) if *table != PrototypeTable::Function => {
             Some("{}".to_owned())
         }
-        Value::Undefined | Value::Function(_) | Value::Native(_) | Value::Callback(_) => None,
+        Value::Undefined
+        | Value::Function(_)
+        | Value::Native(_)
+        | Value::Callback(_)
+        | Value::CommonJsRequire(_) => None,
         // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
         Value::Symbol(_) => None,
         Value::Null => Some("null".to_owned()),
@@ -23452,6 +23514,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         // Node prints the target's name with a "bound " prefix; without a name to prefix, the
         // fact that it is bound is the whole of what there is to say.
         Value::Bound(_) => "[Function: bound]".to_owned(),
+        Value::CommonJsRequire(_) => "[Function: require]".to_owned(),
         // Node shows what the traps produce; this shows the target, and says so, rather than
         // running a program's code because something was printed.
         Value::Proxy(proxy) => format!("Proxy [ {} ]", inspect_nested(&proxy.target, depth, seen)),
@@ -24533,6 +24596,7 @@ fn is_callable(value: &Value) -> bool {
             | Value::Callback(_)
             | Value::Settler(..)
             | Value::Bound(_)
+            | Value::CommonJsRequire(_)
             | Value::Proxy(_)
     )
 }

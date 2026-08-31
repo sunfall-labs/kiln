@@ -12,7 +12,7 @@ use std::time::Instant;
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
 use kiln_interpreter::{ExecutionLimits, execute, execute_node};
-use kiln_module_graph::{ModuleGraph, ModuleGraphError};
+use kiln_module_graph::ModuleGraph;
 use kiln_module_resolver::NodeRuntimeResolver;
 use kiln_runtime::CaptureHost;
 
@@ -99,17 +99,22 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
         Ok(resolver) => resolver,
         Err(error) => return failed(DiagnosticPhase::Harness, error.to_string(), started),
     };
-    let graph = match ModuleGraph::build_with_policy(path, resolver, |module_path| {
-        let source = fs::read_to_string(module_path).map_err(|error| ModuleGraphError::Source {
-            path: module_path.to_path_buf(),
-            message: error.to_string(),
-        })?;
-        let hir = parse_with_goal(&module_path.to_string_lossy(), &source, SourceGoal::Module);
-        kiln_ir::compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
-            path: module_path.to_path_buf(),
-            diagnostics,
-        })
-    }) {
+    struct NodeFrontend;
+    impl kiln_module_graph::Frontend for NodeFrontend {
+        fn parse(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+            parse_with_goal(path, source, SourceGoal::Module)
+        }
+
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> kiln_hir::Module {
+            parse_with_goal(path, source, SourceGoal::Script)
+        }
+    }
+    let graph = match ModuleGraph::build_node(
+        path,
+        resolver,
+        |module_path: &Path| fs::read_to_string(module_path),
+        NodeFrontend,
+    ) {
         Ok(graph) => graph,
         Err(error) => return failed(DiagnosticPhase::Compile, error.to_string(), started),
     };
