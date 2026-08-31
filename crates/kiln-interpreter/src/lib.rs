@@ -22455,7 +22455,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | CallbackMethod::FindIndex
                 | CallbackMethod::FindLast
                 | CallbackMethod::FindLastIndex
-        );
+        )
+        // A view has no holes to skip: its methods read each position with `Get` rather than
+        // asking `HasProperty` first, so the callback is called for every one of the `len`
+        // positions the walk started with. The distinction only shows once a resizable buffer
+        // has shrunk under the walk -- and that is exactly when skipping would end the
+        // iteration early instead of handing the callback the `undefined` it is owed.
+        || matches!(receiver, Value::TypedArray(_));
         let created = match method {
             CallbackMethod::Map => {
                 Some(self.array_species_create(receiver, length, instruction)?)
@@ -22650,6 +22656,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(receiver.clone())
     }
 
+    /// Whether a callback method hands its callback the receiver itself rather than a copy.
+    ///
+    /// Every one of these passes the object it is walking as the callback's last argument and
+    /// reads each element at the moment it visits it. A view handed to one got a *snapshot*
+    /// instead, and that is visible twice over: a write the callback performs on the view --
+    /// `a[i + 1] = 1`, which is the whole of what Test262's `values-are-not-cached` files do --
+    /// was invisible to the rest of the walk, and the third argument was an `Array` that a
+    /// program could tell apart from the view it had called the method on.
+    ///
+    /// `sort` is not one of them. Its comparator is handed two elements and never the receiver,
+    /// and the order a view sorts into with no comparator is numeric where an array's is
+    /// lexicographic -- so it keeps the copy that makes those two different sorts, and writes
+    /// the result back.
+    const fn callback_walks_live(method: CallbackMethod) -> bool {
+        !matches!(
+            method,
+            CallbackMethod::Sort
+                | CallbackMethod::GeneratorNext
+                | CallbackMethod::GeneratorReturn
+                | CallbackMethod::GeneratorThrow
+                | CallbackMethod::AsyncGeneratorNext
+                | CallbackMethod::AsyncGeneratorReturn
+                | CallbackMethod::AsyncGeneratorThrow
+        )
+    }
+
     /// `ValidateTypedArray(O, order)`: what stands at the head of every `%TypedArray%.prototype`
     /// method.
     ///
@@ -22727,10 +22759,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(native) => native.walks_an_array(),
             _ => false,
         };
-        let preserves_live_typed_array = matches!(
-            callee,
-            Value::Native(native) if native.creates_array_iterator()
-        ) && matches!(receiver, Value::TypedArray(_));
+        let preserves_live_typed_array = matches!(receiver, Value::TypedArray(_))
+            && match callee {
+                Value::Native(native) => native.creates_array_iterator(),
+                Value::Callback(method) => Self::callback_walks_live(*method),
+                _ => false,
+            };
         // `ValidateTypedArray`, which every `%TypedArray%.prototype` method performs before it
         // does anything else -- including before it coerces its arguments. This is the choke
         // point for it, because this is where a typed array receiver is recognised: the methods
