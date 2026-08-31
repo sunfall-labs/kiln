@@ -912,6 +912,7 @@ static size_t kiln_c99_diagnostic_instruction = 0;
 static uint64_t kiln_c99_diagnostic_method = 0;
 static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
 static int kiln_c99_diagnostic_has_method = 0;
+static const char *kiln_c99_diagnostic_detail = NULL;
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
  * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
@@ -6857,6 +6858,10 @@ static kiln_value kiln_c99_control_diagnostic(void) {
     if (kiln_c99_diagnostic_operation != NULL) {
         (void)kiln_c99_text_append_c(&text, " operation=");
         (void)kiln_c99_text_append_c(&text, kiln_c99_diagnostic_operation);
+    }
+    if (kiln_c99_diagnostic_detail != NULL) {
+        (void)kiln_c99_text_append_c(&text, " detail=");
+        (void)kiln_c99_text_append_c(&text, kiln_c99_diagnostic_detail);
     }
     if (kiln_c99_diagnostic_has_method) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_method);
@@ -15478,10 +15483,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY: {
             kiln_value name = argc > 1 ? kiln_c99_property_key(args[1]) : kiln_c99_undefined();
             if (argc < 3 || name.tag != KILN_VALUE_STRING) {
+                kiln_c99_diagnostic_detail = "Object.defineProperty invalid key or arity";
                 return KILN_C99_CONTROL_ERROR;
             }
             status = kiln_c99_define_property(host, args[0], name.ptr, name.len, args[2], depth,
                                               thrown);
+            if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL)
+                kiln_c99_diagnostic_detail = "Object.defineProperty rejected descriptor or target";
             /* The target, so a definition can be inlined into the expression that built it. */
             *result = args[0];
             return status;
@@ -17771,13 +17779,12 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                                      kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len),
                                      descriptor, depth, thrown);
     }
-    if (target.tag != KILN_VALUE_OBJECT) {
-        /* Only an ordinary object, whose every own property really is a slot in one list.
-         *
-         * A function's `name`, `length` and `prototype` are read from the closure rather than
-         * from its store, and an array's elements and `length` from the array itself -- so a
-         * definition of one of those names would land somewhere nothing reads it back, and
-         * `Object.defineProperty(f, "name", ...)` would look as though it had worked. */
+    if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_FUNCTION &&
+        kiln_c99_exotic_store(target) == NULL) {
+        /* References with an own-property store are valid targets. Their intrinsic names still
+         * need specialised descriptor handling, but an unrelated key must land in the same store
+         * ordinary reads already consult. This is what permits libraries to install a symbol
+         * hook on a constructor with `Object.defineProperty`. */
         return KILN_C99_CONTROL_ERROR;
     }
     /* Every field is read before anything is written, because a descriptor may be a program's
@@ -23144,6 +23151,7 @@ fn emit_instruction(
     )
     .unwrap();
     output.push_str("    kiln_c99_diagnostic_has_method = 0;\n");
+    output.push_str("    kiln_c99_diagnostic_detail = NULL;\n");
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
@@ -25093,6 +25101,16 @@ int main(void) {
             generated
                 .source
                 .contains("kiln_c99_diagnostic_operation = \"CallMethod(defineProperty)\";")
+        );
+        assert!(
+            generated
+                .source
+                .contains("kiln_c99_diagnostic_detail = NULL;")
+        );
+        assert!(
+            generated
+                .source
+                .contains("Object.defineProperty invalid key or arity")
         );
     }
 
