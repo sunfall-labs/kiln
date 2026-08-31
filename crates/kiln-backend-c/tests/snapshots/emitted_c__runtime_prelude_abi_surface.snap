@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 293
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -433,6 +432,7 @@ KILN_VALUE_COMMONJS_REQUIRE = 26
 #define KILN_C99_METHOD_ATOMICS_UNAVAILABLE 398
 #define KILN_C99_METHOD_SET_IMMEDIATE 399
 #define KILN_C99_METHOD_CLEAR_IMMEDIATE 400
+#define KILN_C99_METHOD_NODE_HTTP_SERVER 401
 #define KILN_C99_METHOD_TEMPORAL_FROM 285
 #define KILN_C99_METHOD_TEMPORAL_FROM_LAST 292
 #define KILN_C99_METHOD_TEMPORAL_COMPARE 293
@@ -496,6 +496,7 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
 static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
 typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
+static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
 typedef struct kiln_node_completion {
 typedef struct kiln_json_reader {
 typedef struct kiln_text {
