@@ -5843,9 +5843,8 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime.capabilities().entropy,
-        runtime.capabilities().clock,
-    );
+        runtime.capabilities(),
+    )?;
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
     // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
@@ -5903,9 +5902,8 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime.capabilities().entropy,
-        runtime.capabilities().clock,
-    );
+        runtime.capabilities(),
+    )?;
     vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
     let execution = runtime.enter(|| vm.run())?;
@@ -5949,9 +5947,8 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime.capabilities().entropy,
-        runtime.capabilities().clock,
-    );
+        runtime.capabilities(),
+    )?;
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
     // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
@@ -6342,9 +6339,8 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         host,
         locals,
         limits,
-        runtime.capabilities().entropy,
-        runtime.capabilities().clock,
-    );
+        runtime.capabilities(),
+    )?;
     if session.is_some() {
         vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
         vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
@@ -6974,7 +6970,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             dynamic_modules: std::collections::HashMap::new(),
             dynamic_namespaces: std::collections::HashMap::new(),
             limits,
-        }
+        })
     }
 
     /// Read the realm's civil-time clock.
