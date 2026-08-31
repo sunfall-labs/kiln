@@ -3092,7 +3092,7 @@ int main(void) {
             writeln!(
                 output,
                 "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &result, &result);\n    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
-                native_c_string(&node.path.to_string_lossy())
+                native_c_string(&logical_module_path(graph.project_root(), &node.path)?)
             )
             .unwrap();
             if node.path == graph.entry() {
@@ -3121,10 +3121,16 @@ int main(void) {
         // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
         // reference cannot cross the boundary and printing it is the only thing left to do with
         // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
+        //
+        // The name it says is the project-relative one, not `node.path`. An absolute path is a
+        // property of the machine that ran the build rather than of the program: it makes the
+        // launcher source differ between two checkouts of the same graph, which costs every
+        // sibling root the launcher object it should have reused, and it puts the builder's home
+        // directory inside the shipped executable.
         writeln!(
             output,
             "    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"module-enter\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
-            native_c_string(&node.path.to_string_lossy())
+            native_c_string(&logical_module_path(graph.project_root(), &node.path)?)
         )
         .unwrap();
         if node.path == graph.entry() {
