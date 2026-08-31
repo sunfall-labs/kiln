@@ -111,8 +111,8 @@ trap kiln_provider_cleanup EXIT
 # Keep the shipped manifest tied to the ABI the resolver validates. This is intentionally read from
 # the Rust source rather than duplicated as a second version constant in the shell packager.
 KILN_PROVIDER_ABI_VERSION=$(
-	sed -n 's/^pub(crate) const PROVIDER_ABI_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' \
-		crates/kiln-native/src/number_provider.rs
+	sed -n 's/^pub const PROVIDER_ABI_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' \
+		crates/kiln-native-number-abi/src/lib.rs
 )
 if [[ ! $KILN_PROVIDER_ABI_VERSION =~ ^[0-9]+$ ]]; then
 	printf 'could not determine number-provider ABI version\n' >&2
@@ -120,11 +120,11 @@ if [[ ! $KILN_PROVIDER_ABI_VERSION =~ ^[0-9]+$ ]]; then
 fi
 
 # The export list likewise, and for a sharper reason: the resolver rejects an archive whose
-# manifest does not name *exactly* the symbols it requires, so a list copied by hand here becomes a
-# packaged artifact nothing will link the first time either side of it grows a function.
+# manifest does not name *exactly* the symbols it requires. This intentionally bounded extraction
+# reads the registry entries, rather than maintaining another list in the packager.
 KILN_PROVIDER_EXPORTS=$(
-	sed -n '/^const REQUIRED_EXPORTS/,/^\];$/p' crates/kiln-native/src/number_provider.rs |
-		sed -n 's/^[[:space:]]*"\([A-Za-z0-9_]*\)",\{0,1\}$/"\1"/p' |
+	sed -n '/^macro_rules! provider_abi_registry/,/^}/p' crates/kiln-native-number-abi/src/lib.rs |
+		sed -n 's/.*\(kiln_[A-Za-z0-9_]*\).*/"\1"/p' |
 		paste -sd, -
 )
 if [[ -z $KILN_PROVIDER_EXPORTS ]]; then
@@ -142,6 +142,8 @@ KILN_PROVIDER_SOURCE_DIGEST=$(
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
 		crates/kiln-native-number-ffi/src/lib.rs \
+		crates/kiln-native-number-abi/Cargo.toml \
+		crates/kiln-native-number-abi/src/lib.rs \
 		crates/kiln-temporal/Cargo.toml \
 		crates/kiln-temporal/src/lib.rs \
 		crates/kiln-runtime/Cargo.toml \

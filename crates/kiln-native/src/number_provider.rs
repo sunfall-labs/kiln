@@ -8,11 +8,12 @@ use std::sync::Arc;
 
 use kiln_artifact_cache::Digest;
 use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
+pub(crate) use kiln_native_number_abi::PROVIDER_ABI_VERSION;
+use kiln_native_number_abi::PROVIDER_EXPORTS;
 use kiln_native_toolchain::ToolIdentity;
 use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
-pub(crate) const PROVIDER_ABI_VERSION: u32 = 14;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
@@ -21,73 +22,9 @@ const PROVIDER_RUSTFLAGS: &str =
     "-C panic=unwind -C relocation-model=pic -C target-cpu=generic -C debuginfo=0";
 const MANIFEST_ENV: &str = "KILN_NATIVE_NUMBER_PROVIDER_MANIFEST";
 const MANIFEST_FILE: &str = "kiln-native-number-provider.json";
-/// What a packaged archive has to define.
-///
-/// The regexp five joined the number two when the provider grew a second semantic core (ADR
-/// 0025), and the temporal fourteen joined them when the calendar engine did (ADR 0029 §4). The
-/// list is part of the identity below, so an archive built before them is rejected rather than
-/// linked and found wanting.
-const REQUIRED_EXPORTS: [&str; 58] = [
-    "kiln_realm_create",
-    "kiln_realm_enter",
-    "kiln_realm_is_active",
-    "kiln_realm_symbol_for",
-    "kiln_realm_symbol_key_for",
-    "kiln_realm_now",
-    "kiln_realm_now_nanoseconds",
-    "kiln_realm_queue_microtask",
-    "kiln_realm_queue_next_tick",
-    "kiln_realm_set_timeout",
-    "kiln_realm_set_interval",
-    "kiln_realm_clear_timer",
-    "kiln_realm_drive",
-    "kiln_realm_destroy",
-    "kiln_realm_read_file",
-    "kiln_realm_start_host_op",
-    "kiln_realm_start_active_host_op",
-    "kiln_realm_cancel_request",
-    "kiln_realm_cancel_active_request",
-    "kiln_realm_http_server_attach_active",
-    "kiln_realm_http_server_close_active",
-    "kiln_realm_http_client_attach_active",
-    "kiln_realm_http_client_start_active",
-    "kiln_realm_http_client_write_active",
-    "kiln_realm_http_client_end_active",
-    "kiln_realm_http_response_start_active",
-    "kiln_realm_http_response_write_active",
-    "kiln_realm_http_response_end_active",
-    "kiln_number_to_js_string",
-    "kiln_string_to_number",
-    "kiln_regexp_compile",
-    "kiln_regexp_free",
-    "kiln_regexp_search",
-    "kiln_regexp_group_count",
-    "kiln_regexp_group_name",
-    "kiln_bigint_parse",
-    "kiln_bigint_from_double",
-    "kiln_bigint_free",
-    "kiln_bigint_to_double",
-    "kiln_bigint_to_string",
-    "kiln_bigint_binary",
-    "kiln_bigint_negate",
-    "kiln_bigint_compare",
-    "kiln_bigint_is_zero",
-    "kiln_bigint_to_i128",
-    "kiln_temporal_from_fields",
-    "kiln_temporal_duration_from_fields",
-    "kiln_temporal_parse",
-    "kiln_temporal_now",
-    "kiln_temporal_instant_from_epoch_milliseconds",
-    "kiln_temporal_instant_from_epoch_nanoseconds",
-    "kiln_temporal_free",
-    "kiln_temporal_kind",
-    "kiln_temporal_get",
-    "kiln_temporal_to_string",
-    "kiln_temporal_compare",
-    "kiln_temporal_invoke",
-    "kiln_temporal_to_kind",
-    "kiln_temporal_last_error",
-];
+// `kiln-native-number-abi` owns the ordered export registry and ABI version. Keep the imported
+// contract private to this resolver module so manifest validation and source-build identities
+// cannot drift from the provider's compile-time signature assertions.
 
 #[derive(Debug, Clone)]
 pub(crate) struct NumberProvider {
@@ -353,9 +290,9 @@ fn validate_manifest(
     } else if manifest.profile != "release" {
         Some("the provider archive must use the `release` profile".to_owned())
     } else if manifest.exports
-        != REQUIRED_EXPORTS
-            .map(str::to_owned)
-            .into_iter()
+        != PROVIDER_EXPORTS
+            .iter()
+            .map(|name| (*name).to_owned())
             .collect::<Vec<_>>()
     {
         Some("the provider export list does not exactly match its private ABI".to_owned())
@@ -475,7 +412,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         rustc_digest_identity,
         env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_default(),
         env::var("KILN_LIBC_BASELINE").unwrap_or_default(),
-        REQUIRED_EXPORTS.join(","),
+        PROVIDER_EXPORTS.join(","),
     );
     Ok(NumberProvider {
         archive: archive.into(),
@@ -492,6 +429,8 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-number-core/src/lib.rs",
         "crates/kiln-native-number-ffi/Cargo.toml",
         "crates/kiln-native-number-ffi/src/lib.rs",
+        "crates/kiln-native-number-abi/Cargo.toml",
+        "crates/kiln-native-number-abi/src/lib.rs",
         // The calendar engine's adapter. It is compiled *into* this archive under the `temporal`
         // feature, so a change to it changes the archive -- and leaving it out of the identity is
         // how a native run keeps linking yesterday's calendar while the interpreter, which links
@@ -728,6 +667,11 @@ mod tests {
                 "crates/kiln-native-number-ffi/src/lib.rs",
                 b"ffi\n".as_slice(),
             ),
+            ("crates/kiln-native-number-abi/Cargo.toml", b"[package]\n"),
+            (
+                "crates/kiln-native-number-abi/src/lib.rs",
+                b"abi\n".as_slice(),
+            ),
             ("crates/kiln-temporal/Cargo.toml", b"[package]\n"),
             ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
@@ -747,7 +691,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("03536597f5f3e8bb3aefaf2b484d268e9c5ae9698f8741daf499c851d92d16df")
+            Digest::from_hex("77404309a771d9a232ca29d4e29df315be7443170d1ffd228418bf59f10784af")
                 .expect("fixture digest")
         );
     }
@@ -870,7 +814,7 @@ mod tests {
             "cpu_features": "generic",
             "deployment": "",
             "libc_baseline": "",
-            "exports": REQUIRED_EXPORTS.as_slice(),
+            "exports": PROVIDER_EXPORTS,
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
@@ -928,7 +872,7 @@ mod tests {
             "cpu_features": "generic",
             "deployment": "",
             "libc_baseline": "",
-            "exports": REQUIRED_EXPORTS.as_slice(),
+            "exports": PROVIDER_EXPORTS,
         });
         let manifest_path = root.0.join(MANIFEST_FILE);
         fs::write(
