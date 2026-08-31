@@ -806,10 +806,23 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         resource: ResourceId,
         completion: Completion,
     ) -> Option<Vec<node_stream::StreamAction>> {
-        self.http_connections
+        let idle_client = self
+            .http_connections
+            .get(&resource)
+            .is_some_and(|connection| connection.client_requests.is_some())
+            && !self.http_agent.has_active_request(resource);
+        let mut actions = self
+            .http_connections
             .get_mut(&resource)?
             .transport
-            .completed(completion)
+            .completed(completion)?;
+        if idle_client {
+            // A keep-alive connection may be reset after its response has completed and the Agent
+            // has made it idle. There is no language request left to reject, so expose the close
+            // transition but not the transport error. Busy connections still surface every error.
+            actions.retain(|action| !matches!(action, node_stream::StreamAction::Error(_)));
+        }
+        Some(actions)
     }
 
     /// Poll woken Hyper tasks and return bytes they selected for the existing HostOps stream.

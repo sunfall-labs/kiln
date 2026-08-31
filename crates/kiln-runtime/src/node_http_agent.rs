@@ -114,6 +114,18 @@ impl HttpAgent {
         }
     }
 
+    /// Whether this connection currently owns a request whose result is still observable.
+    ///
+    /// An idle keep-alive socket remains in the pool for reuse, but a peer closing that socket is
+    /// not a request failure. Transport adapters use this distinction to suppress idle-close
+    /// errors without hiding failures from a request that is still in flight.
+    pub fn has_active_request(&self, resource: ResourceId) -> bool {
+        self.resources
+            .get(&resource)
+            .and_then(|origin| self.origins.get(origin))
+            .is_some_and(|pool| pool.busy.contains_key(&resource))
+    }
+
     pub fn connect_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
         let Some(pool) = self.origins.get_mut(origin) else {
             return AgentFailure::Empty;
@@ -162,8 +174,11 @@ mod tests {
             agent.release(resource, true),
             AgentRelease::Dispatch { request: 2 }
         );
+        assert!(agent.has_active_request(resource));
         assert_eq!(agent.release(resource, true), AgentRelease::Idle);
+        assert!(!agent.has_active_request(resource));
         assert_eq!(agent.acquire(origin, 3), AgentDecision::Reuse(resource));
+        assert!(agent.has_active_request(resource));
     }
 
     #[test]
