@@ -213,6 +213,21 @@ pub enum Instruction {
     RestArguments(u32),
     /// Set an object's prototype. Stack is object, then prototype; the object is left.
     SetPrototype,
+    /// `super.x`: read the named property of the value on top -- the home object's prototype --
+    /// with the running function's `this` as the receiver. Stack: `[prototype] -> [value]`.
+    ///
+    /// Not two `GetProperty`s. The receiver is what a getter found up there is called with, and
+    /// an ordinary read would hand it the prototype: `class Q extends P { read() { return
+    /// super.who } }` asked `P.prototype`'s getter about `P.prototype` and answered `undefined`
+    /// where the instance had the value.
+    LoadSuperProperty(u32),
+    /// Read a value's `[[Prototype]]`. Stack: `[value] -> [prototype]`.
+    ///
+    /// The read half of [`Instruction::SetPrototype`], and it exists for exactly one caller:
+    /// `super.x` is a lookup on the *current* prototype of the object the method was defined on,
+    /// and reading it through `Object.getPrototypeOf` would let a program that replaced that
+    /// function change what `super` means.
+    LoadPrototype,
     /// `ToObject`, for the head of a `with`. Stack: `[value] -> [object]`.
     ///
     /// A primitive is boxed and `null` or `undefined` is a TypeError, which is what makes
@@ -1545,6 +1560,20 @@ struct Compiler {
     /// cannot serve: it returns to zero after each class, and the bindings are siblings in the
     /// same scope rather than nested.
     super_binding_count: usize,
+    /// The hidden `[[HomeObject]]` bindings of the methods currently being compiled, innermost
+    /// last.
+    ///
+    /// `super.x` is a lookup on the prototype of the object the *method* was defined on, which
+    /// is a different object from the parent constructor: `C.prototype` for an instance method,
+    /// `C` itself for a static one, and the literal for a method written in one. Resolving it
+    /// through the superclass binding instead answered `Parent.prototype` for all three -- so a
+    /// static method read the wrong object, and a method in a class with no `extends`, or in an
+    /// object literal, could not be compiled at all because there was no superclass binding to
+    /// read. A binding of its own, resolved exactly the way `%super` is, gives every one of them
+    /// the object the specification names.
+    home_bindings: Vec<String>,
+    /// Monotonic, for the reason `super_binding_count` is.
+    home_binding_count: usize,
     code: Vec<Instruction>,
     /// Lexical scopes of the function being compiled, innermost last. At module level the first
     /// entry is module scope itself.
@@ -1619,6 +1648,8 @@ impl Compiler {
             chains: Vec::new(),
             super_bindings: Vec::new(),
             super_binding_count: 0,
+            home_bindings: Vec::new(),
+            home_binding_count: 0,
             scopes: vec![HashMap::new()],
             local_count: 0,
             diagnostics: Vec::new(),
@@ -4201,12 +4232,11 @@ impl Compiler {
                 self.code.push(Instruction::Binary(BinaryOp::In));
             }
             ExpressionKind::SuperMember { property } => {
-                // `super.m` resolves on the parent's prototype, not on `this`.
-                self.load_super();
-                let prototype = self.constant_index(Constant::String("prototype".to_owned()));
-                self.code.push(Instruction::GetProperty(prototype));
+                // `super.m` resolves on the prototype of the object this method was defined on,
+                // not on `this` and not on the parent constructor.
+                self.load_home_prototype();
                 let name = self.constant_index(Constant::String(property.clone()));
-                self.code.push(Instruction::GetProperty(name));
+                self.code.push(Instruction::LoadSuperProperty(name));
             }
             ExpressionKind::Function(function) => {
                 // A function expression the source gave a name to can call itself by that name,
@@ -4522,6 +4552,28 @@ impl Compiler {
         }
         let mut pending = 0u32;
         let mut accumulating = false;
+        // A method written in a literal is defined *on the literal*, so `super.x` inside one
+        // reads the literal's own prototype. The binding is reserved before any member is
+        // compiled, because a method closes over it and is compiled before the object it will
+        // name exists; it is filled in once the literal is built, below.
+        //
+        // Only a method or an accessor gets one. `{ x: v }` and `{ ...o }` cannot contain a
+        // `super` that belongs to this literal -- a `super` written in a value position belongs
+        // to whatever method encloses the literal -- so a plain object literal emits exactly
+        // what it emitted before.
+        let home = members
+            .iter()
+            .any(|member| {
+                matches!(
+                    member,
+                    ObjectMember::Accessor { .. }
+                        | ObjectMember::Property(kiln_hir::ObjectProperty {
+                            form: kiln_hir::PropertyForm::Method,
+                            ..
+                        })
+                )
+            })
+            .then(|| self.declare_home_binding(span));
 
         for member in members {
             match member {
@@ -4554,7 +4606,17 @@ impl Compiler {
                         // computed key is an arbitrary expression and may have side effects.
                         ObjectKey::Computed(key) => self.expression(key),
                     }
+                    // A method's body is the only part of a member the literal's own home
+                    // covers. A value's is not: `{ v: super.m() }` inside a class method reads
+                    // that method's home, not this literal's.
+                    let method = property.form == kiln_hir::PropertyForm::Method;
+                    if method && let Some(home) = &home {
+                        self.home_bindings.push(home.clone());
+                    }
                     self.expression(&property.value);
+                    if method && home.is_some() {
+                        self.home_bindings.pop();
+                    }
                     pending += 1;
                 }
                 ObjectMember::Spread(source) => {
@@ -4583,7 +4645,14 @@ impl Compiler {
                         }
                         ObjectKey::Computed(key) => self.expression(key),
                     }
-                    let Some(index) = self.compile_function(function, span) else {
+                    if let Some(home) = &home {
+                        self.home_bindings.push(home.clone());
+                    }
+                    let compiled = self.compile_function(function, span);
+                    if home.is_some() {
+                        self.home_bindings.pop();
+                    }
+                    let Some(index) = compiled else {
                         return;
                     };
                     self.code.push(Instruction::MakeFunction(index));
@@ -4595,6 +4664,14 @@ impl Compiler {
             }
         }
         self.emit_object_segment(&mut pending, accumulating);
+        // The literal is the home object its methods were defined on, so it is what the binding
+        // they captured has to hold -- duplicated rather than reloaded, because the literal is
+        // also this expression's value.
+        if let Some(home) = &home {
+            self.code.push(Instruction::Dup);
+            let home = home.clone();
+            self.store_home_binding(&home);
+        }
     }
 
     /// Emit the pending run of key/value pairs as an object, merging it into the accumulator
@@ -4905,6 +4982,14 @@ impl Compiler {
             self.super_bindings.push(binding);
         }
 
+        // The two home objects a class has. An instance method, the constructor and every field
+        // initialiser are defined on `C.prototype`; a static method and a static field are
+        // defined on `C` itself. Declared here, before anything that could capture one is
+        // compiled, and filled in below once the constructor exists -- a method closes over the
+        // binding, not over what it held at the time.
+        let instance_home = self.declare_home_binding(class.span);
+        let static_home = self.declare_home_binding(class.span);
+
         // Bound before the body is compiled, so a method can refer to the class by name.
         self.variable(VariableKind::Let, &name, None, class.span);
 
@@ -4972,7 +5057,8 @@ impl Compiler {
             .iter()
             .filter(|field| !field.is_static)
             .collect();
-        let Some(index) = self.compile_constructor(
+        self.home_bindings.push(instance_home.clone());
+        let compiled = self.compile_constructor(
             &constructor,
             class.span,
             // A *derived* class with no constructor is not empty: it forwards its arguments to
@@ -4981,7 +5067,9 @@ impl Compiler {
             synthesized_derived,
             &private_elements,
             &instance_fields,
-        ) else {
+        );
+        self.home_bindings.pop();
+        let Some(index) = compiled else {
             return;
         };
 
@@ -5014,7 +5102,17 @@ impl Compiler {
             self.code.push(Instruction::Pop);
         }
 
+        // Filled after the prototype link, so that reading `C.prototype`'s own prototype from
+        // inside a method answers the parent's -- and before the static fields, because a static
+        // field initialiser runs *now* and may be the first thing to read one.
+        self.load_local_or_cell(local);
+        self.store_home_binding(&static_home);
+        self.load_local_or_cell(local);
+        self.code.push(Instruction::GetProperty(prototype));
+        self.store_home_binding(&instance_home);
+
         // Static fields are ordinary properties of the constructor, assigned once here.
+        self.home_bindings.push(static_home.clone());
         for field in class.fields.iter().filter(|field| field.is_static) {
             self.load_local_or_cell(local);
             match &field.key {
@@ -5036,9 +5134,17 @@ impl Compiler {
             }
             self.code.push(Instruction::Pop);
         }
+        self.home_bindings.pop();
 
         for method in &class.methods {
-            let Some(body) = self.compile_function(&method.function, class.span) else {
+            self.home_bindings.push(if method.is_static {
+                static_home.clone()
+            } else {
+                instance_home.clone()
+            });
+            let compiled = self.compile_function(&method.function, class.span);
+            self.home_bindings.pop();
+            let Some(body) = compiled else {
                 return;
             };
 
@@ -5107,6 +5213,64 @@ impl Compiler {
         self.private_declarations
             .pop()
             .expect("this class pushed its own private names");
+    }
+
+    /// Push the `[[Prototype]]` of the home object of the method currently being compiled.
+    ///
+    /// Read at each `super.x` rather than fixed when the method was defined, because that is
+    /// where the specification reads it: `Object.setPrototypeOf(C.prototype, X)` changes what
+    /// `super` means inside `C`'s methods from that moment on, and a link recorded at class
+    /// definition would keep answering the old one.
+    fn load_home_prototype(&mut self) {
+        let Some(binding) = self.home_bindings.last().cloned() else {
+            // Unreachable from any program the frontend accepts -- `super.x` outside a method is
+            // a syntax error before it reaches here -- so this reports rather than invents.
+            self.error(None, "`super` outside of a method");
+            self.push_constant(Constant::Undefined);
+            return;
+        };
+        match self.resolve_or_capture(&binding) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot));
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
+            Resolution::Unresolved => {
+                self.error(None, "`super` outside of a method");
+                self.push_constant(Constant::Undefined);
+                return;
+            }
+        }
+        self.code.push(Instruction::LoadPrototype);
+    }
+
+    /// Reserve a hidden binding for a home object, celled so a method body can capture it.
+    ///
+    /// The value is stored later, by [`Compiler::store_home_binding`], because the object it
+    /// names does not exist yet when the methods that capture it are compiled -- a method
+    /// closes over the *binding*, and reads it when it runs.
+    fn declare_home_binding(&mut self, span: Span) -> String {
+        let binding = format!("%home{}", self.home_binding_count);
+        self.home_binding_count += 1;
+        self.captured.insert(binding.clone());
+        self.variable(VariableKind::Let, &binding, None, span);
+        binding
+    }
+
+    /// Store the value on top of the stack into a hidden home binding, consuming it.
+    fn store_home_binding(&mut self, binding: &str) {
+        match self.resolve(binding) {
+            Resolution::Local(local) => self.code.push(if local.celled {
+                Instruction::StoreCell(local.slot)
+            } else {
+                Instruction::StoreLocal(local.slot)
+            }),
+            _ => {
+                self.error(None, "a home object binding lost its slot");
+                self.code.push(Instruction::Pop);
+            }
+        }
     }
 
     /// Push the parent constructor of the class currently being compiled.
@@ -6163,19 +6327,17 @@ impl Compiler {
             return;
         }
         match &callee.kind {
-            // `super.m(...)` resolves the function on the parent's prototype but runs it against
-            // the current `this` -- that is the whole point of it, and an ordinary call would
-            // lose the receiver.
-            ExpressionKind::SuperMember { .. } if !spreading => {
-                self.expression(callee);
-                let argc = self.emit_arguments(arguments);
-                self.code.push(Instruction::SuperCall { argc });
-                return;
-            }
+            // `super.m(...)` resolves the method on the home object's prototype but runs it
+            // against the current receiver, which is precisely the `[this, callee, arguments]`
+            // shape `Apply` takes -- no dedicated instruction is needed for either half.
+            //
+            // The spread-free spelling used `SuperCall` instead, which is *construction*: it
+            // treats the value it pops as a parent constructor. That was invisible while
+            // `super.x` could only reach a compiled method, and stopped being so the moment it
+            // could reach `Object.prototype` -- `super.toString()` in a base class reported that
+            // `Object.prototype.toString` is not a constructor. `SuperCall` now means `super()`
+            // and nothing else.
             ExpressionKind::SuperMember { .. } => {
-                // `super.m(...xs)` resolves the method on the parent but runs it against the
-                // current receiver, which is precisely the `[this, callee, arguments]` shape
-                // `Apply` takes -- no dedicated instruction is needed for this half.
                 self.code.push(Instruction::LoadThis);
                 self.expression(callee);
                 self.array_literal(arguments, span);

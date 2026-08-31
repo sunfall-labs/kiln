@@ -11976,6 +11976,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.stack.push(value);
                 }
+                // The read half of `SetPrototype`, and `super.x`'s first step: the object a
+                // method was defined on answers with the link it carries at this moment rather
+                // than the one it carried when the class was written.
+                Instruction::LoadPrototype => {
+                    let value = self.pop(current)?;
+                    let prototype = prototype_of(&value);
+                    self.stack.push(prototype);
+                }
                 Instruction::SetPrototype => {
                     let prototype = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -12796,6 +12804,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Catchable: a proxy trap and a getter are both ordinary code, and what
                     // they throw is the program's to handle.
                     let read = self.read_property(&target, &name, current);
+                    let Some(value) = self.catchable(read, current)? else {
+                        continue;
+                    };
+                    self.stack.push(value);
+                }
+                // `super.x`. The prototype answers *which* property, and `this` answers who a
+                // getter up there is asked about -- which is the whole reason this is not the
+                // ordinary read: a method reaching an inherited accessor through `super` is
+                // asking it about the instance, not about the prototype it was found on.
+                Instruction::LoadSuperProperty(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let target = self.pop(current)?;
+                    if target.is_nullish() {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot read properties of {} (reading '{name}')",
+                                target.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let receiver = self.this_value.clone();
+                    let read = self.read_computed_with_receiver(
+                        &target,
+                        &Value::String(name),
+                        &receiver,
+                        current,
+                    );
                     let Some(value) = self.catchable(read, current)? else {
                         continue;
                     };
