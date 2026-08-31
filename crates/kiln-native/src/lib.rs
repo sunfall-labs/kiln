@@ -1926,8 +1926,61 @@ fn native_builtin_supports_export(
     builtin: kiln_module_resolver::NodeBuiltin,
     export_name: &str,
 ) -> bool {
-    kiln_node_abi::builtin_abi(builtin.specifier())
-        .is_some_and(|abi| abi.exports.contains(&export_name))
+    native_builtin_supported_exports(builtin).contains(&export_name)
+}
+
+/// Names whose native materializer carries an implementation rather than an alignment slot.
+///
+/// `kiln-node-abi` describes the Node-visible module surface shared by every execution mode. A
+/// native materializer may deliberately implement a smaller subset, so using that full table as
+/// the support predicate turns an `undefined` alignment slot into a claimed implementation. Keep
+/// the subset explicit until the corresponding C methods exist; the slot invariant below proves
+/// that each body still follows the authoritative full-table order.
+fn native_builtin_supported_exports(
+    builtin: kiln_module_resolver::NodeBuiltin,
+) -> &'static [&'static str] {
+    use kiln_module_resolver::NodeBuiltin;
+
+    match builtin {
+        NodeBuiltin::Events => &["EventEmitter", "default"],
+        NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
+        NodeBuiltin::Http => &["Server", "createServer", "default", "get", "request"],
+        NodeBuiltin::Util => &[
+            "debuglog",
+            "default",
+            "deprecate",
+            "format",
+            "inherits",
+            "inspect",
+        ],
+        NodeBuiltin::DiagnosticsChannel => {
+            &["channel", "default", "hasSubscribers", "tracingChannel"]
+        }
+        NodeBuiltin::Https => &["createServer", "default"],
+        NodeBuiltin::Http2 => &["createSecureServer", "createServer", "default"],
+        NodeBuiltin::Dns => &["default", "lookup"],
+        NodeBuiltin::Os => &["default", "hostname", "networkInterfaces"],
+        NodeBuiltin::Tty => &["default", "isatty"],
+        NodeBuiltin::Stream => &[
+            "Readable",
+            "Writable",
+            "addAbortSignal",
+            "default",
+            "finished",
+        ],
+        NodeBuiltin::PerfHooks => &["default", "performance"],
+        NodeBuiltin::FsPromises => &["readFile", "stat", "writeFile"],
+        NodeBuiltin::Fs => &["default", "existsSync", "promises"],
+        NodeBuiltin::Path => &["default", "isAbsolute", "join", "resolve", "sep"],
+        NodeBuiltin::Assert => &["default", "ok", "strict"],
+        NodeBuiltin::WorkerThreads => &["Worker", "default"],
+        NodeBuiltin::Module => &["createRequire", "default"],
+        NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
+        NodeBuiltin::Buffer => &["Buffer", "constants", "default"],
+        NodeBuiltin::AsyncHooks => &["AsyncResource", "default"],
+        NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
+        _ => &[],
+    }
 }
 
 fn emit_native_graph_module(
@@ -2131,9 +2184,27 @@ status = kiln_c99_put(host, namespace, "hostname", 8, hostname, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "networkInterfaces", 17, network_interfaces, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = namespace;
-exports[1] = hostname;
-exports[2] = network_interfaces;"#,
+exports[0] = kiln_c99_undefined();
+exports[1] = kiln_c99_undefined();
+exports[2] = kiln_c99_undefined();
+exports[3] = kiln_c99_undefined();
+exports[4] = namespace;
+exports[5] = kiln_c99_undefined();
+exports[6] = kiln_c99_undefined();
+exports[7] = kiln_c99_undefined();
+exports[8] = kiln_c99_undefined();
+exports[9] = hostname;
+exports[10] = kiln_c99_undefined();
+exports[11] = kiln_c99_undefined();
+exports[12] = network_interfaces;
+exports[13] = kiln_c99_undefined();
+exports[14] = kiln_c99_undefined();
+exports[15] = kiln_c99_undefined();
+exports[16] = kiln_c99_undefined();
+exports[17] = kiln_c99_undefined();
+exports[18] = kiln_c99_undefined();
+exports[19] = kiln_c99_undefined();
+exports[20] = kiln_c99_undefined();"#,
         ),
         NodeBuiltin::Tty => Some(
             r#"kiln_value isatty = kiln_c99_method(KILN_C99_METHOD_NODE_TTY_ISATTY);
@@ -2205,9 +2276,26 @@ status = kiln_c99_put(host, namespace, "existsSync", 10, exists_sync, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "promises", 8, promises, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = namespace;
-exports[1] = exists_sync;
-exports[2] = promises;"#,
+exports[0] = kiln_c99_undefined();
+exports[1] = kiln_c99_undefined();
+exports[2] = kiln_c99_undefined();
+exports[3] = kiln_c99_undefined();
+exports[4] = namespace;
+exports[5] = exists_sync;
+exports[6] = kiln_c99_undefined();
+exports[7] = kiln_c99_undefined();
+exports[8] = kiln_c99_undefined();
+exports[9] = promises;
+exports[10] = kiln_c99_undefined();
+exports[11] = kiln_c99_undefined();
+exports[12] = kiln_c99_undefined();
+exports[13] = kiln_c99_undefined();
+exports[14] = kiln_c99_undefined();
+exports[15] = kiln_c99_undefined();
+exports[16] = kiln_c99_undefined();
+exports[17] = kiln_c99_undefined();
+exports[18] = kiln_c99_undefined();
+exports[19] = kiln_c99_undefined();"#,
         ),
         NodeBuiltin::Path => Some(
             r#"kiln_value is_absolute = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE);
@@ -2224,11 +2312,20 @@ status = kiln_c99_put(host, namespace, "resolve", 7, resolve, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "sep", 3, kiln_c99_copy_text("/", 1), 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = namespace;
-exports[1] = is_absolute;
-exports[2] = join;
-exports[3] = resolve;
-exports[4] = kiln_c99_copy_text("/", 1);"#,
+exports[0] = kiln_c99_undefined();
+exports[1] = namespace;
+exports[2] = kiln_c99_undefined();
+exports[3] = kiln_c99_undefined();
+exports[4] = kiln_c99_undefined();
+exports[5] = kiln_c99_undefined();
+exports[6] = is_absolute;
+exports[7] = join;
+exports[8] = kiln_c99_undefined();
+exports[9] = kiln_c99_undefined();
+exports[10] = kiln_c99_undefined();
+exports[11] = kiln_c99_undefined();
+exports[12] = resolve;
+exports[13] = kiln_c99_copy_text("/", 1);"#,
         ),
         NodeBuiltin::Assert => Some(
             r#"kiln_value assert = kiln_c99_method(KILN_C99_METHOD_NODE_ASSERT_OK);
@@ -4846,7 +4943,7 @@ mod tests {
             "native Node execution does not yet materialize the `node:querystring` builtin"
         );
         assert!(native_builtin_body(NodeBuiltin::QueryString).is_none());
-        assert!(native_builtin_supports_export(
+        assert!(!native_builtin_supports_export(
             NodeBuiltin::QueryString,
             "parse"
         ));
@@ -9863,8 +9960,8 @@ int main(int argc, char **argv) {{
 
     /// Every native builtin body must fill exactly the slots the shared export table declares.
     ///
-    /// The bodies index `exports[]` by position, and the positions are decided in another crate
-    /// by `node_builtin_export_names`. Nothing makes that a compile error, and it has already
+    /// The bodies index `exports[]` by position, and the positions are decided in the leaf ABI
+    /// crate. Nothing makes that a compile error, and it has already
     /// broken once: `node:http`'s body was written against a six-name list, the table later grew
     /// three names at the front, and every slot shifted by two without a single warning. The
     /// result was not a refusal but a wrong answer - `default` bound to `request`, `createServer`
@@ -9876,18 +9973,22 @@ int main(int argc, char **argv) {{
     fn native_builtin_slots_match_the_shared_export_table() {
         use kiln_module_resolver::NodeBuiltin;
 
-        for builtin in [
-            NodeBuiltin::Events,
-            NodeBuiltin::Net,
-            NodeBuiltin::Http,
-            NodeBuiltin::Tty,
-        ] {
+        for builtin in NodeBuiltin::ALL.iter().copied() {
             let Some(body) = native_builtin_body(builtin) else {
-                panic!("{} has no native body", builtin.specifier());
+                // Resolver-known but not-yet-materialized builtins are deliberately rejected by
+                // `validate_native_node_builtins`; they have no native slot contract to check.
+                continue;
             };
             let specifier = builtin.specifier();
-            let declared = kiln_interpreter::node_builtin_export_names(specifier)
-                .unwrap_or_else(|| panic!("{specifier} has no declared export names"));
+            let abi = kiln_node_abi::builtin_abi(specifier)
+                .unwrap_or_else(|| panic!("{specifier} has no declared Node ABI row"));
+            for supported in native_builtin_supported_exports(builtin) {
+                assert!(
+                    abi.exports.contains(supported),
+                    "{specifier} claims native export `{supported}` outside its declared ABI {:?}",
+                    abi.exports
+                );
+            }
 
             let mut assigned: Vec<usize> = body
                 .lines()
@@ -9900,16 +10001,42 @@ int main(int argc, char **argv) {{
                 })
                 .collect();
             assigned.sort_unstable();
-            assigned.dedup();
 
-            let expected: Vec<usize> = (0..declared.len()).collect();
+            let expected: Vec<usize> = (0..abi.exports.len()).collect();
             assert_eq!(
                 assigned, expected,
-                "{specifier} assigns slots {assigned:?} but its declared exports are {declared:?}; \
+                "{specifier} assigns slots {assigned:?} but its declared exports are {:?}; \
+                 a duplicate slot is also invalid; \
                  a body that skips a slot leaves an export `undefined` and one that overruns \
-                 writes past the array"
+                 writes past the array",
+                abi.exports
             );
         }
+    }
+
+    #[test]
+    fn native_builtin_support_is_the_materialized_subset_not_the_declared_surface() {
+        use kiln_module_resolver::NodeBuiltin;
+
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::Fs,
+            "existsSync"
+        ));
+        assert!(!native_builtin_supports_export(
+            NodeBuiltin::Fs,
+            "accessSync"
+        ));
+        assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
+        assert!(!native_builtin_supports_export(
+            NodeBuiltin::Path,
+            "basename"
+        ));
+        assert!(native_builtin_supports_export(NodeBuiltin::Os, "hostname"));
+        assert!(!native_builtin_supports_export(NodeBuiltin::Os, "platform"));
+        assert!(!native_builtin_supports_export(
+            NodeBuiltin::Http,
+            "IncomingMessage"
+        ));
     }
 
     #[test]
