@@ -147,6 +147,10 @@ pub fn run(
         match batch {
             Ok(batch) => {
                 let target_changed = batch.iter().any(|event| target.matches(event));
+                let resolution_metadata_changed = batch
+                    .iter()
+                    .flat_map(|event| event.paths.iter())
+                    .any(|event_path| is_package_resolution_metadata(&project_dir, event_path));
                 let dependency_paths = batch
                     .iter()
                     .flat_map(|event| event.paths.iter())
@@ -166,15 +170,20 @@ pub fn run(
                             .keys()
                             .any(|source| Path::new(source).starts_with(event_path))
                     });
-                if !target_changed && dependency_paths.is_empty() && !source_tree_removed {
+                if !target_changed
+                    && dependency_paths.is_empty()
+                    && !source_tree_removed
+                    && !resolution_metadata_changed
+                {
                     continue;
                 }
 
                 // Existing dependencies can be updated directly from the event batch. A removal
                 // needs an authoritative sync because Sync omission is the protocol's deletion
                 // operation; this is deliberately the uncommon slow path.
-                let mut dependency_changed = source_tree_removed;
-                let mut authoritative_sync = !project_synced || source_tree_removed;
+                let mut dependency_changed = source_tree_removed || resolution_metadata_changed;
+                let mut authoritative_sync =
+                    !project_synced || source_tree_removed || resolution_metadata_changed;
                 let mut dependency_updates = Vec::new();
                 for dependency in dependency_paths {
                     match commands::read_source(&dependency) {
@@ -319,6 +328,11 @@ fn is_synchronized_source(manifest: &commands::SourceManifest, path: &Path) -> b
         .ok()
         .and_then(|path| path.to_str().map(str::to_owned))
         .is_some_and(|path| manifest.contains_key(&path))
+}
+
+/// Package metadata participates in the pinned resolution map rather than the source manifest.
+fn is_package_resolution_metadata(project_root: &Path, path: &Path) -> bool {
+    path.starts_with(project_root) && path.file_name().is_some_and(|name| name == "package.json")
 }
 
 /// Where the watch is registered, and what the file is called inside it.
@@ -1454,6 +1468,83 @@ mod tests {
 
         assert!(!sources::is_discoverable(&dir, &package));
         assert!(is_synchronized_source(&manifest, &package));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn package_manifest_paths_are_resolution_metadata_not_sources() {
+        let root = Path::new("/project");
+
+        assert!(is_package_resolution_metadata(
+            root,
+            Path::new("/project/package.json")
+        ));
+        assert!(is_package_resolution_metadata(
+            root,
+            Path::new("/project/node_modules/pkg/package.json")
+        ));
+        assert!(!is_package_resolution_metadata(
+            root,
+            Path::new("/project/node_modules/pkg/package-lock.json")
+        ));
+        assert!(!is_package_resolution_metadata(
+            root,
+            Path::new("/other/package.json")
+        ));
+    }
+
+    #[test]
+    fn a_package_manifest_edit_reconciles_the_resolution_map() {
+        let dir = scratch("package-manifest");
+        let entry = dir.join("main.js");
+        let package = dir.join("node_modules/pkg");
+        std::fs::create_dir_all(&package).expect("create package");
+        std::fs::write(&entry, "import { value } from 'pkg'; console.log(value);\n")
+            .expect("write entry");
+        std::fs::write(package.join("a.js"), "export const value = 'a';\n")
+            .expect("write first target");
+        std::fs::write(package.join("b.js"), "export const value = 'b';\n")
+            .expect("write second target");
+        let manifest = package.join("package.json");
+        std::fs::write(&manifest, r#"{"exports":"./a.js"}"#).expect("write manifest");
+
+        let (printed, _, requests) = watch_in_background_observed(&entry);
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initial run");
+        let initial = requests.try_iter().collect::<Vec<_>>();
+        let initial_resolution = initial.iter().find_map(|request| match request {
+            Request::Sync { resolutions, .. } => resolutions.entries.first(),
+            _ => None,
+        });
+        assert!(
+            initial_resolution
+                .is_some_and(|resolution| resolution.target.ends_with("/node_modules/pkg/a.js")),
+            "initial resolution must target a.js: {initial:?}"
+        );
+
+        std::fs::write(&manifest, r#"{"exports":"./b.js"}"#).expect("retarget package");
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("package metadata edit must rerun the entry");
+        let changed = requests.try_iter().collect::<Vec<_>>();
+        let changed_resolution = changed.iter().find_map(|request| match request {
+            Request::Sync { resolutions, .. } => resolutions.entries.first(),
+            _ => None,
+        });
+        assert!(
+            changed_resolution
+                .is_some_and(|resolution| resolution.target.ends_with("/node_modules/pkg/b.js")),
+            "metadata edit must publish the new resolution: {changed:?}"
+        );
+        assert!(
+            !changed.iter().any(|request| matches!(
+                request,
+                Request::StageSource { path, .. } if path.ends_with("/package.json")
+            )),
+            "package metadata is authority input, not executable source: {changed:?}"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
