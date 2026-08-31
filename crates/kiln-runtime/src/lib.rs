@@ -1107,49 +1107,11 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return events;
         };
         while let Ok(event) = receiver.try_recv() {
-            let id = match &event {
-                hyper_http::ClientEvent::ResponseHead { id, .. }
-                | hyper_http::ClientEvent::Ready { id }
-                | hyper_http::ClientEvent::ResponseData { id, .. }
-                | hyper_http::ClientEvent::ResponseEnd { id }
-                | hyper_http::ClientEvent::Error { id, .. } => Some(*id),
-                hyper_http::ClientEvent::Closed => None,
-            };
-            if id.is_some_and(|id| connection.completed_client_requests.contains(&id)) {
-                continue;
+            if let Some(event) =
+                map_http1_client_event(event, &mut connection.completed_client_requests)
+            {
+                events.push(event);
             }
-            let terminal = matches!(
-                event,
-                hyper_http::ClientEvent::ResponseEnd { .. } | hyper_http::ClientEvent::Error { .. }
-            );
-            let mapped = match event {
-                hyper_http::ClientEvent::Ready { id } => RuntimeHttpClientEvent::Ready { id },
-                hyper_http::ClientEvent::ResponseHead {
-                    id,
-                    status,
-                    reason,
-                    headers,
-                } => RuntimeHttpClientEvent::ResponseHead {
-                    id,
-                    status,
-                    reason,
-                    headers,
-                },
-                hyper_http::ClientEvent::ResponseData { id, data } => {
-                    RuntimeHttpClientEvent::ResponseData { id, data }
-                }
-                hyper_http::ClientEvent::ResponseEnd { id } => {
-                    RuntimeHttpClientEvent::ResponseEnd { id }
-                }
-                hyper_http::ClientEvent::Error { id, message } => {
-                    RuntimeHttpClientEvent::Error { id, message }
-                }
-                hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
-            };
-            if terminal && let Some(id) = id {
-                connection.completed_client_requests.insert(id);
-            }
-            events.push(mapped);
         }
         events
     }
@@ -1215,6 +1177,56 @@ struct RuntimeHttpConnection {
     client_bodies: BTreeMap<u64, ResponseBodyDriver>,
     client_body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
     completed_client_requests: HashSet<u64>,
+}
+
+fn map_http1_client_event(
+    event: hyper_http::ClientEvent,
+    completed: &mut HashSet<u64>,
+) -> Option<RuntimeHttpClientEvent> {
+    let id = match &event {
+        hyper_http::ClientEvent::ResponseHead { id, .. }
+        | hyper_http::ClientEvent::Ready { id }
+        | hyper_http::ClientEvent::ResponseData { id, .. }
+        | hyper_http::ClientEvent::ResponseEnd { id }
+        | hyper_http::ClientEvent::Error { id, .. } => Some(*id),
+        hyper_http::ClientEvent::Closed => None,
+    };
+    // Ready follows ResponseEnd and authorizes Agent reuse; it must survive terminal-ID filtering.
+    if !matches!(event, hyper_http::ClientEvent::Ready { .. })
+        && id.is_some_and(|id| completed.contains(&id))
+    {
+        return None;
+    }
+    let terminal = matches!(
+        event,
+        hyper_http::ClientEvent::ResponseEnd { .. } | hyper_http::ClientEvent::Error { .. }
+    );
+    let mapped = match event {
+        hyper_http::ClientEvent::Ready { id } => RuntimeHttpClientEvent::Ready { id },
+        hyper_http::ClientEvent::ResponseHead {
+            id,
+            status,
+            reason,
+            headers,
+        } => RuntimeHttpClientEvent::ResponseHead {
+            id,
+            status,
+            reason,
+            headers,
+        },
+        hyper_http::ClientEvent::ResponseData { id, data } => {
+            RuntimeHttpClientEvent::ResponseData { id, data }
+        }
+        hyper_http::ClientEvent::ResponseEnd { id } => RuntimeHttpClientEvent::ResponseEnd { id },
+        hyper_http::ClientEvent::Error { id, message } => {
+            RuntimeHttpClientEvent::Error { id, message }
+        }
+        hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
+    };
+    if terminal && let Some(id) = id {
+        completed.insert(id);
+    }
+    Some(mapped)
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
@@ -2524,6 +2536,32 @@ pub fn duration_from_milliseconds(milliseconds: f64) -> Duration {
 mod tests {
     use super::*;
 
+    #[test]
+    fn client_ready_survives_terminal_request_deduplication() {
+        let mut completed = HashSet::new();
+        assert!(matches!(
+            map_http1_client_event(
+                hyper_http::ClientEvent::ResponseEnd { id: 7 },
+                &mut completed,
+            ),
+            Some(RuntimeHttpClientEvent::ResponseEnd { id: 7 })
+        ));
+        assert!(matches!(
+            map_http1_client_event(hyper_http::ClientEvent::Ready { id: 7 }, &mut completed,),
+            Some(RuntimeHttpClientEvent::Ready { id: 7 })
+        ));
+        assert!(
+            map_http1_client_event(
+                hyper_http::ClientEvent::ResponseData {
+                    id: 7,
+                    data: b"stale".to_vec(),
+                },
+                &mut completed,
+            )
+            .is_none()
+        );
+    }
+
     fn request_events(events: &[RuntimeHttpEvent]) -> (u64, &node_http::HttpRequest, Vec<u8>) {
         let [
             RuntimeHttpEvent::RequestHead { id, request },
@@ -3586,6 +3624,9 @@ mod tests {
             },
             false,
         );
+        assert!(!runtime.host().has_referenced_work());
+        let mut realm = Realm::<(), ()>::new();
+        assert!(runtime.next_referenced_turn(&mut realm).is_none());
         let response_write = runtime.start_host_op(
             AsyncHostOp::TcpWrite {
                 stream: server.id,

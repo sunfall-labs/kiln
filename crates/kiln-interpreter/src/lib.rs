@@ -16,7 +16,7 @@ use kiln_runtime::{
     ActiveHttpRuntime, Realm, RealmRuntime, RuntimeHttpClientEvent, RuntimeHttpClientRequest,
     RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
     node_http::HttpResponseEvent,
-    node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
+    node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
     node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, StreamEvent},
 };
@@ -7362,21 +7362,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )
                 } {
                     AgentDecision::Connect => {
-                        let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
-                            instruction,
-                            message: "node:http client requires the Node execution Adapter".into(),
-                        })?;
-                        let request = unsafe {
-                            ActiveAsyncHostOps::start(
-                                &mut *host_ops,
-                                AsyncHostOp::TcpConnect { host, port },
-                                true,
-                            )
-                        };
-                        self.push_pending_node(PendingNodeRequest::Connect {
-                            request,
-                            target: PendingConnect::Http(Rc::clone(&state)),
-                        });
+                        self.start_http_client_connection(&state, instruction)?
                     }
                     AgentDecision::Reuse(resource) => {
                         self.attach_http_client_request_to_resource(&state, resource, instruction)?;
@@ -7529,6 +7515,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             _ => unreachable!("only HTTP natives dispatch here"),
         }
+    }
+
+    fn start_http_client_connection(
+        &mut self,
+        state: &Rc<RefCell<HttpClientRequestState>>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let (host, port) = {
+            let state = state.borrow();
+            (state.host.clone(), state.port)
+        };
+        let host_ops = self.async_host.ok_or_else(|| ExecutionError::Host {
+            instruction,
+            message: "node:http client requires the Node execution Adapter".into(),
+        })?;
+        let request = unsafe {
+            ActiveAsyncHostOps::start(&mut *host_ops, AsyncHostOp::TcpConnect { host, port }, true)
+        };
+        self.push_pending_node(PendingNodeRequest::Connect {
+            request,
+            target: PendingConnect::Http(Rc::clone(state)),
+        });
+        Ok(())
     }
 
     fn start_http_server_action(
@@ -7762,13 +7771,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
-                let referenced = !matches!(
-                    operation,
-                    AsyncHostOp::SetResourceReferenced {
-                        referenced: false,
-                        ..
-                    }
-                );
+                let referenced = !(runtime_http
+                    && matches!(operation, AsyncHostOp::TcpRead { .. }))
+                    && !matches!(
+                        operation,
+                        AsyncHostOp::SetResourceReferenced {
+                            referenced: false,
+                            ..
+                        }
+                    );
                 let request =
                     unsafe { ActiveAsyncHostOps::start(&mut *host, operation.clone(), referenced) };
                 let accepted = if runtime_http {
@@ -8179,6 +8190,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                 }
                 RuntimeHttpClientEvent::Closed => {
+                    let retry = unsafe {
+                        ActiveHttpRuntime::client_connection_closed(&mut *runtime, resource)
+                    };
                     let actions = {
                         let mut owner = owner.borrow_mut();
                         owner
@@ -8190,6 +8204,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     for action in actions {
                         self.start_http_stream_action(owner, resource, action, instruction)?;
+                    }
+                    if let Some(request) = retry {
+                        let queued = self.http_client_request(request).ok_or_else(|| {
+                            ExecutionError::Host {
+                                instruction,
+                                message: "HTTP Agent lost its queued ClientRequest".into(),
+                            }
+                        })?;
+                        self.start_http_client_connection(&queued, instruction)?;
                     }
                 }
             }
@@ -9424,8 +9447,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         message: "node:net connect returned a non-stream resource".into(),
                     }),
                     Err(error) => {
+                        let retry = if let PendingConnect::Http(state) = &target {
+                            let origin = {
+                                let state = state.borrow();
+                                HttpOrigin::http(&state.host, state.port)
+                            };
+                            let runtime =
+                                self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                                    instruction: self.instruction,
+                                    message: "node:http client requires the realm HTTP runtime"
+                                        .into(),
+                                })?;
+                            Some(unsafe {
+                                ActiveHttpRuntime::client_connection_failed(&mut *runtime, &origin)
+                            })
+                        } else {
+                            None
+                        };
                         let error = self.node_error_value(error);
-                        let object = match target {
+                        let object = match &target {
                             PendingConnect::Net(state) => state
                                 .borrow()
                                 .object
@@ -9446,6 +9486,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             &[Value::String("error".into()), error],
                             self.instruction,
                         )?;
+                        if let Some(AgentFailure::Connect { request }) = retry {
+                            let queued = self.http_client_request(request).ok_or_else(|| {
+                                ExecutionError::Host {
+                                    instruction: self.instruction,
+                                    message: "HTTP Agent lost its queued ClientRequest".into(),
+                                }
+                            })?;
+                            self.start_http_client_connection(&queued, self.instruction)?;
+                        }
                         Ok(())
                     }
                 },
