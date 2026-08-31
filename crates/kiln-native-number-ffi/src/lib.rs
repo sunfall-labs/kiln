@@ -70,7 +70,6 @@ mod realm {
     const HTTP_EVENT_RESPONSE_END: u32 = 8;
     const HTTP_EVENT_ERROR: u32 = 9;
     const HTTP_EVENT_CLOSED: u32 = 10;
-    const HTTP_EVENT_CLIENT_READY: u32 = 11;
     const HTTP_AGENT_CONNECT: i32 = 1;
     const HTTP_AGENT_REUSE: i32 = 2;
     const HTTP_AGENT_QUEUED: i32 = 3;
@@ -1046,21 +1045,25 @@ mod realm {
                                 .take_http1_client_events(resource)
                         };
                         for event in events {
-                            let (id, kind, status, reason, headers, data) = match event {
-                                RuntimeHttpClientEvent::Ready { id } => (
+                            let (id, kind, flags, status, reason, headers, data) = match event {
+                                RuntimeHttpClientEvent::Drain { id } => (
                                     id,
-                                    HTTP_EVENT_CLIENT_READY,
+                                    HTTP_EVENT_DRAIN,
+                                    0,
                                     0,
                                     Vec::new(),
                                     Vec::new(),
                                     Vec::new(),
                                 ),
-                                RuntimeHttpClientEvent::Drain { id } => {
-                                    (id, HTTP_EVENT_DRAIN, 0, Vec::new(), Vec::new(), Vec::new())
-                                }
-                                RuntimeHttpClientEvent::Finish { id } => {
-                                    (id, HTTP_EVENT_FINISH, 0, Vec::new(), Vec::new(), Vec::new())
-                                }
+                                RuntimeHttpClientEvent::Finish { id } => (
+                                    id,
+                                    HTTP_EVENT_FINISH,
+                                    0,
+                                    0,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    Vec::new(),
+                                ),
                                 RuntimeHttpClientEvent::ResponseHead {
                                     id,
                                     status,
@@ -1069,6 +1072,7 @@ mod realm {
                                 } => (
                                     id,
                                     HTTP_EVENT_RESPONSE_HEAD,
+                                    0,
                                     status,
                                     reason.into_bytes(),
                                     flatten_headers(&headers),
@@ -1078,13 +1082,15 @@ mod realm {
                                     id,
                                     HTTP_EVENT_RESPONSE_DATA,
                                     0,
+                                    0,
                                     Vec::new(),
                                     Vec::new(),
                                     data,
                                 ),
-                                RuntimeHttpClientEvent::ResponseEnd { id } => (
+                                RuntimeHttpClientEvent::ResponseEnd { id, reusable } => (
                                     id,
                                     HTTP_EVENT_RESPONSE_END,
+                                    u32::from(reusable),
                                     0,
                                     Vec::new(),
                                     Vec::new(),
@@ -1094,19 +1100,28 @@ mod realm {
                                     id,
                                     HTTP_EVENT_ERROR,
                                     0,
+                                    0,
                                     Vec::new(),
                                     Vec::new(),
                                     message.into_bytes(),
                                 ),
                                 RuntimeHttpClientEvent::Closed => {
                                     close_transport = true;
-                                    (0, HTTP_EVENT_CLOSED, 0, Vec::new(), Vec::new(), Vec::new())
+                                    (
+                                        0,
+                                        HTTP_EVENT_CLOSED,
+                                        0,
+                                        0,
+                                        Vec::new(),
+                                        Vec::new(),
+                                        Vec::new(),
+                                    )
                                 }
                             };
                             payloads.push(HttpEventPayload {
                                 owner: Rc::clone(&owner),
                                 kind,
-                                flags: 0,
+                                flags,
                                 id,
                                 status,
                                 version_minor: 0,

@@ -75,9 +75,6 @@ pub struct RuntimeHttpClientRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RuntimeHttpClientEvent {
-    Ready {
-        id: u64,
-    },
     Drain {
         id: u64,
     },
@@ -96,6 +93,7 @@ pub enum RuntimeHttpClientEvent {
     },
     ResponseEnd {
         id: u64,
+        reusable: bool,
     },
     Error {
         id: u64,
@@ -740,6 +738,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         resource: ResourceId,
         allow_half_close: bool,
     ) -> Vec<node_stream::StreamAction> {
+        // The listening server is the Node-visible resource that keeps the realm alive. Accepted
+        // HTTP keep-alive sockets are Hyper-owned implementation resources; their reads remain
+        // registered for reuse but must not outlive `server.close()` merely because they inherited
+        // the listener's referenced flag at accept time. Referenced writes and close operations
+        // still keep active work alive through their individual HostOps requests.
+        let _ = self.host.set_resource_referenced_now(resource, false);
         let (io, mut transport) = HttpTransportDriver::new(resource);
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let (response_sender, response_receiver) = mpsc::unbounded_channel();
@@ -850,9 +854,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
     ) -> Option<Vec<node_stream::StreamAction>> {
-        self.local.block_on(&self.runtime, async {
-            let _ = tokio::time::timeout(std::time::Duration::ZERO, tokio::task::yield_now()).await;
-        });
+        self.poll_http_tasks();
         self.http_connections
             .get_mut(&resource)
             .map(|connection| connection.transport.pump_write())
@@ -880,7 +882,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// it visible to the synchronous language adapter before it waits on an otherwise-idle read.
     pub fn poll_http_tasks(&mut self) {
         self.local.block_on(&self.runtime, async {
-            let _ = tokio::time::timeout(std::time::Duration::ZERO, tokio::task::yield_now()).await;
+            // Hyper commonly needs more than one cooperative turn: a body wake schedules the
+            // connection, which schedules transport output or a service response. A zero-length
+            // timeout races the first poll and made progress depend on executor polling details.
+            // A small fixed drain advances no clock and keeps the checkpoint reproducible while
+            // allowing each already-runnable layer to hand work to the next.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
         });
     }
 
@@ -889,9 +898,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// concrete wake guarantees progress and the adapter immediately drains the resulting events.
     #[doc(hidden)]
     pub fn poll_http_tasks_after_wake(&mut self) {
-        self.local.block_on(&self.runtime, async {
-            tokio::task::yield_now().await;
-        });
+        self.poll_http_tasks();
     }
 
     /// Retire an HTTP transport after Hyper has completed its connection future.
@@ -1255,16 +1262,12 @@ fn map_http1_client_event(
 ) -> Option<RuntimeHttpClientEvent> {
     let id = match &event {
         hyper_http::ClientEvent::ResponseHead { id, .. }
-        | hyper_http::ClientEvent::Ready { id }
         | hyper_http::ClientEvent::ResponseData { id, .. }
-        | hyper_http::ClientEvent::ResponseEnd { id }
+        | hyper_http::ClientEvent::ResponseEnd { id, .. }
         | hyper_http::ClientEvent::Error { id, .. } => Some(*id),
         hyper_http::ClientEvent::Closed => None,
     };
-    // Ready follows ResponseEnd and authorizes Agent reuse; it must survive terminal-ID filtering.
-    if !matches!(event, hyper_http::ClientEvent::Ready { .. })
-        && id.is_some_and(|id| completed.contains(&id))
-    {
+    if id.is_some_and(|id| completed.contains(&id)) {
         return None;
     }
     let terminal = matches!(
@@ -1272,7 +1275,6 @@ fn map_http1_client_event(
         hyper_http::ClientEvent::ResponseEnd { .. } | hyper_http::ClientEvent::Error { .. }
     );
     let mapped = match event {
-        hyper_http::ClientEvent::Ready { id } => RuntimeHttpClientEvent::Ready { id },
         hyper_http::ClientEvent::ResponseHead {
             id,
             status,
@@ -1287,7 +1289,9 @@ fn map_http1_client_event(
         hyper_http::ClientEvent::ResponseData { id, data } => {
             RuntimeHttpClientEvent::ResponseData { id, data }
         }
-        hyper_http::ClientEvent::ResponseEnd { id } => RuntimeHttpClientEvent::ResponseEnd { id },
+        hyper_http::ClientEvent::ResponseEnd { id, reusable } => {
+            RuntimeHttpClientEvent::ResponseEnd { id, reusable }
+        }
         hyper_http::ClientEvent::Error { id, message } => {
             RuntimeHttpClientEvent::Error { id, message }
         }
@@ -2615,18 +2619,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn client_ready_survives_terminal_request_deduplication() {
+    fn terminal_request_events_are_deduplicated() {
         let mut completed = HashSet::new();
         assert!(matches!(
             map_http1_client_event(
-                hyper_http::ClientEvent::ResponseEnd { id: 7 },
+                hyper_http::ClientEvent::ResponseEnd {
+                    id: 7,
+                    reusable: true,
+                },
                 &mut completed,
             ),
-            Some(RuntimeHttpClientEvent::ResponseEnd { id: 7 })
-        ));
-        assert!(matches!(
-            map_http1_client_event(hyper_http::ClientEvent::Ready { id: 7 }, &mut completed,),
-            Some(RuntimeHttpClientEvent::Ready { id: 7 })
+            Some(RuntimeHttpClientEvent::ResponseEnd {
+                id: 7,
+                reusable: true,
+            })
         ));
         assert!(
             map_http1_client_event(

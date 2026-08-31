@@ -585,4 +585,20 @@ fs.writeFile({path:?}, 'hello tokio').then(() => fs.readFile({path:?})).then((by
         assert_eq!(results[0].result.outcome, Outcome::Pass, "{results:#?}");
         assert_eq!(results[0].result.stdout, "pass\n");
     }
+
+    #[test]
+    fn fastify_server_case_runs_through_the_production_graph_when_installed() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/server/packages");
+        if !root.join("node_modules/fastify/fastify.js").is_file() {
+            return;
+        }
+
+        let entry = root.join("s04-fastify.mjs");
+        let result = run_node_against_expected_stdout(
+            &entry,
+            "200 {\"ok\":true}\n200 {\"id\":\"7\"}\n200 {\"got\":{\"hello\":\"kiln\"}}\n404 {\"error\":\"not found\"}\n",
+            RunMode::Node,
+        );
+        assert_eq!(result.result.outcome, Outcome::Pass, "{result:#?}");
+    }
 }
