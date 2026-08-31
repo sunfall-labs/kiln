@@ -5769,10 +5769,18 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     } else {
         vm.run_module_body()
     }?;
+    // A dependency's top-level await must finish before its importer reads the exported cells.
+    // Node graph execution normally leaves a dependency's shared-realm jobs queued so they run
+    // after the entry body, but that is only valid for ordinary module jobs. A suspended module
+    // owns the VM, program and locals needed by `Sink::ModuleAwait`; keep that VM alive and drain
+    // it now, rather than letting the entry VM try to resume a continuation whose owner is gone.
+    let suspended_module = vm.module_suspension.is_some();
     // Exports are read before the event loop runs: they are the module's interface, and a timer
     // that mutates a binding afterwards has not changed what the module exported.
     if enter_runtime {
-        if drain {
+        if suspended_module {
+            vm.run_node_event_loop_until_module(runtime)?;
+        } else if drain {
             vm.run_node_event_loop(runtime)?;
         } else if vm.async_host.is_none() {
             vm.run_event_loop(runtime)?;
@@ -8488,9 +8496,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     }
 
     fn run_node_event_loop(&mut self, runtime: &mut RealmRuntime) -> Result<(), ExecutionError> {
+        self.run_node_event_loop_inner(runtime, false)
+    }
+
+    /// Run the shared Node event loop until this module's top-level await settles.
+    ///
+    /// A dependency may leave a live server or stream behind when its body awaits. Those
+    /// resources belong to the graph and must remain available to later modules, but they must
+    /// not keep dependency evaluation waiting after its own continuation has completed.
+    fn run_node_event_loop_until_module(
+        &mut self,
+        runtime: &mut RealmRuntime,
+    ) -> Result<(), ExecutionError> {
+        self.run_node_event_loop_inner(runtime, true)
+    }
+
+    fn run_node_event_loop_inner(
+        &mut self,
+        runtime: &mut RealmRuntime,
+        until_module: bool,
+    ) -> Result<(), ExecutionError> {
         loop {
             self.drain_microtasks(runtime)?;
             runtime.enter(|| self.check_unhandled_rejection())?;
+            if until_module && self.module_outcome().is_some() {
+                return Ok(());
+            }
             let has_pending = self.module_realm.as_ref().map_or_else(
                 || !self.pending_host.is_empty() || !self.pending_node.is_empty(),
                 |realm| {

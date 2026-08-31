@@ -2111,6 +2111,67 @@ mod tests {
     }
 
     #[test]
+    fn node_dependency_top_level_await_finishes_before_importer() {
+        let project = TempProject::new();
+        project.write(
+            "dep.mjs",
+            "console.log('dep-before'); await Promise.resolve(); console.log('dep-after'); export const value = 42;",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import { value } from './dep.mjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build dependency top-level await graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute dependency top-level await graph");
+        assert_eq!(host.into_stdout(), "dep-before\ndep-after\n42\n");
+    }
+
+    #[test]
+    fn node_dependency_top_level_await_rejection_stops_importer() {
+        let project = TempProject::new();
+        project.write(
+            "dep.mjs",
+            "console.log('dep-before'); await Promise.reject('dep failed'); console.log('dep-after'); export const value = 42;",
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import { value } from './dep.mjs'; console.log(value);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build rejecting dependency top-level await graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        let error = graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect_err("rejected dependency top-level await must stop the importer");
+        assert!(matches!(
+            error,
+            ModuleGraphError::Execution {
+                error: ExecutionError::Uncaught { .. },
+                ..
+            }
+        ));
+        assert_eq!(host.into_stdout(), "dep-before\n");
+    }
+
+    #[test]
     fn node_reports_rejected_top_level_await_as_module_failure() {
         let project = TempProject::new();
         let entry = project.write("main.mjs", "await Promise.reject('module failed');");
