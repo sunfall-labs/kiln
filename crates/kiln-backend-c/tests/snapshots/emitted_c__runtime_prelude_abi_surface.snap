@@ -417,6 +417,7 @@ struct kiln_node_server {
 struct kiln_node_socket {
 typedef struct kiln_node_client_request {
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request);
+static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
 typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
 typedef struct kiln_node_completion {
@@ -427,7 +428,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 2
+#define KILN_REALM_ASYNC_ABI_VERSION 3
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1

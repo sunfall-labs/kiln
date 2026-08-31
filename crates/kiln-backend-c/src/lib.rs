@@ -1223,7 +1223,8 @@ struct kiln_node_socket {
     uint64_t shutdown_request;
     uint64_t close_request;
     kiln_node_server *server;
-    struct kiln_node_client_request *client_request;
+    struct kiln_node_client_request *client_requests;
+    uint64_t next_client_request_id;
     struct kiln_node_response *responses;
     int close_after_write;
     int closing;
@@ -1248,14 +1249,26 @@ typedef struct kiln_node_client_request {
     size_t pending_body_capacity;
     uint16_t port;
     uint64_t connect_request;
+    uint64_t request_id;
     int ended;
     int sent;
     int response_started;
     int response_ended;
     int utf8;
+    struct kiln_node_client_request *next;
 } kiln_node_client_request;
 
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request);
+
+static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
+                                                              uint64_t id) {
+    kiln_node_client_request *request;
+    if (socket == NULL || id == 0) return NULL;
+    for (request = socket->client_requests; request != NULL; request = request->next) {
+        if (request->request_id == id) return request;
+    }
+    return NULL;
+}
 
 typedef struct kiln_node_response {
     kiln_node_socket *socket;
@@ -1315,7 +1328,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 2
+#define KILN_REALM_ASYNC_ABI_VERSION 3
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -8549,7 +8562,7 @@ static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
     if (kiln_c99_text_append(&headers, "host", 4) != KILN_C99_OK ||
         kiln_c99_text_append(&headers, "\0", 1) != KILN_C99_OK ||
         kiln_c99_text_append(&headers, request->host_name, request->host_name_len) != KILN_C99_OK ||
-        kiln_c99_text_append(&headers, "\0connection\0close\0", 18) != KILN_C99_OK) {
+        kiln_c99_text_append(&headers, "\0", 1) != KILN_C99_OK) {
         free(headers.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -8560,13 +8573,15 @@ static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
     framed.target_len = request->path_len;
     framed.headers = (const uint8_t *)headers.bytes;
     framed.headers_len = headers.len;
-    status = kiln_realm_http_client_start_active(request->socket->resource, 1, &framed, 16384);
+    status = kiln_realm_http_client_start_active(request->socket->resource, request->request_id,
+                                                 &framed, 16384);
     free(headers.bytes);
     if (status == KILN_C99_OK) {
         request->sent = 1;
         if (request->pending_body_len != 0) {
             int write_status = kiln_realm_http_client_write_active(
-                request->socket->resource, 1, (const uint8_t *)request->pending_body,
+                request->socket->resource, request->request_id,
+                (const uint8_t *)request->pending_body,
                 request->pending_body_len);
             status = write_status < KILN_C99_OK ? write_status : KILN_C99_OK;
         }
@@ -8575,7 +8590,8 @@ static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
         request->pending_body_len = 0;
         request->pending_body_capacity = 0;
         if (status == KILN_C99_OK && request->ended) {
-            int end_status = kiln_realm_http_client_end_active(request->socket->resource, 1,
+            int end_status = kiln_realm_http_client_end_active(request->socket->resource,
+                                                               request->request_id,
                                                                NULL, 0);
             status = end_status < KILN_C99_OK ? end_status : KILN_C99_OK;
         }
@@ -8679,7 +8695,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     int status;
     (void)host;
     if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
-    client = socket->client_request;
+    client = kiln_c99_node_client_for_id(socket, event->id);
     if (event->kind == 1) {
         response = (kiln_node_response *)calloc(1, sizeof *response);
         if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -8894,7 +8910,14 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
             socket->host = request->host;
             socket->resource = completion->resource;
-            socket->client_request = request;
+            socket->next_client_request_id = 1;
+            request->request_id = socket->next_client_request_id;
+            socket->next_client_request_id =
+                socket->next_client_request_id == UINT64_MAX
+                    ? 1
+                    : socket->next_client_request_id + 1;
+            request->next = socket->client_requests;
+            socket->client_requests = request;
             request->socket = socket;
             status = kiln_c99_node_socket_object(socket, exception);
             if (status != KILN_C99_OK) return status;
@@ -9353,9 +9376,11 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         if (request->sent) {
             status = code == KILN_C99_METHOD_NODE_CLIENT_REQUEST_END
                          ? kiln_realm_http_client_end_active(
-                               request->socket->resource, 1, (const uint8_t *)text.ptr, text.len)
+                               request->socket->resource, request->request_id,
+                               (const uint8_t *)text.ptr, text.len)
                          : kiln_realm_http_client_write_active(
-                               request->socket->resource, 1, (const uint8_t *)text.ptr, text.len);
+                               request->socket->resource, request->request_id,
+                               (const uint8_t *)text.ptr, text.len);
             if (status < KILN_C99_OK) return status;
         } else if (text.len != 0) {
             if (kiln_c99_reserve((void **)&request->pending_body,

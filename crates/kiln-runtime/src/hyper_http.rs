@@ -20,7 +20,7 @@ pub(crate) enum EngineEvent {
     RequestHead { id: u64, request: HttpRequest },
     RequestData { id: u64, data: Vec<u8> },
     RequestEnd { id: u64 },
-    Error(String),
+    Error { id: u64, message: String },
     Closed,
 }
 
@@ -54,7 +54,10 @@ pub(crate) enum ClientEvent {
     ResponseEnd {
         id: u64,
     },
-    Error(String),
+    Error {
+        id: u64,
+        message: String,
+    },
     Closed,
 }
 
@@ -68,9 +71,37 @@ where
 {
     Box::pin(async move {
         let (mut sender, connection) =
-            hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
-        let connection_task = tokio::task::spawn_local(connection);
-        while let Some(command) = requests.recv().await {
+            match hyper::client::conn::http1::handshake(TokioIo::new(io)).await {
+                Ok(parts) => parts,
+                Err(error) => {
+                    let _ = events.send(ClientEvent::Error {
+                        id: 0,
+                        message: error.to_string(),
+                    });
+                    let _ = events.send(ClientEvent::Closed);
+                    return Ok(());
+                }
+            };
+        let mut connection_task = tokio::task::spawn_local(connection);
+        loop {
+            let command = tokio::select! {
+                biased;
+                command = requests.recv() => command,
+                result = &mut connection_task => {
+                    match result {
+                        Ok(Err(error)) => {
+                            let _ = events.send(ClientEvent::Error { id: 0, message: error.to_string() });
+                        }
+                        Err(error) => {
+                            let _ = events.send(ClientEvent::Error { id: 0, message: error.to_string() });
+                        }
+                        Ok(Ok(())) => {}
+                    }
+                    let _ = events.send(ClientEvent::Closed);
+                    return Ok(());
+                }
+            };
+            let Some(command) = command else { break };
             let id = command.id;
             let mut builder = Request::builder()
                 .method(command.method.as_str())
@@ -81,7 +112,12 @@ where
             let request = match builder.body(command.body) {
                 Ok(request) => request,
                 Err(error) => {
-                    let _ = events.send(ClientEvent::Error(error.to_string()));
+                    connection_task.abort();
+                    let _ = events.send(ClientEvent::Error {
+                        id,
+                        message: error.to_string(),
+                    });
+                    let _ = events.send(ClientEvent::Closed);
                     return Ok(());
                 }
             };
@@ -105,7 +141,18 @@ where
                         headers,
                     });
                     while let Some(frame) = response.body_mut().frame().await {
-                        let frame = frame?;
+                        let frame = match frame {
+                            Ok(frame) => frame,
+                            Err(error) => {
+                                connection_task.abort();
+                                let _ = events.send(ClientEvent::Error {
+                                    id,
+                                    message: error.to_string(),
+                                });
+                                let _ = events.send(ClientEvent::Closed);
+                                return Ok(());
+                            }
+                        };
                         if let Ok(data) = frame.into_data()
                             && !data.is_empty()
                         {
@@ -118,7 +165,12 @@ where
                     let _ = events.send(ClientEvent::ResponseEnd { id });
                 }
                 Err(error) => {
-                    let _ = events.send(ClientEvent::Error(error.to_string()));
+                    connection_task.abort();
+                    let _ = events.send(ClientEvent::Error {
+                        id,
+                        message: error.to_string(),
+                    });
+                    let _ = events.send(ClientEvent::Closed);
                     return Ok(());
                 }
             }
@@ -183,7 +235,10 @@ where
                             }
                         }
                         Err(error) => {
-                            let _ = events.send(EngineEvent::Error(error.to_string()));
+                            let _ = events.send(EngineEvent::Error {
+                                id,
+                                message: error.to_string(),
+                            });
                             break;
                         }
                     }
@@ -218,10 +273,13 @@ where
             }
         })
         .await;
-        let _ = events.send(match &result {
-            Ok(()) => EngineEvent::Closed,
-            Err(error) => EngineEvent::Error(error.to_string()),
-        });
+        if let Err(error) = &result {
+            let _ = events.send(EngineEvent::Error {
+                id: 0,
+                message: error.to_string(),
+            });
+        }
+        let _ = events.send(EngineEvent::Closed);
         result
     })
 }
@@ -601,6 +659,127 @@ mod tests {
                 .await
                 .expect("server task joins")
                 .expect("server succeeds");
+        });
+    }
+
+    #[test]
+    fn client_connection_reuses_one_real_tcp_socket_for_sequential_requests() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .expect("listener binds");
+            let address = listener.local_addr().expect("listener has an address");
+            let (request_sender, request_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (client_event_sender, mut client_events) = tokio::sync::mpsc::unbounded_channel();
+            let client_io = tokio::net::TcpStream::connect(address)
+                .await
+                .expect("client connects");
+            let client = tokio::task::spawn_local(client_connection(
+                client_io,
+                request_receiver,
+                client_event_sender,
+            ));
+            let (server_io, _) = listener.accept().await.expect("server accepts");
+            let (server_event_sender, mut server_events) = tokio::sync::mpsc::unbounded_channel();
+            let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::task::spawn_local(event_connection(
+                server_io,
+                server_event_sender,
+                response_receiver,
+            ));
+
+            for request_id in 1..=2 {
+                let mut body = crate::http_body::ResponseBodyDriver::default();
+                body.end(Vec::new());
+                let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
+                request_sender
+                    .send(ClientRequestCommand {
+                        id: request_id,
+                        method: "GET".into(),
+                        target: format!("/{request_id}"),
+                        headers: vec![("host".into(), "kiln".into())],
+                        body: body.body(body_events),
+                    })
+                    .expect("request command sends");
+                let EngineEvent::RequestHead { id, request } =
+                    server_events.recv().await.expect("request head arrives")
+                else {
+                    panic!("expected request head")
+                };
+                assert_eq!(request.target, format!("/{request_id}"));
+                assert!(matches!(
+                    server_events.recv().await,
+                    Some(EngineEvent::RequestEnd { id: end_id }) if end_id == id
+                ));
+                let mut response_body = crate::http_body::ResponseBodyDriver::default();
+                response_body.end(request_id.to_string().into_bytes());
+                let (response_events, _) = tokio::sync::mpsc::unbounded_channel();
+                response_sender
+                    .send(ResponseCommand {
+                        id,
+                        status: 200,
+                        headers: Vec::new(),
+                        body: response_body.body(response_events),
+                    })
+                    .expect("response sends");
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::ResponseHead { id, status: 200, .. }) if id == request_id
+                ));
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::ResponseData { id, data })
+                        if id == request_id && data == request_id.to_string().as_bytes()
+                ));
+                assert!(matches!(
+                    client_events.recv().await,
+                    Some(ClientEvent::ResponseEnd { id }) if id == request_id
+                ));
+            }
+            drop(request_sender);
+            client
+                .await
+                .expect("client task joins")
+                .expect("client succeeds");
+            server
+                .await
+                .expect("server task joins")
+                .expect("server succeeds");
+        });
+    }
+
+    #[test]
+    fn client_connection_reports_task_failure_with_terminal_events() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (client_io, server_io) = duplex(1024);
+            let (request_sender, request_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let client = tokio::task::spawn_local(client_connection(
+                client_io,
+                request_receiver,
+                event_sender,
+            ));
+            drop(server_io);
+            assert!(matches!(
+                events.recv().await,
+                Some(ClientEvent::Error { id: 0, .. })
+            ));
+            assert!(matches!(events.recv().await, Some(ClientEvent::Closed)));
+            drop(request_sender);
+            client
+                .await
+                .expect("client task joins")
+                .expect("client succeeds");
         });
     }
 }

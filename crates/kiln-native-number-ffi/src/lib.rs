@@ -963,11 +963,11 @@ mod realm {
                                     headers: Vec::new(),
                                     data: Vec::new(),
                                 },
-                                RuntimeHttpEvent::Error(message) => HttpEventPayload {
+                                RuntimeHttpEvent::Error { id, message } => HttpEventPayload {
                                     owner: Rc::clone(&owner),
                                     kind: HTTP_EVENT_ERROR,
                                     flags: 0,
-                                    id: 0,
+                                    id,
                                     status: 0,
                                     version_minor: 0,
                                     method: Vec::new(),
@@ -1046,8 +1046,8 @@ mod realm {
                                     Vec::new(),
                                     Vec::new(),
                                 ),
-                                RuntimeHttpClientEvent::Error(message) => (
-                                    0,
+                                RuntimeHttpClientEvent::Error { id, message } => (
+                                    id,
                                     HTTP_EVENT_ERROR,
                                     0,
                                     Vec::new(),
