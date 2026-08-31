@@ -17,7 +17,7 @@ use kiln_hir::{
 pub use kiln_host_abi::HostOp;
 
 /// Version of the bytecode contract produced by this crate.
-pub const BYTECODE_VERSION: u16 = 1;
+pub const BYTECODE_VERSION: u16 = 2;
 
 /// A constant embedded in a [`Program`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +147,10 @@ pub enum Instruction {
     },
     /// Write `object[key] = value`. Stack is object, key, value.
     SetComputed,
+    /// Computed write carrying the strictness of the body that contains it.
+    SetComputedStrict {
+        strict: bool,
+    },
     /// Push the current `this`.
     LoadThis,
     /// `new.target`. Follows the same rule as `this`: an ordinary call has none, a `new` call
@@ -238,6 +242,11 @@ pub enum Instruction {
     GetProperty(u32),
     /// Write a property. Stack is object, then value.
     SetProperty(u32),
+    /// Named write carrying the strictness of the body that contains it.
+    SetPropertyStrict {
+        name: u32,
+        strict: bool,
+    },
     /// Copy every own property of the source into the target object, symbol-keyed ones included.
     ///
     /// Stack: `[target, source] -> [target]`, the same shape `SpreadInto` uses for arrays. One
@@ -247,6 +256,11 @@ pub enum Instruction {
     /// Remove an own property, leaving `true` -- which is what the `delete` operator evaluates
     /// to. Stack: `[target] -> [true]`.
     DeleteProperty(u32),
+    /// Named delete carrying the strictness of the body that contains it.
+    DeletePropertyStrict {
+        name: u32,
+        strict: bool,
+    },
     /// Build a regular expression from its source and flags, both constant strings.
     ///
     /// Built per evaluation rather than interned: each literal produces a fresh object, and the
@@ -268,6 +282,10 @@ pub enum Instruction {
     PushHole,
     /// `delete target[key]`. Stack: `[target, key] -> [true]`.
     DeleteComputed,
+    /// Computed delete carrying the strictness of the body that contains it.
+    DeleteComputedStrict {
+        strict: bool,
+    },
     /// Read `object.#name`, where the name is a constant. Stack: `[object] -> [value]`.
     ///
     /// Own-only, and a miss is a TypeError rather than `undefined` -- which is the brand check:
@@ -1452,6 +1470,32 @@ struct Compiler {
 }
 
 impl Compiler {
+    fn set_property_instruction(&self, name: u32) -> Instruction {
+        Instruction::SetPropertyStrict {
+            name,
+            strict: self.strict,
+        }
+    }
+
+    fn set_computed_instruction(&self) -> Instruction {
+        Instruction::SetComputedStrict {
+            strict: self.strict,
+        }
+    }
+
+    fn delete_property_instruction(&self, name: u32) -> Instruction {
+        Instruction::DeletePropertyStrict {
+            name,
+            strict: self.strict,
+        }
+    }
+
+    fn delete_computed_instruction(&self) -> Instruction {
+        Instruction::DeleteComputedStrict {
+            strict: self.strict,
+        }
+    }
+
     fn new(module: &Module) -> Self {
         let mut compiler = Self {
             constants: Vec::new(),
@@ -1805,10 +1849,10 @@ impl Compiler {
             }
             Pattern::Member { property, .. } => {
                 let name = self.constant_index(Constant::String(property.clone()));
-                self.store_through_reference(leaf, Instruction::SetProperty(name), span);
+                self.store_through_reference(leaf, self.set_property_instruction(name), span);
             }
             Pattern::Computed { .. } => {
-                self.store_through_reference(leaf, Instruction::SetComputed, span);
+                self.store_through_reference(leaf, self.set_computed_instruction(), span);
             }
             Pattern::PrivateMember { name, .. } => {
                 let name = self.constant_index(Constant::String(self.private_key(name)));
@@ -1872,11 +1916,13 @@ impl Compiler {
                             compiler.code.push(Instruction::Dup);
                             match key {
                                 SourceKey::Static(index) => {
-                                    compiler.code.push(Instruction::DeleteProperty(*index));
+                                    compiler
+                                        .code
+                                        .push(compiler.delete_property_instruction(*index));
                                 }
                                 SourceKey::Computed(held) => {
                                     compiler.load_hidden(held);
-                                    compiler.code.push(Instruction::DeleteComputed);
+                                    compiler.code.push(compiler.delete_computed_instruction());
                                 }
                             }
                             compiler.code.push(Instruction::Pop);
@@ -2061,7 +2107,7 @@ impl Compiler {
         // The value survived, so the iterator is unfinished again.
         self.push_constant(Constant::Boolean(false));
         self.store_hidden(done);
-        self.code.push(Instruction::SetComputed);
+        self.code.push(self.set_computed_instruction());
         self.code.push(Instruction::Pop);
         self.load_hidden(&count);
         self.push_constant(Constant::Number(1.0f64.to_bits()));
@@ -4227,7 +4273,7 @@ impl Compiler {
                     argc: 1,
                 });
                 let name = self.constant_index(Constant::String("raw".to_owned()));
-                self.code.push(Instruction::SetProperty(name));
+                self.code.push(self.set_property_instruction(name));
                 self.code.push(Instruction::Pop);
                 self.code.push(Instruction::CallMethod {
                     name: freeze,
@@ -4254,11 +4300,11 @@ impl Compiler {
                     ),
                     ObjectKey::Static(key) => {
                         let name = self.constant_index(Constant::String(key.clone()));
-                        self.code.push(Instruction::DeleteProperty(name));
+                        self.code.push(self.delete_property_instruction(name));
                     }
                     ObjectKey::Computed(key) => {
                         self.expression(key);
-                        self.code.push(Instruction::DeleteComputed);
+                        self.code.push(self.delete_computed_instruction());
                     }
                 }
             }
@@ -4470,7 +4516,7 @@ impl Compiler {
                 let skip = self.emit_jump(short_circuit_jump(operator));
                 self.load_with_object(with);
                 self.expression(value);
-                self.code.push(Instruction::SetProperty(key));
+                self.code.push(self.set_property_instruction(key));
                 let done = self.emit_jump(Instruction::Jump(0));
                 self.patch_jump(skip);
                 self.load_with_object(with);
@@ -4479,7 +4525,7 @@ impl Compiler {
             } else if operator == AssignmentOperator::Assign {
                 self.load_with_object(with);
                 self.expression(value);
-                self.code.push(Instruction::SetProperty(key));
+                self.code.push(self.set_property_instruction(key));
             } else {
                 self.load_with_object(with);
                 self.load_with_object(with);
@@ -4487,7 +4533,7 @@ impl Compiler {
                 self.expression(value);
                 self.code
                     .push(Instruction::Binary(compound_operator(operator)));
-                self.code.push(Instruction::SetProperty(key));
+                self.code.push(self.set_property_instruction(key));
             }
             found.push(self.emit_jump(Instruction::Jump(0)));
             self.patch_jump(miss);
@@ -4798,17 +4844,17 @@ impl Compiler {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetComputed);
+                    self.code.push(self.set_computed_instruction());
                 }
             }
             self.code.push(Instruction::Pop);
@@ -5180,17 +5226,17 @@ impl Compiler {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Static(key) => {
                     let name = self.constant_index(Constant::String(key.clone()));
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetProperty(name));
+                    self.code.push(self.set_property_instruction(name));
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
                     self.emit_field_value(field);
-                    self.code.push(Instruction::SetComputed);
+                    self.code.push(self.set_computed_instruction());
                 }
             }
             self.code.push(Instruction::Pop);
@@ -5313,7 +5359,7 @@ impl Compiler {
             } else {
                 BinaryOp::Subtract
             }));
-            self.code.push(Instruction::SetProperty(key));
+            self.code.push(self.set_property_instruction(key));
             if !prefix {
                 self.code.push(Instruction::Pop);
                 self.load_hidden(&held);
@@ -5479,7 +5525,7 @@ impl Compiler {
             self.expression(value);
         }
 
-        self.code.push(Instruction::SetComputed);
+        self.code.push(self.set_computed_instruction());
     }
 
     /// `object.property ??= value`, and the `&&=`/`||=` forms, static or computed.
@@ -5529,8 +5575,8 @@ impl Compiler {
         }
         self.expression(value);
         match name {
-            Some(name) => self.code.push(Instruction::SetProperty(name)),
-            None => self.code.push(Instruction::SetComputed),
+            Some(name) => self.code.push(self.set_property_instruction(name)),
+            None => self.code.push(self.set_computed_instruction()),
         }
         let done = self.emit_jump(Instruction::Jump(0));
 
@@ -5607,8 +5653,8 @@ impl Compiler {
             BinaryOp::Subtract
         }));
         match name {
-            Some(name) => self.code.push(Instruction::SetProperty(name)),
-            None => self.code.push(Instruction::SetComputed),
+            Some(name) => self.code.push(self.set_property_instruction(name)),
+            None => self.code.push(self.set_computed_instruction()),
         }
 
         // The store leaves the new value, which is what a prefix update evaluates to; a postfix
@@ -5718,7 +5764,7 @@ impl Compiler {
 
         // `SetProperty` leaves the assigned value, which is what an assignment expression
         // evaluates to.
-        self.code.push(Instruction::SetProperty(name));
+        self.code.push(self.set_property_instruction(name));
     }
 
     /// `f?.()` and `o.m?.()`: call only when the callee is there.
@@ -7573,6 +7619,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn property_mutations_carry_their_local_strictness() {
+        let assignment = || {
+            statement(StatementKind::Expression(Expression {
+                kind: ExpressionKind::MemberAssignment {
+                    operator: AssignmentOperator::Assign,
+                    object: Box::new(Expression {
+                        kind: ExpressionKind::Object {
+                            members: Vec::new(),
+                        },
+                        span: Span::default(),
+                    }),
+                    property: "answer".into(),
+                    value: Box::new(number(42.0)),
+                },
+                span: Span::default(),
+            }))
+        };
+        let mut strict_module = module(vec![assignment()]);
+        strict_module.strict = true;
+        let strict = compile(&strict_module).expect("strict module compiles");
+        assert!(strict.code.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::SetPropertyStrict { strict: true, .. }
+        )));
+
+        let sloppy = compile_commonjs(&module(vec![assignment()])).expect("CommonJS compiles");
+        assert!(sloppy.program.code.iter().any(|instruction| matches!(
+            instruction,
+            Instruction::SetPropertyStrict { strict: false, .. }
+        )));
+    }
+
     /// Strictness decides whose binding a `var` in eval code is.
     ///
     /// A sloppy direct eval declares into the caller's variable environment, so `var x` over a
@@ -9195,7 +9274,12 @@ mod tests {
         let store = program
             .code
             .iter()
-            .position(|instruction| matches!(instruction, Instruction::SetProperty(_)))
+            .position(|instruction| {
+                matches!(
+                    instruction,
+                    Instruction::SetProperty(_) | Instruction::SetPropertyStrict { .. }
+                )
+            })
             .expect("the element is stored through the reference");
         assert!(receiver < read, "the receiver is evaluated before the read");
         assert!(read < store, "the value exists before it is stored");

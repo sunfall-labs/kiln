@@ -8027,17 +8027,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         HttpResponseEvent::End,
                         instruction,
                     )?;
-                    owner
+                    if let Some(stream) = owner
                         .borrow_mut()
                         .streams
                         .iter_mut()
                         .find(|stream| stream.resource() == resource)
-                        .map(|stream| {
-                            stream.client_responses.remove(&id);
-                            stream.client_requests.remove(&id);
-                            stream.request = None;
-                            stream.response = None;
-                        });
+                    {
+                        stream.client_responses.remove(&id);
+                        stream.client_requests.remove(&id);
+                        stream.request = None;
+                        stream.response = None;
+                    }
                     let actions =
                         unsafe { ActiveHttpRuntime::close_connection(&mut *runtime, resource) }
                             .unwrap_or_default();
@@ -9855,6 +9855,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     self.stack.push(value);
                 }
+                Instruction::SetComputedStrict { strict } => {
+                    let value = self.pop(current)?;
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let assigned =
+                        self.assign_with_strict(&target, &key, value.clone(), current, *strict);
+                    if self.catchable(assigned, current)?.is_none() {
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
                 Instruction::SetPrototype => {
                     let prototype = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -10503,10 +10514,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     self.stack.push(Value::Boolean(removed));
                 }
+                Instruction::DeleteComputedStrict { strict } => {
+                    let key = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let removed = self.remove_with_strict(&target, &key, current, *strict);
+                    let Some(removed) = self.catchable(removed, current)? else {
+                        continue;
+                    };
+                    self.stack.push(Value::Boolean(removed));
+                }
                 Instruction::DeleteProperty(name) => {
                     let name = self.string_constant(*name, current)?;
                     let target = self.pop(current)?;
                     let removed = self.remove(&target, &Value::String(name), current);
+                    let Some(removed) = self.catchable(removed, current)? else {
+                        continue;
+                    };
+                    self.stack.push(Value::Boolean(removed));
+                }
+                Instruction::DeletePropertyStrict { name, strict } => {
+                    let name = self.string_constant(*name, current)?;
+                    let target = self.pop(current)?;
+                    let removed =
+                        self.remove_with_strict(&target, &Value::String(name), current, *strict);
                     let Some(removed) = self.catchable(removed, current)? else {
                         continue;
                     };
@@ -10540,6 +10570,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let target = self.pop(current)?;
                     let assigned =
                         self.assign(&target, &Value::String(name), value.clone(), current);
+                    if self.catchable(assigned, current)?.is_none() {
+                        continue;
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::SetPropertyStrict { name, strict } => {
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    let target = self.pop(current)?;
+                    let assigned = self.assign_with_strict(
+                        &target,
+                        &Value::String(name),
+                        value.clone(),
+                        current,
+                        *strict,
+                    );
                     if self.catchable(assigned, current)?.is_none() {
                         continue;
                     }
@@ -13072,8 +13118,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 {
                     return Ok(Value::Boolean(true));
                 }
-                self.set_computed(&target, &key, value, instruction)?;
-                Ok(Value::Boolean(true))
+                let accepted = self.set_reflect(&target, &key, value, instruction)?;
+                Ok(Value::Boolean(accepted))
             }
             Native::ReflectApply => {
                 let callee = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -18536,6 +18582,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// swallows the write rather than creating anything. Only when the chain has nothing to say
     /// does it come down to whether the receiver will take a new property at all.
     fn write_accepted(&self, target: &Value, name: &str) -> bool {
+        if let Value::Function(closure) = target
+            && name == "prototype"
+        {
+            return !closure.properties.borrow().is_frozen();
+        }
         // `__proto__` is an accessor on `Object.prototype` with a setter, and the setter is what
         // decides -- it refuses a cycle and a non-extensible target by throwing, in sloppy mode
         // as well as strict. So the write is always "accepted" here and `set_computed` answers.
@@ -22844,7 +22895,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         value: Value,
         instruction: usize,
     ) -> Result<(), ExecutionError> {
-        if !self.strict {
+        self.assign_with_strict(target, key, value, instruction, self.strict)
+    }
+
+    fn assign_with_strict(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        value: Value,
+        instruction: usize,
+        strict: bool,
+    ) -> Result<(), ExecutionError> {
+        if !strict {
             return self.set_computed(target, key, value, instruction);
         }
         // A primitive has no property store, so an ordinary assignment onto one creates
@@ -22878,8 +22940,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         key: &Value,
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
+        self.remove_with_strict(target, key, instruction, self.strict)
+    }
+
+    fn remove_with_strict(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+        strict: bool,
+    ) -> Result<bool, ExecutionError> {
         let removed = self.delete(target, key, instruction)?;
-        if !removed && self.strict {
+        if !removed && strict {
             return Err(ExecutionError::TypeErrorMessage {
                 message: format!(
                     "Cannot delete property '{}' of an object",
@@ -23086,6 +23158,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // that landed in the property store would be read back by `f.prototype` and
                 // ignored by `new`.
                 if name == "prototype" {
+                    if closure.properties.borrow().is_frozen() {
+                        return Ok(());
+                    }
                     *closure.prototype.borrow_mut() = Some(value);
                     return Ok(());
                 }
@@ -23141,6 +23216,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 value: other.type_name(),
             }),
         }
+    }
+
+    /// `Reflect.set` returns the boolean result of `[[Set]]` instead of applying the throwing
+    /// assignment spelling. The write itself still goes through `set_computed` after the same
+    /// descriptor probe used by `set_or_throw`, so setters and proxy traps run only once.
+    fn set_reflect(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        value: Value,
+        instruction: usize,
+    ) -> Result<bool, ExecutionError> {
+        if let Value::Proxy(proxy) = target {
+            let proxy = Rc::clone(proxy);
+            let inner = proxy.target.clone();
+            return match self.proxy_trap(&proxy, "set", instruction)? {
+                Some(trap) => {
+                    let handler = proxy.handler.clone();
+                    let arguments = vec![inner, Self::trap_key(key), value, target.clone()];
+                    let answered = self.call_value(&trap, handler, arguments, instruction)?;
+                    Ok(answered.is_truthy())
+                }
+                None => self.set_reflect(&inner, key, value, instruction),
+            };
+        }
+        let name = key.property_key();
+        if !self.write_accepted(target, &name) {
+            return Ok(false);
+        }
+        self.set_computed(target, key, value, instruction)?;
+        Ok(true)
     }
 
     fn string_constant(&self, index: u32, instruction: usize) -> Result<String, ExecutionError> {
