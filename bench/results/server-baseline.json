@@ -15,11 +15,11 @@
       "target": "node",
       "form": "script",
       "available": true,
-      "runtime_path": "/Users/alee/.local/share/mise/shims/node",
+      "runtime_path": "/opt/homebrew/bin/node",
       "note": "no standalone form measured: Node's SEA is a multi-step postject flow rather than one command, and half-doing it would put a number in this table that nobody could reproduce from the line above it",
-      "startup_ms_median": 126.55,
-      "startup_ms_min": 122.9,
-      "peak_rss_bytes": 60858368
+      "startup_ms_median": 81.51,
+      "startup_ms_min": 80.54,
+      "peak_rss_bytes": 60899328
     },
     {
       "target": "deno",
@@ -27,9 +27,9 @@
       "available": true,
       "runtime_path": "/Users/alee/.local/share/mise/installs/deno/2.9.5/bin/deno",
       "note": "",
-      "startup_ms_median": 28.17,
-      "startup_ms_min": 26.02,
-      "peak_rss_bytes": 36438016
+      "startup_ms_median": 26.33,
+      "startup_ms_min": 25.27,
+      "peak_rss_bytes": 36167680
     },
     {
       "target": "bun",
@@ -37,9 +37,9 @@
       "available": true,
       "runtime_path": "/Users/alee/.local/share/mise/installs/bun/latest/bin/bun",
       "note": "",
-      "startup_ms_median": 24.93,
-      "startup_ms_min": 23.94,
-      "peak_rss_bytes": 26583040
+      "startup_ms_median": 23.14,
+      "startup_ms_min": 21.77,
+      "peak_rss_bytes": 26640384
     },
     {
       "target": "deno",
@@ -47,9 +47,9 @@
       "available": true,
       "artifact_bytes": 67463474,
       "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 27.01,
-      "startup_ms_min": 25.27,
-      "peak_rss_bytes": 36446208
+      "startup_ms_median": 26.25,
+      "startup_ms_min": 24.81,
+      "peak_rss_bytes": 36339712
     },
     {
       "target": "bun",
@@ -57,16 +57,25 @@
       "available": true,
       "artifact_bytes": 63910514,
       "note": "the JavaScript engine is inside this file",
-      "startup_ms_median": 22.25,
-      "startup_ms_min": 21.43,
-      "peak_rss_bytes": 25567232
+      "startup_ms_median": 22.48,
+      "startup_ms_min": 21.74,
+      "peak_rss_bytes": 25665536
+    },
+    {
+      "target": "kiln",
+      "form": "script",
+      "available": true,
+      "runtime_path": "/Users/alee/Developer/Personal/kiln/target/debug/kiln",
+      "note": "explicit Node interpreter mode; Tokio owns both loopback I/O paths",
+      "startup_ms_median": 617.66,
+      "startup_ms_min": 593.96,
+      "peak_rss_bytes": 40493056
     },
     {
       "target": "kiln",
       "form": "standalone",
       "available": false,
-      "reason": "kiln: invalid module specifier `node:http`: URL schemes are not supported",
-      "note": "the target of docs/design.md \u00a714 step 10. Until it runs this file there is nothing to measure, and a placeholder number would be a claim"
+      "reason": "the native backend does not yet advertise Node mode; its async continuation ABI must use the same RealmRuntime before this form exists"
     }
   ]
 }
