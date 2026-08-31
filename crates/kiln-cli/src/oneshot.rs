@@ -251,8 +251,8 @@ mod tests {
                         importer: source_path.clone(),
                         specifier: "pkg".to_owned(),
                         target: target_path.clone(),
-                        package_json: manifest.to_string_lossy().into_owned(),
-                        package_json_hash: source_digest(manifest_text),
+                        package_json: Some(manifest.to_string_lossy().into_owned()),
+                        package_json_hash: Some(source_digest(manifest_text)),
                     }],
                 )
                 .expect("valid resolution map"),
