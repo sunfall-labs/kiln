@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -334,6 +334,8 @@ pub enum Request {
         path: String,
         /// Project root used to resolve this module's explicit relative imports.
         project_root: String,
+        /// Install the explicit Tokio-owned Node Adapter for this execution.
+        node: bool,
         source_view: SourceView,
     },
     /// Emit, compile, and link one module through the native backend.
@@ -713,7 +715,7 @@ mod tests {
 
     #[test]
     fn protocol_v18_sync_source_view_and_cache_gc_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 18);
+        assert_eq!(PROTOCOL_VERSION, 19);
 
         let requests = [
             (

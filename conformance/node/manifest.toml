@@ -151,3 +151,10 @@ source = "upstream-adapted/http-server-tokio-owned.mjs"
 status = "runnable"
 features = ["node:http", "node:net", "tokio-net", "streams", "timers", "module-graph"]
 expected_stdout = "pass\n"
+
+[[test]]
+id = "node-v24.7.0/http/client-server-roundtrip"
+source = "../server/s01-http-hello.mjs"
+status = "runnable"
+features = ["node:http", "tokio-net", "http-client", "http-server", "streams", "set-encoding", "resource-lifecycle", "module-graph"]
+expected_stdout = "200 text/plain kiln\n"

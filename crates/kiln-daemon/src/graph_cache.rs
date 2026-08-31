@@ -17,7 +17,7 @@ use std::sync::Arc;
 /// Bump when the in-memory graph snapshot contract changes.  The cache is process-local, but the
 /// version keeps key construction explicit and prevents accidental reuse if this ever changes to
 /// a longer-lived backing store.
-pub(crate) const GRAPH_CACHE_FORMAT: u16 = 2;
+pub(crate) const GRAPH_CACHE_FORMAT: u16 = 3;
 
 /// Keep several editor/watch entries warm without retaining an unbounded number of snapshots.
 pub(crate) const DEFAULT_GRAPH_CACHE_CAPACITY: usize = 8;
@@ -35,6 +35,9 @@ pub(crate) struct GraphCacheKey {
     /// `None` means no pinned resolution snapshot was supplied.  It is deliberately distinct from
     /// the identity of an empty [`ResolutionMap`].
     pub(crate) resolution_identity: Option<Digest>,
+    /// Resolution capability: Node mode admits typed builtin identities; deterministic mode does
+    /// not. The same source and package snapshot can therefore never reuse the other mode's graph.
+    pub(crate) node: bool,
     pub(crate) format: u16,
 }
 
@@ -43,11 +46,13 @@ impl GraphCacheKey {
         project_root: PathBuf,
         entry: PathBuf,
         resolutions: Option<&ResolutionMap>,
+        node: bool,
     ) -> Self {
         Self {
             project_root,
             entry,
             resolution_identity: resolutions.map(ResolutionMap::identity),
+            node,
             format: GRAPH_CACHE_FORMAT,
         }
     }
@@ -217,7 +222,7 @@ mod tests {
         entry: &std::path::Path,
         resolutions: Option<&ResolutionMap>,
     ) -> GraphCacheKey {
-        GraphCacheKey::new(root.to_path_buf(), entry.to_path_buf(), resolutions)
+        GraphCacheKey::new(root.to_path_buf(), entry.to_path_buf(), resolutions, false)
     }
 
     fn sources() -> Vec<GraphSourceRevision> {

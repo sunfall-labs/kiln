@@ -438,6 +438,7 @@ fn run_once(
                     project_root,
                     source.canonical,
                     source.text,
+                    false,
                 )?;
             *manifest = current_manifest;
             *truncated = current_truncated;

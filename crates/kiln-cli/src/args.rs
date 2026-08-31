@@ -54,6 +54,7 @@ pub enum Command {
     },
     Run {
         path: PathBuf,
+        node: bool,
         native: bool,
         profile: NativeProfile,
     },
@@ -212,8 +213,10 @@ where
             "--out cannot be combined with `kiln test --parse-only`: results must be from an interpreter run",
         ));
     }
-    if node && name != "test" {
-        return Err(Error::usage("--node only applies to `kiln test`"));
+    if node && name != "test" && name != "run" {
+        return Err(Error::usage(
+            "--node only applies to `kiln run` or `kiln test`",
+        ));
     }
     if node && parse_only {
         return Err(Error::usage(
@@ -232,6 +235,7 @@ where
         },
         "run" => Command::Run {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
+            node,
             native,
             profile: profile.unwrap_or_default(),
         },
@@ -413,7 +417,7 @@ options:
                        it is not a polling cadence.
     --changed          with `test`, run failures, smoke, and affected tests only
     --parse-only       with `test`, classify parser outcomes without interpreting
-    --node             with `test`, install the Tokio-owned Node compatibility Adapter
+    --node             with `run` or `test`, install the Tokio-owned Node compatibility Adapter
     --native           with `run`, execute through the native backend
     --shared            with `build`, write a shared library for embedding
     --dry-run          with `cache gc`, report the sweep without deleting anything
@@ -505,6 +509,7 @@ mod tests {
             .command,
             Command::Run {
                 path: PathBuf::from("src/main.ts"),
+                node: false,
                 native: true,
                 profile: NativeProfile::Check,
             }
@@ -563,7 +568,14 @@ mod tests {
         );
         assert!(usage_error(&["check", "a.js", "--changed"]).contains("only applies"));
         assert!(usage_error(&["run", "a.js", "--parse-only"]).contains("only applies"));
-        assert!(usage_error(&["run", "a.js", "--node"]).contains("only applies"));
+        assert!(matches!(
+            run(&["run", "a.mjs", "--node"]).command,
+            Command::Run {
+                node: true,
+                native: false,
+                ..
+            }
+        ));
         assert!(
             usage_error(&["test", "test262", "--node", "--parse-only"])
                 .contains("cannot be combined")
@@ -577,6 +589,28 @@ mod tests {
             usage_error(&["test", "test262", "--parse-only", "--out", "result.json"])
                 .contains("interpreter run")
         );
+    }
+
+    #[test]
+    fn node_run_is_explicit_and_native_does_not_claim_it() {
+        assert!(matches!(
+            run(&["run", "server.mjs", "--node"]).command,
+            Command::Run {
+                node: true,
+                native: false,
+                ..
+            }
+        ));
+        // Parsing retains both facts so dispatch can issue the precise backend-capability error;
+        // neither flag is silently dropped or made to imply the other.
+        assert!(matches!(
+            run(&["run", "server.mjs", "--node", "--native"]).command,
+            Command::Run {
+                node: true,
+                native: true,
+                ..
+            }
+        ));
     }
 
     #[test]

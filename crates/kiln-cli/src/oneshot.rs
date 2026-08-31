@@ -168,10 +168,11 @@ mod tests {
 
         let (output, updated) = {
             let mut session = OneShot::start().expect("start an in-process engine");
-            let output = commands::run(&mut session, &source, &fixture).expect("run package graph");
+            let output =
+                commands::run(&mut session, &source, &fixture, false).expect("run package graph");
             std::fs::write(package.join("index.js"), "export const answer = 43;\n")
                 .expect("update package entry");
-            let updated = commands::run(&mut session, &source, &fixture)
+            let updated = commands::run(&mut session, &source, &fixture, false)
                 .expect("rerun updated package graph");
             (output, updated)
         };
@@ -253,7 +254,12 @@ mod tests {
 
         std::fs::remove_file(&manifest).expect("remove manifest after commit");
         let SourceResponse::Ready(summary) = session
-            .run_at_view(source_path, root.to_string_lossy().into_owned(), view)
+            .run_at_view(
+                source_path,
+                root.to_string_lossy().into_owned(),
+                false,
+                view,
+            )
             .expect("run pinned graph")
         else {
             panic!("fresh source view became stale");

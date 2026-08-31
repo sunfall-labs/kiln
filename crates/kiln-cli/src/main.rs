@@ -103,14 +103,16 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
     match invocation.command {
         Command::Run {
             path,
+            node,
             native: false,
             ..
         } => {
             let mut backend = open(one_shot, &socket)?;
-            report(commands::run(backend.as_mut(), &path, &root)?)
+            report(commands::run(backend.as_mut(), &path, &root, node)?)
         }
         Command::Run {
             path,
+            node: false,
             native: true,
             profile,
         } => {
@@ -122,6 +124,13 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 profile,
             )?)
         }
+        Command::Run {
+            node: true,
+            native: true,
+            ..
+        } => Err(Error::usage(
+            "--node cannot be combined with `kiln run --native`: the native backend does not advertise Node compatibility",
+        )),
         Command::Build {
             path,
             output,

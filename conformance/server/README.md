@@ -1,6 +1,7 @@
-# The compiled-Node-server probes
+# The Node-server probes
 
-Four programs that do not run, and are not expected to for a long time.
+Four vertical server programs. The first now runs under explicit interpreted Node mode; the later
+probes keep the next compatibility gaps visible, and native standalone remains a separate gate.
 
 `docs/design.md` §14 puts the Node compatibility graft at step 10 and the async event loop at
 step 11. `docs/language-coverage.md` turns everything before that into a ten-step ladder, and
@@ -9,9 +10,9 @@ currently stands — that is the point. The rest of the corpus measures the next
 directory marks the destination, so that "run a Node server, compiled" is a gauge with a reading
 rather than an intention with a date.
 
-The reading is the refusal. `kiln test conformance` prints a ranked distribution of why each
-test failed, and these four contribute the entries that name the graft's own prerequisites. When
-that distribution changes, something moved.
+The reading is executable behavior plus precise refusal. `s01` is the minimal end-to-end gate;
+each later probe contributes the next missing prerequisite rather than collapsing the whole target
+to a compatibility percentage.
 
 ## The two things a server breaks, and where they are handled
 
@@ -61,7 +62,7 @@ tree is what remains, and the probe keeps its imports so that it keeps asking.
 
 ## What passing would be worth
 
-`scripts/server-baseline.sh` measures `s01` under node, deno and bun — each as a script, and as a
+`scripts/server-baseline.sh` measures `s01` under node, deno, bun, and Kiln — as a script, and as a
 standalone executable where the toolchain offers one — and writes
 `bench/results/server-baseline.json`. All three print the byte-identical line this corpus
 records, so it is one program measured three ways rather than three programs.
@@ -75,7 +76,8 @@ Taken on `darwin`, medians over 10 runs after 2 discarded, against node v25.9.0,
 | bun | script | 25 ms | 25 MiB | — |
 | deno | standalone | 27 ms | 35 MiB | **64 MiB** |
 | bun | standalone | 22 ms | 24 MiB | **61 MiB** |
-| kiln | standalone | not measured — `node:http` is refused by the resolver | | |
+| kiln | script | measured by the current baseline script through `kiln run --node` | | — |
+| kiln | standalone | not measured — native Node continuations are not advertised yet | | |
 
 The artifact column is the argument. Sixty-odd megabytes is a JavaScript engine, and shipping one
 is what `deno compile` and `bun build --compile` do; it is the cost kiln's design declines to pay
@@ -83,19 +85,18 @@ by compiling ahead of time to C and linking the small Rust runtime of ADR 0018 i
 that is worth anything is an empirical question, and the numbers above are the answer's other
 half.
 
-They are recorded now, from a checkout where kiln scores nothing, deliberately. A baseline taken
-after kiln can run this program would be a baseline taken by someone who already knew which
-answer they wanted. The script never gates — these are properties of other people's releases.
+The competitor numbers were recorded from a checkout where Kiln scored nothing, deliberately.
+That historical baseline remains useful; current runs append Kiln's now-supported interpreted
+form without pretending it is a standalone compiled artifact. The script never gates.
 
 ## Two findings these produced before they ran once
 
 Recorded here because both are work items rather than curiosities, and both were invisible until
 something tried to be a server.
 
-**`node:` is rejected by the resolver, not by the backend.** `kiln run` on `s01` answers
-`invalid module specifier 'node:http': URL schemes are not supported`, which is earlier and
-more fundamental than the runner's `not supported by this execution backend`. Builtin-module
-resolution is a prerequisite for the graft, not a consequence of it.
+**`node:` was rejected by the resolver, not by the backend.** That finding led to the explicit
+`--node` product boundary. Node mode now selects the production Node resolver and typed builtin
+graph; ordinary mode still rejects `node:` and unknown builtins fail closed in either path.
 
 **The `fastify` gap is CommonJS interop, not package resolution.** A probe importing only
 `fastify` answers `imports missing export 'default'`, naming

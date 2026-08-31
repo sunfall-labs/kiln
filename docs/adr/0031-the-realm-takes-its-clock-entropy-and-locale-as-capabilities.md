@@ -2,9 +2,10 @@
 
 ## Status
 
-Accepted. Implementation started: the capability vocabulary, deterministic defaults, HostOps
-identifiers, and artifact-policy identity are implemented. Interpreter/native consumption of all
-four values and scripted deterministic networking remain migration work.
+Accepted. The capability vocabulary, deterministic defaults, HostOps identifiers, and
+artifact-policy identity are implemented. Interpreter/native consumption of all four values and
+scripted deterministic networking remain migration work; live interpreted Node networking already
+uses the production Tokio provider without weakening the default realm.
 
 ## Context
 
