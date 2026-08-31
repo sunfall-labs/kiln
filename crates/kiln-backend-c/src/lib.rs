@@ -931,6 +931,7 @@ enum kiln_value_tag {
 #define KILN_C99_METHOD_ATOMICS_UNAVAILABLE 398
 #define KILN_C99_METHOD_SET_IMMEDIATE 399
 #define KILN_C99_METHOD_CLEAR_IMMEDIATE 400
+#define KILN_C99_METHOD_NODE_HTTP_SERVER 401
 
 /* `Temporal` methods. Numbered above the node block and routed by an explicit range at the top of
  * `kiln_c99_invoke_method`, because the string range below this one is open-ended. */
@@ -3580,6 +3581,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
         return kiln_c99_temporal_now_name(code);
     }
     switch (code) {
+    case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
+    case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
     case KILN_C99_METHOD_PUSH: return "push";
     case KILN_C99_METHOD_POP: return "pop";
     case KILN_C99_METHOD_JOIN: return "join";
@@ -10115,6 +10118,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         socket->responses = response;
         {
             kiln_value arguments[2] = {request, response->object};
+            if (!kiln_c99_is_callable(socket->server->connection_listener))
+                return KILN_C99_OK;
             return kiln_c99_call(socket->host, &ignored, socket->server->connection_listener,
                                  socket->server->object, arguments, 2, 0, exception);
         }
@@ -10488,13 +10493,35 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         *result = socket->object;
         return KILN_C99_OK;
     }
-    if (code == KILN_C99_METHOD_NODE_NET_CREATE_SERVER) {
+    if (code == KILN_C99_METHOD_NODE_NET_CREATE_SERVER ||
+        code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
+        code == KILN_C99_METHOD_NODE_HTTP_SERVER) {
         kiln_node_server *server;
         kiln_value ignored;
-        kiln_value listener = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value listener = kiln_c99_undefined();
+        int http = code != KILN_C99_METHOD_NODE_NET_CREATE_SERVER;
         int status;
-        if (!kiln_c99_is_callable(listener))
-            return kiln_c99_throw_not_a(thrown, listener, "function");
+        if (!http) {
+            listener = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (!kiln_c99_is_callable(listener))
+                return kiln_c99_throw_not_a(thrown, listener, "function");
+        } else {
+            kiln_value first = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (first.tag != KILN_VALUE_UNDEFINED && first.tag != KILN_VALUE_NULL &&
+                first.tag != KILN_VALUE_OBJECT && !kiln_c99_is_callable(first)) {
+                return kiln_c99_throw_node_invalid_arg_type(
+                    thrown, "The \"options\" argument must be of type object");
+            }
+            if (kiln_c99_is_callable(first)) {
+                listener = first;
+            } else if (argc > 1) {
+                listener = args[1];
+                if (listener.tag != KILN_VALUE_UNDEFINED && !kiln_c99_is_callable(listener)) {
+                    return kiln_c99_throw_node_invalid_arg_type(
+                        thrown, "The \"listener\" argument must be of type function");
+                }
+            }
+        }
         server = (kiln_node_server *)calloc(1, sizeof *server);
         if (server == NULL) return KILN_C99_OUT_OF_MEMORY;
         server->host = host;
@@ -10515,21 +10542,14 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(server->object, "@@node:server", 13, server);
         if (status != KILN_C99_OK) { free(server); return status; }
+        if (http) {
+            server->protocol_http = 1;
+            status = kiln_c99_put(host, server->object, "httpAllowHalfOpen", 17,
+                                  kiln_c99_boolean(0), depth, thrown);
+        }
+        if (status != KILN_C99_OK) { free(server); return status; }
         *result = server->object;
         return KILN_C99_OK;
-    }
-    if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER) {
-        int status = kiln_c99_node_net(host, result, KILN_C99_METHOD_NODE_NET_CREATE_SERVER,
-                                       receiver, args, argc, depth, thrown);
-        if (status == KILN_C99_OK) {
-            kiln_node_server *server = (kiln_node_server *)kiln_c99_node_hidden_pointer(
-                *result, "@@node:server", 13);
-            if (server == NULL) return KILN_C99_CONTROL_ERROR;
-            server->protocol_http = 1;
-            status = kiln_c99_put(host, *result, "httpAllowHalfOpen", 17,
-                                   kiln_c99_boolean(0), depth, thrown);
-        }
-        return status;
     }
     if (code >= KILN_C99_METHOD_NODE_SERVER_LISTEN &&
         code <= KILN_C99_METHOD_NODE_SERVER_ADDRESS) {
@@ -10708,7 +10728,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
     kiln_node_response *response = (kiln_node_response *)kiln_c99_node_hidden_pointer(
         receiver, "@@node:response", 15);
     (void)depth;
-    if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER)
+    if (code == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
+        code == KILN_C99_METHOD_NODE_HTTP_SERVER)
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     if (code == KILN_C99_METHOD_NODE_HTTP_GET || code == KILN_C99_METHOD_NODE_HTTP_REQUEST) {
         kiln_node_client_request *request;
@@ -11824,6 +11845,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code >= KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER &&
         code <= KILN_C99_METHOD_NODE_READABLE_SET_ENCODING) {
+        return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_HTTP_SERVER) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_NET_CONNECT) {
@@ -19257,13 +19281,16 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
          callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
          callee.bits == KILN_C99_METHOD_NODE_STREAM ||
          callee.bits == KILN_C99_METHOD_NODE_READABLE ||
-         callee.bits == KILN_C99_METHOD_NODE_WRITABLE)) {
+         callee.bits == KILN_C99_METHOD_NODE_WRITABLE ||
+         callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER)) {
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
          * and its ordinary-call and `new` forms deliberately share one initializer. */
-        if (callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER) {
+        if (callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
+            callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER) {
             if (argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED &&
-                !kiln_c99_is_callable(args[0]) && args[0].tag != KILN_VALUE_OBJECT) {
+                args[0].tag != KILN_VALUE_NULL && !kiln_c99_is_callable(args[0]) &&
+                args[0].tag != KILN_VALUE_OBJECT) {
                 return kiln_c99_throw_node_invalid_arg_type(
                     thrown, "The \"options\" argument must be of type object");
             }
