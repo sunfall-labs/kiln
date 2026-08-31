@@ -858,6 +858,93 @@ impl Module {
     }
 }
 
+/// Literal CommonJS dependencies in first source-occurrence order.
+///
+/// This deliberately recognizes only `require("...")`. Dynamic arguments remain runtime work;
+/// treating arbitrary calls as static graph edges would evaluate JavaScript during discovery.
+pub fn commonjs_literal_requires(module: &Module) -> Vec<String> {
+    let mut found = Vec::new();
+    for statement in &module.body {
+        collect_statement_requires(statement, &mut found);
+    }
+    found
+}
+
+fn push_require(expression: &Expression, found: &mut Vec<String>) {
+    if let ExpressionKind::Call {
+        callee, arguments, ..
+    } = &expression.kind
+        && matches!(&callee.kind, ExpressionKind::Identifier(name) if name == "require")
+        && let [
+            ListElement::Item(Expression {
+                kind: ExpressionKind::Literal(Literal::String(specifier)),
+                ..
+            }),
+        ] = arguments.as_slice()
+        && !found.contains(specifier)
+    {
+        found.push(specifier.clone());
+    }
+    collect_expression_requires(expression, found);
+}
+
+fn collect_statement_requires(statement: &Statement, found: &mut Vec<String>) {
+    match &statement.kind {
+        StatementKind::Expression(expression) | StatementKind::Throw(expression) => {
+            push_require(expression, found)
+        }
+        StatementKind::Variable { declarations, .. } => {
+            for declaration in declarations {
+                if let Some(value) = &declaration.initializer {
+                    push_require(value, found);
+                }
+            }
+        }
+        StatementKind::Block(body) => {
+            for statement in body {
+                collect_statement_requires(statement, found);
+            }
+        }
+        StatementKind::Return(value) => {
+            if let Some(value) = value {
+                push_require(value, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_expression_requires(expression: &Expression, found: &mut Vec<String>) {
+    match &expression.kind {
+        ExpressionKind::Call {
+            callee, arguments, ..
+        } => {
+            push_require(callee, found);
+            for argument in arguments {
+                if let ListElement::Item(value) | ListElement::Spread(value) = argument {
+                    push_require(value, found);
+                }
+            }
+        }
+        ExpressionKind::StaticMember { object, .. } => push_require(object, found),
+        ExpressionKind::MemberAssignment { object, value, .. } => {
+            push_require(object, found);
+            push_require(value, found);
+        }
+        ExpressionKind::Function(function) => {
+            for statement in &function.body {
+                collect_statement_requires(statement, found);
+            }
+        }
+        ExpressionKind::Binary { left, right, .. }
+        | ExpressionKind::Logical { left, right, .. } => {
+            push_require(left, found);
+            push_require(right, found);
+        }
+        _ => {}
+    }
+}
+
 /// One top-level syntactic item, reduced to information stable across parser implementations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Item {
