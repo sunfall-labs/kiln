@@ -106,7 +106,14 @@ mod realm {
         pub target_len: u64,
         pub headers: *const u8,
         pub headers_len: u64,
+        // The current HTTP client path does not need to read the body from this frame, but it is
+        // part of the C ABI layout and must remain present so the following fields (and future
+        // additions) stay at the offsets the generated C caller expects.
+        pub body: *const u8,
+        pub body_len: u64,
     }
+
+    const _: () = assert!(core::mem::size_of::<HttpRequestView>() == 64);
 
     #[repr(C)]
     pub struct HttpResponseView {
