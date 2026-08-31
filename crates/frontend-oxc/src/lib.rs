@@ -574,6 +574,20 @@ impl Lowerer {
             // that merely *contains* one unrunnable, which is a far larger claim than "no
             // debugger".
             Statement::DebuggerStatement(_) => HirStatementKind::Empty,
+            // `with` is a scope whose names are not known until it runs. Lowered rather than
+            // refused because refusing it made every test that merely *contains* one unrunnable,
+            // and because the object environment record is a thing the compiler can express --
+            // see `Compiler::with_statement`.
+            Statement::WithStatement(statement) => {
+                let object = self.expression(&statement.object);
+                match self.statement(&statement.body) {
+                    Some(body) => HirStatementKind::With {
+                        object,
+                        body: Box::new(body),
+                    },
+                    None => HirStatementKind::Empty,
+                }
+            }
             _ => self.unsupported_statement("statement", statement_span),
         };
         Some(HirStatement {
@@ -1049,8 +1063,24 @@ impl Lowerer {
                     expression: Box::new(inner),
                 }
             }
-            Expression::ImportExpression(_) => {
-                return self.unsupported_expression("dynamic import expression", expression_span);
+            Expression::ImportExpression(import) => {
+                // `import.defer(…)` and `import.source(…)` are not `import(…)` with a flag: each
+                // hands back a different thing -- a deferred namespace, a module source object --
+                // and lowering one as an ordinary import would resolve its promise with the wrong
+                // value rather than saying it is not implemented.
+                if import.phase.is_some() {
+                    return self.unsupported_expression(
+                        "phased dynamic import expression",
+                        expression_span,
+                    );
+                }
+                HirExpressionKind::ImportCall {
+                    specifier: Box::new(self.expression(&import.source)),
+                    options: import
+                        .options
+                        .as_ref()
+                        .map(|options| Box::new(self.expression(options))),
+                }
             }
             // `#x in o` is the brand check: it asks whether `o` carries this class's private
             // field, which is exactly what reading one already tests for.
@@ -1830,15 +1860,30 @@ impl Lowerer {
                 };
                 kiln_hir::ObjectKey::Static(key.to_string())
             };
+            // Only `{ __proto__: v }` sets a prototype, so which of the three productions wrote
+            // this pair has to survive lowering. Oxc reports the shorthand and the method
+            // separately, and a pair is neither only when it was written longhand.
+            let form = if property.shorthand {
+                kiln_hir::PropertyForm::Shorthand
+            } else if property.method {
+                kiln_hir::PropertyForm::Method
+            } else {
+                kiln_hir::PropertyForm::KeyValue
+            };
             let mut value = self.expression(&property.value);
             // `{ handle: () => {} }` names the function `handle`, for the same reason a
-            // variable initialiser does.
-            if let kiln_hir::ObjectKey::Static(name) = &key {
+            // variable initialiser does. A prototype setter is the exception: it never reaches
+            // the specification's named evaluation, so `{ __proto__: function () {} }` leaves
+            // the function anonymous.
+            if let kiln_hir::ObjectKey::Static(name) = &key
+                && !(name == "__proto__" && form == kiln_hir::PropertyForm::KeyValue)
+            {
                 name_anonymous_function(&mut value, name);
             }
             members.push(kiln_hir::ObjectMember::Property(kiln_hir::ObjectProperty {
                 key,
                 value,
+                form,
                 span: span(property.span),
             }));
         }
@@ -2286,8 +2331,8 @@ mod tests {
         let cases = [
             ("const value = import.meta;", "import.meta expression"),
             (
-                "const value = import(\"./x.js\");",
-                "dynamic import expression",
+                "const value = import.defer(\"./x.js\");",
+                "phased dynamic import expression",
             ),
         ];
         for (source, expected) in cases {

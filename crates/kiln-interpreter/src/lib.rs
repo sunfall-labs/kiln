@@ -199,16 +199,18 @@ pub enum ErrorKind {
     Range,
     Reference,
     Syntax,
+    Uri,
 }
 
 impl ErrorKind {
     /// Every kind, in declaration order, so the realm can build all their prototypes.
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Error,
         Self::Type,
         Self::Range,
         Self::Reference,
         Self::Syntax,
+        Self::Uri,
     ];
 
     pub fn name(self) -> &'static str {
@@ -218,6 +220,7 @@ impl ErrorKind {
             Self::Range => "RangeError",
             Self::Reference => "ReferenceError",
             Self::Syntax => "SyntaxError",
+            Self::Uri => "URIError",
         }
     }
 
@@ -243,6 +246,8 @@ pub enum Native {
     Intl(intl::Op),
     /// The `node:fs/promises` namespace and its first asynchronous methods.
     NodeFsPromises,
+    NodeFs,
+    NodeFsExistsSync,
     NodeFsReadFile,
     NodeFsWriteFile,
     NodeFsStat,
@@ -282,12 +287,20 @@ pub enum Native {
     NodeDnsLookup,
     NodeOs,
     NodeOsNetworkInterfaces,
+    NodeOsHostname,
     NodePerfHooks,
     NodeHttps,
     NodeHttpsCreateServer,
     NodeHttp2,
     NodeHttp2CreateServer,
     NodeHttp2CreateSecureServer,
+    NodeModule,
+    NodeModuleCreateRequire,
+    NodePath,
+    NodePathJoin,
+    NodePathIsAbsolute,
+    NodeWorkerThreads,
+    NodeWorkerConstructor,
     NodeUrl,
     NodeEventEmitter,
     NodeEventOn,
@@ -315,13 +328,19 @@ pub enum Native {
     NodeBuffer,
     NodeBufferFrom,
     NodeBufferAlloc,
+    NodeBufferIsBuffer,
+    NodeBufferByteLength,
     NodeBufferConcat,
     NodeBufferToString,
+    /// `process.hrtime`, whose callable and `.bigint()` forms both read the realm clock.
+    ProcessHrtime,
+    ProcessHrtimeBigInt,
     UrlConstructor,
     UrlSearchParamsGet,
     NodeServerListen,
     NodeServerClose,
     NodeServerAddress,
+    NodeServerSetTimeout,
     NodeResponseSetHeader,
     NodeResponseWriteHead,
     NodeResponseWrite,
@@ -1017,6 +1036,8 @@ impl Native {
             (Self::NodeFsPromises, "readFile") => Some(Value::Native(Self::NodeFsReadFile)),
             (Self::NodeFsPromises, "writeFile") => Some(Value::Native(Self::NodeFsWriteFile)),
             (Self::NodeFsPromises, "stat") => Some(Value::Native(Self::NodeFsStat)),
+            (Self::NodeFs, "existsSync") => Some(Value::Native(Self::NodeFsExistsSync)),
+            (Self::NodeFs, "promises") => Some(Value::Native(Self::NodeFsPromises)),
             (Self::NodeDiagnosticsChannel, "channel") => {
                 Some(Value::Native(Self::NodeDiagnosticsChannelCreate))
             }
@@ -1053,6 +1074,7 @@ impl Native {
             (Self::NodeOs, "networkInterfaces") => {
                 Some(Value::Native(Self::NodeOsNetworkInterfaces))
             }
+            (Self::NodeOs, "hostname") => Some(Value::Native(Self::NodeOsHostname)),
             (Self::NodePerfHooks, "performance" | "default") => {
                 Some(Value::Native(Self::Performance))
             }
@@ -1061,6 +1083,13 @@ impl Native {
             (Self::NodeHttp2, "createSecureServer") => {
                 Some(Value::Native(Self::NodeHttp2CreateSecureServer))
             }
+            (Self::NodeModule, "createRequire") => {
+                Some(Value::Native(Self::NodeModuleCreateRequire))
+            }
+            (Self::NodePath, "join") => Some(Value::Native(Self::NodePathJoin)),
+            (Self::NodePath, "isAbsolute") => Some(Value::Native(Self::NodePathIsAbsolute)),
+            (Self::NodePath, "sep") => Some(Value::String("/".to_owned())),
+            (Self::NodeWorkerThreads, "Worker") => Some(Value::Native(Self::NodeWorkerConstructor)),
             (Self::NodeUrl, "URL" | "default") => Some(Value::Native(Self::UrlConstructor)),
             (Self::NodeEvents, "EventEmitter" | "default") => {
                 Some(Value::Native(Self::NodeEventEmitter))
@@ -1074,11 +1103,24 @@ impl Native {
             (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet)),
             (Self::NodeHttp, "ServerResponse") => Some(Value::Native(Self::NodeHttpServerResponse)),
             (Self::NodeBuffer, "from") => Some(Value::Native(Self::NodeBufferFrom)),
-            (Self::NodeBuffer, "alloc") => Some(Value::Native(Self::NodeBufferAlloc)),
+            (Self::NodeBuffer, "alloc" | "allocUnsafe" | "allocUnsafeSlow") => {
+                Some(Value::Native(Self::NodeBufferAlloc))
+            }
+            (Self::NodeBuffer, "isBuffer") => Some(Value::Native(Self::NodeBufferIsBuffer)),
+            (Self::NodeBuffer, "byteLength") => Some(Value::Native(Self::NodeBufferByteLength)),
             (Self::NodeBuffer, "concat") => Some(Value::Native(Self::NodeBufferConcat)),
+            (Self::NodeBuffer, "Buffer" | "default") => Some(Value::Native(Self::NodeBuffer)),
+            (Self::NodeBuffer, "constants") => Some(ordinary_object([(
+                "MAX_STRING_LENGTH".to_owned(),
+                Value::Number(536_870_888.0),
+            )])),
+            (Self::ProcessHrtime, "bigint") => Some(Value::Native(Self::ProcessHrtimeBigInt)),
             (Self::NodeEventEmitter, "prototype") => Some(Value::Native(Self::PrototypeOf(
                 PrototypeTable::EventEmitter,
             ))),
+            (Self::NodeEventEmitter, "EventEmitter" | "default") => {
+                Some(Value::Native(Self::NodeEventEmitter))
+            }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "constructor") => {
                 Some(Value::Native(Self::NodeEventEmitter))
             }
@@ -1666,6 +1708,7 @@ struct NodeServerState {
     driver: TcpServerDriver,
     handler: Value,
     protocol: ServerProtocol,
+    timeout_milliseconds: f64,
     streams: Vec<NodeConnection>,
     object: Option<Weak<RefCell<ObjectData>>>,
 }
@@ -3259,6 +3302,12 @@ pub struct BoundFunction {
     target: Value,
     this_value: Value,
     arguments: Vec<Value>,
+    /// Own properties of this callable wrapper.
+    ///
+    /// A bound function is still an ordinary ECMAScript object. Packages routinely attach
+    /// metadata to callbacks after binding them, so keeping these properties in the realm-wide
+    /// intrinsic override table would conflate distinct bound-function identities.
+    properties: RefCell<ObjectData>,
 }
 
 /// A generator's saved execution state.
@@ -3372,11 +3421,11 @@ pub type Cell = Rc<RefCell<Value>>;
 /// of `module.exports` have the same identity semantics as Node's module cache.
 #[derive(Debug, PartialEq)]
 pub struct CommonJsRequire {
-    targets: Vec<(String, Cell)>,
+    targets: Vec<(String, String, Cell)>,
 }
 
 impl CommonJsRequire {
-    pub fn new(targets: impl IntoIterator<Item = (String, Cell)>) -> Self {
+    pub fn new(targets: impl IntoIterator<Item = (String, String, Cell)>) -> Self {
         Self {
             targets: targets.into_iter().collect(),
         }
@@ -3385,8 +3434,15 @@ impl CommonJsRequire {
     fn get(&self, specifier: &str) -> Option<Value> {
         self.targets
             .iter()
-            .find(|(candidate, _)| candidate == specifier)
-            .map(|(_, value)| value.borrow().clone())
+            .find(|(candidate, _, _)| candidate == specifier)
+            .map(|(_, _, value)| value.borrow().clone())
+    }
+
+    fn resolve(&self, specifier: &str) -> Option<String> {
+        self.targets
+            .iter()
+            .find(|(candidate, _, _)| candidate == specifier)
+            .map(|(_, target, _)| target.clone())
     }
 }
 
@@ -3679,6 +3735,7 @@ pub enum Value {
     Bound(Rc<BoundFunction>),
     /// A module-scoped CommonJS loader bound to already-resolved graph edges.
     CommonJsRequire(Rc<CommonJsRequire>),
+    CommonJsResolve(Rc<CommonJsRequire>),
     /// A well-known symbol. User-created symbols need a realm-wide registry and do not exist yet.
     Symbol(Symbol),
     /// An object. Shared by `Rc` because objects have identity: `a === b` asks whether two
@@ -3703,19 +3760,36 @@ pub enum Value {
 pub fn node_builtin_export_names(specifier: &str) -> Option<&'static [&'static str]> {
     Some(match specifier.strip_prefix("node:").unwrap_or(specifier) {
         "assert" | "assert/strict" => &["default", "ok", "strict"],
+        "buffer" => &["Buffer", "constants", "default"],
         "async_hooks" => &["AsyncResource", "default"],
         "crypto" => &["default", "randomUUID"],
         "diagnostics_channel" => &["channel", "default", "hasSubscribers", "tracingChannel"],
         "dns" => &["default", "lookup"],
         "events" => &["EventEmitter", "default"],
         "fs/promises" => &["readFile", "stat", "writeFile"],
+        "fs" => &["default", "existsSync", "promises"],
         "net" => &["connect", "createConnection", "createServer"],
-        "http" => &["createServer", "default", "get", "request"],
+        "http" => &[
+            "ServerResponse",
+            "createServer",
+            "default",
+            "get",
+            "request",
+        ],
         "https" => &["createServer", "default"],
         "http2" => &["createSecureServer", "createServer", "default"],
+        "module" => &["createRequire", "default"],
+        "path" => &["default", "isAbsolute", "join", "sep"],
+        "worker_threads" => &["Worker", "default"],
         "perf_hooks" => &["default", "performance"],
-        "os" => &["default", "networkInterfaces"],
-        "stream" => &["default", "finished"],
+        "os" => &["default", "hostname", "networkInterfaces"],
+        "stream" => &[
+            "Readable",
+            "Writable",
+            "addAbortSignal",
+            "default",
+            "finished",
+        ],
         "util" => &["debuglog", "default", "format", "inherits"],
         "url" => &["URL", "default"],
         _ => return None,
@@ -3726,16 +3800,21 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
     Some(Value::Native(
         match specifier.strip_prefix("node:").unwrap_or(specifier) {
             "assert" | "assert/strict" => Native::NodeAssert,
+            "buffer" => Native::NodeBuffer,
             "async_hooks" => Native::NodeAsyncHooks,
             "crypto" => Native::NodeCrypto,
             "diagnostics_channel" => Native::NodeDiagnosticsChannel,
             "dns" => Native::NodeDns,
             "events" => Native::NodeEvents,
             "fs/promises" => Native::NodeFsPromises,
+            "fs" => Native::NodeFs,
             "net" => Native::NodeNet,
             "http" => Native::NodeHttp,
             "https" => Native::NodeHttps,
             "http2" => Native::NodeHttp2,
+            "module" => Native::NodeModule,
+            "path" => Native::NodePath,
+            "worker_threads" => Native::NodeWorkerThreads,
             "perf_hooks" => Native::NodePerfHooks,
             "os" => Native::NodeOs,
             "stream" => Native::NodeStream,
@@ -3771,6 +3850,25 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
             })
             .collect(),
     )
+}
+
+/// The value CommonJS receives from `require()` for one builtin.
+///
+/// ESM and CommonJS project the same canonical builtin record differently. ESM receives named
+/// bindings plus `default`; CommonJS receives Node's historical `module.exports` value, which is
+/// callable for modules such as `events` and `assert`. Keeping this beside the export table means
+/// the two projections cannot drift onto different implementations.
+pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
+    let namespace = node_builtin_namespace(specifier)?;
+    let Value::Native(native) = namespace else {
+        unreachable!("builtin namespaces are native values")
+    };
+    let value = native.property("default").unwrap_or(Value::Native(native));
+    // Node's callable CommonJS facades also carry the named exports as own-looking properties:
+    // `require('node:events').EventEmitter === require('node:events')`. Native values answer
+    // those properties from the canonical table, so no mutable wrapper or second identity is
+    // needed.
+    Some(value)
 }
 
 impl Value {
@@ -3812,7 +3910,7 @@ impl Value {
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
-            Self::CommonJsRequire(_) => "function",
+            Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
             Self::Proxy(proxy) => proxy.target.type_of(),
@@ -3850,7 +3948,7 @@ impl Value {
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
             | Self::Intl(_) => "object",
             Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
-            Self::CommonJsRequire(_) => "function",
+            Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
             Self::TypedArray(view) => view.kind.name(),
             Self::ArrayBuffer(_) => "arraybuffer",
@@ -3897,7 +3995,8 @@ impl Value {
             | Self::RegExp(_)
             | Self::Settler(..)
             | Self::Bound(_)
-            | Self::CommonJsRequire(_) => f64::NAN,
+            | Self::CommonJsRequire(_)
+            | Self::CommonJsResolve(_) => f64::NAN,
             // Coercion is defined on the target: the traps that could change it are `get` on
             // `valueOf` and `toString`, which this pure path cannot call anyway.
             Self::Proxy(proxy) => proxy.target.as_number(),
@@ -3953,6 +4052,7 @@ impl Value {
             | Self::Settler(..)
             | Self::Bound(_)
             | Self::CommonJsRequire(_)
+            | Self::CommonJsResolve(_)
             | Self::Proxy(_)
             | Self::TypedArray(_)
             | Self::ArrayBuffer(_)
@@ -4022,6 +4122,7 @@ impl Value {
             Self::BigInt(value) => value.to_string(),
             Self::Settler(..) | Self::Bound(_) => "function () { [native code] }".to_owned(),
             Self::CommonJsRequire(_) => "function require() { [native code] }".to_owned(),
+            Self::CommonJsResolve(_) => "function resolve() { [native code] }".to_owned(),
             Self::Proxy(proxy) => proxy.target.to_display_string(),
             // Like an array: `String(new Uint8Array([1, 2]))` is "1,2".
             Self::TypedArray(view) => join(&view.items(), ",").unwrap_or_default(),
@@ -4177,6 +4278,93 @@ fn source_compiler() -> Option<SourceCompiler> {
     SOURCE_COMPILER.with(std::cell::Cell::get)
 }
 
+/// One module a dynamic import has to evaluate, compiled and linked by the host.
+///
+/// The interpreter deliberately owns no linker for the same reason it owns no parser: resolving
+/// a specifier is filesystem policy and reading a star re-export is graph work, and neither
+/// belongs in a machine that runs bytecode. What arrives here is already decided.
+pub struct PlannedModule {
+    /// A stable identity for this module -- its canonical path. Two imports naming the same key
+    /// share one evaluation, which is the whole of what a module cache is.
+    pub key: String,
+    /// The body to run. Its `Return` yields an array holding, in order, the values the rest of
+    /// the plan refers to by index.
+    ///
+    /// The epilogue that builds that array is the host's work, because only the host has a
+    /// compiler: nothing here can look inside a module and decide which slots an importer wants.
+    pub program: Rc<Program>,
+    /// Module-scope slots to fill before the body runs, and where each value comes from.
+    pub bindings: Vec<(u32, ModuleBinding)>,
+}
+
+/// Where one value a planned module imports comes from.
+pub enum ModuleBinding {
+    /// A value an earlier plan entry returned.
+    Value(ModuleValueRef),
+    /// `import * as ns`: an object over values earlier plan entries returned.
+    Namespace(Vec<(String, ModuleValueRef)>),
+    /// A value the host already holds -- a JSON module's default, a Node builtin's exports.
+    Ready(Value),
+}
+
+/// The `index`-th value returned by plan entry `module`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModuleValueRef {
+    pub module: usize,
+    pub index: usize,
+}
+
+/// Everything one `import(specifier)` needs, in the order it has to happen.
+pub struct ModulePlan {
+    /// The key of the module that was asked for, which is one of `modules`' keys.
+    pub key: String,
+    /// Dependencies first, with the requested module last. Every entry is evaluated once.
+    pub modules: Vec<PlannedModule>,
+    /// The requested module's namespace: each visible export and where its value comes from.
+    pub namespace: Vec<(String, ModuleValueRef)>,
+}
+
+/// Why a host produced no plan for a specifier.
+pub enum ModuleLoadError {
+    /// The specifier names nothing, or names something the graph will not link. The promise
+    /// rejects, which is what a host is supposed to do with a specifier it cannot resolve.
+    NotFound(String),
+    /// A requested module is not a module. A `SyntaxError`, raised at link time.
+    Syntax(String),
+    /// A module this compiler cannot build yet. Kept apart from the other two for the same
+    /// reason [`EvalCompileError::Unsupported`] is: rejecting would tell the program the module
+    /// is broken, and a program that believes that takes the branch it wrote for that instead of
+    /// failing.
+    Unsupported(String),
+}
+
+/// How a host turns one `import(specifier)` into modules the machine can run.
+///
+/// The same shape [`SourceCompiler`] has, and for the same reason (ADR 0007, ADR 0030): the
+/// interpreter is downstream of the bytecode and has no filesystem, no parser and no linker.
+/// A host that installs none simply has no `import()`, and says so rather than answering.
+///
+/// The specifier arrives already coerced to a string. The referrer does not arrive at all: a
+/// compiled program does not carry the path it came from, so a host that needs one has to know
+/// where it put the program.
+pub type ModuleLoader = fn(&str) -> Result<ModulePlan, ModuleLoadError>;
+
+thread_local! {
+    /// Per thread for the same reason [`SOURCE_COMPILER`] is: which linker this process was
+    /// built with is a property of the build, not of any one execution.
+    static MODULE_LOADER: std::cell::Cell<Option<ModuleLoader>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Give this thread's VMs a module loader, so `import()` can reach a module at run time.
+pub fn install_module_loader(loader: ModuleLoader) {
+    MODULE_LOADER.with(|slot| slot.set(Some(loader)));
+}
+
+fn module_loader() -> Option<ModuleLoader> {
+    MODULE_LOADER.with(std::cell::Cell::get)
+}
+
 /// Whether a program reads or writes module scope through the frame stack.
 ///
 /// True of every ordinary program with a nested function over a module binding, and false of
@@ -4266,6 +4454,9 @@ pub struct ModuleExportValue {
 pub struct ModuleExecutionResult {
     pub execution: ExecutionResult,
     pub exports: Vec<ModuleExportValue>,
+    /// The final value of the CommonJS `module.exports` object when the module wrapper supplied
+    /// one. Read through the VM so an accessor descriptor is observed like an ordinary require.
+    pub commonjs_exports: Option<Value>,
 }
 
 /// Realm-owned state shared by every module body in one graph execution.
@@ -4349,6 +4540,7 @@ pub enum ExecutionError {
     ///
     /// A catchable `RangeError`, in the specification and here -- see [`Self::CyclicJson`].
     RadixOutOfRange,
+    InvalidTimeout,
     InvalidPort,
     InvalidHttpStatus,
     /// A `size` a set-like reported as a negative number, which no collection can have.
@@ -4577,6 +4769,20 @@ pub enum ExecutionError {
     /// frontend, not the language saying anything, and a program that caught it would carry on
     /// as though the source had been rejected on its merits.
     NoSourceCompiler,
+    /// `import()` reached with no module loader installed for this realm.
+    ///
+    /// Absent from `as_javascript_error` for the same reason [`Self::NoSourceCompiler`] is: a
+    /// rejection here would be indistinguishable, to the program, from a module that genuinely
+    /// could not be found.
+    NoModuleLoader,
+    /// A module `import()` reached that this compiler cannot build yet.
+    ///
+    /// Kept apart from a rejection for the same reason [`Self::EvalUnsupported`] is kept apart
+    /// from a `SyntaxError`: a program told the module failed will take the branch it wrote for
+    /// a failing module rather than failing itself.
+    DynamicImportUnsupported {
+        message: String,
+    },
     /// Source handed to `eval` or `new Function` that is not a program.
     SyntaxErrorMessage {
         message: String,
@@ -4662,6 +4868,7 @@ impl fmt::Display for ExecutionError {
                     "argument is out of the range this method accepts"
                 )
             }
+            Self::InvalidTimeout => write!(formatter, "timeout is out of range"),
             Self::InvalidPort => write!(formatter, "port is outside 0..=65535"),
             Self::InvalidHttpStatus => write!(formatter, "invalid HTTP status code"),
             Self::DateOutOfRange => write!(formatter, "date has no ISO spelling"),
@@ -4748,6 +4955,13 @@ impl fmt::Display for ExecutionError {
                 formatter,
                 "no source compiler is installed, so `eval` and `Function` cannot compile at run time"
             ),
+            Self::NoModuleLoader => write!(
+                formatter,
+                "no module loader is installed, so `import()` cannot reach a module at run time"
+            ),
+            Self::DynamicImportUnsupported { message } => {
+                write!(formatter, "unsupported dynamic import: {message}")
+            }
             Self::SyntaxErrorMessage { message } => write!(formatter, "{message}"),
             Self::EvalUnsupported { message } => write!(formatter, "{message}"),
             Self::ProxyNotSerialisable => {
@@ -4959,6 +5173,10 @@ impl ExecutionError {
                 ErrorKind::Range,
                 "toString() radix must be between 2 and 36".to_owned(),
             ),
+            Self::InvalidTimeout => (
+                ErrorKind::Range,
+                "The value of \"msecs\" is out of range".to_owned(),
+            ),
             Self::InvalidPort => (
                 ErrorKind::Range,
                 "Port should be >= 0 and < 65536".to_owned(),
@@ -5011,6 +5229,13 @@ pub fn execute<H: HostOps + ?Sized>(
         limits,
         runtime_entropy_seed(&runtime)?,
     );
+    // A Script's `this` is the global object, and in strict code too: strictness governs what a
+    // *function* receives when called without a receiver, not what a script body's `this` is.
+    // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
+    // on `Vm::this_value` says exactly that, and this path was reading it as though every program
+    // were a module. Setting it here also forces the realm's global object into existence before
+    // the program runs, which is what makes `this.x = 1` and a later bare `x` name one binding.
+    vm.this_value = vm.global_object();
     // The program is not finished when its last statement is: anything it scheduled still has
     // to run, which is what makes a `setTimeout` observable at all.
     let execution = runtime.enter(|| vm.run())?;
@@ -5072,6 +5297,13 @@ pub fn execute_reclaiming<H: HostOps + ?Sized>(
         limits,
         runtime_entropy_seed(&runtime)?,
     );
+    // A Script's `this` is the global object, and in strict code too: strictness governs what a
+    // *function* receives when called without a receiver, not what a script body's `this` is.
+    // Only a module gets `undefined`, and `execute_module` builds its own machine -- the comment
+    // on `Vm::this_value` says exactly that, and this path was reading it as though every program
+    // were a module. Setting it here also forces the realm's global object into existence before
+    // the program runs, which is what makes `this.x = 1` and a later bare `x` name one binding.
+    vm.this_value = vm.global_object();
     let outcome = runtime
         .enter(|| vm.run())
         .and_then(|_| vm.run_event_loop(&mut runtime));
@@ -5367,6 +5599,7 @@ fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
         });
     }
 
+    let commonjs_module = import_values.get(2).cloned();
     let mut locals = vec![Value::Undefined; module.program.local_count as usize];
     for (binding, value) in module.imports.iter().zip(import_values) {
         let Some(local) = locals.get_mut(binding.local_slot as usize) else {
@@ -5429,7 +5662,15 @@ fn execute_module_in_runtime_mode_with_session<H: HostOps + ?Sized>(
             value: value.clone(),
         });
     }
-    Ok(ModuleExecutionResult { execution, exports })
+    let commonjs_exports = commonjs_module
+        .as_ref()
+        .map(|module_object| vm.read_property(module_object, "exports", vm.instruction))
+        .transpose()?;
+    Ok(ModuleExecutionResult {
+        execution,
+        exports,
+        commonjs_exports,
+    })
 }
 
 /// The language payload attached to a Realm Runtime timer.
@@ -5596,6 +5837,14 @@ enum Job {
     /// thenable settles one tick later than a plain value. Programs order themselves around that
     /// tick, and running the `then` straight away would move them.
     Thenable(Rc<RefCell<PromiseState>>, Value, Value),
+    /// `import(specifier)`: resolve, evaluate and settle, with the specifier already coerced.
+    ///
+    /// A job rather than work the instruction does, because the specification loads a module
+    /// asynchronously even when the host already has it in memory. Running it inline would
+    /// settle the promise before `import(x).then(f)` had attached `f`, which is not observable
+    /// on its own -- but the module's *side effects* would then happen before the statement
+    /// after the `import()`, and that is.
+    Import(Rc<RefCell<PromiseState>>, String),
 }
 
 /// How a suspended generator is resumed.
@@ -5775,6 +6024,19 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// registry itself keeps nothing alive -- it exists only so [`Vm::release_cycles`] can find
     /// the closures again and cut the links.
     closures: Vec<Weak<Closure>>,
+    /// What each module a dynamic import has already evaluated exported, by the host's key for
+    /// it.
+    ///
+    /// The module cache, and the whole of what makes `import("./m.js")` twice run `m.js` once.
+    /// It is realm state rather than the loader's, because it holds *values* -- a second
+    /// evaluation would produce a second set of objects, and a program that compared the two
+    /// namespaces would see them differ.
+    dynamic_modules: std::collections::HashMap<String, Rc<Vec<Value>>>,
+    /// The namespace object handed back for each module, so two imports of one module hand back
+    /// the same object rather than two equal ones. A namespace has identity in the
+    /// specification, and `import(s).then(a => import(s).then(b => a === b))` is how a program
+    /// sees it.
+    dynamic_namespaces: std::collections::HashMap<String, Value>,
     limits: ExecutionLimits,
 }
 
@@ -5866,6 +6128,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             symbol_registry: Vec::new(),
             random_state: entropy_seed,
             closures: Vec::new(),
+            dynamic_modules: std::collections::HashMap::new(),
+            dynamic_namespaces: std::collections::HashMap::new(),
             limits,
         }
     }
@@ -5956,6 +6220,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     driver: TcpServerDriver::default(),
                     handler,
                     protocol: ServerProtocol::Net,
+                    timeout_milliseconds: 0.0,
                     streams: Vec::new(),
                     object: None,
                 }));
@@ -6393,7 +6658,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.dispatch_node_client_request(native, receiver, arguments, instruction)
             }
             Native::NodeHttpCreateServer => {
-                let handler = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // Node accepts both `createServer(listener)` and
+                // `createServer(options, listener)`. Options are transport policy; the last
+                // callable argument is the request listener on either form. Keeping overload
+                // selection here prevents the HTTP state machine from learning about JavaScript
+                // argument shapes and leaves room for the options object to be lowered into
+                // protocol/transport configuration independently.
+                let handler = arguments
+                    .iter()
+                    .rev()
+                    .find(|value| is_callable(value))
+                    .cloned()
+                    .unwrap_or(Value::Undefined);
                 if !is_callable(&handler) {
                     return Err(ExecutionError::TypeErrorMessage {
                         message: "The request listener must be a function".into(),
@@ -6403,6 +6679,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     driver: TcpServerDriver::default(),
                     handler,
                     protocol: ServerProtocol::Http,
+                    timeout_milliseconds: 0.0,
                     streams: Vec::new(),
                     object: None,
                 }));
@@ -6449,6 +6726,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .unwrap_or(Value::Undefined),
                 );
                 Ok(Value::Object(Rc::new(RefCell::new(address))))
+            }
+            Native::NodeServerSetTimeout => {
+                let state = node_http_server(receiver)?;
+                let timeout = arguments.first().map_or(0.0, Value::as_number);
+                if !timeout.is_finite() || timeout < 0.0 {
+                    return Err(ExecutionError::InvalidTimeout);
+                }
+                state.borrow_mut().timeout_milliseconds = timeout.trunc();
+                if let Some(callback) = arguments.get(1).filter(|value| is_callable(value)) {
+                    self.dispatch_node_event(
+                        Native::NodeEventOn,
+                        receiver,
+                        &[Value::String("timeout".into()), callback.clone()],
+                        instruction,
+                    )?;
+                }
+                if let Value::Object(object) = receiver {
+                    object
+                        .borrow_mut()
+                        .set("timeout", Value::Number(timeout.trunc()));
+                }
+                Ok(receiver.clone())
             }
             Native::NodeServerClose => {
                 let state = node_http_server(receiver)?;
@@ -7683,6 +7982,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             driver: TcpServerDriver::default(),
                             handler: Value::Undefined,
                             protocol,
+                            timeout_milliseconds: 0.0,
                             streams: vec![connection],
                             object: None,
                         }));
@@ -8241,6 +8541,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::SetPrototype => {
                     let prototype = self.pop(current)?;
                     let target = self.pop(current)?;
+                    // Only an object or `null` can be a prototype, and `{ __proto__: 1 }` is
+                    // neither an error nor a property: the literal quietly keeps the prototype
+                    // it already had. Recording the primitive instead would make
+                    // `Object.getPrototypeOf` answer `1`, which is a chain no walk can end.
+                    if matches!(
+                        prototype,
+                        Value::Undefined
+                            | Value::Number(_)
+                            | Value::String(_)
+                            | Value::Boolean(_)
+                            | Value::Symbol(_)
+                            | Value::BigInt(_)
+                    ) {
+                        self.stack.push(target);
+                        continue;
+                    }
                     match &target {
                         Value::Object(object) => object.borrow_mut().set_prototype(prototype),
                         Value::Function(closure) => {
@@ -8308,6 +8624,72 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value,
                         steps: self.steps,
                     });
+                }
+                Instruction::ToObject => {
+                    let value = self.pop(current)?;
+                    if value.is_nullish() {
+                        // `with (null)` throws before its body runs, which is why the coercion
+                        // is a step of its own rather than something the first name lookup does.
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!("Cannot convert {} to object", value.to_display_string()),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    self.stack.push(match &value {
+                        Value::String(_)
+                        | Value::Number(_)
+                        | Value::Boolean(_)
+                        | Value::Symbol(_)
+                        | Value::BigInt(_) => wrap_primitive(value),
+                        _ => value,
+                    });
+                }
+                Instruction::WithHas(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let object = self.pop(current)?;
+                    let present =
+                        has_property(&self.intrinsics, &object, &Value::String(name.clone()));
+                    if !present {
+                        self.stack.push(Value::Boolean(false));
+                        continue;
+                    }
+                    // `Symbol.unscopables` is how an object takes a name *out* of the scope it
+                    // provides. It is what let `Array.prototype.flat` be added years after code
+                    // like `with (array) { flat }` was written without changing what that code
+                    // means, and it is an ordinary property read: a getter on it runs, and what
+                    // it throws is the program's to handle.
+                    let read =
+                        self.read_property(&object, WellKnown::Unscopables.property_key(), current);
+                    let Some(blockers) = self.catchable(read, current)? else {
+                        continue;
+                    };
+                    let blocked = if matches!(blockers, Value::Undefined | Value::Null) {
+                        false
+                    } else {
+                        let read = self.read_property(&blockers, &name, current);
+                        let Some(flag) = self.catchable(read, current)? else {
+                            continue;
+                        };
+                        flag.is_truthy()
+                    };
+                    self.stack.push(Value::Boolean(!blocked));
+                }
+                Instruction::DynamicImport => {
+                    let specifier = self.pop(current)?;
+                    let promise = PromiseState::pending();
+                    // Everything from the coercion onwards rejects rather than throws: the
+                    // specification hands the promise back first and only then looks at what it
+                    // was given, so `import({ toString() { throw x } })` is a rejection and not
+                    // an exception at the call site.
+                    match self.import_specifier(&specifier, current)? {
+                        Ok(text) => self
+                            .realm
+                            .queue_microtask(Job::Import(Rc::clone(&promise), text)),
+                        Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
+                    }
+                    self.stack.push(Value::Promise(promise));
                 }
                 Instruction::Throw => {
                     let thrown = self.pop(current)?;
@@ -8392,6 +8774,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         kiln_ir::Builtin::RangeError => Native::Error(ErrorKind::Range),
                         kiln_ir::Builtin::ReferenceError => Native::Error(ErrorKind::Reference),
                         kiln_ir::Builtin::SyntaxError => Native::Error(ErrorKind::Syntax),
+                        kiln_ir::Builtin::UriError => Native::Error(ErrorKind::Uri),
                         kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
                         kiln_ir::Builtin::String => Native::StringConstructor,
                         kiln_ir::Builtin::Set => Native::SetConstructor,
@@ -8896,7 +9279,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // Both defer to `call_value`: a bound function knows its own receiver,
                         // and a proxy has to consult its `apply` trap before anything else can
                         // happen.
-                        Value::Bound(_) | Value::Proxy(_) | Value::CommonJsRequire(_) => {
+                        Value::Bound(_)
+                        | Value::Proxy(_)
+                        | Value::CommonJsRequire(_)
+                        | Value::CommonJsResolve(_) => {
                             let callee = callee.clone();
                             let arguments = self.take_arguments(argc, current)?;
                             let called =
@@ -9804,6 +10190,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     target: callback,
                     this_value: arguments.get(1).cloned().unwrap_or(Value::Undefined),
                     arguments: Vec::new(),
+                    properties: RefCell::new(ObjectData::default()),
                 })));
             }
             Native::NodeAsyncResourceEmitDestroy => return Ok(Value::Undefined),
@@ -9951,6 +10338,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 ])]));
                 return Ok(ordinary_object([("loopback".to_owned(), loopback)]));
             }
+            Native::NodeOsHostname => return Ok(Value::String("kiln".to_owned())),
             Native::NodeHttpsCreateServer => {
                 return Err(ExecutionError::Host {
                     instruction,
@@ -9963,6 +10351,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Err(ExecutionError::Host {
                     instruction,
                     message: "node:http2 requires an HTTP/2 host capability that this realm does not provide"
+                        .to_owned(),
+                });
+            }
+            Native::NodeModuleCreateRequire => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message:
+                        "node:module createRequire requires the captured graph resolution index"
+                            .to_owned(),
+                });
+            }
+            Native::NodeFsExistsSync => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message: "node:fs existsSync is unavailable: filesystem I/O is Tokio-owned and asynchronous"
+                        .to_owned(),
+                });
+            }
+            Native::NodePathJoin => {
+                let joined = arguments
+                    .iter()
+                    .map(Value::to_display_string)
+                    .collect::<Vec<_>>()
+                    .join("/");
+                return Ok(Value::String(normalize_posix_path(&joined)));
+            }
+            Native::NodePathIsAbsolute => {
+                return Ok(Value::Boolean(
+                    arguments
+                        .first()
+                        .map(Value::to_display_string)
+                        .is_some_and(|path| path.starts_with('/')),
+                ));
+            }
+            Native::NodeWorkerConstructor => {
+                return Err(ExecutionError::Host {
+                    instruction,
+                    message: "node:worker_threads requires an isolated realm worker capability"
                         .to_owned(),
                 });
             }
@@ -10013,6 +10439,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::NodeServerListen
                 | Native::NodeServerClose
                 | Native::NodeServerAddress
+                | Native::NodeServerSetTimeout
                 | Native::NodeResponseSetHeader
                 | Native::NodeResponseWriteHead
                 | Native::NodeResponseWrite
@@ -10279,6 +10706,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let fill = arguments.get(1).map(Value::as_number).unwrap_or(0.0) as u8;
                 Ok(node_bytes_value(vec![fill; length]))
             }
+            Native::NodeBufferIsBuffer => Ok(Value::Boolean(matches!(
+                arguments.first(),
+                Some(Value::TypedArray(view)) if view.kind == TypedKind::Uint8
+            ))),
+            Native::NodeBufferByteLength => {
+                let length = match arguments.first().unwrap_or(&Value::Undefined) {
+                    Value::String(text) => text.len(),
+                    Value::TypedArray(view) => view.bytes().len(),
+                    Value::ArrayBuffer(buffer) => buffer.byte_length(),
+                    value => value.to_display_string().len(),
+                };
+                Ok(Value::Number(length as f64))
+            }
             Native::NodeBufferConcat => {
                 let Some(Value::Array(items)) = arguments.first() else {
                     return Err(ExecutionError::TypeErrorMessage {
@@ -10543,6 +10983,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // reports with the other stays consistent.
             Native::DateNow | Native::PerformanceNow => {
                 Ok(Value::Number(self.realm.now().as_secs_f64() * 1_000.0))
+            }
+            Native::ProcessHrtimeBigInt => {
+                let nanoseconds = self.realm.now().as_nanos();
+                Ok(Value::BigInt(Rc::new(num_bigint::BigInt::from(
+                    nanoseconds,
+                ))))
+            }
+            Native::ProcessHrtime => {
+                let mut nanoseconds = self.realm.now().as_nanos();
+                if let Some(Value::Array(previous)) = arguments.first() {
+                    let previous = previous.borrow();
+                    let seconds = previous.first().map(Value::as_number).unwrap_or(0.0);
+                    let nanos = previous.get(1).map(Value::as_number).unwrap_or(0.0);
+                    let prior = (seconds.max(0.0) as u128)
+                        .saturating_mul(1_000_000_000)
+                        .saturating_add(nanos.max(0.0) as u128);
+                    nanoseconds = nanoseconds.saturating_sub(prior);
+                }
+                Ok(Value::Array(ArrayData::new(vec![
+                    Value::Number((nanoseconds / 1_000_000_000) as f64),
+                    Value::Number((nanoseconds % 1_000_000_000) as f64),
+                ])))
             }
             // Copying reads each property, and a read is a call when the property is an
             // accessor -- which is why this cannot be a pure transformation of its arguments.
@@ -10829,6 +11291,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 target: receiver.clone(),
                 this_value: arguments.first().cloned().unwrap_or(Value::Undefined),
                 arguments: arguments.get(1..).unwrap_or_default().to_vec(),
+                properties: RefCell::new(ObjectData::default()),
             }))),
             // `Object.create(proto, descriptors)` is `Object.create(proto)` followed by
             // `Object.defineProperties`. The descriptors may carry accessors, and an accessor
@@ -14949,6 +15412,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     message: format!("CommonJS require target `{specifier}` is not in the graph"),
                 })
             }
+            Value::CommonJsResolve(require) => {
+                let specifier = arguments
+                    .first()
+                    .map(Value::to_display_string)
+                    .unwrap_or_default();
+                require
+                    .resolve(&specifier)
+                    .map(Value::String)
+                    .ok_or_else(|| ExecutionError::Host {
+                        instruction,
+                        message: format!(
+                            "CommonJS resolve target `{specifier}` is not in the captured graph"
+                        ),
+                    })
+            }
             Value::Function(closure) => {
                 let depth = self.frames.len();
                 // The shared call path expects a callee beneath the arguments and pops it.
@@ -15772,6 +16250,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     );
                     Ok(())
                 }
+                Job::Import(promise, specifier) => {
+                    match self.import_module(&specifier)? {
+                        Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
+                        Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
+                    }
+                    Ok(())
+                }
                 Job::Thenable(promise, resolution, then) => {
                     let resolve = Value::Settler(Rc::clone(&promise), false);
                     let reject = Value::Settler(Rc::clone(&promise), true);
@@ -16077,6 +16562,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // invites a program to take a path nothing here implements.
         process.set("platform", Value::String("kiln".to_owned()));
         process.set("version", Value::String("kiln".to_owned()));
+        process.set(
+            "versions",
+            ordinary_object([("node".to_owned(), Value::String("22.0.0".to_owned()))]),
+        );
+        process.set_non_enumerable("hrtime", Value::Native(Native::ProcessHrtime));
         process.set_non_enumerable(
             "getBuiltinModule",
             Value::Native(Native::ProcessGetBuiltinModule),
@@ -18057,6 +18547,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // what it wraps, which is what makes a stack trace through one readable.
             Value::Bound(_) => identity_property(target, name)
                 .unwrap_or_else(|| function_property(&self.intrinsics, name)),
+            Value::CommonJsRequire(require) if name == "resolve" => {
+                Value::CommonJsResolve(Rc::clone(require))
+            }
+            Value::CommonJsRequire(_) | Value::CommonJsResolve(_) => {
+                identity_property(target, name)
+                    .unwrap_or_else(|| function_property(&self.intrinsics, name))
+            }
             // Every other callable answers to the same three, and to nothing else: none of them
             // has a property store to shadow them with.
             Value::Callback(_) | Value::Settler(..) => {
@@ -19157,6 +19654,227 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         outcome
     }
 
+    /// Coerce what `import()` was given into a specifier string.
+    ///
+    /// `Ok(Err(value))` is a rejection rather than a throw: everything after the argument has
+    /// been evaluated settles the promise, so a `toString` that throws hands its value back here
+    /// instead of unwinding. The host handler is what makes that possible, exactly as it does
+    /// for a promise reaction that throws.
+    fn import_specifier(
+        &mut self,
+        specifier: &Value,
+        instruction: usize,
+    ) -> Result<Result<String, Value>, ExecutionError> {
+        if matches!(specifier, Value::Symbol(_)) {
+            // A symbol has no string form, and the resulting TypeError rejects like any other
+            // failure of the coercion.
+            let error = self.construct_error(
+                ErrorKind::Type,
+                &[Value::String(
+                    "Cannot convert a Symbol value to a string".to_owned(),
+                )],
+            );
+            return Ok(Err(error));
+        }
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        let outcome = self.as_primitive(specifier, true, instruction);
+        self.handlers.truncate(installed);
+        match outcome {
+            Ok(Value::Symbol(_)) => {
+                let error = self.construct_error(
+                    ErrorKind::Type,
+                    &[Value::String(
+                        "Cannot convert a Symbol value to a string".to_owned(),
+                    )],
+                );
+                Ok(Err(error))
+            }
+            Ok(primitive) => Ok(Ok(primitive.to_display_string())),
+            Err(ExecutionError::CaughtByHost) => {
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Resolve, evaluate and answer one `import(specifier)`.
+    ///
+    /// `Ok(Err(value))` is the rejection the promise gets: a specifier that names nothing, a
+    /// module that is not a module, a module whose body threw. An `Err` is this engine admitting
+    /// it cannot host the request at all, which is not something to tell the program -- a
+    /// rejection would look to it exactly like a module that failed.
+    fn import_module(&mut self, specifier: &str) -> Result<Result<Value, Value>, ExecutionError> {
+        let Some(load) = module_loader() else {
+            return Err(ExecutionError::NoModuleLoader);
+        };
+        let plan = match load(specifier) {
+            Ok(plan) => plan,
+            Err(ModuleLoadError::Unsupported(message)) => {
+                return Err(ExecutionError::DynamicImportUnsupported { message });
+            }
+            Err(ModuleLoadError::NotFound(message)) => {
+                let error = self.construct_error(ErrorKind::Type, &[Value::String(message)]);
+                return Ok(Err(error));
+            }
+            Err(ModuleLoadError::Syntax(message)) => {
+                let error = self.construct_error(ErrorKind::Syntax, &[Value::String(message)]);
+                return Ok(Err(error));
+            }
+        };
+
+        if let Some(namespace) = self.dynamic_namespaces.get(&plan.key) {
+            return Ok(Ok(namespace.clone()));
+        }
+
+        let mut evaluated: Vec<Rc<Vec<Value>>> = Vec::with_capacity(plan.modules.len());
+        for planned in &plan.modules {
+            if let Some(cached) = self.dynamic_modules.get(&planned.key) {
+                evaluated.push(Rc::clone(cached));
+                continue;
+            }
+            let mut locals = vec![Value::Undefined; planned.program.local_count as usize];
+            for (slot, binding) in &planned.bindings {
+                let value = self.module_binding(binding, &evaluated)?;
+                let Some(local) = locals.get_mut(*slot as usize) else {
+                    return Err(ExecutionError::LocalOutOfBounds {
+                        index: *slot as usize,
+                    });
+                };
+                // An import slot always holds a cell, because an import is a live view of the
+                // exporter's binding -- the same rule `execute_module` follows for a statically
+                // linked graph.
+                *local = match value {
+                    Value::Cell(_) => value,
+                    other => Value::Cell(Rc::new(RefCell::new(other))),
+                };
+            }
+            match self.drive_module(Rc::clone(&planned.program), locals)? {
+                Ok(returned) => {
+                    let Value::Array(exported) = returned else {
+                        return Err(ExecutionError::DynamicImportUnsupported {
+                            message: format!(
+                                "module `{}` did not hand back its exports",
+                                planned.key
+                            ),
+                        });
+                    };
+                    let exported = Rc::new(exported.items.borrow().clone());
+                    self.dynamic_modules
+                        .insert(planned.key.clone(), Rc::clone(&exported));
+                    evaluated.push(exported);
+                }
+                // A module that throws while evaluating rejects the import. It is deliberately
+                // not cached: the specification remembers the failure and hands the same error
+                // to a later import of the same module, and re-running the body instead is a
+                // gap rather than a wrong answer.
+                Err(thrown) => return Ok(Err(thrown)),
+            }
+        }
+
+        let mut entries = Vec::with_capacity(plan.namespace.len());
+        for (name, reference) in &plan.namespace {
+            entries.push((name.clone(), Self::planned_value(reference, &evaluated)?));
+        }
+        let namespace = namespace_object(entries);
+        self.dynamic_namespaces.insert(plan.key, namespace.clone());
+        Ok(Ok(namespace))
+    }
+
+    /// Build one value a planned module imports out of what the plan has already evaluated.
+    fn module_binding(
+        &mut self,
+        binding: &ModuleBinding,
+        evaluated: &[Rc<Vec<Value>>],
+    ) -> Result<Value, ExecutionError> {
+        match binding {
+            ModuleBinding::Ready(value) => Ok(value.clone()),
+            ModuleBinding::Value(reference) => Self::planned_value(reference, evaluated),
+            ModuleBinding::Namespace(entries) => {
+                let mut names = Vec::with_capacity(entries.len());
+                for (name, reference) in entries {
+                    names.push((name.clone(), Self::planned_value(reference, evaluated)?));
+                }
+                Ok(namespace_object(names))
+            }
+        }
+    }
+
+    fn planned_value(
+        reference: &ModuleValueRef,
+        evaluated: &[Rc<Vec<Value>>],
+    ) -> Result<Value, ExecutionError> {
+        evaluated
+            .get(reference.module)
+            .and_then(|values| values.get(reference.index))
+            .cloned()
+            .ok_or_else(|| ExecutionError::DynamicImportUnsupported {
+                message: "a module plan referred to a value that was never evaluated".to_owned(),
+            })
+    }
+
+    /// Run one planned module body to completion and hand back what it exported.
+    ///
+    /// A module is a program, not a function, so it enters a frame of its own and `global_base`
+    /// moves with it -- the same arrangement `enter_eval` makes, and for the same reason: its
+    /// top-level slots are what its nested functions call module scope.
+    fn drive_module(
+        &mut self,
+        program: Rc<Program>,
+        locals: Vec<Value>,
+    ) -> Result<Result<Value, Value>, ExecutionError> {
+        if self.native_depth >= self.limits.max_native_depth {
+            return Err(ExecutionError::CallDepthExceeded {
+                limit: self.limits.max_native_depth,
+            });
+        }
+        if self.frames.len() >= self.limits.max_call_depth {
+            return Err(ExecutionError::CallDepthExceeded {
+                limit: self.limits.max_call_depth,
+            });
+        }
+        self.native_depth += 1;
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: self.frames.len(),
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        let depth = self.frames.len();
+        self.frames.push(Frame {
+            program: std::mem::replace(&mut self.program, program),
+            function: self.function.take(),
+            // A module body is always strict, so its `this` is `undefined` rather than the
+            // global object.
+            this_value: std::mem::replace(&mut self.this_value, Value::Undefined),
+            new_target: std::mem::replace(&mut self.new_target, Value::Undefined),
+            arguments: std::mem::replace(&mut self.arguments, Vec::new()),
+            constructing: None,
+            locals: std::mem::replace(&mut self.locals, locals),
+            global_base: self.global_base,
+            instruction: self.instruction,
+            stack_base: self.stack.len(),
+        });
+        self.global_base = self.frames.len();
+        self.instruction = 0;
+        let outcome = self.run_frames(depth).map(|result| result.value);
+        self.handlers.truncate(installed);
+        self.native_depth -= 1;
+        match outcome {
+            Ok(value) => Ok(Ok(value)),
+            Err(ExecutionError::CaughtByHost) => {
+                Ok(Err(self.caught.take().unwrap_or(Value::Undefined)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// `eval(x)` reached as a value: an indirect eval, which evaluates in global scope.
     ///
     /// A non-string argument comes straight back. That is not a shortcut -- the specification
@@ -19356,6 +20074,10 @@ fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
     data.set("listen", Value::Native(Native::NodeServerListen));
     data.set("close", Value::Native(Native::NodeServerClose));
     data.set("address", Value::Native(Native::NodeServerAddress));
+    data.set("setTimeout", Value::Native(Native::NodeServerSetTimeout));
+    data.set("timeout", Value::Number(0.0));
+    data.set("keepAliveTimeout", Value::Number(5_000.0));
+    data.set("requestTimeout", Value::Number(300_000.0));
     data.set("on", Value::Native(Native::NodeEventOn));
     data.set("once", Value::Native(Native::NodeEventOnce));
     data.set("emit", Value::Native(Native::NodeEventEmit));
@@ -19844,6 +20566,35 @@ fn split_mix_64(state: &mut u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
+/// POSIX `path.normalize` semantics used by `path.join` on the Unix Node target.
+fn normalize_posix_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let trailing = path.ends_with('/');
+    let mut parts = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|part| *part != "..") => {
+                parts.pop();
+            }
+            ".." if !absolute => parts.push(".."),
+            ".." => {}
+            part => parts.push(part),
+        }
+    }
+    let mut normalized = parts.join("/");
+    if absolute {
+        normalized.insert(0, '/');
+    }
+    if normalized.is_empty() {
+        normalized.push('.');
+    }
+    if trailing && normalized != "/" && normalized != "." {
+        normalized.push('/');
+    }
+    normalized
+}
+
 /// A double in `[0, 1)` from 53 random bits, which is every bit the mantissa has.
 fn random_double(state: &mut u64) -> f64 {
     #[expect(clippy::cast_precision_loss)]
@@ -20117,7 +20868,8 @@ fn json_stringify(
         | Value::Function(_)
         | Value::Native(_)
         | Value::Callback(_)
-        | Value::CommonJsRequire(_) => None,
+        | Value::CommonJsRequire(_)
+        | Value::CommonJsResolve(_) => None,
         // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
         Value::Symbol(_) => None,
         Value::Null => Some("null".to_owned()),
@@ -20507,6 +21259,7 @@ fn call_native(
                     target: Value::Native(Native::ProxyRevoke),
                     this_value: proxy.clone(),
                     arguments: Vec::new(),
+                    properties: RefCell::new(ObjectData::default()),
                 })),
             );
             pair.set("proxy", proxy);
@@ -22439,12 +23192,20 @@ fn call_native(
         | Native::NodeDnsLookup
         | Native::NodeOs
         | Native::NodeOsNetworkInterfaces
+        | Native::NodeOsHostname
         | Native::NodePerfHooks
         | Native::NodeHttps
         | Native::NodeHttpsCreateServer
         | Native::NodeHttp2
         | Native::NodeHttp2CreateServer
         | Native::NodeHttp2CreateSecureServer
+        | Native::NodeModule
+        | Native::NodeModuleCreateRequire
+        | Native::NodePath
+        | Native::NodePathJoin
+        | Native::NodePathIsAbsolute
+        | Native::NodeWorkerThreads
+        | Native::NodeWorkerConstructor
         | Native::NodeUrl
         | Native::NodeNet
         | Native::NodeNetCreateServer
@@ -22471,13 +23232,18 @@ fn call_native(
         | Native::NodeBuffer
         | Native::NodeBufferFrom
         | Native::NodeBufferAlloc
+        | Native::NodeBufferIsBuffer
+        | Native::NodeBufferByteLength
         | Native::NodeBufferConcat
         | Native::NodeBufferToString
+        | Native::ProcessHrtime
+        | Native::ProcessHrtimeBigInt
         | Native::UrlConstructor
         | Native::UrlSearchParamsGet
         | Native::NodeServerListen
         | Native::NodeServerClose
         | Native::NodeServerAddress
+        | Native::NodeServerSetTimeout
         | Native::NodeResponseSetHeader
         | Native::NodeResponseWriteHead
         | Native::NodeResponseWrite
@@ -22485,6 +23251,8 @@ fn call_native(
         Native::Error(_)
         | Native::NodeEvents
         | Native::NodeFsPromises
+        | Native::NodeFs
+        | Native::NodeFsExistsSync
         | Native::NodeFsReadFile
         | Native::NodeFsWriteFile
         | Native::NodeFsStat
@@ -24496,6 +25264,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         // fact that it is bound is the whole of what there is to say.
         Value::Bound(_) => "[Function: bound]".to_owned(),
         Value::CommonJsRequire(_) => "[Function: require]".to_owned(),
+        Value::CommonJsResolve(_) => "[Function: resolve]".to_owned(),
         // Node shows what the traps produce; this shows the target, and says so, rather than
         // running a program's code because something was printed.
         Value::Proxy(proxy) => format!("Proxy [ {} ]", inspect_nested(&proxy.target, depth, seen)),
@@ -25578,6 +26347,7 @@ fn is_callable(value: &Value) -> bool {
             | Value::Settler(..)
             | Value::Bound(_)
             | Value::CommonJsRequire(_)
+            | Value::CommonJsResolve(_)
             | Value::Proxy(_)
     )
 }
@@ -27341,6 +28111,17 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
             Some(Property::Accessor {
                 get: Some(Value::Native(Native::ProtoGetter)),
                 set: Some(Value::Native(Native::ProtoSetter)),
+            })
+        }
+        // `%TypedArray%.prototype[Symbol.toStringTag]` is an accessor: it reports the concrete
+        // view name from its receiver and returns undefined for an incompatible receiver. Real
+        // serializers capture this getter once and call it as their typed-array brand check.
+        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray))
+            if key == WellKnown::ToStringTag.property_key() =>
+        {
+            Some(Property::Accessor {
+                get: Some(Value::Native(Native::ObjectToStringTag)),
+                set: None,
             })
         }
         _ => None,

@@ -122,7 +122,25 @@ pub struct SwitchCase {
 pub struct ObjectProperty {
     pub key: ObjectKey,
     pub value: Expression,
+    /// How the pair was written, which matters for exactly one key.
+    ///
+    /// `{ __proto__: v }` sets the object's prototype; `{ __proto__ }` and `{ __proto__() {} }`
+    /// are ordinary own properties named `__proto__`. They are three separate productions in the
+    /// grammar and nothing about the key or the value tells them apart, so the syntax is recorded
+    /// here rather than the conclusion drawn from it.
+    pub form: PropertyForm,
     pub span: Span,
+}
+
+/// Which object-literal production a property came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyForm {
+    /// `{ key: value }`, the only form that can set a prototype.
+    KeyValue,
+    /// `{ key }`, which is `{ key: key }` everywhere except the `__proto__` rule.
+    Shorthand,
+    /// `{ key() {} }`, including the `async` and generator spellings.
+    Method,
 }
 
 /// One entry in an object literal.
@@ -281,6 +299,17 @@ pub enum StatementKind {
         init: Option<Box<Statement>>,
         test: Option<Expression>,
         update: Option<Expression>,
+        body: Box<Statement>,
+    },
+    /// `with (object) body`.
+    ///
+    /// The object becomes a scope: every name the body mentions is looked for on it before the
+    /// bindings around it, and found there unless `Symbol.unscopables` says otherwise. That is
+    /// the one construct in the language whose scope is decided at run time, so it cannot be
+    /// desugared into a block over a temporary -- the names inside it are not the names a
+    /// compiler can see.
+    With {
+        object: Expression,
         body: Box<Statement>,
     },
     /// `label: body`.
@@ -650,6 +679,18 @@ pub enum ExpressionKind {
     /// `yield` are different in the source and a diagnostic that named the wrong one would be
     /// confusing.
     Await(Box<Expression>),
+    /// `import(specifier)`, which is an expression rather than a declaration: it names its module
+    /// at run time and hands back a promise for that module's namespace.
+    ///
+    /// Not a [`RequestedModule`], because there is nothing to request until the specifier has been
+    /// evaluated -- which is the whole difference from a static import, and why the linker cannot
+    /// see one.
+    ImportCall {
+        specifier: Box<Expression>,
+        /// The second argument, `import(s, { with: … })`. Evaluated for its side effects wherever
+        /// it appears; nothing reads it yet.
+        options: Option<Box<Expression>>,
+    },
     /// `object.#name`.
     ///
     /// Its own node because the lookup is different in kind: a private name is found on the
@@ -1000,6 +1041,10 @@ impl CommonJsRequireWalker {
             | StatementKind::Continue { .. }
             | StatementKind::Empty
             | StatementKind::Unsupported { .. } => {}
+            StatementKind::With { object, body } => {
+                self.walk_expression(object, shadowed);
+                self.walk_statement(body, shadowed);
+            }
         }
     }
 
@@ -1060,6 +1105,12 @@ impl CommonJsRequireWalker {
             | ExpressionKind::Logical { left, right, .. } => {
                 self.walk_expression(left, shadowed);
                 self.walk_expression(right, shadowed);
+            }
+            ExpressionKind::ImportCall { specifier, options } => {
+                self.walk_expression(specifier, shadowed);
+                if let Some(options) = options {
+                    self.walk_expression(options, shadowed);
+                }
             }
             ExpressionKind::Assignment { value, .. } => self.walk_expression(value, shadowed),
             ExpressionKind::Conditional {
@@ -1282,6 +1333,7 @@ fn statement_has_var_require(statement: &Statement) -> bool {
         }
         StatementKind::While { body, .. }
         | StatementKind::DoWhile { body, .. }
+        | StatementKind::With { body, .. }
         | StatementKind::Labelled { body, .. } => statement_has_var_require(body),
         StatementKind::ForIn {
             kind, name, body, ..
@@ -1564,6 +1616,7 @@ mod tests {
                     ObjectMember::Property(ObjectProperty {
                         key: ObjectKey::Computed(require_call("./object-key")),
                         value: require_call("./object-value"),
+                        form: PropertyForm::KeyValue,
                         span: Span::default(),
                     }),
                     ObjectMember::Spread(require_call("./object-spread")),

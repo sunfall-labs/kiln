@@ -4,7 +4,7 @@
 //! loader and a HIR frontend; the resolver is used only to apply the explicit, canonical
 //! relative/absolute filesystem policy shared by the rest of Kiln.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 use kiln_hir::{Module, commonjs_literal_requires};
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
-    Cell, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult, ModuleRealmSession,
-    Value, execute_module_in_runtime, execute_node_module_in_session, node_builtin_export_names,
-    node_builtin_exports, ordinary_object, own_data_property, parse_json_module, read_through_cell,
+    Cell, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult, ModuleBinding,
+    ModulePlan, ModuleRealmSession, ModuleValueRef, PlannedModule, Value,
+    execute_module_in_runtime, execute_node_module_in_session, node_builtin_commonjs_value,
+    node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
+    parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -28,6 +30,27 @@ use kiln_module_resolver::{
 use kiln_runtime::RealmRuntime;
 
 const COMMONJS_WRAPPER_SOURCE: &str = "*commonjs-wrapper*";
+
+/// A copy of `program` that hands back the values in `slots` instead of `undefined`.
+///
+/// A module body ends by returning `undefined`, and its bindings die with its frame. The only
+/// way an importer running in the same machine can see them is for the body to *return* them, so
+/// the trailing `Return` becomes a `Pop` -- it consumes the same one value, so a jump that
+/// targeted it still balances -- and the epilogue is appended behind it.
+fn export_epilogue(program: &Program, slots: Vec<u32>) -> Program {
+    let mut program = program.clone();
+    if matches!(program.code.last(), Some(Instruction::Return)) {
+        let last = program.code.len() - 1;
+        program.code[last] = Instruction::Pop;
+    }
+    let count = u32::try_from(slots.len()).unwrap_or(u32::MAX);
+    for slot in slots {
+        program.code.push(Instruction::LoadLocal(slot));
+    }
+    program.code.push(Instruction::NewArray { count });
+    program.code.push(Instruction::Return);
+    program
+}
 
 /// Re-exported because [`ModuleGraphError::Resolve`] carries one: a caller that has to tell a
 /// missing module from an unresolvable specifier should not need a second dependency to read it.
@@ -693,6 +716,157 @@ impl ModuleGraph {
         self.execute_mode(host, limits, false)
     }
 
+    /// Turn this graph into the plan one `import()` needs, with the entry as the module asked for.
+    ///
+    /// Nothing is executed: the machine that is *already running* when `import()` evaluates has
+    /// to run these bodies itself, because a module and its importer share one realm -- one
+    /// microtask queue, one set of intrinsics, one heap. So the graph's job here is only the part
+    /// the machine cannot do: resolve, link, and say in what order.
+    ///
+    /// Each planned module's program ends by handing back an array of the values anything else
+    /// in the plan refers to. Building that epilogue belongs here for the same reason: choosing
+    /// the slots needs the linker's answer about where each visible export lives, and the
+    /// interpreter has no way to ask.
+    pub fn import_plan(&self) -> Result<ModulePlan, ModuleGraphError> {
+        // Every slot anything in this graph will want out of any module, gathered before an
+        // epilogue is written: a module's array has to hold every value its importers, and the
+        // entry's namespace, will later look up by index.
+        let mut wanted: BTreeMap<PathBuf, BTreeSet<u32>> = BTreeMap::new();
+        for resolutions in self.export_resolutions.values() {
+            for resolution in resolutions.values() {
+                if let ResolvedExport::Local { module, local_slot } = resolution {
+                    wanted
+                        .entry(module.clone())
+                        .or_default()
+                        .insert(*local_slot);
+                }
+            }
+        }
+
+        let position: HashMap<&Path, usize> = self
+            .order
+            .iter()
+            .enumerate()
+            .map(|(index, path)| (path.as_path(), index))
+            .collect();
+        let slot_index = |module: &Path, slot: u32| -> Option<ModuleValueRef> {
+            Some(ModuleValueRef {
+                module: *position.get(module)?,
+                index: wanted.get(module)?.iter().position(|held| *held == slot)?,
+            })
+        };
+
+        let mut modules = Vec::with_capacity(self.order.len());
+        for path in &self.order {
+            let node = self
+                .modules
+                .get(path)
+                .ok_or_else(|| ModuleGraphError::InternalMissingModule { path: path.clone() })?;
+            // Only a source module has a body to run. A JSON module, a CommonJS wrapper and a
+            // Node builtin each need their own materialisation, and answering with an empty
+            // namespace for one would be a wrong answer rather than a missing feature.
+            if node.source != ModuleSource::Source {
+                return Err(ModuleGraphError::Source {
+                    path: path.clone(),
+                    message: format!(
+                        "`import()` of a {:?} module is not implemented",
+                        node.source
+                    ),
+                });
+            }
+            let mut bindings = Vec::with_capacity(node.program.imports.len());
+            for import in &node.program.imports {
+                let dependency = node
+                    .dependencies
+                    .iter()
+                    .find(|dependency| dependency.specifier == import.source)
+                    .ok_or_else(|| ModuleGraphError::UnresolvedImport {
+                        importer: path.clone(),
+                        source: import.source.clone(),
+                    })?;
+                // A module that imports from itself is evaluated once, so there is no earlier
+                // entry in the plan to take the value from. Nothing reads the slot either: the
+                // only import a module can have from itself is the placeholder a re-export
+                // desugars to, whose name no source can write, and the linker resolves the
+                // export it stands for straight through to its origin. Any *other* self-import
+                // would be read, so it is refused rather than left holding `undefined`.
+                let binding = if dependency.target == *path {
+                    if !import.local.starts_with(kiln_ir::REEXPORT_LOCAL_PREFIX) {
+                        return Err(ModuleGraphError::Source {
+                            path: path.clone(),
+                            message: format!(
+                                "module imports `{}` from itself, which this linker cannot bind",
+                                import.imported
+                            ),
+                        });
+                    }
+                    Some(ModuleBinding::Ready(Value::Undefined))
+                } else if import.imported == kiln_ir::NAMESPACE_IMPORT {
+                    self.plan_namespace(&dependency.target, &slot_index)
+                        .map(ModuleBinding::Namespace)
+                } else {
+                    match self.resolved_export(&dependency.target, &import.imported) {
+                        Some(ResolvedExport::Local { module, local_slot }) => {
+                            slot_index(module, *local_slot).map(ModuleBinding::Value)
+                        }
+                        Some(ResolvedExport::Namespace { module }) => self
+                            .plan_namespace(module, &slot_index)
+                            .map(ModuleBinding::Namespace),
+                        Some(ResolvedExport::Ambiguous) | None => None,
+                    }
+                };
+                let binding = binding.ok_or_else(|| ModuleGraphError::MissingExport {
+                    importer: path.clone(),
+                    provider: dependency.target.clone(),
+                    name: import.imported.clone(),
+                })?;
+                bindings.push((import.local_slot, binding));
+            }
+            let slots = wanted
+                .get(path)
+                .map(|slots| slots.iter().copied().collect())
+                .unwrap_or_default();
+            modules.push(PlannedModule {
+                key: path.to_string_lossy().into_owned(),
+                program: std::rc::Rc::new(export_epilogue(&node.program.program, slots)),
+                bindings,
+            });
+        }
+
+        let namespace = self
+            .plan_namespace(&self.entry, &slot_index)
+            .ok_or_else(|| ModuleGraphError::InternalMissingModule {
+                path: self.entry.clone(),
+            })?;
+        Ok(ModulePlan {
+            key: self.entry.to_string_lossy().into_owned(),
+            modules,
+            namespace,
+        })
+    }
+
+    /// Every visible export of `module`, paired with where in the plan its value will be.
+    fn plan_namespace(
+        &self,
+        module: &Path,
+        slot_index: &impl Fn(&Path, u32) -> Option<ModuleValueRef>,
+    ) -> Option<Vec<(String, ModuleValueRef)>> {
+        let resolutions = self.export_resolutions.get(module)?;
+        let mut entries = Vec::with_capacity(resolutions.len());
+        for (name, resolution) in resolutions {
+            // Only a name whose value the plan can point at is included. An ambiguous star
+            // export has no value, and `export * as ns from` names an object rather than a slot;
+            // leaving either out keeps the namespace honest about what it holds, where putting
+            // a wrong value in would not.
+            if let ResolvedExport::Local { module, local_slot } = resolution
+                && let Some(reference) = slot_index(module, *local_slot)
+            {
+                entries.push((name.clone(), reference));
+            }
+        }
+        Some(entries)
+    }
+
     /// Execute this graph with the realm-owned Tokio Node host installed.
     ///
     /// The graph and linker are identical to [`Self::execute`]; only the explicit execution
@@ -713,6 +887,11 @@ impl ModuleGraph {
         node: bool,
     ) -> Result<ExecutionResult, ModuleGraphError> {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
+        // A builtin has one canonical implementation and two language projections. `values`
+        // holds its ESM bindings; this table holds Node's historical CommonJS `module.exports`
+        // value so a later `require()` never has to reverse-engineer one projection from the
+        // other.
+        let mut builtin_commonjs: HashMap<PathBuf, Value> = HashMap::new();
         // Allocated for every CommonJS node before any body runs. This is the module cache's
         // identity seam: every require edge names the same mutable export cell.
         let commonjs_cache: HashMap<PathBuf, Cell> = self
@@ -745,6 +924,11 @@ impl ModuleGraph {
             if let ModuleSource::NodeBuiltin(builtin) = module_node.source {
                 let exports = node_builtin_exports(builtin.specifier())
                     .expect("only materializable builtins have linkable exports");
+                builtin_commonjs.insert(
+                    path.clone(),
+                    node_builtin_commonjs_value(builtin.specifier())
+                        .expect("a linkable builtin has a CommonJS projection"),
+                );
                 values.insert(path.clone(), exports.into_iter().collect());
                 continue;
             }
@@ -775,7 +959,9 @@ impl ModuleGraph {
                     let value = if let Some(cell) = commonjs_cache.get(&dependency.target) {
                         std::rc::Rc::clone(cell)
                     } else if let Some(provider) = values.get(&dependency.target) {
-                        if self
+                        if let Some(value) = builtin_commonjs.get(&dependency.target) {
+                            std::rc::Rc::new(std::cell::RefCell::new(value.clone()))
+                        } else if self
                             .modules
                             .get(&dependency.target)
                             .is_some_and(|node| node.source == ModuleSource::Json)
@@ -799,7 +985,11 @@ impl ModuleGraph {
                             path: dependency.target.clone(),
                         });
                     };
-                    targets.push((dependency.specifier.clone(), value));
+                    targets.push((
+                        dependency.specifier.clone(),
+                        dependency.target.to_string_lossy().into_owned(),
+                        value,
+                    ));
                 }
                 let module_object =
                     ordinary_object([("exports".to_owned(), initial_exports.clone())]);
@@ -854,8 +1044,13 @@ impl ModuleGraph {
                 total_steps = total_steps
                     .checked_add(result.execution.steps)
                     .ok_or(ModuleGraphError::StepOverflow)?;
-                let final_exports =
-                    own_data_property(&module_object, "exports").unwrap_or(Value::Undefined);
+                // `module.exports` is an ordinary property, not necessarily a data property.
+                // Packages such as `abstract-logging` deliberately publish it through a getter
+                // so every `require` receives a fresh facade. Reading only the backing data slot
+                // made that module export `undefined`, and the first consumer mutation failed.
+                let final_exports = result.commonjs_exports.unwrap_or_else(|| {
+                    own_data_property(&module_object, "exports").unwrap_or(Value::Undefined)
+                });
                 *exports_cell.borrow_mut() = final_exports.clone();
                 values.insert(
                     path.clone(),
@@ -876,6 +1071,23 @@ impl ModuleGraph {
                         importer: path.clone(),
                         source: import.source.clone(),
                     })?;
+                // A module importing from itself has no finished exports to take a value from,
+                // and needs none: the only such import is the placeholder a re-export desugars
+                // to, whose slot no source can name and whose export the linker resolves
+                // straight through to its origin. Any other one would be read, so it is refused.
+                if dependency.target == *path {
+                    if !import.local.starts_with(kiln_ir::REEXPORT_LOCAL_PREFIX) {
+                        return Err(ModuleGraphError::Source {
+                            path: path.clone(),
+                            message: format!(
+                                "module imports `{}` from itself, which this linker cannot bind",
+                                import.imported
+                            ),
+                        });
+                    }
+                    imports.push(Value::Undefined);
+                    continue;
+                }
                 let provider = values.get(&dependency.target).ok_or_else(|| {
                     ModuleGraphError::InternalMissingModule {
                         path: dependency.target.clone(),
@@ -1056,6 +1268,15 @@ where
                             .iter()
                             .all(|source| *source == ModuleSource::CommonJs)
                         {
+                            continue;
+                        }
+                        // A module that names itself -- `export { x as y } from "./this.js"` is
+                        // how a module gives one of its own bindings a second name -- is a cycle
+                        // only in the graph's bookkeeping. There is no evaluation order to get
+                        // wrong: one module, evaluated once, and every name it re-exports from
+                        // itself resolves to a slot it already owns. The edge stays recorded on
+                        // the parent; only the descent stops.
+                        if self.stack.last() == Some(&path) {
                             continue;
                         }
                         let mut cycle = self.stack[start..].to_vec();
@@ -1394,10 +1615,15 @@ fn resolve_exports(
                         module: dependency.target.clone(),
                     }
                 } else {
-                    match tables
-                        .get(&dependency.target)
-                        .and_then(|provider| provider.get(&import.imported))
-                    {
+                    // A module re-exporting from itself has no finished table yet: it is the
+                    // one being built. The names it declared before this line are already in
+                    // it, which is exactly the set a self re-export can name.
+                    let provider = if dependency.target == *module_path {
+                        Some(&table)
+                    } else {
+                        tables.get(&dependency.target)
+                    };
+                    match provider.and_then(|provider| provider.get(&import.imported)) {
                         Some(resolution) => resolution.clone(),
                         None => continue,
                     }
@@ -1609,6 +1835,38 @@ mod tests {
             .expect("execute mixed graph");
         assert_eq!(host.into_stdout(), "42\n");
         assert_eq!(execution.value, Value::Undefined);
+    }
+
+    #[test]
+    fn node_reads_accessor_backed_module_exports_through_commonjs_semantics() {
+        let project = TempProject::new();
+        project.write(
+            "facade.cjs",
+            concat!(
+                "const prototype = { answer: 42 };",
+                "Object.defineProperty(module, 'exports', {",
+                "  get() { return Object.create(prototype); }",
+                "});",
+            ),
+        );
+        let entry = project.write(
+            "main.mjs",
+            "import facade from './facade.cjs'; console.log(facade.answer);",
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build accessor-backed CommonJS graph");
+
+        let mut host = kiln_runtime::CaptureHost::new();
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("execute accessor-backed CommonJS graph");
+        assert_eq!(host.into_stdout(), "42\n");
     }
 
     #[test]
@@ -2112,6 +2370,90 @@ mod tests {
             "{response:?}"
         );
         assert!(response.ends_with("GET /health"), "{response:?}");
+    }
+
+    #[test]
+    fn node_http_create_server_accepts_options_before_the_listener() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { createServer } from 'node:http';",
+                "let server;",
+                "server = createServer({ keepAlive: false }, (request, response) => {",
+                "  response.end('options ' + request.url);",
+                "  server.close();",
+                "});",
+                "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build HTTP graph");
+
+        let (port_sender, port_receiver) = mpsc::channel();
+        struct ServerHost {
+            port_sender: Option<mpsc::Sender<u16>>,
+        }
+        impl HostOps for ServerHost {
+            fn call(
+                &mut self,
+                operation: HostOp,
+                arguments: &[HostValue],
+            ) -> Result<HostValue, HostError> {
+                assert_eq!(operation, HostOp::WriteStdout);
+                let port = arguments
+                    .first()
+                    .and_then(|value| value.to_js_string().parse::<u16>().ok())
+                    .expect("listening callback prints port");
+                if let Some(sender) = self.port_sender.take() {
+                    sender.send(port).expect("send server port");
+                }
+                Ok(HostValue::Undefined)
+            }
+        }
+        let client = std::thread::spawn(move || {
+            let port = port_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("server announces port");
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect client");
+            stream
+                .write_all(
+                    b"GET /configured HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                )
+                .expect("write request");
+            stream.shutdown(Shutdown::Write).expect("finish request");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).expect("read response");
+            response
+        });
+
+        let mut host = ServerHost {
+            port_sender: Some(port_sender),
+        };
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("serve options-form request");
+        let response = client.join().expect("client thread");
+        assert!(response.ends_with("options /configured"), "{response:?}");
     }
 
     #[test]
