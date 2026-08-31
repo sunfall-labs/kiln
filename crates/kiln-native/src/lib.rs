@@ -1759,7 +1759,10 @@ fn native_builtin_supports_export(
         NodeBuiltin::Events => matches!(export_name, "EventEmitter" | "default"),
         NodeBuiltin::Net => matches!(export_name, "connect" | "createConnection" | "createServer"),
         NodeBuiltin::Http => {
-            matches!(export_name, "createServer" | "default" | "get" | "request")
+            matches!(
+                export_name,
+                "Server" | "createServer" | "default" | "get" | "request"
+            )
         }
         _ => false,
     }
@@ -1805,11 +1808,14 @@ exports[1] = connect;
 exports[2] = create_server;"#,
         ),
         NodeBuiltin::Http => Some(
-            r#"kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
+            r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
+kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
 kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
 kiln_value request = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_REQUEST);
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "Server", 6, server, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
 if (status != KILN_C99_OK) return status;
@@ -1817,11 +1823,12 @@ status = kiln_c99_put(host, namespace, "get", 3, get, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "request", 7, request, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
-exports[1] = create_server;
-exports[2] = namespace;
-exports[3] = get;
-exports[4] = request;"#,
+exports[0] = server;
+exports[1] = kiln_c99_undefined();
+exports[2] = create_server;
+exports[3] = namespace;
+exports[4] = get;
+exports[5] = request;"#,
         ),
         _ => None,
     }
@@ -3792,6 +3799,74 @@ mod tests {
         assert!(body.contains("exports[1] = connect;"));
         assert!(body.contains("exports[2] = create_server;"));
         assert!(native_builtin_body(NodeBuiltin::Https).is_none());
+    }
+
+    #[test]
+    fn node_http_native_materializer_matches_the_authoritative_export_order() {
+        use kiln_module_resolver::NodeBuiltin;
+
+        let body = native_builtin_body(NodeBuiltin::Http).expect("http materializes");
+        assert!(body.contains("exports[0] = server;"));
+        assert!(body.contains("exports[1] = kiln_c99_undefined();"));
+        assert!(body.contains("exports[2] = create_server;"));
+        assert!(body.contains("exports[3] = namespace;"));
+        assert!(body.contains("exports[4] = get;"));
+        assert!(body.contains("exports[5] = request;"));
+        assert!(native_builtin_supports_export(NodeBuiltin::Http, "Server"));
+    }
+
+    #[test]
+    fn native_node_http_server_rejects_invalid_options_with_a_node_code() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::process::Command;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:http option validation: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-node-http-invalid-options");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import http from "node:http";
+for (const option of ["foo", 42, true, []]) {
+  let thrown;
+  try { new http.Server(option); } catch (error) { thrown = error; }
+  if (!(thrown instanceof TypeError)) throw new Error("missing TypeError");
+  if (thrown.code !== "ERR_INVALID_ARG_TYPE") throw new Error("missing code");
+}
+console.log("pass");
+"#,
+        )
+        .expect("write invalid-options fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native invalid-options graph builds");
+        let output = Command::new(&report.output)
+            .output()
+            .expect("run native invalid-options fixture");
+        assert!(
+            output.status.success(),
+            "status={} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "pass\n");
     }
 
     #[test]
