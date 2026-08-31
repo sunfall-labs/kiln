@@ -54,3 +54,38 @@ console.log(leaf.a, leaf.b, leaf.c, leaf instanceof Base, Object.keys(leaf));
 
 // A method reached through the chain and used as a value.
 console.log([new Dog("A"), new Puppy("B")].map((animal: Animal) => animal.speak()));
+
+// `super[key]` is the same lookup as `super.name` with the key computed, so the two have to
+// agree on the receiver -- an accessor found on the prototype is called with the *instance*,
+// and reading `super['g']` off `Base.prototype` with `Base.prototype` as `this` answers
+// `undefined` where the instance holds a value.
+class Held {
+  v = 7;
+  get g() { return this.v * 10; }
+  m() { return "Held.m"; }
+  static s() { return "Held.s"; }
+}
+class Holder extends Held {
+  read(key: string) { return super[key]; }
+  call(key: string) { return super[key](); }
+  static readStatic(key: string) { return super[key](); }
+  write() { super["w"] = 5; return this.w; }
+}
+const holder = new Holder();
+console.log(holder.read("g"), holder.read("v"), holder.call("m"), Holder.readStatic("s"));
+console.log(holder.write(), typeof holder.read("nope"));
+
+// The key expression runs before the home object is asked what it inherits from, so a key with
+// a side effect is ordered against the lookup rather than after it.
+const order: string[] = [];
+class Ordered extends Held {
+  probe() { return super[(order.push("key"), "g")]; }
+}
+console.log(new Ordered().probe(), order.join(","));
+
+// `super[k]` in an object literal reaches the literal's own prototype, not a superclass.
+const literal = {
+  __proto__: { tag: "proto" },
+  reach(key: string) { return super[key]; },
+};
+console.log(literal.reach("tag"));
