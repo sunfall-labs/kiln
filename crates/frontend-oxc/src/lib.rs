@@ -62,11 +62,13 @@ pub fn parse_with_goal(path: &str, source: &str, goal: SourceGoal) -> Module {
     parse_source(source, source_type)
 }
 
-/// Parse a CommonJS file under the Script goal while preserving the owned HIR boundary.
-/// Package-format policy belongs to the Node resolver/graph; the frontend only selects grammar.
+/// Parse a CommonJS file with Oxc's explicit wrapper-aware goal while preserving the owned HIR
+/// boundary. Package-format policy belongs to the Node resolver/graph; the frontend only selects
+/// grammar. Unlike an ordinary Script goal, this admits the wrapper's top-level `return` and
+/// `new.target` while continuing to reject top-level `await`.
 pub fn parse_commonjs(path: &str, source: &str) -> Module {
     let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
-    parse_source(source, inferred.with_script(true))
+    parse_source(source, inferred.with_commonjs(true))
 }
 
 fn parse_source(source: &str, source_type: SourceType) -> Module {
@@ -2152,6 +2154,22 @@ mod tests {
             })
         ));
         assert_eq!(kiln_hir::commonjs_literal_requires(&module), ["./dep.cjs"]);
+    }
+
+    #[test]
+    fn commonjs_goal_uses_oxcs_wrapper_grammar() {
+        let returned = parse_commonjs("fixture.js", "return module.exports;");
+        assert!(
+            returned.diagnostics.is_empty(),
+            "{:?}",
+            returned.diagnostics
+        );
+
+        let awaited = parse_commonjs("fixture.js", "await Promise.resolve();");
+        assert!(
+            !awaited.diagnostics.is_empty(),
+            "CommonJS must reject top-level await"
+        );
     }
 
     #[test]
