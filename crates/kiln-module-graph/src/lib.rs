@@ -10,7 +10,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use kiln_hir::Module;
+use kiln_hir::{Module, commonjs_literal_requires};
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     ExecutionError, ExecutionLimits, ExecutionResult, ModuleRealmSession, Value,
@@ -19,12 +19,15 @@ use kiln_interpreter::{
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
-    compile_module,
+    compile_commonjs, compile_module,
 };
 use kiln_module_resolver::{
-    ModuleResolver, NodeBuiltin, PathRole, ResolutionPolicy, SUPPORTED_EXTENSIONS,
+    ModuleResolver, NodeBuiltin, NodeModuleFormat, PathRole, ResolutionKind, ResolutionPolicy,
+    ResolvedModule, SUPPORTED_EXTENSIONS,
 };
 use kiln_runtime::RealmRuntime;
+
+const COMMONJS_WRAPPER_SOURCE: &str = "*commonjs-wrapper*";
 
 /// Re-exported because [`ModuleGraphError::Resolve`] carries one: a caller that has to tell a
 /// missing module from an unresolvable specifier should not need a second dependency to read it.
@@ -52,6 +55,12 @@ where
 /// A callback that lowers one source file into Kiln's owned HIR.
 pub trait Frontend {
     fn parse(&mut self, path: &str, source: &str) -> Module;
+
+    /// Parse a CommonJS script. Frontends without a distinct script goal may use the module
+    /// parser; Node-aware production frontends override this method.
+    fn parse_commonjs(&mut self, path: &str, source: &str) -> Module {
+        self.parse(path, source)
+    }
 }
 
 impl<F> Frontend for F
@@ -89,6 +98,7 @@ pub struct ModuleNode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModuleSource {
     Source,
+    CommonJs,
     NodeBuiltin(NodeBuiltin),
 }
 
@@ -395,6 +405,73 @@ impl ModuleGraph {
         Self::build_with_policy_provider(entry, resolver, provider)
     }
 
+    /// Build with a provider that receives the resolver-selected source kind.
+    ///
+    /// Node package format is resolution metadata, not a parser guess. This boundary lets a
+    /// caller select the corresponding frontend goal and lowering path while leaving ordinary
+    /// ESM-only callers source-compatible with [`Self::build_with_policy`].
+    pub fn build_with_typed_policy<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_typed_policy_provider(entry, resolver, provider)
+    }
+
+    /// Build a Node-format graph directly from source.
+    ///
+    /// This is the canonical non-incremental adapter: the resolver chooses format, the frontend
+    /// chooses the matching grammar goal, and this layer selects ESM or CommonJS lowering. Static
+    /// literal `require()` calls become ordinary graph dependencies; dynamic require remains a
+    /// runtime concern.
+    pub fn build_node<L, F, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        mut loader: L,
+        mut frontend: F,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        L: SourceLoader,
+        F: Frontend,
+        R: ResolutionPolicy,
+    {
+        Self::build_with_typed_policy(entry, resolver, move |path, source_kind| {
+            let source = loader
+                .load(path)
+                .map_err(|error| ModuleGraphError::Source {
+                    path: path.to_path_buf(),
+                    message: error.to_string(),
+                })?;
+            let path_string = path
+                .to_str()
+                .ok_or_else(|| ModuleGraphError::FrontendPath {
+                    path: path.to_path_buf(),
+                })?;
+            let hir = if source_kind == ModuleSource::CommonJs {
+                frontend.parse_commonjs(path_string, &source)
+            } else {
+                frontend.parse(path_string, &source)
+            };
+            let mut program = if source_kind == ModuleSource::CommonJs {
+                compile_commonjs(&hir)
+            } else {
+                compile_module(&hir)
+            }
+            .map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })?;
+            if source_kind == ModuleSource::CommonJs {
+                program.dependencies = commonjs_literal_requires(&hir);
+            }
+            Ok(program)
+        })
+    }
+
     fn build_with_provider<P>(
         entry: impl AsRef<Path>,
         project_root: impl AsRef<Path>,
@@ -419,6 +496,21 @@ impl ModuleGraph {
     ) -> Result<Self, ModuleGraphError>
     where
         P: FnMut(&Path) -> Result<ModuleProgram, ModuleGraphError>,
+        R: ResolutionPolicy,
+    {
+        let mut provider = provider;
+        Self::build_with_typed_policy_provider(entry, resolver, move |path, _source| {
+            provider(path)
+        })
+    }
+
+    fn build_with_typed_policy_provider<P, R>(
+        entry: impl AsRef<Path>,
+        resolver: R,
+        provider: P,
+    ) -> Result<Self, ModuleGraphError>
+    where
+        P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
         R: ResolutionPolicy,
     {
         if !entry.as_ref().is_absolute() {
@@ -770,7 +862,7 @@ enum VisitState {
 
 impl<P, R> Builder<P, R>
 where
-    P: FnMut(&Path) -> Result<ModuleProgram, ModuleGraphError>,
+    P: FnMut(&Path, ModuleSource) -> Result<ModuleProgram, ModuleGraphError>,
     R: ResolutionPolicy,
 {
     fn visit(&mut self, path: PathBuf) -> Result<(), ModuleGraphError> {
@@ -796,8 +888,29 @@ where
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
 
+                        let source = match source {
+                            ModuleSource::Source => {
+                                match self
+                                    .resolver
+                                    .node_format(&ResolvedModule {
+                                        path: path.clone(),
+                                        kind: ResolutionKind::Relative,
+                                    })
+                                    .map_err(|error| ModuleGraphError::Resolve {
+                                        importer: path.clone(),
+                                        specifier: String::new(),
+                                        error,
+                                    })? {
+                                    Some(NodeModuleFormat::CommonJs) => ModuleSource::CommonJs,
+                                    _ => ModuleSource::Source,
+                                }
+                            }
+                            source => source,
+                        };
                         let program = match source {
-                            ModuleSource::Source => (self.provider)(&path)?,
+                            ModuleSource::Source | ModuleSource::CommonJs => {
+                                (self.provider)(&path, source)?
+                            }
                             ModuleSource::NodeBuiltin(builtin) => builtin_module_program(builtin),
                         };
                         validate_exports(&path, &program)?;
@@ -812,10 +925,20 @@ where
                                         error,
                                     }
                                 })?;
-                            let source = resolved
-                                .builtin()
-                                .map(ModuleSource::NodeBuiltin)
-                                .unwrap_or(ModuleSource::Source);
+                            let source = if let Some(builtin) = resolved.builtin() {
+                                ModuleSource::NodeBuiltin(builtin)
+                            } else if self.resolver.node_format(&resolved).map_err(|error| {
+                                ModuleGraphError::Resolve {
+                                    importer: path.clone(),
+                                    specifier: specifier.clone(),
+                                    error,
+                                }
+                            })? == Some(NodeModuleFormat::CommonJs)
+                            {
+                                ModuleSource::CommonJs
+                            } else {
+                                ModuleSource::Source
+                            };
                             dependencies.push(Dependency {
                                 specifier: specifier.clone(),
                                 target: resolved.path,
@@ -920,6 +1043,11 @@ fn validate_links(
                     path: importer_path.clone(),
                 })?;
         for import in &importer.program.imports {
+            if importer.source == ModuleSource::CommonJs
+                && import.source == COMMONJS_WRAPPER_SOURCE
+            {
+                continue;
+            }
             let dependency = importer
                 .dependencies
                 .iter()
@@ -985,6 +1113,19 @@ fn resolve_exports(
         let mut table = BTreeMap::new();
         let mut explicit_names = HashSet::new();
 
+        // Node's ESM bridge exposes the final `module.exports` value as the default export. The
+        // value is materialized by CommonJS execution; the linker only needs its typed shape.
+        if node.source == ModuleSource::CommonJs {
+            table.insert(
+                "default".to_owned(),
+                ResolvedExport::Local {
+                    module: module_path.clone(),
+                    local_slot: 0,
+                },
+            );
+            explicit_names.insert("default".to_owned());
+        }
+
         for export in node
             .program
             .exports
@@ -996,6 +1137,7 @@ fn resolve_exports(
                 .program
                 .imports
                 .iter()
+                .filter(|import| import.source != COMMONJS_WRAPPER_SOURCE)
                 .find(|import| import.local_slot == export.local_slot)
             {
                 let dependency = node
@@ -1105,6 +1247,94 @@ mod tests {
 
             ModuleGraph::build(entry, &self.root, load, frontend_oxc::parse)
         }
+    }
+
+    #[test]
+    fn node_graph_records_package_commonjs_source_identity() {
+        let project = TempProject::new();
+        fs::create_dir_all(project.root.join("node_modules/pkg")).unwrap();
+        project.write(
+            "node_modules/pkg/package.json",
+            r#"{"name":"pkg","main":"index.js","type":"commonjs"}"#,
+        );
+        let package = project.write("node_modules/pkg/index.js", "module.exports = 1;");
+        let entry = project.write("main.mjs", "import value from 'pkg'; console.log(value);");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_typed_policy(&entry, resolver, |path, source_kind| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = match source_kind {
+                ModuleSource::CommonJs => frontend_oxc::parse_commonjs(path.to_str().unwrap(), &source),
+                _ => frontend_oxc::parse(path.to_str().unwrap(), &source),
+            };
+            let mut program = match source_kind {
+                ModuleSource::CommonJs => kiln_ir::compile_commonjs(&hir),
+                _ => compile_module(&hir),
+            }
+            .map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })?;
+            if fs::canonicalize(path).ok() == fs::canonicalize(&package).ok() {
+                program.exports.push(ExportBinding {
+                    exported: "default".into(),
+                    local_slot: 0,
+                });
+            }
+            Ok(program)
+        })
+        .expect("build package graph");
+        assert_eq!(
+            graph.module(&package).unwrap().source,
+            ModuleSource::CommonJs
+        );
+        assert_eq!(graph.module(&entry).unwrap().source, ModuleSource::Source);
+    }
+
+    struct OxcFrontend;
+
+    impl Frontend for OxcFrontend {
+        fn parse(&mut self, path: &str, source: &str) -> Module {
+            frontend_oxc::parse(path, source)
+        }
+
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> Module {
+            frontend_oxc::parse_commonjs(path, source)
+        }
+    }
+
+    #[test]
+    fn node_builder_compiles_commonjs_wrapper_and_require_edges() {
+        let project = TempProject::new();
+        project.write("package.json", r#"{"type":"module"}"#);
+        fs::create_dir_all(project.root.join("pkg")).unwrap();
+        project.write("pkg/package.json", r#"{"type":"commonjs"}"#);
+        let dependency = project.write("pkg/dep.js", "exports.answer = 42;");
+        let package = project.write(
+            "pkg/index.js",
+            "const dep = require('./dep.js'); module.exports = dep.answer;",
+        );
+        let entry = project.write("main.mjs", "import value from './pkg/index.js';");
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            resolver,
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build typed Node graph");
+        let node = graph.module(&package).expect("CommonJS package node");
+        assert_eq!(node.source, ModuleSource::CommonJs);
+        assert_eq!(node.program.dependencies, ["./dep.js"]);
+        assert_eq!(node.program.imports.len(), 5);
+        assert_eq!(node.dependencies.len(), 1);
+        assert_eq!(node.dependencies[0].specifier, "./dep.js");
+        assert_eq!(
+            node.dependencies[0].target,
+            fs::canonicalize(dependency).unwrap()
+        );
     }
 
     impl Drop for TempProject {
