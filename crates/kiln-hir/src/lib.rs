@@ -583,6 +583,12 @@ pub enum ExpressionKind {
     SuperMember {
         property: String,
     },
+    /// `super[expression]`. The same lookup as [`ExpressionKind::SuperMember`], with the key
+    /// computed rather than written -- kept apart from it so the key stays an expression that
+    /// has to be evaluated, in the order the language evaluates it.
+    SuperComputedMember {
+        property: Box<Expression>,
+    },
     /// `x++`, `++x`, `x--`, `--x`.
     ///
     /// Not desugared into an assignment: the postfix form evaluates to the *old* value, which a
