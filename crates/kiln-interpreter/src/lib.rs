@@ -6906,6 +6906,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Native::Temporal(op) = native {
             return self.temporal_dispatch(op, receiver, arguments, instruction);
         }
+        // Date methods share Temporal's requirement to stay on the machine: setters convert
+        // arguments through user-visible `valueOf` calls, and the formatting methods read the
+        // realm's deterministic clock/zone policy. `call_native` deliberately has no VM and
+        // therefore keeps its Date arm unreachable as a guard against losing this route again.
+        if let Native::Date(method) = native {
+            return self.date_dispatch(method, receiver, arguments, instruction);
+        }
         // These three answer from the machine because each can run program code -- a set-like's
         // `has`/`keys`, a sort comparator, a getter reached through a generic receiver -- and
         // `call_native` has no VM to run it with. Their arms in `call_native` are `unreachable!`
@@ -21602,6 +21609,25 @@ mod tests {
             vec![Value::Undefined; program.local_count as usize],
             ExecutionLimits::default(),
         )
+    }
+
+    #[test]
+    fn date_methods_stay_on_the_machine_dispatch_path() {
+        let program = Program {
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost { calls: Vec::new() };
+        let mut vm = test_vm(&program, &mut host);
+        let date = Value::Date(Rc::new(std::cell::Cell::new(0.0)));
+
+        assert_eq!(
+            vm.dispatch_native(Native::Date(DateMethod::ToIsoString), &date, &[], 0),
+            Ok(Value::String("1970-01-01T00:00:00.000Z".to_owned()))
+        );
     }
 
     #[test]
