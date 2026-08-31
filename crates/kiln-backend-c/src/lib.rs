@@ -1214,7 +1214,11 @@ int kiln_realm_read_file(uint64_t realm, const uint8_t *path, uint64_t path_len,
 int kiln_realm_start_host_op(uint64_t realm, const kiln_async_host_op *operation,
                              kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work,
                              uint64_t *out_request);
+int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
+                                    kiln_realm_completion_fn run, kiln_realm_drop_fn drop,
+                                    void *work, uint64_t *out_request);
 int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
+int kiln_realm_cancel_active_request(uint64_t request);
 int32_t kiln_regexp_compile(const unsigned char *pattern, size_t pattern_len,
                             const unsigned char *flags, size_t flags_len, void **out_handle);
 void kiln_regexp_free(void *handle);

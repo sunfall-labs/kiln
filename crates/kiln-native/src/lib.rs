@@ -61,7 +61,7 @@ const _: () = {
     assert!(EMBEDDING_C_ABI_VERSION == C_ABI_VERSION);
     assert!(EMBEDDING_HOST_ABI_VERSION == HOST_ABI_VERSION);
     assert!(PROVIDER_SCHEMA_VERSION == 1);
-    assert!(PROVIDER_ABI_VERSION == 5);
+    assert!(PROVIDER_ABI_VERSION == 6);
 };
 
 /// Native optimization and checking policy.
