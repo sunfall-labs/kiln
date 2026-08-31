@@ -1421,6 +1421,94 @@ mod tests {
         assert!(response.ends_with("GET /health"), "{response:?}");
     }
 
+    #[test]
+    fn node_http_request_body_is_a_readable_event_stream() {
+        use std::io::{Read, Write};
+        use std::net::{Shutdown, TcpStream};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let project = TempProject::new();
+        let entry = project.write(
+            "main.js",
+            concat!(
+                "import { createServer } from 'node:http';",
+                "let server;",
+                "server = createServer((request, response) => {",
+                "  let bytes = 0;",
+                "  request.on('data', chunk => { bytes += chunk.length; });",
+                "  request.on('end', () => {",
+                "    response.writeHead(201, { 'Content-Type': 'text/plain' });",
+                "    response.end(request.method + ' ' + bytes);",
+                "    server.close();",
+                "  });",
+                "});",
+                "server.listen(0, '127.0.0.1', () => console.log(server.address().port));",
+            ),
+        );
+        let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
+        let graph = ModuleGraph::build_with_policy(&entry, resolver, |path| {
+            let source = fs::read_to_string(path).map_err(|error| ModuleGraphError::Source {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            })?;
+            let hir = frontend_oxc::parse(path.to_str().expect("UTF-8 test path"), &source);
+            compile_module(&hir).map_err(|diagnostics| ModuleGraphError::Compile {
+                path: path.to_path_buf(),
+                diagnostics,
+            })
+        })
+        .expect("build HTTP graph");
+
+        let (port_sender, port_receiver) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let port = port_receiver
+                .recv_timeout(Duration::from_secs(5))
+                .expect("server publishes its port");
+            let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect server");
+            stream
+                .write_all(
+                    b"POST /upload HTTP/1.1\r\nHost: localhost\r\nContent-Length: 12\r\nConnection: close\r\n\r\nhello tokio!",
+                )
+                .expect("write request");
+            stream.shutdown(Shutdown::Write).expect("finish request");
+            let mut response = String::new();
+            stream.read_to_string(&mut response).expect("read response");
+            response
+        });
+
+        struct ServerHost {
+            port_sender: Option<mpsc::Sender<u16>>,
+        }
+        impl HostOps for ServerHost {
+            fn call(
+                &mut self,
+                operation: HostOp,
+                arguments: &[HostValue],
+            ) -> Result<HostValue, HostError> {
+                assert_eq!(operation, HostOp::WriteStdout);
+                let port = arguments
+                    .first()
+                    .and_then(|value| value.to_js_string().parse::<u16>().ok())
+                    .expect("server logs numeric port");
+                if let Some(sender) = self.port_sender.take() {
+                    sender.send(port).expect("publish server port");
+                }
+                Ok(HostValue::Undefined)
+            }
+        }
+        let mut host = ServerHost {
+            port_sender: Some(port_sender),
+        };
+        graph
+            .execute_node(&mut host, ExecutionLimits::default())
+            .expect("serve request body");
+        let response = client.join().expect("client completes");
+        assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
+        assert!(response.contains("Content-Type: text/plain\r\n"));
+        assert!(response.ends_with("POST 12"));
+    }
+
     /// A function value survives the module boundary it was exported across.
     ///
     /// A closure indexes its own program's function table, and every module compiles to its own
