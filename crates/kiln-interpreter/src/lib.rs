@@ -789,6 +789,10 @@ pub enum Native {
     ArrayPush,
     ArrayPop,
     ArrayIndexOf,
+    /// `Array.prototype.toLocaleString`, which is `join` with each element reduced by *calling*
+    /// its own `toLocaleString` rather than its `toString`. On the machine because of that call:
+    /// the corpus counts it, and an array of objects renders through it.
+    ArrayToLocaleString,
     ArrayIncludes,
     ArraySlice,
     SetConstructor,
@@ -1046,6 +1050,9 @@ impl Native {
                 | Self::ArraySlice
                 | Self::ArraySplice
                 | Self::ArrayUnshift
+                | Self::ArrayEntries
+                | Self::ArrayKeys
+                | Self::ArrayValues
         )
     }
 
@@ -11217,6 +11224,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::ArrayLastIndexOf
                 | Native::ArrayIncludes
                 | Native::ArrayAt
+                // `toLocaleString` reduces each element by *calling* its own, so it has no pure
+                // form at all: it is the machine's from the first element on.
+                | Native::ArrayToLocaleString
         ) {
             return self.generic_array_native(native, receiver, arguments, instruction);
         }
@@ -11232,6 +11242,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ArrayCopy(method) => {
                 return self.array_copy(method, receiver, arguments, instruction);
+            }
+            // An array iterator over anything but a dense array or a view reads each position
+            // through the program: the `length` may be a getter and the element may be an
+            // accessor, and the pure `next` below can call neither.
+            Native::ArrayIteratorNext
+                if iterator_state(receiver).is_ok_and(|iterated| {
+                    dense_array(&iterated).is_none() && !matches!(iterated, Value::TypedArray(_))
+                }) =>
+            {
+                return self.generic_array_iterator_next(receiver, instruction);
             }
             Native::RegExpAccessor(accessor) => {
                 return self.regexp_accessor(accessor, receiver, instruction);
@@ -18825,6 +18845,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Self::truncate_created_array(&created, written);
                 Ok(created)
             }
+            // `join` with `ToString` replaced by a *call* to each element's own
+            // `toLocaleString`, and the arguments passed straight through: the locale and the
+            // options a program hands the array are the ones each element is asked with.
+            Native::ArrayToLocaleString => {
+                let length = self.array_like_length(receiver, instruction)?;
+                let mut out = String::new();
+                for index in 0..length {
+                    Self::walk_step(&mut steps)?;
+                    if index > 0 {
+                        push_bounded(&mut out, ",")?;
+                    }
+                    let element = self.element_get(receiver, index, instruction)?;
+                    // `undefined` and `null` render as nothing rather than as themselves, which
+                    // is the one rule this shares with `join`.
+                    if matches!(element, Value::Undefined | Value::Null) {
+                        continue;
+                    }
+                    let method = self.read_property(&element, "toLocaleString", instruction)?;
+                    if !is_callable(&method) {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: "toLocaleString is not a function".to_owned(),
+                        });
+                    }
+                    let rendered =
+                        self.call_value(&method, element, arguments.to_vec(), instruction)?;
+                    let text = self.as_text(&rendered, instruction)?;
+                    push_bounded(&mut out, &text)?;
+                }
+                Ok(Value::String(out))
+            }
+            // The three iterators keep the receiver rather than a copy of it, which is the whole
+            // point of an iterator: a write between `entries()` and the `next()` that reaches it
+            // has to be visible, and a snapshot is a promise that it will not be.
+            Native::ArrayEntries | Native::ArrayKeys | Native::ArrayValues => {
+                Ok(array_iterator_over(native, receiver))
+            }
             Native::ArrayCopy(method) => {
                 self.generic_array_copy(method, receiver, arguments, instruction)
             }
@@ -19218,6 +19274,53 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             CallbackMethod::Every => Value::Boolean(true),
             _ => Value::Undefined,
         })
+    }
+
+    /// `%ArrayIteratorPrototype%.next` over a receiver the dense storage cannot answer for.
+    fn generic_array_iterator_next(
+        &mut self,
+        receiver: &Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let iterated = iterator_state(receiver)?;
+        let Value::Object(state) = receiver else {
+            unreachable!("only an object carries the marker");
+        };
+        let state = Rc::clone(state);
+        let (index, part) = {
+            let state = state.borrow();
+            (
+                state
+                    .get("@@index")
+                    .unwrap_or(Value::Number(0.0))
+                    .as_number(),
+                state
+                    .get("@@part")
+                    .unwrap_or(Value::String("value".to_owned()))
+                    .to_display_string(),
+            )
+        };
+        // The length is re-read every step. An array-like shortened during iteration must stop
+        // early rather than read past its end, which is exactly what a cached length would do.
+        let length = self.array_like_length(&iterated, instruction)?;
+        let index = Self::to_length(index);
+        if index >= length {
+            return Ok(iteration_result(Value::Undefined, true));
+        }
+        #[expect(clippy::cast_precision_loss)]
+        let position = index as f64;
+        state
+            .borrow_mut()
+            .set("@@index", Value::Number(position + 1.0));
+        // An iterator walks *indices*, so it visits a hole -- and what it yields there is what a
+        // read yields, which is undefined unless the chain fills it.
+        let value = self.element_get(&iterated, index, instruction)?;
+        let yielded = match part.as_str() {
+            "key" => Value::Number(position),
+            "entry" => Value::Array(ArrayData::new(vec![Value::Number(position), value])),
+            _ => value,
+        };
+        Ok(iteration_result(yielded, false))
     }
 
     /// `Array.prototype.sort` over a receiver that is not an array.
@@ -25644,6 +25747,11 @@ fn call_native(
             }
             _ => Value::Undefined,
         },
+        // `toLocaleString` calls each element's own, which is program code: it is dispatched by
+        // the interpreter, and reaching this arm means the route to it was lost.
+        Native::ArrayToLocaleString => {
+            unreachable!("`Array.prototype.toLocaleString` is dispatched by the interpreter")
+        }
         Native::ArrayJoin => {
             let separator = match arguments.first() {
                 None | Some(Value::Undefined) => ",".to_owned(),
@@ -25890,36 +25998,7 @@ fn call_native(
         // State lives in reserved properties on the iterator itself, so `next` can observe a
         // write that happened after iterator creation, as the language requires.
         Native::ArrayEntries | Native::ArrayKeys | Native::ArrayValues => match receiver {
-            Value::Array(_) | Value::TypedArray(_) => {
-                let mut iterator = ObjectData::default();
-                // On `Iterator.prototype`, which is where the helper methods live: an array
-                // iterator is one of the iterators `map` and `take` are for, and without the
-                // link `[...].values().map(f)` finds nothing.
-                iterator.set_prototype(Value::Native(Native::PrototypeOf(
-                    PrototypeTable::Iterator,
-                )));
-                iterator.set("@@iterated", receiver.clone());
-                iterator.set("@@index", Value::Number(0.0));
-                iterator.set(
-                    "@@part",
-                    Value::String(
-                        match native {
-                            Native::ArrayEntries => "entry",
-                            Native::ArrayKeys => "key",
-                            _ => "value",
-                        }
-                        .to_owned(),
-                    ),
-                );
-                iterator.set("next", Value::Native(Native::ArrayIteratorNext));
-                // An iterator is itself iterable, which is what lets one be passed straight to
-                // another `for-of` or to `Array.from`.
-                iterator.set(
-                    WellKnown::Iterator.property_key(),
-                    Value::Native(Native::IteratorSelf),
-                );
-                Value::Object(Rc::new(RefCell::new(iterator)))
-            }
+            Value::Array(_) | Value::TypedArray(_) => array_iterator_over(native, receiver),
             _ => Value::Undefined,
         },
         Native::IteratorSelf => receiver.clone(),
@@ -27795,6 +27874,41 @@ fn require_collection(
 ///
 /// The marker is the brand: a plain object that merely carries a `next` is not an array
 /// iterator, and reporting a walk that finished before it started hid the mistake.
+/// The iterator `entries()`, `keys()` and `values()` answer with.
+///
+/// It keeps the receiver rather than a copy of it, which is the whole point: a write between the
+/// call that made the iterator and the `next()` that reaches that position has to be visible, and
+/// a snapshot is a promise that it will not be. The state lives in reserved properties on the
+/// iterator itself, so `next` reads the receiver as it is each step.
+fn array_iterator_over(native: Native, iterated: &Value) -> Value {
+    let mut iterator = ObjectData::default();
+    // On `Iterator.prototype`, which is where the helper methods live: an array iterator is one
+    // of the iterators `map` and `take` are for, and without the link `[...].values().map(f)`
+    // finds nothing.
+    iterator.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Iterator)));
+    iterator.set("@@iterated", iterated.clone());
+    iterator.set("@@index", Value::Number(0.0));
+    iterator.set(
+        "@@part",
+        Value::String(
+            match native {
+                Native::ArrayEntries => "entry",
+                Native::ArrayKeys => "key",
+                _ => "value",
+            }
+            .to_owned(),
+        ),
+    );
+    iterator.set("next", Value::Native(Native::ArrayIteratorNext));
+    // An iterator is itself iterable, which is what lets one be passed straight to another
+    // `for-of` or to `Array.from`.
+    iterator.set(
+        WellKnown::Iterator.property_key(),
+        Value::Native(Native::IteratorSelf),
+    );
+    Value::Object(Rc::new(RefCell::new(iterator)))
+}
+
 fn iterator_state(receiver: &Value) -> Result<Value, ExecutionError> {
     match receiver {
         Value::Object(object) => object
@@ -28000,6 +28114,7 @@ fn array_property(name: &str) -> Value {
         "copyWithin" => Value::Native(Native::ArrayCopyWithin),
         // `Array.prototype.toString` is `join(",")`, which is why `String([1, 2])` is `"1,2"`.
         "toString" => Value::Native(Native::ArrayJoinDefault),
+        "toLocaleString" => Value::Native(Native::ArrayToLocaleString),
         "values" => Value::Native(Native::ArrayValues),
         key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
         _ => Value::Undefined,
@@ -31379,6 +31494,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::FunctionToString
         | N::ArrayCopy(ArrayCopy::ToReversed)
         | N::ArrayJoinDefault
+        | N::ArrayToLocaleString
         | N::ArrayPop
         | N::ArrayReverse
         | N::ArrayShift
