@@ -7248,6 +7248,17 @@ static kiln_value kiln_c99_control_diagnostic(void) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
 }
 
+static void kiln_c99_note_refusal(const char *site, size_t instruction,
+                                  const char *operation) {
+    /* A helper may add detail before the generated instruction that owns the failure has had a
+     * chance to name itself. That partial diagnostic is not provenance. The innermost instruction
+     * installs the site exactly once; callers see the non-null site and leave it untouched. */
+    if (kiln_c99_diagnostic_site != NULL) return;
+    kiln_c99_diagnostic_site = site;
+    kiln_c99_diagnostic_instruction = instruction;
+    kiln_c99_diagnostic_operation = operation;
+}
+
 
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
     int status;
@@ -24138,7 +24149,7 @@ fn emit_instruction(
     let instruction_site = c_string(diagnostic_site);
     let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
     let control_refusal = format!(
-        "if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_site == NULL) {{ kiln_c99_diagnostic_site = {instruction_site}; kiln_c99_diagnostic_instruction = (size_t){index}; kiln_c99_diagnostic_operation = {instruction_operation}; }}"
+        "if (status == KILN_C99_CONTROL_ERROR) {{ kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation});"
     );
     match instruction {
         // Rejected by `verify` before emission begins, so reaching here means the two passes
@@ -26116,7 +26127,7 @@ int main(void) {
             generated
                 .source
                 .contains(
-                    "kiln_c99_diagnostic_site = \"node_modules/@fastify/error/index.js\"; kiln_c99_diagnostic_instruction = (size_t)1; kiln_c99_diagnostic_operation = \"CallMethod(defineProperty)\";"
+                    "kiln_c99_note_refusal(\"node_modules/@fastify/error/index.js\", (size_t)1, \"CallMethod(defineProperty)\")"
                 )
         );
         assert!(
@@ -26124,11 +26135,6 @@ int main(void) {
                 .source
                 .contains("kiln_c99_diagnostic_site = kiln_c99_diagnostic_site"),
             "diagnostic reset must not be substituted into the site expression"
-        );
-        assert!(
-            generated
-                .source
-                .contains("kiln_c99_diagnostic_operation = \"CallMethod(defineProperty)\";")
         );
         assert!(
             generated
