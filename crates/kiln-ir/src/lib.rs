@@ -6388,6 +6388,12 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
         .iter()
         .chain(class.methods.iter().map(|method| &method.function));
     for function in bodies {
+        for parameter in &function.parameters {
+            collect_pattern_identifiers(&parameter.pattern, names);
+        }
+        if let Some(rest) = &function.rest {
+            collect_pattern_identifiers(rest, names);
+        }
         for statement in &function.body {
             collect_nested_function_names(statement, names, true);
         }
