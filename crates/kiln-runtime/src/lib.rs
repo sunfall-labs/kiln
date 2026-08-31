@@ -5,6 +5,7 @@
 //! the realm at the next deadline, while the realm decides the order in which JavaScript work
 //! runs. Tokio types are deliberately private to this crate.
 
+pub mod node_net;
 pub mod node_stream;
 
 use std::cmp::Ordering;
@@ -2102,6 +2103,85 @@ mod tests {
         for resource in [client.id, accepted.id, listener.id] {
             runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
             runtime.next_host_completion().expect("close completes");
+        }
+    }
+
+    #[test]
+    fn node_server_driver_rearms_accept_on_live_tokio_listener() {
+        use crate::node_net::{ServerAction, TcpServerDriver};
+
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        let mut server = TcpServerDriver::default();
+        let ServerAction::Start(listen) = server.listen("127.0.0.1".into(), 0) else {
+            unreachable!()
+        };
+        let listen_request = runtime.start_host_op(listen.clone(), false);
+        assert!(server.started(&listen, listen_request));
+        let actions = server
+            .completed(runtime.next_host_completion().expect("listen completes"))
+            .expect("listen belongs to server");
+        let listener = match &actions[0] {
+            ServerAction::Listening(listener) => listener.clone(),
+            other => panic!("expected listening action, got {other:?}"),
+        };
+        let ServerAction::Start(accept) = &actions[1] else {
+            panic!("expected accept action");
+        };
+        let accept_request = runtime.start_host_op(accept.clone(), false);
+        assert!(server.started(accept, accept_request));
+
+        let port = listener.port.expect("ephemeral port assigned");
+        runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            false,
+        );
+        let mut accepted_resource = None;
+        let mut client_resource = None;
+        while accepted_resource.is_none() || client_resource.is_none() {
+            let completion = runtime
+                .next_host_completion()
+                .expect("connection completes");
+            if completion.request == accept_request {
+                let actions = server
+                    .completed(completion)
+                    .expect("accept belongs to server");
+                match &actions[0] {
+                    ServerAction::Connection(accepted) => {
+                        accepted_resource = Some(accepted.resource.id)
+                    }
+                    other => panic!("expected connection, got {other:?}"),
+                }
+                let ServerAction::Start(next_accept) = &actions[1] else {
+                    panic!("expected rearmed accept");
+                };
+                let next_request = runtime.start_host_op(next_accept.clone(), false);
+                assert!(server.started(next_accept, next_request));
+                assert!(runtime.host().cancel(next_request));
+            } else {
+                client_resource = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource.id,
+                    other => panic!("expected client stream, got {other:?}"),
+                });
+            }
+        }
+
+        let ServerAction::Start(close) = server.close().expect("close starts") else {
+            unreachable!()
+        };
+        let close_request = runtime.start_host_op(close.clone(), false);
+        assert!(server.started(&close, close_request));
+        assert_eq!(
+            server.completed(runtime.next_host_completion().expect("close completes")),
+            Some(vec![ServerAction::Close])
+        );
+        for resource in [accepted_resource.unwrap(), client_resource.unwrap()] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+            runtime
+                .next_host_completion()
+                .expect("stream close completes");
         }
     }
 
