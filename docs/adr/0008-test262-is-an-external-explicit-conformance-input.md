@@ -41,11 +41,21 @@ Its failure state lives under the Kiln project, not in an external Test262 check
 request executes the selected batch in one resident process so the everyday command does not pay
 one compiler startup per test.
 
+The full upstream lane is `scripts/test262.sh`. It fetches Test262 into a temporary checkout,
+requires the exact pinned commit `771005236e88a909635104e03ba12559688c0172`, verifies a clean
+checkout, and invokes `kiln test <checkout>/test` through the normal resident daemon path. The
+machine-readable report retains the schema-1 per-variant results and adds the pin, discovered
+test-file count, executed verdict count, elapsed milliseconds, and executed-tests-per-second
+throughput. A local checkout may be supplied for offline reruns, but it must pass the same commit
+and cleanliness checks.
+
 ## Consequences
 
 - Conformance counts remain honest while interpreter, harness, and realm coverage grow.
 - Parser goal is an owned HIR property rather than an inference from a filename extension.
 - The upstream suite can be updated independently and CI can pin a revision outside this repo.
 - Local smoke fixtures keep the runner and protocol testable without a network checkout.
+- CI's pinned external lane records full-suite throughput separately from the fast smoke and
+  repository-corpus gates; unsupported behavior remains visible in its report.
 - Harness includes, fresh realms, async completion, module resolution, and exact error identity
   remain visible implementation work rather than behavior approximated by the initial runner.

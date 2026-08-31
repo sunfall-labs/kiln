@@ -114,6 +114,7 @@ cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native
 cargo run -p kiln-cli -- --one-shot build examples/hello.ts --profile native-dev
 cargo run -p kiln-cli -- --one-shot test tests/conformance/smoke
 cargo run -p kiln-cli -- test /path/to/test262/test --changed
+bash scripts/test262.sh --out target/test262/results.json
 cargo run -p kiln-bench  # the timing harness; results land in bench/results/
 cargo build --timings    # the compiler developer's loop, measured (ADR 0004)
 ```

@@ -30,7 +30,7 @@ kiln_block <<'EOF'
 | Link latency | `kiln-bench`, repeated links over warm native objects |
 | Generated C size | `kiln-bench`, alongside object and executable bytes |
 | Targeted Test262 latency | `kiln-bench`, parser/interpreter batch with explicit variants |
-| Full Test262 throughput | not yet — needs a pinned external Test262 checkout and harness support |
+| Full Test262 throughput | `scripts/test262.sh`, pinned external checkout and resident daemon batch; report fields `discovered`, `executed`, `elapsed_millis`, and `throughput_tests_per_second` |
 
 The `kiln-bench` rows are the harness's to produce. This table says where each measurement
 belongs; the `Performance` block above says what the harness actually emitted on this run.

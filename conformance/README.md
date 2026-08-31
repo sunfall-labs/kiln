@@ -210,6 +210,23 @@ The command writes the schema-1 results document at the requested path. Its exit
 reports whether the corpus passed; the CI gate reads the document even when that status is
 non-zero so it can name per-test regressions.
 
+### Pinned upstream lane
+
+The complete upstream Test262 suite is never vendored. `scripts/test262.sh` fetches commit
+`771005236e88a909635104e03ba12559688c0172` from [tc39/test262](https://github.com/tc39/test262),
+checks that the detached checkout is clean and contains the expected `harness/` and `test/`
+layout, then invokes the existing daemon-backed batch command:
+
+```sh
+bash scripts/test262.sh --out target/test262/results.json
+```
+
+The report keeps the schema-1 `tests` array and adds `test262.commit`, `discovered` (unique test
+files), `executed` (pass + fail variants), `passed`, `failed`, `unsupported`, `skipped`,
+`elapsed_millis`, and `throughput_tests_per_second`. Unsupported and skipped variants are not
+silently counted as passes. The small repository-owned fixture at
+`tests/conformance/external-test262/` exercises the same external layout without a network fetch.
+
 The source project ran three gates, and the reason all three existed is the single most
 transferable thing here.
 
