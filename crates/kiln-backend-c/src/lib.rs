@@ -8686,9 +8686,18 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         if (!kiln_c99_reads_only(code)) {
             return KILN_C99_CONTROL_ERROR;
         }
-        status = kiln_c99_get(host, receiver, "length", 6, &length, depth, thrown);
-        if (status != KILN_C99_OK) {
-            return status;
+        /* A number or a boolean has no `length` and no indices, so the walk is empty -- which is
+         * why `[].slice.call(7).length` is 0. Asking for the property instead would be answered
+         * with "this backend has no such member", and that is a different sentence: the language
+         * says the property is absent, not unknown. */
+        if (receiver.tag == KILN_VALUE_NUMBER || receiver.tag == KILN_VALUE_BOOLEAN ||
+            receiver.tag == KILN_VALUE_SYMBOL || receiver.tag == KILN_VALUE_BIGINT) {
+            length = kiln_c99_undefined();
+        } else {
+            status = kiln_c99_get(host, receiver, "length", 6, &length, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
         }
         /* No `length` is an empty walk rather than an error, which is why
          * `[].slice.call(7).length` is 0 and not a throw. */
@@ -9447,6 +9456,12 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
         }
         free(units);
         return KILN_C99_OK;
+    }
+    /* Nullish is answered here rather than by the `@@iterator` lookup below, because the two
+     * faults are reported differently: reading a property off null is "Cannot read properties of
+     * null", but *iterating* it is "null is not iterable", and `[...null]` is the second one. */
+    if (source.tag == KILN_VALUE_UNDEFINED || source.tag == KILN_VALUE_NULL) {
+        return kiln_c99_throw_not_iterable(thrown, source);
     }
     /* Everything else goes through the protocol: ask for an iterator, then drive it. */
     if (source.tag == KILN_VALUE_GENERATOR) {
