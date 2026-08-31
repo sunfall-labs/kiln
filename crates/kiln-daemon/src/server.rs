@@ -972,7 +972,7 @@ fn handle_run<E: QueryEngine>(
                 Err(payload) => return (internal_error(&*payload), Next::Continue),
             };
             let mut guard = state.lock().unwrap_or_else(PoisonError::into_inner);
-            if !graph_snapshot_is_current(&snapshot, &guard.engine, source_view) {
+            if !graph_snapshot_is_current(&snapshot, &guard.engine, guard.source_view) {
                 return (
                     Response::StaleSourceView {
                         current: guard.source_view,

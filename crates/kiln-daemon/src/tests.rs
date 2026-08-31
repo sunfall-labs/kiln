@@ -968,6 +968,11 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     let initial_view = setup.source_view();
     let dependency_path = dependency.to_string_lossy().into_owned();
     let entry_path = entry.to_string_lossy().into_owned();
+    let unrelated_path = fixture
+        .dir
+        .join("gated-unrelated.js")
+        .to_string_lossy()
+        .into_owned();
     let (entered_rx, gate) = install_graph_gate(&dependency_path);
 
     let socket = fixture.socket.clone();
@@ -979,6 +984,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         client.handshake().expect("run handshake");
         client.raw_request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: initial_view,
             path: run_path,
             project_root: run_root,
@@ -989,7 +995,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         .expect("graph preparation reached frontend gate");
 
     let socket = fixture.socket.clone();
-    let update_path = dependency_path.clone();
+    let update_path = unrelated_path;
     let updater = std::thread::spawn(move || {
         let mut client = Client::connect(&socket).expect("connect update client");
         client.source_view = initial_view;
@@ -997,7 +1003,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
         let response = client.request(&Request::SetSource {
             source_view: initial_view,
             path: update_path,
-            text: "console.log('new'); export const answer = 7;\n".into(),
+            text: "console.log('unrelated');\n".into(),
         });
         (client, response)
     });
@@ -1025,6 +1031,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     let Response::Ran(fresh) = updater
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: updated_view,
             path: entry_path,
             project_root: root.clone(),
@@ -1033,7 +1040,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     else {
         panic!("expected fresh run response");
     };
-    assert_eq!(fresh.stdout, "new\n7\n");
+    assert_eq!(fresh.stdout, "old\n42\n");
     let Response::Stats(stats) = updater.request(&Request::Stats).expect("fresh stats") else {
         panic!("expected stats response");
     };
@@ -1052,6 +1059,7 @@ fn graph_preparation_releases_state_lock_and_rejects_stale_snapshot() {
     let Response::Ran(fresh) = updater
         .request(&Request::Run {
             node: false,
+            steps: StepBudget::Unmetered,
             source_view: updated_view,
             path: std::fs::canonicalize(fixture.dir.join("gated-entry.js"))
                 .expect("canonical entry")
