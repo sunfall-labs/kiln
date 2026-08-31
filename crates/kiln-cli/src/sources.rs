@@ -194,13 +194,15 @@ pub(crate) fn include_reachable_dependencies(
         } else {
             NodeRequestKind::Import
         };
-        let module = if commonjs {
-            frontend_oxc::parse_commonjs(importer_path, importer_text)
+        let (module, static_requires) = if commonjs {
+            let (module, requires) =
+                frontend_oxc::parse_commonjs_with_requires(importer_path, importer_text);
+            (module, Some(requires))
         } else {
-            frontend_oxc::parse(importer_path, importer_text)
+            (frontend_oxc::parse(importer_path, importer_text), None)
         };
         let requests = if commonjs {
-            kiln_hir::commonjs_literal_requires(&module)
+            static_requires.expect("CommonJS facts exist")
         } else {
             module
                 .runtime_requested_modules()

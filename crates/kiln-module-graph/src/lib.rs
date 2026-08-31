@@ -11,7 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use kiln_hir::{Module, commonjs_literal_requires};
+use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
     Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult,
@@ -80,11 +80,15 @@ where
 pub trait Frontend {
     fn parse(&mut self, path: &str, source: &str) -> Module;
 
-    /// Parse a CommonJS script. Frontends without a distinct script goal may use the module
-    /// parser; Node-aware production frontends override this method.
-    fn parse_commonjs(&mut self, path: &str, source: &str) -> Module {
-        self.parse(path, source)
-    }
+    /// Parse a CommonJS script and return its statically discoverable literal dependencies.
+    /// Scope and hoisting semantics belong to the frontend that owns the source AST.
+    fn parse_commonjs(&mut self, path: &str, source: &str) -> CommonJsParse;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommonJsParse {
+    pub module: Module,
+    pub static_requires: Vec<String>,
 }
 
 impl<F> Frontend for F
@@ -93,6 +97,13 @@ where
 {
     fn parse(&mut self, path: &str, source: &str) -> Module {
         self(path, source)
+    }
+
+    fn parse_commonjs(&mut self, path: &str, source: &str) -> CommonJsParse {
+        CommonJsParse {
+            module: self(path, source),
+            static_requires: Vec::new(),
+        }
     }
 }
 
@@ -493,11 +504,12 @@ impl ModuleGraph {
             if source_kind == ModuleSource::Json {
                 return Ok(ModulePayload::JsonText(source));
             }
-            let hir = if source_kind == ModuleSource::CommonJs {
-                frontend.parse_commonjs(path_string, &source)
-            } else {
-                frontend.parse(path_string, &source)
-            };
+            let commonjs = (source_kind == ModuleSource::CommonJs)
+                .then(|| frontend.parse_commonjs(path_string, &source));
+            let hir = commonjs.as_ref().map_or_else(
+                || frontend.parse(path_string, &source),
+                |parsed| parsed.module.clone(),
+            );
             let mut program = if source_kind == ModuleSource::CommonJs {
                 compile_commonjs(&hir)
             } else {
@@ -508,7 +520,7 @@ impl ModuleGraph {
                 diagnostics,
             })?;
             if source_kind == ModuleSource::CommonJs {
-                program.dependencies = commonjs_literal_requires(&hir);
+                program.dependencies = commonjs.expect("CommonJS parse exists").static_requires;
             }
             Ok(ModulePayload::Program(program))
         })
@@ -2240,8 +2252,13 @@ mod tests {
             frontend_oxc::parse(path, source)
         }
 
-        fn parse_commonjs(&mut self, path: &str, source: &str) -> Module {
-            frontend_oxc::parse_commonjs(path, source)
+        fn parse_commonjs(&mut self, path: &str, source: &str) -> CommonJsParse {
+            let (module, static_requires) =
+                frontend_oxc::parse_commonjs_with_requires(path, source);
+            CommonJsParse {
+                module,
+                static_requires,
+            }
         }
     }
 

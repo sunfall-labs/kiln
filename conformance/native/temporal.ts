@@ -4,10 +4,19 @@
 // crate and the native artifact links the same crate through the provider archive -- so a
 // disagreement here is the object model around it, not a calendar.
 //
-// Only the operations the native backend actually carries are exercised. What is still refused by
-// name under `--native` -- `epochNanoseconds`, which only a BigInt can hold, and the static
-// `fromEpochMilliseconds` pair -- stays out, because a probe that printed several lines and then
-// refused would read as a divergence rather than as the refusal it is.
+// Only the operations the native backend actually carries are exercised. `Temporal.X.prototype`
+// is the one member still refused by name under `--native`, and it stays out: a probe that
+// printed several lines and then refused would read as a divergence rather than as the refusal it
+// is. It is refused rather than answered because the interpreter's own `prototype` is a method
+// table rather than an object -- it reports `typeof` as "function" -- so there is no answer the
+// native backend could give that is both correct and equal to the interpreter's.
+//
+// `Temporal.Instant.fromEpochMilliseconds` and `fromEpochNanoseconds` are the other pair missing
+// here, and for the opposite reason: the native backend now answers both exactly as `deno` does,
+// and the *interpreter* is the one that cannot. It routes `fromEpochMilliseconds` to the instance
+// method `toInstant`, which then rejects the constructor as a receiver, and it has no
+// `fromEpochNanoseconds` at all. They belong with the three below: a divergence whose native side
+// is right.
 
 const date = Temporal.PlainDate.from({ year: 2026, month: 8, day: 30 });
 console.log(date.toString());
@@ -135,12 +144,19 @@ console.log(span.with({ hours: 1 }).toString());
 // An instant and a zoned date-and-time, where the zone is part of the value rather than a
 // formatting choice.
 const instant = Temporal.Instant.from("2020-01-15T10:20:30Z");
+// An instant counts nanoseconds, which is more precision than a double holds: 1579083630000000000
+// is past 2^53, so an engine that answered this through a number would print a value ending in the
+// wrong digits rather than failing. It is a BigInt in both engines because it is one field of the
+// one shared adapter, carried across the C seam as its exact decimal digits.
+console.log(typeof instant.epochNanoseconds, instant.epochNanoseconds);
+console.log(instant.epochNanoseconds === 1579083630000000000n, instant.epochMilliseconds);
 console.log(instant.add({ hours: 2 }).toString());
 console.log(instant.until("2020-02-01T00:00:00Z").toString());
 console.log(instant.toZonedDateTimeISO("UTC").toString());
 console.log(instant.round({ smallestUnit: "minute" }).toString());
 
 const zoned = Temporal.ZonedDateTime.from("2020-01-15T10:20:30+00:00[UTC]");
+console.log(typeof zoned.epochNanoseconds, zoned.epochNanoseconds);
 console.log(zoned.startOfDay().toString());
 console.log(zoned.withTimeZone("UTC").toString());
 console.log(zoned.withPlainTime(Temporal.PlainTime.from("01:02")).toString());
@@ -209,6 +225,12 @@ console.log(Temporal.Now.instant().toString(), Date.now());
 console.log(Temporal.Now.plainDateISO().toString(), Temporal.Now.plainTimeISO().toString());
 console.log(Temporal.Now.plainDateTimeISO().toString());
 console.log(Temporal.Now.zonedDateTimeISO("UTC").toString());
+// With no argument the zone is the realm's own, and ADR 0015 fixes that at UTC *by name*. The
+// bracketed identifier has to be the one `timeZoneId()` answers above: a zone built from a
+// `+00:00` offset would print `[+00:00]` instead, which is the same instant described as a
+// coincidence rather than as a place, and would make the two readers disagree.
+console.log(Temporal.Now.zonedDateTimeISO().toString());
+console.log(Temporal.Now.instant().epochNanoseconds);
 
 // The clock advances with the realm's timers and with nothing else, so two reads with a timer
 // between them differ by exactly the delay.

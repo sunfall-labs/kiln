@@ -20,8 +20,6 @@ inconsistent stack height at a merge
   invalid bytecode program: instruction 3: inconsistent stack height: reached with 1 and 0
 control falls off the end
   invalid bytecode program: instruction 0: control falls off the end of the program
-builtin the backend does not implement
-  unsupported native emission: the `WeakMap` builtin in the native backend
 function captures a slot its creator lacks
   invalid bytecode program: instruction 0: function 0 captures ParentLocal(7), which this frame does not have
 function with more parameters than slots

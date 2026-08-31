@@ -235,21 +235,65 @@ fn assert_numeric_id_invariants(prelude: &str) {
         ids.entry(define.value).or_default().push(define.name);
     }
 
-    const TEMPORAL_ALIASES: [&str; 2] = [
-        "KILN_C99_METHOD_TEMPORAL_LAST",
-        "KILN_C99_METHOD_TEMPORAL_OP_LAST",
-    ];
+    // Two invariants about method IDs, and the reason they are worth a test rather than a
+    // comment: they collide on almost every merge, because two people adding builtins both reach
+    // for the next free number. The resolution is not a matter of taste, it follows from how each
+    // block is dispatched, and rediscovering that from a merge conflict costs an hour.
+    //
+    //   * `Temporal` is dispatched by an explicit *range* (`code >= TEMPORAL_FROM && code <=
+    //     TEMPORAL_LAST` in `kiln_c99_invoke_method`), so its block must stay contiguous and
+    //     nothing else may sit inside it.
+    //   * The node, buffer and url codes are matched by *equality*, one `if` per code, so they do
+    //     not care what number they hold and can be renumbered freely.
+    //
+    // So when the two collide: shift the equality-matched block, never the range-matched one.
+    let temporal_ids: Vec<u64> = methods
+        .iter()
+        .filter(|(_, names)| names.iter().all(|n| n.starts_with("KILN_C99_METHOD_TEMPORAL_")))
+        .map(|(value, _)| *value)
+        .collect();
+    let temporal_low = *temporal_ids.iter().min().expect("Temporal methods exist");
+    let temporal_high = *temporal_ids.iter().max().expect("Temporal methods exist");
+    for (value, names) in &methods {
+        if *value >= temporal_low && *value <= temporal_high {
+            assert!(
+                names.iter().all(|n| n.starts_with("KILN_C99_METHOD_TEMPORAL_")),
+                "method ID {value} ({}) sits inside the Temporal range {temporal_low}..={temporal_high}, \
+                 which is dispatched by range and must stay contiguous. Renumber this one upward \
+                 instead -- it is matched by equality, so its value does not matter.",
+                names.join(", ")
+            );
+        }
+    }
+
+    // `TEMPORAL_LAST` is an alias for whatever the highest Temporal code currently is, which is
+    // exactly what makes the range check above correct. Deriving it rather than pinning a number
+    // means growing the Temporal surface does not require editing this test -- the old pinned
+    // form failed twice for the right reason and had to be hand-updated both times.
+    let last = methods
+        .iter()
+        .find(|(_, names)| names.iter().any(|n| *n == "KILN_C99_METHOD_TEMPORAL_LAST"))
+        .map(|(value, _)| *value)
+        .expect("KILN_C99_METHOD_TEMPORAL_LAST is defined");
+    assert_eq!(
+        last, temporal_high,
+        "KILN_C99_METHOD_TEMPORAL_LAST must alias the highest Temporal code, or the range \
+         dispatch in kiln_c99_invoke_method silently stops reaching the newest ones"
+    );
+
     for (value, names) in &methods {
         if names.len() > 1 {
             let mut sorted = names.clone();
             sorted.sort();
-            assert_eq!(
-                sorted,
-                TEMPORAL_ALIASES,
-                "duplicate method ID {value} is claimed by {}",
+            let all_temporal = sorted
+                .iter()
+                .all(|n| n.starts_with("KILN_C99_METHOD_TEMPORAL_"));
+            assert!(
+                all_temporal && sorted.iter().any(|n| n == "KILN_C99_METHOD_TEMPORAL_LAST"),
+                "duplicate method ID {value} is claimed by {}. The only intended alias is \
+                 TEMPORAL_LAST naming the highest Temporal code.",
                 names.join(", ")
             );
-            assert_eq!(*value, 335, "Temporal method aliases moved from ID 335");
         }
     }
 
@@ -863,17 +907,6 @@ fn rejected_programs() {
     record(
         "control falls off the end",
         bad(vec![number(1.0)], vec![Instruction::Const(0)], 0),
-    );
-    record(
-        "builtin the backend does not implement",
-        bad(
-            Vec::new(),
-            vec![
-                Instruction::LoadBuiltin(Builtin::WeakMap),
-                Instruction::Return,
-            ],
-            0,
-        ),
     );
     record("function captures a slot its creator lacks", {
         let mut top = program(
