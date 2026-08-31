@@ -38,7 +38,9 @@ mod realm {
     use super::{INVALID_ARGUMENT, RUNTIME_ERROR};
     use core::ffi::c_void;
     use kiln_host_abi::{AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId};
-    use kiln_runtime::{Realm, RealmRuntime, TimerId, WorkItem, duration_from_milliseconds};
+    use kiln_runtime::{
+        Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem, duration_from_milliseconds,
+    };
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
     use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -394,50 +396,56 @@ mod realm {
                 continue;
             }
 
-            if realm.runtime.borrow().has_pending_host_work() {
-                let Some(completion) = realm.runtime.borrow_mut().next_host_completion() else {
-                    return RUNTIME_ERROR;
-                };
-                let continuation = realm.continuations.borrow_mut().remove(&completion.request);
-                let Some(continuation) = continuation else {
-                    continue;
-                };
-                let payload = CompletionPayload::from_result(
-                    completion.request,
-                    completion.sequence,
-                    completion.result,
-                );
-                let completion_work = Box::new(CompletionWork {
-                    request: completion.request,
-                    continuation: Some(continuation),
-                    payload,
-                    cancelled: Rc::clone(&realm.cancelled),
-                    queued: Rc::clone(&realm.queued),
-                });
-                realm.queued.borrow_mut().insert(completion.request);
-                let pointer = Box::into_raw(completion_work).cast::<c_void>();
-                let Some(work) =
-                    NativeWork::new(pointer, Some(run_completion), Some(drop_completion))
-                else {
-                    // SAFETY: `pointer` was produced by Box::into_raw and ownership has not been
-                    // transferred because the callback pair was rejected.
-                    unsafe { drop_completion(pointer) };
-                    return RUNTIME_ERROR;
-                };
-                realm.work.borrow_mut().queue_microtask(work);
-                continue;
-            }
-
-            let timer = realm
-                .runtime
-                .borrow_mut()
-                .next_timer(&mut realm.work.borrow_mut());
-            let Some(WorkItem::Timer { work, .. }) = timer else {
-                return 0;
+            let turn = {
+                let has_pending = realm.runtime.borrow().has_pending_host_work();
+                let mut runtime = realm.runtime.borrow_mut();
+                let mut work = realm.work.borrow_mut();
+                if has_pending {
+                    runtime.next_turn(&mut work)
+                } else {
+                    runtime.next_timer(&mut work).map(RuntimeTurn::Timer)
+                }
             };
-            let status = run_in_runtime(realm, || work.run(host, thrown));
-            if status != 0 {
-                return status;
+            match turn {
+                Some(RuntimeTurn::Completion(completion)) => {
+                    let continuation = realm.continuations.borrow_mut().remove(&completion.request);
+                    let Some(continuation) = continuation else {
+                        continue;
+                    };
+                    let payload = CompletionPayload::from_result(
+                        completion.request,
+                        completion.sequence,
+                        completion.result,
+                    );
+                    let completion_work = Box::new(CompletionWork {
+                        request: completion.request,
+                        continuation: Some(continuation),
+                        payload,
+                        cancelled: Rc::clone(&realm.cancelled),
+                        queued: Rc::clone(&realm.queued),
+                    });
+                    realm.queued.borrow_mut().insert(completion.request);
+                    let pointer = Box::into_raw(completion_work).cast::<c_void>();
+                    let Some(work) =
+                        NativeWork::new(pointer, Some(run_completion), Some(drop_completion))
+                    else {
+                        // SAFETY: `pointer` was produced by Box::into_raw and ownership has not
+                        // been transferred because the callback pair was rejected.
+                        unsafe { drop_completion(pointer) };
+                        return RUNTIME_ERROR;
+                    };
+                    realm.work.borrow_mut().queue_microtask(work);
+                }
+                Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) => {
+                    let status = run_in_runtime(realm, || work.run(host, thrown));
+                    if status != 0 {
+                        return status;
+                    }
+                }
+                Some(RuntimeTurn::Timer(WorkItem::Microtask(_))) => {
+                    unreachable!("native drive drains microtasks before selecting a turn")
+                }
+                None => return 0,
             }
         }
     }
@@ -823,6 +831,12 @@ mod realm {
             request: *mut u64,
         }
 
+        struct ReadAndTimerSubmission {
+            read: ReadSubmission,
+            order: *mut Vec<u8>,
+            drops: *mut usize,
+        }
+
         unsafe extern "C" fn record_read_completion(
             work: *mut c_void,
             completion: *const CompletionView,
@@ -908,6 +922,38 @@ mod realm {
             // SAFETY: `context` remains live and contains the request just submitted.
             let submission = unsafe { &mut *context.cast::<ReadSubmission>() };
             unsafe { kiln_realm_cancel_request(submission.handle, *submission.request) }
+        }
+
+        unsafe extern "C" fn submit_read_and_timer(context: *mut c_void) -> i32 {
+            if context.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: the test owns this combined submission for the duration of realm entry.
+            let submission = unsafe { &mut *context.cast::<ReadAndTimerSubmission>() };
+            // SAFETY: the nested read submission and every callback target remain live through
+            // the subsequent realm drive.
+            let status = unsafe { submit_read((&raw mut submission.read).cast::<c_void>()) };
+            if status != 0 {
+                return status;
+            }
+            // SAFETY: both target pointers are test-owned until realm teardown.
+            let timer = unsafe { recorded_work(9, &mut *submission.order, &mut *submission.drops) };
+            let mut id = 0;
+            // SAFETY: callbacks match the transferred allocation and the identity slot is live.
+            let status = unsafe {
+                kiln_realm_set_timeout(
+                    3_600_000.0,
+                    Some(record_work),
+                    Some(drop_recorded_work),
+                    timer,
+                    &raw mut id,
+                )
+            };
+            if status != 0 {
+                // SAFETY: ownership did not transfer on failure.
+                unsafe { drop_recorded_work(timer) };
+            }
+            status
         }
 
         struct CancelSubmission {
@@ -1146,6 +1192,67 @@ mod realm {
             assert_eq!(observation.bytes, b"native continuation");
             assert_eq!(observation.drops, 1);
             assert_eq!(kiln_realm_destroy(handle), 0);
+            assert!(fs::remove_file(path).is_ok());
+        }
+
+        #[test]
+        fn native_timer_is_not_starved_by_pending_async_io() {
+            let suffix = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("kiln-native-turn-{suffix}.txt"));
+            assert!(fs::write(&path, b"completion").is_ok());
+            let mut handle = 0;
+            let mut request = 0;
+            let mut observation = ReadObservation {
+                status: -1,
+                request: 0,
+                sequence: 0,
+                bytes: Vec::new(),
+                error_code: Vec::new(),
+                drops: 0,
+            };
+            let mut order = Vec::new();
+            let mut timer_drops = 0;
+            let mut submission = ReadAndTimerSubmission {
+                read: ReadSubmission {
+                    handle: 0,
+                    path: path.to_string_lossy().as_bytes().to_vec(),
+                    observation: &raw mut observation,
+                    request: &raw mut request,
+                },
+                order: &raw mut order,
+                drops: &raw mut timer_drops,
+            };
+            // SAFETY: callback state remains live through drive and realm teardown.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            submission.read.handle = handle;
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(submit_read_and_timer),
+                        (&raw mut submission).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            let mut host = 0_u8;
+            let mut thrown = 0_u8;
+            assert_eq!(
+                unsafe {
+                    kiln_realm_drive(
+                        handle,
+                        (&raw mut host).cast::<c_void>(),
+                        (&raw mut thrown).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            assert_eq!(order, [9]);
+            assert_eq!(observation.status, 0);
+            assert_eq!(observation.bytes, b"completion");
+            assert_eq!(observation.drops, 1);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(timer_drops, 1);
             assert!(fs::remove_file(path).is_ok());
         }
 
