@@ -1788,6 +1788,9 @@ struct Slot {
 #[derive(Clone, Debug)]
 pub struct ObjectData {
     properties: Vec<Slot>,
+    /// The built-in Error brand. This is an internal slot, not a reserved property: program code
+    /// may read, write and delete every string key, including ones beginning with `@@`.
+    error_brand: bool,
     /// `Object.preventExtensions` and `Object.seal`. Weaker than frozen: the properties that
     /// are already there stay writable, only the shape is closed.
     extensible: bool,
@@ -1956,6 +1959,7 @@ impl Default for ObjectData {
     fn default() -> Self {
         Self {
             properties: Vec::new(),
+            error_brand: false,
             // Objects start open; closing one is always something a program asked for.
             extensible: true,
             frozen: false,
@@ -24447,8 +24451,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         native_inherited_property(&self.intrinsics, target, name)
                     }
                     Some(found) => found,
-                    None => identity_property(target, name)
-                        .unwrap_or_else(|| function_property(&self.intrinsics, name)),
+                    None => identity_property(target, name).unwrap_or_else(|| {
+                        native_inherited_property(&self.intrinsics, target, name)
+                    }),
                 },
             },
             // `f.prototype` is the object `new f()` gives instances. Reading it creates it, so
@@ -27604,6 +27609,7 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
 
     let name = kind.name();
     let mut data = ObjectData::default();
+    data.error_brand = true;
     // Every own property of an error is non-enumerable, which is why `JSON.stringify(err)` is
     // `{}` and `Object.keys(err)` is empty -- an error is meant to be *read*, not walked, and a
     // program that serialises one is asking for the fields it names rather than all of them.
@@ -29935,12 +29941,11 @@ fn call_native(
             call_native(intrinsics, Native::ArrayIteratorNext, receiver, arguments)?
         }
         // `Error.isError`: whether this value carries the internal slot every error is built
-        // with. The realm records the trace under a reserved key at construction, so a plain
-        // object wearing `Error.prototype`, an `Error` name and a `stack` is still not one --
-        // which is exactly the distinction a program cannot draw for itself.
+        // with. The stack trace remains a separate reserved property for diagnostics, but it is
+        // not a brand because program code can add or remove any string property.
         Native::ErrorIsError => Value::Boolean(matches!(
             arguments.first(),
-            Some(Value::Object(object)) if object.borrow().get_own(ERROR_TRACE).is_some()
+            Some(Value::Object(object)) if object.borrow().error_brand
         )),
         // `RegExp.escape(text)`: the same characters, as a pattern that matches them literally.
         Native::RegExpEscape => {
@@ -30619,6 +30624,12 @@ fn prototype_of(value: &Value) -> Value {
         Value::Native(Native::TypedArrayConstructor(_)) => {
             Value::Native(Native::TypedArrayIntrinsic)
         }
+        // NativeError constructors inherit static properties from Error, just as the built-in
+        // constructors do in ECMAScript. This is also what makes `TypeError.isError` resolve as an
+        // inherited method rather than an accidental own property.
+        Value::Native(Native::Error(kind)) if *kind != ErrorKind::Error => {
+            Value::Native(Native::Error(ErrorKind::Error))
+        }
         // Every callable inherits `Function.prototype`, and every ordinary object
         // `Object.prototype`. A primitive has no chain of its own to walk.
         Value::Native(_) | Value::Bound(_) | Value::Callback(_) | Value::Function(_) => {
@@ -30749,7 +30760,17 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
             Overridden::Held(..) => true,
             Overridden::Removed => false,
             Overridden::Untouched => {
-                native.property(&name).is_some() || identity_property(target, &name).is_some()
+                native.property(&name).is_some()
+                    || identity_property(target, &name).is_some()
+                    || (matches!(native, Native::Error(kind) if *kind != ErrorKind::Error)
+                        && name == "isError"
+                        && !matches!(
+                            intrinsics.overridden(
+                                &Value::Native(Native::Error(ErrorKind::Error)),
+                                &name,
+                            ),
+                            Overridden::Removed
+                        ))
             }
         },
         // Mirrors the read: a function answers from its own store, then from `name`, `length`
@@ -35680,6 +35701,23 @@ impl Intrinsics {
 /// one link up -- which is why a table goes straight to the object methods.
 fn native_inherited_property(intrinsics: &Intrinsics, target: &Value, name: &str) -> Value {
     match target {
+        // NativeError constructors inherit static properties from Error. Keep this separate from
+        // the own-property table: `TypeError.isError` is inherited, so it must not appear in
+        // TypeError's own property names or descriptor.
+        Value::Native(Native::Error(kind)) if *kind != ErrorKind::Error => {
+            match intrinsics.overridden(
+                &Value::Native(Native::Error(ErrorKind::Error)),
+                name,
+            ) {
+                Overridden::Held(Property::Value(value), _) => value,
+                Overridden::Held(Property::Accessor { .. }, _) | Overridden::Removed => {
+                    function_property(intrinsics, name)
+                }
+                Overridden::Untouched => Native::Error(ErrorKind::Error)
+                    .property(name)
+                    .unwrap_or_else(|| function_property(intrinsics, name)),
+            }
+        }
         Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(_))) => match table_step(
             intrinsics,
             PrototypeTable::TypedArray,
@@ -36277,6 +36315,7 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
         ],
         Value::Native(Native::ProxyConstructor) => &["revocable"],
         Value::Native(Native::ArrayBufferConstructor) => &["isView"],
+        Value::Native(Native::RegExpConstructor) => &["escape"],
         Value::Native(Native::Error(ErrorKind::Error)) => &["isError", "captureStackTrace"],
         Value::Native(Native::BigIntConstructor) => &["asIntN", "asUintN"],
         Value::Native(Native::MapConstructor) => &["groupBy"],
@@ -38281,6 +38320,50 @@ mod tests {
         };
         let cause = data.borrow().get("cause").expect("cause present");
         assert!(strict_equal(&cause, &inner), "cause is the same object");
+    }
+
+    #[test]
+    fn error_brand_is_not_the_reserved_trace_property() {
+        let error = build_error(ErrorKind::Error, &[Value::String("x".to_owned())]);
+        let Value::Object(error) = &error else {
+            panic!("build_error returns an object");
+        };
+        assert!(error.borrow().error_brand);
+
+        // The trace is deliberately a separate, reserved property. Program-visible writes and
+        // deletes must not change the internal Error brand.
+        error
+            .borrow_mut()
+            .set(ERROR_TRACE, Value::String("spoofed".to_owned()));
+        error.borrow_mut().remove(ERROR_TRACE);
+        assert!(error.borrow().error_brand);
+
+        let fake = object(&[(ERROR_TRACE, Value::String("spoofed".to_owned()))]);
+        let Value::Object(fake) = fake else {
+            unreachable!();
+        };
+        assert!(!fake.borrow().error_brand);
+    }
+
+    #[test]
+    fn error_is_error_inherits_through_native_error_constructors() {
+        let intrinsics = Intrinsics::default();
+        let type_error = Value::Native(Native::Error(ErrorKind::Type));
+        assert!(matches!(
+            native_inherited_property(&intrinsics, &type_error, "isError"),
+            Value::Native(Native::ErrorIsError)
+        ));
+        assert!(matches!(
+            prototype_of(&type_error),
+            Value::Native(Native::Error(ErrorKind::Error))
+        ));
+    }
+
+    #[test]
+    fn regexp_escape_appears_in_constructor_own_property_names() {
+        let intrinsics = Intrinsics::default();
+        let constructor = Value::Native(Native::RegExpConstructor);
+        assert!(own_property_keys(&intrinsics, &constructor).contains(&"escape".to_owned()));
     }
 
     /// An error with no message gets a bare header, not one with a trailing colon.
