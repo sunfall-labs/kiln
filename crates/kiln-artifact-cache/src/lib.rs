@@ -665,9 +665,14 @@ fn read_regular_file(path: &Path, operation: &'static str) -> Result<Option<Vec<
         Err(source) if source.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(source) => return Err(io_error("inspect cache artifact", path, source)),
     }
-    fs::read(path)
-        .map(Some)
-        .map_err(|source| io_error(operation, path, source))
+    match fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        // Eviction deliberately does not lock readers. If a sweeper unlinks the record after
+        // the metadata check above, lookup degrades to the same cache miss it would have seen
+        // before that check rather than turning an ordinary eviction race into an I/O failure.
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(io_error(operation, path, source)),
+    }
 }
 
 fn non_regular_path(path: &Path, expected: &str) -> CacheError {
