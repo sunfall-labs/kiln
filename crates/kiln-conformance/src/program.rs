@@ -421,6 +421,106 @@ fs.writeFile({path:?}, 'hello tokio').then(() => fs.readFile({path:?})).then((by
     }
 
     #[test]
+    fn node_mode_drains_http_continuations_before_waiting_for_referenced_work() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-http-keep-alive-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        let entry = root.join("entry.mjs");
+        fs::write(
+            &entry,
+            r#"import http from 'node:http';
+
+const server = http.createServer((request, response) => {
+  response.end(request.url);
+});
+
+function get(port, path) {
+  return new Promise(resolve => {
+    http.get({ host: '127.0.0.1', port, path }, response => {
+      response.setEncoding('utf8');
+      let body = '';
+      response.on('data', chunk => { body += chunk; });
+      response.on('end', () => resolve(body));
+    });
+  });
+}
+
+server.listen(0, '127.0.0.1', async () => {
+  const port = server.address().port;
+  console.log(await get(port, '/one'));
+  console.log(await get(port, '/two'));
+  console.log(await get(port, '/three'));
+  server.close();
+});
+"#,
+        )
+        .expect("keep-alive fixture is written");
+
+        let result =
+            run_node_against_expected_stdout(&entry, "/one\n/two\n/three\n", RunMode::Node);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
+    }
+
+    #[test]
+    fn node_mode_keeps_runtime_http_readable_flow_control_in_hyper() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is after the epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "kiln-node-http-readable-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("fixture directory is created");
+        let entry = root.join("entry.mjs");
+        fs::write(
+            &entry,
+            r#"import http from 'node:http';
+
+const server = http.createServer((request, response) => {
+  request.pause();
+  let body = '';
+  request.setEncoding('utf8');
+  request.on('data', chunk => { body += chunk; });
+  request.on('end', () => response.end(body));
+  setTimeout(() => request.resume(), 1);
+});
+
+server.listen(0, '127.0.0.1', () => {
+  const request = http.request({
+    host: '127.0.0.1',
+    port: server.address().port,
+    method: 'POST',
+    path: '/',
+    headers: { 'content-length': '5' },
+  }, response => {
+    response.setEncoding('utf8');
+    let body = '';
+    response.on('data', chunk => { body += chunk; });
+    response.on('end', () => {
+      console.log(body);
+      server.close();
+    });
+  });
+  request.end('hello');
+});
+"#,
+        )
+        .expect("readable fixture is written");
+
+        let result = run_node_against_expected_stdout(&entry, "hello\n", RunMode::Node);
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(result.result.outcome, Outcome::Pass, "{result:?}");
+    }
+
+    #[test]
     fn node_mode_uses_package_type_for_js_modules() {
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
