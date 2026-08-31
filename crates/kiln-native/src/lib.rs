@@ -2371,7 +2371,7 @@ fn module_abi_identity() -> String {
     // change to that source therefore changes the object ABI even when the public scalar C ABI
     // does not. Pin the generator revision here so a stale object can never be linked beside a
     // freshly generated sibling merely because both still expose C ABI v1.
-    format!("host-{HOST_ABI_VERSION};c-{C_ABI_VERSION};generator-2")
+    format!("host-{HOST_ABI_VERSION};c-{C_ABI_VERSION};generator-3")
 }
 
 fn runtime_abi_identity() -> String {
@@ -4703,7 +4703,7 @@ mod tests {
 
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
-        assert_eq!(module_abi_identity(), "host-2;c-1;generator-2");
+        assert_eq!(module_abi_identity(), "host-2;c-1;generator-3");
         assert!(runtime_abi_identity().contains("async-4"));
         // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
         // would silently invalidate every cached native artifact. When the bump is intended,
