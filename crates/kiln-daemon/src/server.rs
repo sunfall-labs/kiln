@@ -996,7 +996,10 @@ fn handle_native_build_at_revision<E: QueryEngine>(
         (guard.engine.revision().0, prepared)
     };
 
-    let final_output = native_build_output(&project_root, &path, output);
+    let final_output = match native_build_output(&project_root, &path, output) {
+        Ok(output) => output,
+        Err(message) => return (Response::Error { message }, Next::Continue),
+    };
     let source = PathBuf::from(&path);
     let project_source = if source.is_absolute() {
         source.clone()
