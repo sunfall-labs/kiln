@@ -9,6 +9,7 @@ use crate::number::{NumberFormat, Numeric, Options};
 use crate::{Error, Setting};
 use icu_plurals::{
     PluralCategory, PluralRuleType, PluralRules as IcuPluralRules, PluralRulesOptions,
+    PluralRulesWithRanges,
 };
 
 /// The accepted values of `type`.
@@ -17,6 +18,10 @@ pub const TYPES: &[&str] = &["cardinal", "ordinal"];
 /// A built plural-rule selector.
 pub struct PluralRules {
     rules: IcuPluralRules,
+    /// The same rules with CLDR's *range* table behind them. A range is not the category of its
+    /// ends: `1-2` is `other` in English while both ends are not, and Russian sorts `0-2` into
+    /// `few` although neither end is, so the pairing is data rather than a rule over two answers.
+    ranges: PluralRulesWithRanges<IcuPluralRules>,
     /// The rounding half. `Intl.PluralRules` takes the same digit options as `Intl.NumberFormat`
     /// and for the same reason, so it borrows the implementation rather than growing a second one
     /// that would round `2.5` differently.
@@ -61,8 +66,15 @@ impl PluralRules {
             PluralRulesOptions::default().with_type(plural_type),
         )
         .map_err(|_| Error::range("no plural data for the resolved locale"))?;
+        let ranges = if kind == "ordinal" {
+            PluralRulesWithRanges::try_new_ordinal((&locale).into())
+        } else {
+            PluralRulesWithRanges::try_new_cardinal((&locale).into())
+        }
+        .map_err(|_| Error::range("no plural range data for the resolved locale"))?;
         Ok(Self {
             rules,
+            ranges,
             rounding,
             kind: kind.to_string(),
         })
@@ -72,6 +84,13 @@ impl PluralRules {
     pub fn select(&self, value: &Numeric) -> Result<&'static str, Error> {
         let rounded = self.rounding.rounded(value)?;
         Ok(category_name(self.rules.category_for(&rounded)))
+    }
+
+    /// `selectRange(start, end)`: the category a range of two values falls into.
+    pub fn select_range(&self, start: &Numeric, end: &Numeric) -> Result<&'static str, Error> {
+        let start = self.rounding.rounded(start)?;
+        let end = self.rounding.rounded(end)?;
+        Ok(category_name(self.ranges.category_for_range(&start, &end)))
     }
 
     /// `resolvedOptions()`, in the order the specification creates the properties.
@@ -172,6 +191,33 @@ mod tests {
         let plain =
             PluralRules::new(&["en-US".to_string()], "cardinal", Options::default()).unwrap();
         assert_eq!(plain.select(&Numeric::Double(1.0)).unwrap(), "one");
+    }
+
+    #[test]
+    fn a_range_has_its_own_category_rather_than_its_ends() {
+        let english =
+            PluralRules::new(&["en-US".to_string()], "cardinal", Options::default()).unwrap();
+        let range = |a: f64, b: f64| {
+            english
+                .select_range(&Numeric::Double(a), &Numeric::Double(b))
+                .unwrap()
+        };
+        assert_eq!(range(1.0, 2.0), "other");
+        // The two cases the conformance corpus pins. A range whose ends land in the same category
+        // still goes through the range table rather than short-circuiting: the specification's
+        // equal-formatted-string shortcut was removed, so `200-200` is the `(other, other)` entry.
+        assert_eq!(range(200.0, 200.0), "other");
+        assert_eq!(range(102.0, 201.0), "other");
+        let russian =
+            PluralRules::new(&["ru".to_string()], "cardinal", Options::default()).unwrap();
+        // Neither end is `few`; the range is. That is CLDR's range table and not a rule over the
+        // two answers.
+        assert_eq!(
+            russian
+                .select_range(&Numeric::Double(0.0), &Numeric::Double(2.0))
+                .unwrap(),
+            "few"
+        );
     }
 
     #[test]

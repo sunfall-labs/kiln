@@ -975,6 +975,54 @@ fn duration_field(duration: &Duration, name: &str) -> Option<Field> {
     })
 }
 
+/// The instant a value is formatted at, in epoch milliseconds, for `Intl.DateTimeFormat`.
+///
+/// ECMA-402 formats a wall-clock value by placing it on the timeline at UTC -- a date at noon, a
+/// time on 1970-01-01, a month-day in its reference year -- and then formatting that instant with
+/// the time zone suppressed, which is what makes `format` ignore the formatter's own zone for a
+/// plain value. The placement is exact specification text (`HandleDateTimeTemporalDate` and its
+/// siblings) and the engine already implements it, so it is read from there rather than
+/// reconstructed from the calendar fields, which would go wrong for a non-ISO calendar.
+///
+/// `None` for a `ZonedDateTime`, which ECMA-402 refuses outright.
+pub fn format_instant(value: &TemporalValue) -> Option<f64> {
+    let nanoseconds: i128 = match &value.0 {
+        Repr::PlainDate(date) => date.epoch_ns_for_utc().as_i128(),
+        Repr::PlainDateTime(date_time) => date_time.epoch_ns_for_utc().as_i128(),
+        Repr::PlainYearMonth(year_month) => year_month.epoch_ns_for_utc().as_i128(),
+        Repr::PlainMonthDay(month_day) => month_day.epoch_ns_for_utc().as_i128(),
+        Repr::PlainTime(time) => time.epoch_ns_for_utc().as_i128(),
+        Repr::Instant(instant) => instant.as_i128(),
+        Repr::Duration(_) | Repr::ZonedDateTime(_) => return None,
+    };
+    // Floor rather than truncate: a millisecond before the epoch is still the millisecond the
+    // nanosecond falls inside, and rounding towards zero would move it forwards.
+    Some(nanoseconds.div_euclid(1_000_000) as f64)
+}
+
+/// The ten components of a `Temporal.Duration`, in the order ECMA-402's duration table lists them.
+///
+/// Separate from [`TemporalValue::get`] because that answers in `f64`, which is what the
+/// language's own getters return, and two of the components are held in 128 bits. A formatter that
+/// has to render `microseconds` exactly cannot go through a double to get them.
+pub fn duration_components(value: &TemporalValue) -> Option<[i128; 10]> {
+    let Repr::Duration(duration) = &value.0 else {
+        return None;
+    };
+    Some([
+        i128::from(duration.years()),
+        i128::from(duration.months()),
+        i128::from(duration.weeks()),
+        i128::from(duration.days()),
+        i128::from(duration.hours()),
+        i128::from(duration.minutes()),
+        i128::from(duration.seconds()),
+        i128::from(duration.milliseconds()),
+        duration.microseconds(),
+        duration.nanoseconds(),
+    ])
+}
+
 fn instant_field(instant: &Instant, name: &str) -> Option<Field> {
     Some(match name {
         "epochMilliseconds" => Field::Number(instant.epoch_milliseconds() as f64),

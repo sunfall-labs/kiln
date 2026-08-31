@@ -715,6 +715,35 @@ fn nan_text() -> &'static str {
     "NaN"
 }
 
+/// Every numbering system this build will actually format with, sorted.
+///
+/// The candidate list is UTS 35's table of numbering systems with *simple digit mappings* -- the
+/// ones that are ten code points in a row, which is the only kind `Intl` may resolve to -- and it
+/// is transcribed rather than derived because a baked provider exposes a lookup and not an
+/// enumeration. Every candidate is then put through [`numbering_system_is_supported`], so the
+/// list reports what this build can do rather than what the table says exists: a system ICU4X's
+/// bundle happens not to carry is dropped here rather than reported and then silently ignored.
+pub fn available_numbering_systems() -> Vec<String> {
+    const CANDIDATES: &[&str] = &[
+        "adlm", "ahom", "arab", "arabext", "bali", "beng", "bhks", "brah", "cakm", "cham", "deva",
+        "diak", "fullwide", "gara", "gong", "gonm", "gujr", "gukh", "guru", "hanidec", "hmng",
+        "hmnp", "java", "kali", "kawi", "khmr", "knda", "krai", "lana", "lanatham", "laoo", "latn",
+        "lepc", "limb", "mathbold", "mathdbl", "mathmono", "mathsanb", "mathsans", "mlym", "modi",
+        "mong", "mroo", "mtei", "mymr", "mymrepka", "mymrpao", "mymrshan", "mymrtlng", "nagm",
+        "newa", "nkoo", "olck", "onao", "orya", "osma", "outlined", "rohg", "saur", "segment",
+        "shrd", "sind", "sinh", "sora", "sund", "sunu", "takr", "talu", "tamldec", "telu", "thai",
+        "tibt", "tirh", "tnsa", "tols", "vaii", "wara", "wcho",
+    ];
+    let mut systems: Vec<String> = CANDIDATES
+        .iter()
+        .filter(|value| numbering_system_is_supported(value))
+        .map(|value| (*value).to_owned())
+        .collect();
+    systems.sort();
+    systems.dedup();
+    systems
+}
+
 /// Is `value` a numbering system whose digits ICU4X actually has?
 ///
 /// Asked by observation rather than from a table: format a number whose digits are all distinct

@@ -100,6 +100,69 @@ impl Segmenter {
     }
 }
 
+/// The `Segments` object `segment(string)` returns.
+///
+/// It is a *view* rather than a list: the language's `Segments` is iterable and random-access at
+/// the same time, and `containing(index)` may be asked for any index in any order, so the
+/// boundaries are computed once and the object keeps both them and the string they came from.
+/// Rescanning per query would turn a linear walk into a quadratic one, which is what
+/// `for (const s of segments) segments.containing(s.index)` would do.
+#[derive(Debug)]
+pub struct Segments {
+    text: String,
+    units: Vec<u16>,
+    segments: Vec<Segment>,
+}
+
+impl Segments {
+    /// Segment `text`, keeping the result.
+    pub fn new(segmenter: &Segmenter, text: &str) -> Self {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let segments = segmenter.segments(&units);
+        Self {
+            text: text.to_owned(),
+            units,
+            segments,
+        }
+    }
+
+    /// The string that was segmented, which is every segment record's `input`.
+    pub fn input(&self) -> &str {
+        &self.text
+    }
+
+    /// The length of the string in the units the language counts in.
+    pub fn len(&self) -> usize {
+        self.units.len()
+    }
+
+    /// Whether the string was empty, and therefore has no segments at all.
+    pub fn is_empty(&self) -> bool {
+        self.units.is_empty()
+    }
+
+    /// Every segment, in order.
+    pub fn list(&self) -> &[Segment] {
+        &self.segments
+    }
+
+    /// The text of one segment.
+    pub fn text_of(&self, segment: &Segment) -> String {
+        String::from_utf16_lossy(&self.units[segment.start..segment.end])
+    }
+
+    /// `containing(index)`: the segment the code unit at `index` belongs to.
+    ///
+    /// `None` for an index outside the string, which the language reports as `undefined` rather
+    /// than as an error -- `containing(-1)` and `containing(string.length)` are both questions
+    /// with a legitimate answer of "no segment".
+    pub fn containing(&self, index: usize) -> Option<&Segment> {
+        self.segments
+            .iter()
+            .find(|segment| segment.start <= index && index < segment.end)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

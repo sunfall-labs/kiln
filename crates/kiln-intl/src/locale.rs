@@ -51,6 +51,15 @@ pub fn is_structurally_valid(tag: &str) -> bool {
     Locale::try_from_str(tag).is_ok()
 }
 
+/// A `unicode_language_id`: the language-script-region-variant part of a tag and nothing else.
+///
+/// The narrower of the two grammars. `Intl.DisplayNames` asks a language *code* for its name, and a
+/// code carries no `-u-` keywords and no singleton extensions -- `en-a-bcd` parses as a tag and is
+/// not a language, which is a distinction the corpus turns on in both directions.
+pub fn is_language_identifier(tag: &str) -> bool {
+    LanguageIdentifier::try_from_str(tag).is_ok()
+}
+
 /// `CanonicalizeUnicodeLocaleId`, rejecting a structurally invalid tag with a `RangeError`.
 pub fn canonicalize(tag: &str) -> Result<String, Error> {
     let mut locale = Locale::try_from_str(tag)
@@ -127,6 +136,25 @@ fn canonicalize_keyword_types(locale: &mut Locale) {
             keywords.set(key, value);
         }
     }
+}
+
+/// `CanonicalizeUValue`: the preferred spelling of one `-u-` keyword type.
+///
+/// The same alias table `canonicalize` applies inside a tag, exposed for the option *objects* that
+/// take the same vocabulary: `{ calendar: "islamicc" }` has to reach the engine as
+/// `islamic-civil`, exactly as `-u-ca-islamicc` does, or the two spellings of one request resolve
+/// differently.
+pub fn canonicalize_keyword_type(key: &str, value: &str) -> String {
+    let Ok(mut locale) = Locale::try_from_str(&format!("und-u-{key}-{value}")) else {
+        return value.to_owned();
+    };
+    canonicalize_keyword_types(&mut locale);
+    Key::try_from_str(key)
+        .ok()
+        .and_then(|k| locale.extensions.unicode.keywords.get(&k).cloned())
+        .map(|found| found.to_string())
+        .filter(|found| !found.is_empty())
+        .unwrap_or_else(|| value.to_owned())
 }
 
 /// Whether Kiln claims to have locale data for a tag.
@@ -258,6 +286,7 @@ pub fn resolve(
 
     let mut resolved = Locale::from(LanguageIdentifier::UNKNOWN);
     let mut settled = Vec::with_capacity(keys.len());
+    let mut from_tag_settled: Vec<bool> = Vec::with_capacity(keys.len());
     for relevant in keys {
         let key = Key::try_from_str(relevant.key).expect("a relevant key is a valid BCP 47 key");
         // The options object outranks the `-u-` extension, which outranks the default (ECMA-402
@@ -276,12 +305,23 @@ pub fn resolve(
                     spelled
                 }
             });
+        // The option outranks the extension only if this build can honour it: ECMA-402's
+        // ResolveLocale step 9.h overrides `value` *if* the option's value is in the key's locale
+        // data, so `en-u-ca-iso8601` with `calendar: "invalid"` keeps `iso8601` rather than losing
+        // both. A value neither of the two supplies falls to the implementation default.
+        let from_tag = from_tag.filter(|value| supported(relevant.key, value));
         let chosen = relevant
             .from_options
             .clone()
-            .or(from_tag)
             .filter(|value| supported(relevant.key, value))
+            .or_else(|| from_tag.clone())
             .or_else(|| relevant.default.clone());
+        // Whether the *tag* is what settled the key, which is a separate question from what the
+        // key settled on: ECMA-402 clears `supportedExtensionAddition` when the options object
+        // supplies a value the tag did not already agree with, so `en-u-nu-latn` with
+        // `numberingSystem: "arab"` resolves to `en` -- the extension the caller wrote is not the
+        // one in force, and reporting it would say otherwise.
+        from_tag_settled.push(chosen.is_some() && chosen == from_tag);
         if let Some(value) = &chosen {
             let written = if value == "true" {
                 Value::default()
@@ -300,11 +340,13 @@ pub fn resolve(
     resolved.id = id;
     let icu = resolved.clone();
     let mut reported = resolved;
-    for (key, value) in keys.iter().zip(settled.iter()) {
-        // A key whose settled value came only from the implementation default is not written into
-        // the reported tag: `new Intl.Collator("de").resolvedOptions().locale` is `de`, not
-        // `de-u-co-default`.
-        if value.1.is_some() && key.default.as_deref() == value.1.as_deref() {
+    for ((key, value), from_tag) in keys.iter().zip(settled.iter()).zip(from_tag_settled) {
+        // Two reasons a key that settled on a value is still absent from the reported tag. It came
+        // only from the implementation default -- `new Intl.Collator("de").resolvedOptions().locale`
+        // is `de`, not `de-u-co-default` -- or it came from the options object rather than from the
+        // tag, in which case the extension the caller wrote is not the one in force.
+        let from_default = value.1.is_some() && key.default.as_deref() == value.1.as_deref();
+        if from_default || !from_tag {
             let k = Key::try_from_str(key.key).expect("a relevant key is a valid BCP 47 key");
             reported.extensions.unicode.keywords.remove(k);
         }
@@ -544,7 +586,19 @@ mod tests {
         let keys = [RelevantKey::new("nu").with_option(Some("arab".into()))];
         let resolved = resolve(&["th-u-nu-thai".into()], &keys, |_, _| true);
         assert_eq!(resolved.value("nu"), Some("arab"));
-        assert_eq!(resolved.locale, "th-u-nu-arab");
+        // And the *reported* tag loses the keyword entirely: `th-u-nu-thai` is not what is in
+        // force, so echoing it back would be a claim about the formatter that is not true.
+        assert_eq!(resolved.locale, "th");
+        // When the two agree the tag keeps its keyword, which is the distinction ECMA-402 draws
+        // by clearing `supportedExtensionAddition` only on a *conflicting* option.
+        let agreeing = [RelevantKey::new("nu").with_option(Some("thai".into()))];
+        assert_eq!(
+            resolve(&["th-u-nu-thai".into()], &agreeing, |_, _| true).locale,
+            "th-u-nu-thai"
+        );
+        // An option with no extension behind it never reaches the tag either.
+        let alone = [RelevantKey::new("nu").with_option(Some("arab".into()))];
+        assert_eq!(resolve(&["th".into()], &alone, |_, _| true).locale, "th");
     }
 
     #[test]
