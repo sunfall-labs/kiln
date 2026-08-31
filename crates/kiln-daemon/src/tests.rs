@@ -118,9 +118,7 @@ impl Client {
                 source_view: view, ..
             }
             | Request::Run {
-                node: false,
-                source_view: view,
-                ..
+                source_view: view, ..
             }
             | Request::NativeBuild {
                 source_view: view, ..
@@ -1948,6 +1946,43 @@ fn production_check_reports_the_graph_resolved_star_surface() {
         "dependency diagnostics must retain their module path: {:?}",
         failed.diagnostics
     );
+
+    stop.shutdown();
+    within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");
+}
+
+#[test]
+fn production_daemon_executes_a_node_builtin_module_with_explicit_capability() {
+    let fixture = Fixture::empty();
+    let daemon = Daemon::bind(&fixture.socket).expect("bind");
+    let stop = daemon.shutdown_handle();
+    let serving = std::thread::spawn(move || daemon.serve());
+    let mut client = Client::connect(&fixture.socket).expect("connect");
+    client.handshake().expect("handshake");
+
+    let path = "run.mjs".to_owned();
+    let text = "import { createServer } from 'node:http'; console.log(typeof createServer);\n";
+    std::fs::write(fixture.dir.join(&path), text).expect("write Node source");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: path.clone(),
+            text: text.into(),
+        })
+        .expect("set Node source");
+    let response = client
+        .request(&Request::Run {
+            source_view: client.source_view(),
+            path,
+            project_root: fixture.dir.to_string_lossy().into_owned(),
+            node: true,
+        })
+        .expect("run Node module");
+    let Response::Ran(summary) = response else {
+        panic!("expected run response, got {response:?}");
+    };
+    assert!(summary.succeeded, "{:?}", summary.diagnostics);
+    assert_eq!(summary.stdout, "function\n");
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("the accept loop must not panic");

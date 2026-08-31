@@ -109,7 +109,7 @@ pub(crate) fn run_source_with_manifest(
     )? {
         SourceResponse::Ready(summary) => finish_run_summary(path, summary, project_notes),
         SourceResponse::Stale(_) => {
-            let snapshot = establish_snapshot(backend, project_root, canonical, &text)?;
+            let snapshot = establish_snapshot(backend, project_root, canonical, &text, node)?;
             project_notes.extend(snapshot.notes);
             let _ = snapshot.synced_paths;
             manifest = snapshot.manifest;
@@ -224,9 +224,10 @@ fn establish_snapshot(
     project_root: &Path,
     canonical: &str,
     text: &str,
+    node: bool,
 ) -> Result<Snapshot> {
     let (notes, paths, manifest, truncated, view) =
-        sync_project_sources_with_override(backend, project_root, Some((canonical, text)), false)?;
+        sync_project_sources_with_override(backend, project_root, Some((canonical, text)), node)?;
     let source_view = if paths.contains(canonical) {
         view
     } else {
@@ -326,7 +327,8 @@ pub fn build(
         )? {
             SourceResponse::Ready(summary) => summary,
             SourceResponse::Stale(_) => {
-                let snapshot = establish_snapshot(backend, project_root_path, &canonical, &text)?;
+                let snapshot =
+                    establish_snapshot(backend, project_root_path, &canonical, &text, false)?;
                 project_notes.extend(snapshot.notes);
                 source_view = snapshot.source_view;
                 match backend.native_shared_build_at_view(
@@ -361,7 +363,8 @@ pub fn build(
     )? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
-            let snapshot = establish_snapshot(backend, project_root_path, &canonical, &text)?;
+            let snapshot =
+                establish_snapshot(backend, project_root_path, &canonical, &text, false)?;
             project_notes.extend(snapshot.notes);
             source_view = snapshot.source_view;
             match backend.native_build_at_view(
@@ -422,7 +425,7 @@ pub fn native_run(
     )? {
         SourceResponse::Ready(summary) => summary,
         SourceResponse::Stale(_) => {
-            let snapshot = establish_snapshot(backend, project_root, &canonical, &text)?;
+            let snapshot = establish_snapshot(backend, project_root, &canonical, &text, false)?;
             project_notes.extend(snapshot.notes);
             source_view = snapshot.source_view;
             match backend.native_run_at_view(canonical, project_root_text, profile, source_view)? {
@@ -1344,6 +1347,7 @@ mod tests {
         inner: Fake,
         stale_commits: usize,
         stale_checks: usize,
+        stale_runs: usize,
     }
 
     impl StaleBackend {
@@ -1352,6 +1356,16 @@ mod tests {
                 inner: Fake::new(),
                 stale_commits,
                 stale_checks,
+                stale_runs: 0,
+            }
+        }
+
+        fn with_stale_runs(stale_runs: usize) -> Self {
+            Self {
+                inner: Fake::new(),
+                stale_commits: 0,
+                stale_checks: 0,
+                stale_runs,
             }
         }
     }
@@ -1368,6 +1382,13 @@ mod tests {
                 }
                 Request::Check { .. } if self.stale_checks > 0 => {
                     self.stale_checks -= 1;
+                    self.inner.seen.push(request);
+                    Ok(Response::StaleSourceView {
+                        current: SourceView(99),
+                    })
+                }
+                Request::Run { .. } if self.stale_runs > 0 => {
+                    self.stale_runs -= 1;
                     self.inner.seen.push(request);
                     Ok(Response::StaleSourceView {
                         current: SourceView(99),
@@ -2215,6 +2236,29 @@ mod tests {
             vec![&survivor_path]
         );
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_node_run_resync_keeps_the_node_capability_on_retry() {
+        let dir = std::env::temp_dir().join(format!("kiln-cli-stale-node-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create fixture");
+        let entry = dir.join("entry.mjs");
+        std::fs::write(&entry, "console.log('node');\n").expect("write fixture");
+
+        let mut backend = StaleBackend::with_stale_runs(1);
+        run(&mut backend, &entry, &dir, true).expect("stale Node run is retried");
+        let runs = backend
+            .inner
+            .seen
+            .iter()
+            .filter_map(|request| match request {
+                Request::Run { node, .. } => Some(*node),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(runs, [true, true]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

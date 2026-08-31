@@ -547,6 +547,7 @@ impl ResolutionPolicy for NodeRuntimeResolver {
 pub struct PinnedPackageResolver {
     explicit: ModuleResolver,
     packages: HashMap<(PathBuf, String), PathBuf>,
+    node_builtins: bool,
 }
 
 impl PinnedPackageResolver {
@@ -560,7 +561,22 @@ impl PinnedPackageResolver {
                 .into_iter()
                 .map(|(importer, specifier, target)| ((importer, specifier), target))
                 .collect(),
+            node_builtins: false,
         })
+    }
+
+    /// Construct a pinned resolver with the explicit Node compatibility builtin surface enabled.
+    /// Package decisions remain pinned exactly as they are for the default resolver.
+    pub fn new_with_node_builtins<I>(
+        project_root: impl AsRef<Path>,
+        entries: I,
+    ) -> Result<Self, ResolveError>
+    where
+        I: IntoIterator<Item = (PathBuf, String, PathBuf)>,
+    {
+        let mut resolver = Self::new(project_root, entries)?;
+        resolver.node_builtins = true;
+        Ok(resolver)
     }
 
     pub fn project_root(&self) -> &Path {
@@ -573,6 +589,14 @@ impl PinnedPackageResolver {
         importer: impl AsRef<Path>,
     ) -> Result<ResolvedModule, ResolveError> {
         let importer = importer.as_ref();
+        if self.node_builtins
+            && let Some(builtin) = NodeBuiltin::parse(specifier)
+        {
+            return Ok(ResolvedModule::new(
+                builtin.virtual_path(self.project_root()),
+                ResolutionKind::Builtin,
+            ));
+        }
         if !matches!(
             classify_specifier(specifier),
             Err(ResolveError::InvalidSpecifier {
@@ -1421,6 +1445,43 @@ mod tests {
                     .unwrap()
             );
         }
+    }
+
+    #[test]
+    fn pinned_node_policy_is_opt_in_and_keeps_unknown_builtins_refused() {
+        let project = TempProject::new();
+        let importer = project.write("main.js", "");
+        let ordinary = PinnedPackageResolver::new(
+            &project.root,
+            std::iter::empty::<(PathBuf, String, PathBuf)>(),
+        )
+        .expect("ordinary pinned resolver");
+        assert!(matches!(
+            ordinary.resolve("node:http", &importer),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::UrlScheme,
+                ..
+            })
+        ));
+
+        let node = PinnedPackageResolver::new_with_node_builtins(
+            &project.root,
+            std::iter::empty::<(PathBuf, String, PathBuf)>(),
+        )
+        .expect("Node pinned resolver");
+        assert_eq!(
+            node.resolve("node:http", &importer)
+                .expect("recognized builtin resolves")
+                .builtin(),
+            Some(NodeBuiltin::Http)
+        );
+        assert!(matches!(
+            node.resolve("node:tls", &importer),
+            Err(ResolveError::InvalidSpecifier {
+                reason: InvalidSpecifierReason::UrlScheme,
+                ..
+            })
+        ));
     }
 
     // Small lexical path-difference helper kept local to tests so the crate stays dependency-free.

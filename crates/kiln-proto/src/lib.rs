@@ -714,7 +714,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v18_sync_source_view_and_cache_gc_wire_contract_round_trips() {
+    fn protocol_v19_sync_source_view_and_cache_gc_wire_contract_round_trips() {
         assert_eq!(PROTOCOL_VERSION, 19);
 
         let requests = [
@@ -765,6 +765,20 @@ mod tests {
                     source_view: SourceView(12),
                 },
                 serde_json::json!({"Project": {"source_view": 12}}),
+            ),
+            (
+                Request::Run {
+                    path: "main.mjs".to_owned(),
+                    project_root: "/project".to_owned(),
+                    node: true,
+                    source_view: SourceView(12),
+                },
+                serde_json::json!({"Run": {
+                    "path": "main.mjs",
+                    "project_root": "/project",
+                    "node": true,
+                    "source_view": 12
+                }}),
             ),
             (
                 Request::CacheGc {

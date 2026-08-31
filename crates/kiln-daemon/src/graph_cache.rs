@@ -281,6 +281,14 @@ mod tests {
     }
 
     #[test]
+    fn node_mode_is_a_separate_graph_cache_key() {
+        let (root, first, _second, _graph) = graph_fixture();
+        let deterministic = GraphCacheKey::new(root.clone(), first.clone(), None, false);
+        let node = GraphCacheKey::new(root, first, None, true);
+        assert_ne!(deterministic, node);
+    }
+
+    #[test]
     fn a_miss_does_not_publish_an_entry_without_insert() {
         let (root, first, _second, graph) = graph_fixture();
         let cache_key = key(&root, &first, None);
