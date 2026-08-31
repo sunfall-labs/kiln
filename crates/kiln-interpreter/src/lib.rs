@@ -9081,6 +9081,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::ObjectGroupBy => return self.group_by(false, arguments, instruction),
             Native::MapGroupBy => return self.group_by(true, arguments, instruction),
+            Native::LegacyAccessor { defines, setter } => {
+                return self.legacy_accessor(defines, setter, receiver, arguments, instruction);
+            }
             // `Promise.try(f, ...args)` runs `f` *now* and wraps whatever happens: the value it
             // returned, or the error it threw. That last half is the whole point -- a synchronous
             // throw from a function that was meant to be asynchronous becomes a rejection rather
@@ -22161,27 +22164,6 @@ impl RegExpSymbol {
     /// The name a stack trace prints, which for a symbol-keyed method is the key in brackets.
     fn js_name(self) -> String {
         format!("[Symbol.{}]", self.symbol().js_name())
-    }
-
-    /// The string method each is the implementation of. The specification defines the pair the
-    /// other way round -- `"s".match(re)` is `re[Symbol.match]("s")` -- and this engine's regexp
-    /// machinery is written on the string side, so the delegation runs that way here.
-    const fn string_method(self) -> Native {
-        match self {
-            Self::Match => Native::StringMatch,
-            Self::MatchAll => Native::StringMatchAll,
-            Self::Replace => Native::StringReplace,
-            Self::Search => Native::StringSearch,
-            Self::Split => Native::StringSplit,
-        }
-    }
-
-    const fn length(self) -> f64 {
-        match self {
-            // Both take the subject and one more: the replacement, or the split limit.
-            Self::Replace | Self::Split => 2.0,
-            _ => 1.0,
-        }
     }
 
     fn named(key: &str) -> Option<Self> {
