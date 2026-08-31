@@ -2730,6 +2730,22 @@ fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
     }
 }
 
+/// The slot whose value CommonJS receives from `require()` for a typed builtin.
+///
+/// Native materializers already build that projection as the builtin's `default` export: for
+/// namespace-shaped modules it is the namespace object, while historically callable modules
+/// such as `events` put their constructor there. Keeping the lookup name-based avoids another
+/// positional table beside `node_builtin_export_names`.
+fn native_builtin_commonjs_export_index(node: &kiln_module_graph::ModuleNode) -> Option<usize> {
+    matches!(node.source, ModuleSource::NodeBuiltin(_)).then(|| {
+        node.program
+            .exports
+            .iter()
+            .position(|export| export.exported == "default")
+            .expect("every native Node builtin has a CommonJS projection")
+    })
+}
+
 fn native_c_string(value: &str) -> String {
     let mut output = String::from("\"");
     for byte in value.bytes() {
@@ -2929,9 +2945,11 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
                 )
                 .unwrap();
             } else {
+                let commonjs_export =
+                    native_builtin_commonjs_export_index(modules[provider_index].0).unwrap_or(0);
                 writeln!(
                     output,
-                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = kiln_exports_{provider_index}[0]; return 0; }}"
+                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = kiln_exports_{provider_index}[{commonjs_export}]; return 0; }}"
                 )
                 .unwrap();
             }
@@ -3491,9 +3509,11 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
                 )
                 .unwrap();
             } else {
+                let commonjs_export =
+                    native_builtin_commonjs_export_index(modules[provider_index].0).unwrap_or(0);
                 writeln!(
                     output,
-                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = graph->exports[{provider_index}][0]; return KILN_C99_OK; }}"
+                    "    if (specifier.len == (size_t){specifier_len} && memcmp(specifier.ptr, {specifier}, (size_t){specifier_len}) == 0) {{ *result = graph->exports[{provider_index}][{commonjs_export}]; return KILN_C99_OK; }}"
                 )
                 .unwrap();
             }
@@ -4888,6 +4908,109 @@ console.log("pass");
             return;
         };
         assert_eq!(output, "pass\n");
+    }
+
+    #[test]
+    fn native_node_http_server_exposes_timeout_policy_used_by_frameworks() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-server-timeouts",
+            r#"import http from "node:http";
+const server = http.createServer(() => {});
+console.log(server.timeout, server.keepAliveTimeout, server.requestTimeout);
+server.setTimeout(12.9);
+console.log(server.timeout);
+console.log("pass");
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "0 5000 300000\n12\npass\n");
+    }
+
+    #[test]
+    fn native_node_http_response_exposes_node_lifecycle_state() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-response-state",
+            r#"import http from "node:http";
+const server = http.createServer((request, response) => {
+  console.log(response.statusCode, response.headersSent, response.writableEnded, response.destroyed);
+  response.statusCode = 201;
+  response.writeHead(response.statusCode, { "content-type": "text/plain" });
+  console.log(response.statusCode, response.headersSent, response.writableEnded);
+  response.end("ok");
+  console.log(response.headersSent, response.writableEnded);
+  server.close();
+});
+server.listen(0, "127.0.0.1", () => {
+  const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    response.on("data", () => {});
+    response.on("end", () => {});
+  });
+  request.end();
+});
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "200 false false false\n201 true false\ntrue true\n");
+    }
+
+    #[test]
+    fn native_node_http_response_headers_are_case_insensitive_and_snapshot() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-response-headers",
+            r#"import http from "node:http";
+const server = http.createServer((_request, response) => {
+  response.setHeader("Content-Type", "text/plain");
+  console.log(response.getHeader("content-type"), response.hasHeader("CONTENT-TYPE"));
+  const headers = response.getHeaders();
+  headers["content-type"] = "changed";
+  console.log(response.getHeader("content-type"));
+  response.removeHeader("CONTENT-TYPE");
+  console.log(response.hasHeader("content-type"), response.getHeader("content-type"));
+  response.end("ok");
+  server.close();
+});
+server.listen(0, "127.0.0.1", () => {
+  const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    response.on("data", () => {});
+    response.on("end", () => {});
+  });
+  request.end();
+});
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "text/plain true\ntext/plain\nfalse undefined\n");
+    }
+
+    #[test]
+    fn native_node_http_incoming_message_exposes_request_lifecycle_state() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-request-state",
+            r#"import http from "node:http";
+const server = http.createServer((request, response) => {
+  console.log(request.httpVersion, request.httpVersionMajor, request.httpVersionMinor);
+  console.log(request.aborted, request.complete, request.destroyed);
+  request.on("end", () => {
+    console.log(request.complete);
+    response.end("ok");
+    server.close();
+  });
+});
+server.listen(0, "127.0.0.1", () => {
+  const request = http.request({ host: "127.0.0.1", port: server.address().port, path: "/" }, (response) => {
+    response.on("data", () => {});
+    response.on("end", () => {});
+  });
+  request.end();
+});
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "1.1 1 1\nfalse false false\ntrue\n");
     }
 
     #[test]
@@ -6590,6 +6713,98 @@ int main(void) {{
             )
             .expect("native repeated CommonJS require graph builds and runs");
         assert_eq!(cached.stdout, b"true 1\n42\n");
+    }
+
+    #[test]
+    fn native_commonjs_require_receives_the_builtin_projection_on_both_graph_paths() {
+        use kiln_module_resolver::{NodeBuiltin, NodeRuntimeResolver};
+
+        let root = TestDirectory::new("kiln-native-commonjs-builtin-projection");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write root package");
+        fs::create_dir(root.path.join("pkg")).expect("create package directory");
+        fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write CommonJS package");
+        fs::write(
+            root.path.join("pkg/index.js"),
+            "const { format } = require('node:util'); module.exports = format('%s:%d', 'ok', 7);",
+        )
+        .expect("write CommonJS builtin consumer");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            "import answer from './pkg/index.js'; console.log(answer);",
+        )
+        .expect("write entry");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build CommonJS builtin graph");
+        let modules = graph
+            .modules()
+            .map(|node| {
+                (
+                    node,
+                    emit_native_graph_module(
+                        node,
+                        &logical_module_path(graph.project_root(), &node.path)
+                            .expect("logical path"),
+                        &NativeRealmPolicy::default(),
+                    )
+                    .expect("module emits"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let util_index = modules
+            .iter()
+            .position(|(node, _)| node.source == ModuleSource::NodeBuiltin(NodeBuiltin::Util))
+            .expect("util module");
+        let commonjs_index = modules
+            .iter()
+            .position(|(node, _)| node.source == ModuleSource::CommonJs)
+            .expect("CommonJS module");
+        let default_index = native_builtin_commonjs_export_index(modules[util_index].0)
+            .expect("builtin CommonJS projection");
+        let expected_standalone =
+            format!("*result = kiln_exports_{util_index}[{default_index}]; return 0;");
+        let expected_shared =
+            format!("*result = graph->exports[{util_index}][{default_index}]; return KILN_C99_OK;");
+        let launcher = graph_launcher_source(&graph, &modules).expect("launcher emits");
+        assert!(launcher.contains(&expected_standalone));
+        let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_builtin_projection")
+            .expect("shared wrapper emits");
+        assert!(wrapper.contains(&expected_shared));
+        assert!(launcher.contains(&format!("kiln_commonjs_require_{commonjs_index}")));
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native builtin projection integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let run = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("standalone graph runs");
+        assert_eq!(run.stdout, b"ok:7\n");
+        builder
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("shared graph builds");
     }
 
     #[test]
