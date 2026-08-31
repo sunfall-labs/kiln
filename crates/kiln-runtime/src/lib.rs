@@ -36,6 +36,7 @@ use tokio::sync::mpsc;
 
 use crate::http_body::{BodyEvent, ResponseBodyDriver};
 use crate::http_transport::HttpTransportDriver;
+use crate::node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin};
 
 /// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
 /// objects and stream events. No Hyper or Tokio type crosses this seam.
@@ -105,6 +106,16 @@ pub enum RuntimeHttpClientEvent {
 /// This stays separate from `HostOps`: TCP is a versioned capability boundary, while HTTP
 /// framing and body backpressure are realm-runtime policy. Only Kiln types cross this seam.
 pub trait ActiveHttpRuntime {
+    fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision;
+    fn client_connection_connected(
+        &mut self,
+        origin: HttpOrigin,
+        resource: ResourceId,
+        request: u64,
+    ) -> bool;
+    fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease;
+    fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure;
+    fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64>;
     fn start_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction>;
     fn connection_started(
         &mut self,
@@ -489,6 +500,7 @@ pub struct RealmRuntime<H = TokioHost> {
     host: H,
     capabilities: RealmCapabilities,
     http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
+    http_agent: HttpAgent,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
     // executor. `Runtime` itself can be moved, but the realm's language state cannot.
     _not_send: PhantomData<Rc<()>>,
@@ -542,6 +554,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             host,
             capabilities,
             http_connections: BTreeMap::new(),
+            http_agent: HttpAgent::default(),
             _not_send: PhantomData,
         })
     }
@@ -1147,6 +1160,31 @@ struct RuntimeHttpConnection {
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
+    fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
+        self.http_agent.acquire(origin, request)
+    }
+
+    fn client_connection_connected(
+        &mut self,
+        origin: HttpOrigin,
+        resource: ResourceId,
+        request: u64,
+    ) -> bool {
+        self.http_agent.connected(origin, resource, request)
+    }
+
+    fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease {
+        self.http_agent.release(resource, reusable)
+    }
+
+    fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
+        self.http_agent.connect_failed(origin)
+    }
+
+    fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64> {
+        self.http_agent.closed(resource)
+    }
+
     fn start_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction> {
         self.start_http1_connection(resource)
     }
@@ -2520,6 +2558,36 @@ mod tests {
         assert_eq!(
             capabilities.artifact_identity(),
             RealmCapabilityIdentity::default()
+        );
+    }
+
+    #[test]
+    fn each_realm_runtime_owns_an_isolated_http_agent() {
+        let origin = HttpOrigin::http("example.com", 80);
+        let mut first = RealmRuntime::new().expect("runtime builds");
+        let mut second = RealmRuntime::new().expect("runtime builds");
+
+        assert_eq!(
+            ActiveHttpRuntime::acquire_client_connection(&mut first, origin.clone(), 1),
+            AgentDecision::Connect
+        );
+        assert!(ActiveHttpRuntime::client_connection_connected(
+            &mut first,
+            origin.clone(),
+            ResourceId::new(41),
+            1,
+        ));
+        assert_eq!(
+            ActiveHttpRuntime::release_client_connection(&mut first, ResourceId::new(41), true),
+            AgentRelease::Idle
+        );
+        assert_eq!(
+            ActiveHttpRuntime::acquire_client_connection(&mut first, origin.clone(), 2),
+            AgentDecision::Reuse(ResourceId::new(41))
+        );
+        assert_eq!(
+            ActiveHttpRuntime::acquire_client_connection(&mut second, origin, 1),
+            AgentDecision::Connect
         );
     }
 
