@@ -1031,6 +1031,45 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
     })
 }
 
+/// Compile a CommonJS body with Node's wrapper bindings installed as module-scope cells.
+///
+/// The graph supplies the five values in this exact order. They are ordinary mutable bindings:
+/// `module.exports = value` must be observable after evaluation, and nested functions capture
+/// `require`/`exports` through the same cell mechanism as any other module-scope name.
+pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
+    const WRAPPER: [&str; 5] = ["exports", "require", "module", "__filename", "__dirname"];
+    let mut compiler = Compiler::new(module);
+    let mut imports = Vec::with_capacity(WRAPPER.len());
+    for name in WRAPPER {
+        let slot = compiler.local_count;
+        compiler.local_count += 1;
+        compiler.outer_names.insert(name.to_owned());
+        compiler.scopes[0].insert(
+            name.to_owned(),
+            Local {
+                slot,
+                kind: VariableKind::Let,
+                imported: false,
+                initialized: true,
+                celled: true,
+            },
+        );
+        imports.push(ImportBinding {
+            source: "*commonjs-wrapper*".into(),
+            imported: name.into(),
+            local: name.into(),
+            local_slot: slot,
+        });
+    }
+    compiler.compile_body(module);
+    compiler.finish().map(|program| ModuleProgram {
+        program,
+        dependencies: Vec::new(),
+        imports,
+        exports: Vec::new(),
+    })
+}
+
 /// Unpatched exits from one loop.
 ///
 /// Collected rather than patched as they are emitted, because neither target is known until the
