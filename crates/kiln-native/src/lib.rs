@@ -2039,7 +2039,7 @@ exports[3] = namespace;"#,
         // gated names hold `undefined` because `native_builtin_supports_export` refuses them as
         // named imports; they are slots to keep the alignment, not exports.
         NodeBuiltin::Http => Some(
-            r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
+            r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER);
 kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
 kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
 kiln_value request = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_REQUEST);
@@ -4384,6 +4384,47 @@ mod tests {
         }
     }
 
+    fn run_native_http_fixture(name: &str, source: &str) -> Option<String> {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::process::Command;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native node:http fixture: no C compiler found");
+            return None;
+        };
+        let project = TestDirectory::new(name);
+        let entry = project.path.join("main.mjs");
+        fs::write(&entry, source).expect("write node:http fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("source graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native node:http graph builds");
+        let output = Command::new(&report.output)
+            .output()
+            .expect("run native node:http fixture");
+        assert!(
+            output.status.success(),
+            "status={} stdout={:?} stderr={:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Some(String::from_utf8(output.stdout).expect("fixture output is UTF-8"))
+    }
+
     #[test]
     fn owned_result_wrapper_source_is_deterministic_and_has_no_static_result_state() {
         let source = owned_result_wrapper_source(
@@ -4798,7 +4839,49 @@ mod tests {
         assert!(body.contains("exports[5] = namespace;"));
         assert!(body.contains("exports[6] = get;"));
         assert!(body.contains("exports[7] = request;"));
+        assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER"));
+        assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER"));
         assert!(native_builtin_supports_export(NodeBuiltin::Http, "Server"));
+    }
+
+    #[test]
+    fn native_node_http_exports_distinct_server_and_create_server_names() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-callable-shape",
+            r#"import http from "node:http";
+if (typeof http.Server !== "function") throw new Error("Server is not callable");
+if (typeof http.createServer !== "function") throw new Error("createServer is not callable");
+if (http.Server === http.createServer) throw new Error("HTTP callables share identity");
+if (http.Server.name !== "Server") throw new Error("wrong Server name");
+if (http.createServer.name !== "createServer") throw new Error("wrong createServer name");
+console.log("pass");
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "pass\n");
+    }
+
+    #[test]
+    fn native_node_http_server_accepts_options_overload_without_listener() {
+        let Some(output) = run_native_http_fixture(
+            "kiln-native-node-http-options-overload",
+            r#"import http from "node:http";
+const optionOnly = new http.Server({ allowHalfOpen: true });
+const nullOptions = new http.Server(null);
+const withListener = new http.Server({}, () => {});
+const factoryOptionOnly = http.createServer({});
+const factoryWithListener = http.createServer({}, () => {});
+for (const server of [optionOnly, nullOptions, withListener, factoryOptionOnly, factoryWithListener]) {
+  if (typeof server.close !== "function") throw new Error("missing close");
+  server.close();
+}
+console.log("pass");
+"#,
+        ) else {
+            return;
+        };
+        assert_eq!(output, "pass\n");
     }
 
     #[test]
