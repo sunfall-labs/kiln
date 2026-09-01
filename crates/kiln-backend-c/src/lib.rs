@@ -2136,6 +2136,10 @@ typedef struct kiln_host {
     void *context;
 } kiln_host;
 
+typedef void (*kiln_drop_opaque_fn)(void *pointer);
+extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
+                                     kiln_drop_opaque_fn drop_candidate, void **out_store);
+
 /* A closure is its body plus the boxes it captured.
  *
  * The body is a function pointer rather than an index into the emitting program's table,
@@ -8416,11 +8420,23 @@ static int kiln_c99_function_store(kiln_value function, kiln_value *out) {
     return KILN_C99_OK;
 }
 
-static kiln_method_store *kiln_c99_method_stores;
-
 /* Return the property store for either representation of callable. `create == 0` makes reads
  * allocation-free when no static was ever attached. Generated closures retain their inline
  * store; runtime methods use the realm registry above. */
+static kiln_method_store *kiln_c99_fixture_method_stores;
+
+static void kiln_c99_drop_callable_store(void *pointer) {
+    kiln_method_store *entry = (kiln_method_store *)pointer;
+    kiln_object *properties;
+    if (entry == NULL) return;
+    properties = kiln_c99_object_of(entry->properties);
+    if (properties != NULL) {
+        free(properties->properties);
+        free(properties);
+    }
+    free(entry);
+}
+
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
     kiln_method_store *entry;
     if (callable.tag == KILN_VALUE_FUNCTION) {
@@ -8446,32 +8462,74 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
     }
     if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN)
         return KILN_C99_CONTROL_ERROR;
-    /* Method and builtin registries may assign the same numeric code. Fold the value tag into
-     * this private key so their stores cannot alias. */
+    /* Direct C embedding fixtures exercise helpers without entering a realm. Keep that legacy
+     * path local; every generated scalar/module entry creates or inherits a realm and therefore
+     * uses only the shared registry below. */
+    if (!kiln_realm_is_active()) {
+        uint64_t store_code = callable.bits | ((uint64_t)callable.tag << 56);
+        for (entry = kiln_c99_fixture_method_stores; entry != NULL; entry = entry->next) {
+            if (entry->code == store_code) {
+                *out = entry->properties;
+                return KILN_C99_OK;
+            }
+        }
+        if (!create) {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        entry = (kiln_method_store *)malloc(sizeof *entry);
+        if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
+        entry->code = store_code;
+        entry->next = kiln_c99_fixture_method_stores;
+        if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
+            free(entry);
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        kiln_c99_fixture_method_stores = entry;
+        *out = entry->properties;
+        return KILN_C99_OK;
+    }
+    /* Runtime callable identity is realm-wide, so its statics must be too. First perform the
+     * allocation-free lookup promised above. */
     {
-    uint64_t store_code = callable.bits | ((uint64_t)callable.tag << 56);
-    for (entry = kiln_c99_method_stores; entry != NULL; entry = entry->next) {
-        if (entry->code == store_code) {
-            *out = entry->properties;
+        kiln_method_store *published = NULL;
+        int status = kiln_realm_callable_store(callable.tag, callable.bits, NULL, NULL,
+                                               (void **)&published);
+        if (status != KILN_C99_OK) return status;
+        if (published != NULL) {
+            *out = published->properties;
+            return KILN_C99_OK;
+        }
+        if (!create) {
+            *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
     }
-    if (!create) {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
-    }
+    /* Publication transfers the winning candidate and destructor to the realm. */
     entry = (kiln_method_store *)malloc(sizeof *entry);
     if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
-    entry->code = store_code;
-    entry->next = kiln_c99_method_stores;
+    entry->code = callable.bits | ((uint64_t)callable.tag << 56);
+    entry->next = NULL;
     if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
         free(entry);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    kiln_c99_method_stores = entry;
+    {
+        kiln_method_store *published = NULL;
+        int status = kiln_realm_callable_store(callable.tag, callable.bits, entry,
+                                               kiln_c99_drop_callable_store,
+                                               (void **)&published);
+        if (status != KILN_C99_OK) {
+            free(entry);
+            return status;
+        }
+        if (published != entry) {
+            kiln_c99_drop_callable_store(entry);
+            entry = published;
+        }
+    }
     *out = entry->properties;
     return KILN_C99_OK;
-    }
 }
 
 /* Read a named property.  A missing one is undefined; a read *through* undefined or null is an
@@ -27941,7 +27999,7 @@ int main(void) {
             "static kiln_value kiln_c99_globals;",
             "static kiln_value kiln_c99_process;",
             "static kiln_value *kiln_c99_symbols;",
-            "static kiln_method_store *kiln_c99_method_stores;",
+            "static kiln_method_store *kiln_c99_fixture_method_stores;",
             "static kiln_native_constructor kiln_c99_native_constructors[]",
         ] {
             assert!(
@@ -28268,6 +28326,10 @@ static int kiln_test_realm_active = 0;
 static uint64_t kiln_test_symbol_id = 1;
 static char kiln_test_symbol_key[256];
 static uint64_t kiln_test_symbol_key_len = 0;
+static uint32_t kiln_test_callable_tags[256];
+static uint64_t kiln_test_callable_codes[256];
+static void *kiln_test_callable_stores[256];
+static size_t kiln_test_callable_store_count = 0;
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -28336,6 +28398,31 @@ int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *ou
     }
     *out_key = (const uint8_t *)kiln_test_symbol_key;
     *out_key_len = kiln_test_symbol_key_len;
+    return KILN_C99_OK;
+}
+int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
+                              kiln_drop_opaque_fn drop_candidate, void **out_store) {
+    size_t index;
+    if (!kiln_test_realm_active || out_store == NULL ||
+        ((candidate == NULL) != (drop_candidate == NULL))) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (candidate == NULL) {
+        *out_store = NULL;
+        return KILN_C99_OK;
+    }
+    for (index = 0; index < kiln_test_callable_store_count; ++index) {
+        if (kiln_test_callable_tags[index] == tag && kiln_test_callable_codes[index] == code) {
+            *out_store = kiln_test_callable_stores[index];
+            return KILN_C99_OK;
+        }
+    }
+    if (kiln_test_callable_store_count == 256) return KILN_C99_OUT_OF_MEMORY;
+    index = kiln_test_callable_store_count++;
+    kiln_test_callable_tags[index] = tag;
+    kiln_test_callable_codes[index] = code;
+    kiln_test_callable_stores[index] = candidate;
+    *out_store = candidate;
     return KILN_C99_OK;
 }
 int kiln_realm_now(double *out_milliseconds) {
