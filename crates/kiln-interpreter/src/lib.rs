@@ -6702,6 +6702,13 @@ pub struct EvalSource<'a> {
     /// Whether this source is a Script rather than eval code: its `var`s reach the global object
     /// even in strict mode, and the bindings it makes there are not configurable.
     pub script: bool,
+    /// The name, among `outer`, of the caller's home-object binding -- `None` where the language
+    /// does not allow `super.x` to be written at this call.
+    pub home: Option<&'a str>,
+    /// What `new.target` means here, including whether it may be written at all.
+    pub new_target: kiln_ir::EvalNewTarget,
+    /// The private names the calling code can see, outermost class first.
+    pub private_scopes: &'a [kiln_ir::PrivateScope],
 }
 
 /// Why a run-time compilation produced no program.
@@ -32677,12 +32684,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // A direct one goes there only when the call was written at the top level of a script,
         // which the compiler recorded on the site.
         let global_var_scope = site.is_none_or(|site| site.global_var_scope);
+        // An indirect eval is global code with no method, no class and no call around it, so it
+        // carries none of the syntactic context a direct one does.
+        let new_target = site.map_or(kiln_ir::EvalNewTarget::Forbidden, |site| site.new_target);
+        let no_private_scopes: [kiln_ir::PrivateScope; 0] = [];
         let (program, program_strictness) = compile(&EvalSource {
             source,
             outer: &outer,
             strict,
             global_var_scope,
             script,
+            home: site.and_then(|site| site.home.as_deref()),
+            new_target,
+            private_scopes: site.map_or(&no_private_scopes, |site| &site.private_scopes),
         })
         .map_err(|error| match error {
             EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
@@ -32715,11 +32729,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 limit: self.limits.max_call_depth,
             });
         }
-        let (this_value, arguments, new_target) = match site {
+        let (this_value, arguments, frame_new_target) = match site {
             Some(_) => (
                 self.this_value.clone(),
                 self.arguments.clone(),
-                self.new_target.clone(),
+                // A class field initialiser is its own function boundary for `new.target`, and
+                // Kiln emits its code into the constructor -- so the running frame's value is
+                // the constructor's, and an eval written in an initialiser must not see it.
+                match new_target {
+                    kiln_ir::EvalNewTarget::Undefined => Value::Undefined,
+                    kiln_ir::EvalNewTarget::Forbidden | kiln_ir::EvalNewTarget::Caller => {
+                        self.new_target.clone()
+                    }
+                },
             ),
             // An indirect eval is called with no receiver from global scope, which makes `this`
             // the global object -- the one place a sloppy call still gets one.
@@ -32733,7 +32755,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, program_is_strict),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
-            new_target: std::mem::replace(&mut self.new_target, new_target),
+            new_target: std::mem::replace(&mut self.new_target, frame_new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
             arguments_object: self.arguments_object.take(),
             mapped_arguments: self.mapped_arguments,
@@ -46555,6 +46577,9 @@ mod tests {
                     strict: false,
                     global_var_scope: false,
                     argc: Some(1),
+                    home: None,
+                    new_target: kiln_ir::EvalNewTarget::Forbidden,
+                    private_scopes: Vec::new(),
                 })),
                 // The eval's completion value is discarded; the caller's binding is the answer.
                 Instruction::Pop,
