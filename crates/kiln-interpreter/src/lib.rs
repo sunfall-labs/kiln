@@ -41970,41 +41970,54 @@ fn index_key(key: &str) -> Option<u32> {
     (index != u32::MAX && index.to_string() == key).then_some(index)
 }
 
+#[deny(clippy::wildcard_enum_match_arm)]
 fn strict_equal(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
-        (Value::Boolean(a), Value::Boolean(b)) => a == b,
-        (Value::Number(a), Value::Number(b)) => a == b,
-        (Value::String(a), Value::String(b)) => a == b,
-        // Objects and functions compare by identity: `===` asks whether two references name the
-        // same object, not whether their contents match. `Rc::ptr_eq` is that question exactly,
-        // and it also avoids borrowing a `RefCell` that a caller may already hold mutably.
-        (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
-        (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
-        // One `Error` per realm, so two references to it are the same function.
-        (Value::Native(a), Value::Native(b)) => a == b,
-        (Value::Callback(a), Value::Callback(b)) => a == b,
-        (Value::Generator(a), Value::Generator(b)) => Rc::ptr_eq(a, b),
-        (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
-        // Every other object kind compares by identity for the same reason: each is one object,
-        // and `x === x` has to hold for it. Leaving any of them out of this list makes a value
-        // unequal to itself, which is the kind of wrong answer nothing recovers from -- a `Map`
-        // keyed on one stops finding it, and a library checking whether a value is the same one
-        // it stored always says no.
-        (Value::Date(a), Value::Date(b)) => Rc::ptr_eq(a, b),
-        (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
-        (Value::Promise(a), Value::Promise(b)) => Rc::ptr_eq(a, b),
-        (Value::Proxy(a), Value::Proxy(b)) => Rc::ptr_eq(a, b),
-        (Value::TypedArray(a), Value::TypedArray(b)) => Rc::ptr_eq(a, b),
-        (Value::ArrayBuffer(a), Value::ArrayBuffer(b)) => Rc::ptr_eq(a, b),
-        (Value::DataView(a), Value::DataView(b)) => Rc::ptr_eq(a, b),
-        (Value::Bound(a), Value::Bound(b)) => Rc::ptr_eq(a, b),
-        (Value::Settler(a, one), Value::Settler(b, other)) => Rc::ptr_eq(a, b) && one == other,
+    // Exhaustive on `left` deliberately. A wildcard here made every new representation compile
+    // as "unequal to everything", including itself. Adding a `Value` variant must keep failing to
+    // compile until its JavaScript equality semantics are chosen explicitly.
+    match left {
+        Value::Undefined => matches!(right, Value::Undefined),
+        Value::Null => matches!(right, Value::Null),
+        Value::Boolean(a) => matches!(right, Value::Boolean(b) if a == b),
+        Value::Number(a) => matches!(right, Value::Number(b) if a == b),
+        Value::String(a) => matches!(right, Value::String(b) if a == b),
+        // A cell is compiler bookkeeping and never observable as a JavaScript value. Identity is
+        // still the least surprising answer if malformed bytecode lets one reach this boundary.
+        Value::Cell(a) => matches!(right, Value::Cell(b) if Rc::ptr_eq(a, b)),
+        // One instance of each runtime-provided callable exists per realm.
+        Value::Native(a) => matches!(right, Value::Native(b) if a == b),
+        Value::Callback(a) => matches!(right, Value::Callback(b) if a == b),
+        // Every object/function representation compares by identity: `===` asks whether two
+        // references name the same object, not whether their payloads happen to be equal.
+        Value::Generator(a) => matches!(right, Value::Generator(b) if Rc::ptr_eq(a, b)),
+        Value::Promise(a) => matches!(right, Value::Promise(b) if Rc::ptr_eq(a, b)),
+        Value::RegExp(a) => matches!(right, Value::RegExp(b) if Rc::ptr_eq(a, b)),
+        Value::Date(a) => matches!(right, Value::Date(b) if Rc::ptr_eq(a, b)),
+        Value::Temporal(a) => matches!(right, Value::Temporal(b) if Rc::ptr_eq(a, b)),
+        Value::Intl(a) => matches!(right, Value::Intl(b) if Rc::ptr_eq(a, b)),
         // A BigInt is a primitive: two of them are equal when the numbers are, however they were
-        // built. That is the one entry here that is not an identity comparison.
-        (Value::BigInt(a), Value::BigInt(b)) => a == b,
-        (Value::Symbol(a), Value::Symbol(b)) => a == b,
-        _ => false,
+        // built. This is deliberately value equality rather than `Rc` identity.
+        Value::BigInt(a) => matches!(right, Value::BigInt(b) if a == b),
+        Value::Settler(a, one) => matches!(
+            right,
+            Value::Settler(b, other) if Rc::ptr_eq(a, b) && one == other
+        ),
+        Value::Array(a) => matches!(right, Value::Array(b) if Rc::ptr_eq(a, b)),
+        Value::TypedArray(a) => matches!(right, Value::TypedArray(b) if Rc::ptr_eq(a, b)),
+        Value::ArrayBuffer(a) => matches!(right, Value::ArrayBuffer(b) if Rc::ptr_eq(a, b)),
+        Value::DataView(a) => matches!(right, Value::DataView(b) if Rc::ptr_eq(a, b)),
+        Value::Proxy(a) => matches!(right, Value::Proxy(b) if Rc::ptr_eq(a, b)),
+        Value::Bound(a) => matches!(right, Value::Bound(b) if Rc::ptr_eq(a, b)),
+        // `require` and `require.resolve` share lookup state but are distinct function objects.
+        Value::CommonJsRequire(a) => {
+            matches!(right, Value::CommonJsRequire(b) if Rc::ptr_eq(a, b))
+        }
+        Value::CommonJsResolve(a) => {
+            matches!(right, Value::CommonJsResolve(b) if Rc::ptr_eq(a, b))
+        }
+        Value::Symbol(a) => matches!(right, Value::Symbol(b) if a == b),
+        Value::Object(a) => matches!(right, Value::Object(b) if Rc::ptr_eq(a, b)),
+        Value::Function(a) => matches!(right, Value::Function(b) if Rc::ptr_eq(a, b)),
     }
 }
 
@@ -43846,6 +43859,51 @@ mod tests {
             "equal contents are not the same object"
         );
         assert!(strict_equal(&left, &left.clone()), "a clone shares the Rc");
+    }
+
+    #[test]
+    fn engine_and_commonjs_values_are_reflexive_identity_objects() {
+        let temporal = Rc::new(
+            kiln_temporal::plain_date(2026.0, 8.0, 31.0, None)
+                .expect("construct Temporal.PlainDate"),
+        );
+        let intl = Rc::new(intl::IntlValue::Locale("en-US".to_owned()));
+        let require = Rc::new(CommonJsRequire::new(std::iter::empty::<(
+            String,
+            String,
+            Cell,
+        )>()));
+
+        let same_objects = [
+            Value::Temporal(Rc::clone(&temporal)),
+            Value::Intl(Rc::clone(&intl)),
+            Value::CommonJsRequire(Rc::clone(&require)),
+            Value::CommonJsResolve(Rc::clone(&require)),
+        ];
+        for value in &same_objects {
+            let cloned = value.clone();
+            assert!(
+                strict_equal(value, &cloned),
+                "{} must equal another reference to itself",
+                value.type_name()
+            );
+        }
+
+        let other_temporal = Value::Temporal(Rc::new(
+            kiln_temporal::plain_date(2026.0, 8.0, 31.0, None)
+                .expect("construct equal but distinct Temporal.PlainDate"),
+        ));
+        let other_intl = Value::Intl(Rc::new(intl::IntlValue::Locale("en-US".to_owned())));
+        let other_require = Value::CommonJsRequire(Rc::new(CommonJsRequire::new(
+            std::iter::empty::<(String, String, Cell)>(),
+        )));
+        assert!(!strict_equal(&same_objects[0], &other_temporal));
+        assert!(!strict_equal(&same_objects[1], &other_intl));
+        assert!(!strict_equal(&same_objects[2], &other_require));
+        assert!(
+            !strict_equal(&same_objects[2], &same_objects[3]),
+            "require and require.resolve share state, not function identity"
+        );
     }
 
     /// A missing property is `undefined`, not an error: reading one is legal JavaScript.
