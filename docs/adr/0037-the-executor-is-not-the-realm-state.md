@@ -1,0 +1,139 @@
+# ADR 0037: The executor is not the realm state
+
+## Status
+
+Accepted. Not implemented. This records the shape before the work starts, in the same spirit as
+ADR 0016 — the choice is cheap to make now and expensive to reverse once the split has been
+half-made in one direction.
+
+## Context
+
+`RealmRuntime` owns two unrelated things in one struct:
+
+```rust
+pub struct RealmRuntime<H = TokioHost> {
+    runtime: tokio::runtime::Runtime,          // the executor
+    local: tokio::task::LocalSet,              // the executor
+    host: H,                                   // realm state
+    capabilities: RealmCapabilities,           // realm state
+    http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,  // realm state
+    http_agent: HttpAgent,                     // realm state
+    runtime_metrics: tokio_metrics::RuntimeIntervals,
+    time_paused: bool,
+}
+```
+
+All 41 of its methods take `&mut self`; 16 of them touch the executor fields.
+
+That bundling has one consequence, and the consequence is the whole reason this ADR exists: **the
+native drive cannot hold the executor across a drive, because the drive body needs the state.**
+`block_on` would have to borrow the struct for the lifetime of the future, and the future mutates
+`host` and `http_connections` on every turn. The only way out within the current layout is to
+re-enter the executor for each small step — which is exactly what the native adapter does.
+
+### What that costs, measured
+
+Counting runtime entries under a 16-connection load, over 14,175 requests:
+
+```
+poll_http_tasks_once (block_on)   ~120,000   ~8.5 per request
+next_turn                            26,673   ~1.9 per request
+parks on the blocking select!            13   essentially zero
+```
+
+Two readings matter. The server **never waits on the network** — the blocking wait fires thirteen
+times in an entire run — so the 55% of samples in `kevent` (against 32 in `recvfrom`/`sendto`
+combined) is not idle time. It is park overhead from `block_on` entries that had nothing to wait
+for. And `yield_now().await` is the difference: inside `block_on` it must park, because the future
+returns `Pending` and the driver goes to the kernel for a self-wake; inside a task on the same
+`LocalSet` it is a userspace reschedule.
+
+Three tuning passes have already taken the 16-connection case from 141 to 4,973 rps by reducing how
+*often* the runtime is re-entered — a redundant per-connection scheduler drive, a per-microtask
+checkpoint, and a fixed drain replaced by one that stops at quiescence. Those were real, and they
+are finished: what remains is the per-entry cost, which no amount of frequency reduction reaches.
+
+### The duplication this already caused
+
+The adapter carries 21 `in_context` references and 8 `if in_context {}` forks; the runtime exposes
+11 `_in_context` method variants — `poll_http_connection` beside `poll_http_connection_in_context`,
+`start_host_op` beside `start_host_op_in_context`, and so on. Every pair answers one question: *am I
+inside the executor or outside it?* The `_in_context` half is the one that must not nest `block_on`.
+
+They are not an accident either. They are what the bundled layout forces once generated C — which is
+synchronous and re-enters host operations from inside a callback — has to run somewhere.
+
+## Decision
+
+**The executor and the realm state become separate owners.**
+
+```rust
+struct Executor { runtime: tokio::runtime::Runtime, local: tokio::task::LocalSet }
+struct RealmState<H> { host: H, capabilities: ..., http_connections: ..., http_agent: ... }
+
+executor.block_on(drive(&mut state, host, thrown))   // one entry per program run
+```
+
+The drive holds `&mut RealmState` for its lifetime while the executor is held separately, so there is
+no aliasing to launder and no nesting to avoid. `yield_now().await` inside the drive becomes what it
+should always have been: a reschedule that lets Hyper's tasks run, costing no syscall.
+
+**Everything becomes in-context, so the `_in_context` family is deleted rather than extended.** This
+is the test that the split is the right decomposition: the faster version is also the smaller one. A
+change that made this faster while keeping both halves would be a tuning pass wearing an
+architecture's clothes.
+
+**The interpreted path is the target shape, not a new invention.** It already does exactly this:
+
+```rust
+self.local.block_on(&self.runtime, drive_realm(realm, &mut execute, &mut checkpoint))
+```
+
+One entry for the whole program, an `async fn` looping inside it. The native path diverged only
+because it is entered from C. After this ADR the two paths differ in what they execute, not in how
+they are driven, which is what ADR 0028 says a single runtime is for.
+
+**Determinism is unaffected, and that is a constraint rather than a hope.** The runtime stays
+current-thread, the realm stays single-threaded, and the drive still decides callback order
+explicitly. ADR 0015's virtual clock, ADR 0012's virtual-time event loop and ADR 0026's seeded
+generator all key on the realm's own sequencing, not on how the executor is entered. `scripts/native.sh`
+holding at 0 diverged is the standing check that this remains true.
+
+**The C ABI does not change.** `kiln_realm_drive` still takes the same arguments and returns an
+`int`. Only what is behind it moves.
+
+## Alternatives rejected
+
+**Make the methods take `&self` and put the state behind an inner `RefCell`.** This works — tokio's
+`block_on` takes `&self` — and it is a smaller diff. It is rejected because it keeps the two things
+in one type and buys the borrow checker's silence with a runtime check: a drive that re-entered
+would then panic on an already-borrowed `RefCell` instead of failing to compile. The bundling is the
+defect; hiding it behind interior mutability preserves it.
+
+**Multi-threaded runtime.** Node is single-threaded and reaches 88,000 rps on the same machine, so
+threads are not what is missing. It would also cost the determinism above. Rejected on both counts.
+
+**Keep tuning the entry count.** Already done, three times, and the counters say what is left: ~10
+entries per request, of which 8.5 are one call site. Removing entries one at a time cannot reach a
+per-entry cost.
+
+## Consequences
+
+- The `_in_context` methods and the `if in_context {}` forks are deleted. Net less code.
+- Every `block_on` reachable from a JS callback must be gone before the drive is flipped, because
+  tokio panics on nesting. That is the migration's real work, and it fails loudly rather than
+  silently — a nested entry panics, it does not corrupt.
+- The unsafe `as_ptr()` escapes in the native adapter, which exist to hand the executor to a callback
+  while the realm is borrowed, lose their reason to exist.
+- Expected throughput is not stated here on purpose. The target is ~112 µs of a 204 µs request and
+  the mechanism is confirmed, but the honest position is that removing the dominant cost reveals the
+  next one. The number goes in the commit that earns it.
+
+## Sequence
+
+1. Split the types, mechanically, with no behaviour change. `scripts/native.sh` at 0 diverged after.
+2. Remove each remaining `block_on` on a path reachable from a callback, one at a time.
+3. Flip the drive to `async fn` and delete the `_in_context` family.
+
+Each step is independently verifiable, which matters more here than usual: this is the component
+where a subtle aliasing mistake would be both easy to make and hard to see.
