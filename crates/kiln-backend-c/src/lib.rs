@@ -1240,6 +1240,31 @@ const HOST_CREATE_REALM: &str = "$262CreateRealm";
 /// time. Named separately from `eval` because it is a different name in the program.
 const HOST_EVAL_SCRIPT: &str = "$262EvalScript";
 
+/// The hooks a host installs when it lets a program start a second agent.
+///
+/// Refused for a sharper reason than the realm hook is. A second agent is a second thread with a
+/// realm of its own, blocking `Atomics.wait`, and a scheduler that decides the interleaving; this
+/// backend emits one C translation unit with one global object and no scheduler at all. A
+/// compiled program that reached these would start nothing, wait on nobody, and answer every
+/// `Atomics.wait` "timed-out" while the interpreter answered "ok" -- a silent divergence between
+/// the two engines, which is the one failure `scripts/native.sh` exists to prevent. Refusing by
+/// name says which capability is missing, and the differential harness counts it as refused
+/// rather than as diverged.
+const HOST_AGENT_HOOKS: [&str; 8] = [
+    "$262AgentStart",
+    "$262AgentBroadcast",
+    "$262AgentGetReport",
+    "$262AgentSleep",
+    "$262AgentMonotonicNow",
+    "$262AgentReceiveBroadcast",
+    "$262AgentReport",
+    "$262AgentLeaving",
+];
+
+/// Whether this name is a host hook this backend has no way to honour.
+fn refused_host_hook(name: &str) -> bool {
+    name == HOST_CREATE_REALM || name == HOST_EVAL_SCRIPT || HOST_AGENT_HOOKS.contains(&name)
+}
 /// The constructor a program reaches for when it wants a realm it can evaluate in.
 ///
 /// Refused for the same reason the two above are, and it matters more here because
@@ -24191,7 +24216,8 @@ fn validate_code(
                 if matches!(
                     program.constants.get(*name as usize),
                     Some(Constant::String(text))
-                        if text == HOST_CREATE_REALM
+                        if refused_host_hook(text)
+                            || text == HOST_CREATE_REALM
                             || text == HOST_EVAL_SCRIPT
                             || text == SHADOW_REALM
                 ) =>
@@ -30089,6 +30115,27 @@ int main(void) {{
                 feature.contains(HOST_EVAL_SCRIPT),
                 "the refusal must name what it refused, got {feature}"
             );
+            // And each of the eight agent hooks, by its own name. A backend that quietly compiled
+            // `$262AgentStart` into a no-op would answer every `Atomics.wait` "timed-out" while
+            // the interpreter answered "ok", which is the divergence this refusal prevents.
+            for hook in HOST_AGENT_HOOKS {
+                let refused_agent = emit(&program(
+                    vec![Constant::String(hook.to_owned())],
+                    vec![
+                        Instruction::LoadGlobalBindingOrUndefined(0),
+                        Instruction::Pop,
+                        Instruction::Return,
+                    ],
+                    0,
+                ));
+                let Err(EmitError::Unsupported { feature }) = refused_agent else {
+                    panic!("the backend must refuse {hook}, not compile it");
+                };
+                assert!(
+                    feature.contains(hook),
+                    "the refusal must name what it refused, got {feature}"
+                );
+            }
             // `ShadowRealm` is refused for a sharper reason than the two hooks above: it is a
             // language built-in a program may name without any host granting it, and this
             // backend has one global object. Compiling it would answer `new ShadowRealm()` with
