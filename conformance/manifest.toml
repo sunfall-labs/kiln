@@ -1042,6 +1042,7 @@ the runner's focused regression tests rather than left as a step 10 backlog item
 
 [[test]]
 id = "server/s01-http-hello"
+requires_host = "node"
 group = "server"
 source = "server/s01-http-hello.mjs"
 status = "runnable"
@@ -1060,6 +1061,7 @@ expected_stdout = """
 
 [[test]]
 id = "server/s02-routing-json"
+requires_host = "node"
 group = "server"
 source = "server/s02-routing-json.mjs"
 status = "runnable"
@@ -1079,6 +1081,7 @@ expected_stdout = """
 
 [[test]]
 id = "server/s03-request-body-streams"
+requires_host = "node"
 group = "server"
 source = "server/s03-request-body-streams.mjs"
 status = "runnable"
@@ -1100,6 +1103,7 @@ expected_stdout = """
 
 [[test]]
 id = "server/s04-fastify"
+requires_host = "node"
 group = "server"
 source = "server/packages/s04-fastify.mjs"
 status = "needs-packages"
@@ -1132,6 +1136,7 @@ expected_stdout = """
 
 [[test]]
 id = "server/s05-express"
+requires_host = "node"
 group = "server"
 source = "server/packages/s05-express.mjs"
 status = "runnable"

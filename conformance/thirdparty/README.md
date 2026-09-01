@@ -158,7 +158,16 @@ noticing:
   *Fixed* in both engines. `findings/own-property-symbols.js`.
 - `Function.prototype.toString` answers `[Function 0]` rather than source text, so the
   `/native code/` test every polyfill uses to decide whether an intrinsic is real gets a confident
-  wrong answer. *Open*. `findings/function-tostring.js`.
+  wrong answer. *Fixed* in both engines: each function carries a span into its unit's retained
+  source, and a built-in answers the `[native code]` form. `findings/function-tostring.js`.
+- The native backend answers a built-in's `length` with a refusal where the interpreter answers
+  the number. Every other member of every callable shape now agrees between the two engines;
+  this one wants a shared arity table rather than a second copy of the interpreter's.
+  *Open*. `findings/callable-builtin-length.js`.
+- Kiln compiles CommonJS as strict where node runs it sloppy -- but only for the binding rules,
+  not for a refused write. Every bundle in this corpus is CommonJS, so no real program here can
+  reach the sloppy-mode `this` rule at all, which is why fixing that rule moved 201 Test262
+  variants and nothing else. *Open*. `findings/commonjs-runs-strict.js`.
 
 ### findings/
 

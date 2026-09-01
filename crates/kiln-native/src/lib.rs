@@ -1167,7 +1167,7 @@ impl NativeBuilder {
         let topology = graph_shared_topology_digest(graph, &modules);
         let wrapper_symbol = format!(
             "kiln_shared_graph_{}",
-            graph_shared_public_digest(topology, &modules).to_hex()
+            graph_shared_public_digest(topology, &modules)?.to_hex()
         );
         let wrapper = graph_shared_wrapper_source(graph, &modules, &wrapper_symbol)?;
         let module_api_symbol = embedding_module_api_symbol(&wrapper_symbol)?;
@@ -1944,7 +1944,14 @@ fn native_builtin_supported_exports(
     match builtin {
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
-        NodeBuiltin::Http => &["Server", "createServer", "default", "get", "request"],
+        NodeBuiltin::Http => &[
+            "Server",
+            "ServerResponse",
+            "createServer",
+            "default",
+            "get",
+            "request",
+        ],
         NodeBuiltin::Util => &[
             // `TextDecoder` is declared beside it in the ABI and is deliberately absent here:
             // the C runtime has an encoder builtin and no decoder, so the decoder holds an
@@ -2074,10 +2081,11 @@ exports[3] = namespace;"#,
         //
         // `native_builtin_slots_match_the_shared_export_table` now pins this, so the next
         // addition to the table fails a test here instead of miscompiling a server. The three
-        // gated names hold `undefined` because `native_builtin_supports_export` refuses them as
-        // named imports; they are slots to keep the alignment, not exports.
+        // Remaining gated names hold `undefined` because `native_builtin_supports_export`
+        // refuses them as named imports; they are slots to keep alignment, not exports.
         NodeBuiltin::Http => Some(
             r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER);
+kiln_value server_response = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE);
 kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
 kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
 kiln_value request = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_REQUEST);
@@ -2085,6 +2093,8 @@ kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "Server", 6, server, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "ServerResponse", 14, server_response, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
 if (status != KILN_C99_OK) return status;
@@ -2095,7 +2105,7 @@ if (status != KILN_C99_OK) return status;
 exports[0] = kiln_c99_undefined();
 exports[1] = kiln_c99_undefined();
 exports[2] = server;
-exports[3] = kiln_c99_undefined();
+exports[3] = server_response;
 exports[4] = create_server;
 exports[5] = namespace;
 exports[6] = get;
@@ -2580,6 +2590,72 @@ fn compiler_environment_digest_with(
     Digest::hash(&encoded)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LogicalModulePath(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsFilename(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsDirname(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsModulePaths {
+    filename: CommonJsFilename,
+    dirname: CommonJsDirname,
+    diagnostic: LogicalModulePath,
+}
+
+impl LogicalModulePath {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CommonJsFilename {
+    fn new(path: &Path) -> Result<Self, NativeError> {
+        if !path.is_absolute() {
+            return Err(NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("CommonJS module path {} is not absolute", path.display()),
+            }));
+        }
+        Ok(Self(path.to_string_lossy().into_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl CommonJsDirname {
+    fn new(path: &Path) -> Result<Self, NativeError> {
+        let dirname = path.parent().ok_or_else(|| {
+            NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("CommonJS module path {} has no parent", path.display()),
+            })
+        })?;
+        Ok(Self(dirname.to_string_lossy().into_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CommonJsModulePaths {
+    fn new(root: &Path, path: &Path) -> Result<Self, NativeError> {
+        Ok(Self {
+            filename: CommonJsFilename::new(path)?,
+            dirname: CommonJsDirname::new(path)?,
+            diagnostic: LogicalModulePath(logical_module_path(root, path)?),
+        })
+    }
+}
+
 fn logical_module_path(root: &Path, path: &Path) -> Result<String, NativeError> {
     let relative = path.strip_prefix(root).map_err(|_| {
         NativeError::Emit(EmitError::InvalidProgram {
@@ -2722,13 +2798,14 @@ fn graph_shared_topology_digest(
     Digest::hash(&bytes)
 }
 
-/// Derive the public graph wrapper identity from both topology and ordered module bodies. Private
-/// module symbols intentionally remain topology-based, but a public wrapper must not collide with
-/// another DSO containing the same path/import topology and different bytecode.
+/// Derive the public graph wrapper identity from topology, ordered module bodies, and every
+/// absolute CommonJS runtime path embedded by the wrapper. Private module symbols intentionally
+/// remain topology-based, but a public wrapper must not collide with another DSO containing the
+/// same logical graph and bytecode but different observable `__filename`/`__dirname` values.
 fn graph_shared_public_digest(
     topology: Digest,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
-) -> Digest {
+) -> Result<Digest, NativeError> {
     let mut bytes = topology.to_hex().into_bytes();
     bytes.push(0);
     for (_, module) in modules {
@@ -2736,28 +2813,112 @@ fn graph_shared_public_digest(
         bytes.extend_from_slice(digest.to_hex().as_bytes());
         bytes.push(0);
     }
-    Digest::hash(&bytes)
+    if modules
+        .iter()
+        .any(|(node, _)| node.source == ModuleSource::CommonJs)
+    {
+        bytes.extend_from_slice(b"commonjs-runtime-paths-v1\0");
+        for (node, _) in modules {
+            if node.source != ModuleSource::CommonJs {
+                continue;
+            }
+            let filename = CommonJsFilename::new(&node.path)?;
+            bytes.extend_from_slice(&(filename.as_bytes().len() as u64).to_le_bytes());
+            bytes.extend_from_slice(filename.as_bytes());
+        }
+    }
+    Ok(Digest::hash(&bytes))
 }
 
-/// Resolve one module import to the concrete export-array slot that owns its binding.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NativeGraphImport {
+    Internal,
+    Binding {
+        provider_index: usize,
+        export_index: usize,
+    },
+    Namespace {
+        provider_index: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NativeNamespaceValue {
+    Binding {
+        provider_index: usize,
+        export_index: usize,
+    },
+    Namespace {
+        provider_index: usize,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NativeNamespaceEntry {
+    name: String,
+    value: NativeNamespaceValue,
+}
+
+/// Resolve one canonical binding slot from the graph's export table.
 ///
 /// Raw provider export tables are insufficient here: `export *` deliberately has only one
 /// synthetic entry, while the graph linker resolves each forwarded name to its canonical origin.
-/// The synthetic namespace import used solely to carry a star table is skipped; user-observable
-/// namespace values need an object-capable module ABI and remain explicitly unsupported natively.
-fn graph_import_slot(
+fn graph_export_slot(
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+    importer: &Path,
+    origin: &Path,
+    local_slot: u32,
+    exported_name: &str,
+) -> Result<(usize, usize), NativeError> {
+    let provider_index = *indices.get(origin).ok_or_else(|| {
+        NativeError::Graph(ModuleGraphError::InternalMissingModule {
+            path: origin.to_path_buf(),
+        })
+    })?;
+    /* A CommonJS module publishes its entire `module.exports` projection in slot zero. Named
+     * re-export aliases still resolve to that same origin even though their final spelling is no
+     * longer `default`. */
+    if modules[provider_index].0.source == ModuleSource::CommonJs {
+        return Ok((provider_index, 0));
+    }
+    let export_index = modules[provider_index]
+        .0
+        .program
+        .exports
+        .iter()
+        .position(|export| {
+            export.local_slot == local_slot
+                && !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+        })
+        .ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::MissingExport {
+                importer: importer.to_path_buf(),
+                provider: origin.to_path_buf(),
+                name: exported_name.to_owned(),
+            })
+        })?;
+    Ok((provider_index, export_index))
+}
+
+/// Resolve one module import to either its concrete export-array slot or one graph namespace.
+///
+/// The synthetic namespace import used solely to carry a star table remains internal. A visible
+/// namespace is a single snapshot object built after its provider finishes, then shared by every
+/// importer during this graph invocation.
+fn graph_import_value(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     indices: &std::collections::HashMap<PathBuf, usize>,
     node: &kiln_module_graph::ModuleNode,
     import: &kiln_ir::ImportBinding,
-) -> Result<Option<(usize, usize)>, NativeError> {
+) -> Result<NativeGraphImport, NativeError> {
     /* CommonJS's five wrapper bindings are supplied by the graph launcher, not by another
      * module node. Keeping this sentinel out of ordinary dependency resolution is what lets the
      * launcher preserve one cache identity for `exports`/`module.exports` and attach a require
      * function whose target table is scoped to this importer. */
     if node.source == ModuleSource::CommonJs && import.source == "*commonjs-wrapper*" {
-        return Ok(None);
+        return Ok(NativeGraphImport::Internal);
     }
     let dependency = node
         .dependencies
@@ -2775,19 +2936,46 @@ fn graph_import_slot(
                 && export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
         });
         if internal_star_table {
-            return Ok(None);
+            return Ok(NativeGraphImport::Internal);
         }
-        return Err(NativeError::Emit(EmitError::Unsupported {
-            feature: "namespace imports in native module graphs".to_owned(),
-        }));
+        let provider_index = *indices.get(&dependency.target).ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                path: dependency.target.clone(),
+            })
+        })?;
+        let importer_index = *indices.get(&node.path).ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                path: node.path.clone(),
+            })
+        })?;
+        if provider_index >= importer_index {
+            return Err(NativeError::Emit(EmitError::Unsupported {
+                feature: "self or cyclic namespace imports in native module graphs".to_owned(),
+            }));
+        }
+        return Ok(NativeGraphImport::Namespace { provider_index });
     }
 
     let (origin, local_slot) = match graph.resolved_export(&dependency.target, &import.imported) {
         Some(ResolvedExport::Local { module, local_slot }) => (module, *local_slot),
-        Some(ResolvedExport::Namespace { .. }) => {
-            return Err(NativeError::Emit(EmitError::Unsupported {
-                feature: "namespace re-exports in native module graphs".to_owned(),
-            }));
+        Some(ResolvedExport::Namespace { module }) => {
+            let provider_index = *indices.get(module).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: module.clone(),
+                })
+            })?;
+            let importer_index = *indices.get(&node.path).ok_or_else(|| {
+                NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                    path: node.path.clone(),
+                })
+            })?;
+            if provider_index >= importer_index {
+                return Err(NativeError::Emit(EmitError::Unsupported {
+                    feature: "self or cyclic namespace re-exports in native module graphs"
+                        .to_owned(),
+                }));
+            }
+            return Ok(NativeGraphImport::Namespace { provider_index });
         }
         Some(ResolvedExport::Ambiguous) => {
             return Err(NativeError::Graph(ModuleGraphError::AmbiguousExport {
@@ -2804,31 +2992,103 @@ fn graph_import_slot(
             }));
         }
     };
-    let provider_index = *indices.get(origin).ok_or_else(|| {
-        NativeError::Graph(ModuleGraphError::InternalMissingModule {
-            path: origin.clone(),
-        })
-    })?;
-    if modules[provider_index].0.source == ModuleSource::CommonJs && import.imported == "default" {
-        return Ok(Some((provider_index, 0)));
+    let (provider_index, export_index) = graph_export_slot(
+        modules,
+        indices,
+        &node.path,
+        origin,
+        local_slot,
+        &import.imported,
+    )?;
+    Ok(NativeGraphImport::Binding {
+        provider_index,
+        export_index,
+    })
+}
+
+/// The sorted snapshot contents each graph module would expose through `import * as`.
+fn graph_namespace_plans(
+    graph: &ModuleGraph,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    indices: &std::collections::HashMap<PathBuf, usize>,
+) -> Result<Vec<Option<Vec<NativeNamespaceEntry>>>, NativeError> {
+    let mut required = vec![false; modules.len()];
+    for (node, _) in modules {
+        for import in &node.program.imports {
+            if let NativeGraphImport::Namespace { provider_index } =
+                graph_import_value(graph, modules, indices, node, import)?
+            {
+                required[provider_index] = true;
+            }
+        }
     }
-    let export_index = modules[provider_index]
-        .0
-        .program
-        .exports
-        .iter()
-        .position(|export| {
-            export.local_slot == local_slot
-                && !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
-        })
-        .ok_or_else(|| {
-            NativeError::Graph(ModuleGraphError::MissingExport {
-                importer: node.path.clone(),
-                provider: origin.clone(),
-                name: import.imported.clone(),
+
+    let mut plans = vec![None; modules.len()];
+    /* Dependencies precede importers. Walking backwards lets a required barrel namespace mark
+     * the namespace it re-exports before that provider is planned. */
+    for module_index in (0..modules.len()).rev() {
+        if !required[module_index] {
+            continue;
+        }
+        let node = modules[module_index].0;
+        let names = graph.resolved_export_names(&node.path).ok_or_else(|| {
+            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                path: node.path.clone(),
             })
         })?;
-    Ok(Some((provider_index, export_index)))
+        let entries = names
+            .into_iter()
+            .map(|name| {
+                if name.starts_with("@@") {
+                    return Err(NativeError::Emit(EmitError::Unsupported {
+                        feature: "@@-prefixed exports in native module namespaces".to_owned(),
+                    }));
+                }
+                let value = match graph.resolved_export(&node.path, &name) {
+                    Some(ResolvedExport::Local { module, local_slot }) => {
+                        let (provider_index, export_index) = graph_export_slot(
+                            modules,
+                            indices,
+                            &node.path,
+                            module,
+                            *local_slot,
+                            &name,
+                        )?;
+                        NativeNamespaceValue::Binding {
+                            provider_index,
+                            export_index,
+                        }
+                    }
+                    Some(ResolvedExport::Namespace { module }) => {
+                        let provider_index = *indices.get(module).ok_or_else(|| {
+                            NativeError::Graph(ModuleGraphError::InternalMissingModule {
+                                path: module.clone(),
+                            })
+                        })?;
+                        if provider_index >= module_index {
+                            return Err(NativeError::Emit(EmitError::Unsupported {
+                                feature:
+                                    "self or cyclic namespace re-exports in native module graphs"
+                                        .to_owned(),
+                            }));
+                        }
+                        required[provider_index] = true;
+                        NativeNamespaceValue::Namespace { provider_index }
+                    }
+                    Some(ResolvedExport::Ambiguous) | None => {
+                        return Err(NativeError::Graph(ModuleGraphError::MissingExport {
+                            importer: node.path.clone(),
+                            provider: node.path.clone(),
+                            name: name.clone(),
+                        }));
+                    }
+                };
+                Ok(NativeNamespaceEntry { name, value })
+            })
+            .collect::<Result<Vec<_>, NativeError>>()?;
+        plans[module_index] = Some(entries);
+    }
+    Ok(plans)
 }
 
 fn native_graph_export_count(node: &kiln_module_graph::ModuleNode) -> usize {
@@ -2849,7 +3109,7 @@ fn native_commonjs_projection_index(node: &kiln_module_graph::ModuleNode) -> Opt
     match node.source {
         ModuleSource::Json => Some(0),
         ModuleSource::NodeBuiltin(_) => Some(node.program.exports.len()),
-        ModuleSource::Source | ModuleSource::CommonJs => return None,
+        ModuleSource::Source | ModuleSource::CommonJs => None,
     }
 }
 
@@ -2957,13 +3217,113 @@ fn native_c_string(value: &str) -> String {
     output
 }
 
+fn write_graph_commonjs_launcher_setup(
+    output: &mut String,
+    index: usize,
+    module_symbol: &str,
+    filename: &CommonJsFilename,
+    dirname: &CommonJsDirname,
+    diagnostic: &LogicalModulePath,
+) {
+    writeln!(
+        output,
+        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+        native_c_string(filename.as_str()),
+        filename.as_str().len(),
+        native_c_string(dirname.as_str()),
+        dirname.as_str().len(),
+        native_c_string(diagnostic.as_str()),
+    )
+    .unwrap();
+}
+
+fn write_graph_commonjs_shared_setup(
+    output: &mut String,
+    index: usize,
+    module_symbol: &str,
+    filename: &CommonJsFilename,
+    dirname: &CommonJsDirname,
+) {
+    writeln!(
+        output,
+        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, &commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
+        native_c_string(filename.as_str()),
+        filename.as_str().len(),
+        native_c_string(dirname.as_str()),
+        dirname.as_str().len(),
+    )
+    .unwrap();
+}
+
+fn write_graph_namespace_build(
+    output: &mut String,
+    module_index: usize,
+    module_symbol: &str,
+    entries: &[NativeNamespaceEntry],
+    shared: bool,
+) {
+    let namespaces = if shared {
+        "namespaces"
+    } else {
+        "kiln_namespaces"
+    };
+    if entries.is_empty() {
+        writeln!(
+            output,
+            "    status = {module_symbol}_namespace_wrapper(&{namespaces}[{module_index}], NULL, NULL, NULL, (size_t)0);"
+        )
+        .unwrap();
+        return;
+    }
+    let names = entries
+        .iter()
+        .map(|entry| native_c_string(&entry.name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let lengths = entries
+        .iter()
+        .map(|entry| format!("(size_t){}", entry.name.len()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = entries
+        .iter()
+        .map(|entry| match entry.value {
+            NativeNamespaceValue::Binding {
+                provider_index,
+                export_index,
+            } if shared => format!("export_arrays[{provider_index}][{export_index}]"),
+            NativeNamespaceValue::Binding {
+                provider_index,
+                export_index,
+            } => format!("kiln_exports_{provider_index}[{export_index}]"),
+            NativeNamespaceValue::Namespace { provider_index } => {
+                format!("{namespaces}[{provider_index}]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(
+        output,
+        "    status = {module_symbol}_namespace_wrapper(&{namespaces}[{module_index}], (const char *const[]){{ {names} }}, (const size_t[]){{ {lengths} }}, (const kiln_value[]){{ {values} }}, (size_t){});",
+        entries.len()
+    )
+    .unwrap();
+}
+
 fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
 ) -> Result<String, NativeError> {
-    // Keep paths embedded in the cached launcher project-relative, just like module units. An
-    // absolute checkout path would make identical graphs in sibling roots compile different
-    // launcher objects.
+    if modules.is_empty() {
+        return Err(NativeError::Graph(
+            ModuleGraphError::InternalMissingModule {
+                path: graph.entry().to_path_buf(),
+            },
+        ));
+    }
+    // Diagnostic names remain project-relative, while CommonJS path roles are constructed as
+    // distinct types below so observable runtime paths cannot be replaced with diagnostics by a
+    // broad path-normalization refactor.
     let logical_paths = modules
         .iter()
         .map(|(node, _)| logical_module_path(graph.project_root(), &node.path))
@@ -2972,6 +3332,7 @@ fn graph_launcher_source(
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
+    let namespace_plans = graph_namespace_plans(graph, modules, &indices)?;
     let mut output = String::with_capacity(2048 + modules.len() * 512);
     output.push_str(
         r#"/* Kiln native graph launcher. */
@@ -3055,6 +3416,12 @@ extern int kiln_realm_destroy(uint64_t realm);
             module.symbol
         )
         .unwrap();
+        writeln!(
+            output,
+            "extern int {}_namespace_wrapper(kiln_value *result, const char *const *names, const size_t *name_lengths, const kiln_value *values, size_t count);",
+            module.symbol
+        )
+        .unwrap();
     }
     for (node, module) in modules {
         if node.source == ModuleSource::CommonJs {
@@ -3085,6 +3452,12 @@ extern int kiln_realm_destroy(uint64_t realm);
             .unwrap();
         }
     }
+    writeln!(
+        output,
+        "static kiln_value kiln_namespaces[{}];",
+        modules.len()
+    )
+    .unwrap();
     output.push_str(
         r#"
 typedef struct kiln_commonjs_context {
@@ -3228,41 +3601,51 @@ int main(void) {
     // can return the initially allocated exports object without re-entering a module.
     for (index, (node, module)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
-            let filename = &logical_paths[index];
-            let dirname = filename.rsplit_once('/').map_or("", |(parent, _)| parent);
-            writeln!(
-                output,
-                "    status = {}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
-                module.symbol,
-                native_c_string(filename),
-                filename.len(),
-                native_c_string(dirname),
-                dirname.len(),
-                native_c_string(filename),
-                module.symbol,
-            )
-            .unwrap();
+            // CommonJS observes the canonical filesystem identity through `__filename` and
+            // `__dirname`. Unlike the diagnostic names below, these values are language
+            // semantics: making them project-relative would disagree with Node and the
+            // interpreter. A CommonJS launcher is therefore intentionally checkout-specific
+            // while its module objects remain reusable across roots.
+            let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
+            write_graph_commonjs_launcher_setup(
+                &mut output,
+                index,
+                &module.symbol,
+                &paths.filename,
+                &paths.dirname,
+                &paths.diagnostic,
+            );
         }
     }
     for (index, (node, module)) in modules.iter().enumerate() {
         for (import_index, import) in node.program.imports.iter().enumerate() {
-            let Some((provider_index, export_index)) =
-                graph_import_slot(graph, modules, &indices, node, import)?
-            else {
-                continue;
-            };
-            if modules[provider_index].0.source == ModuleSource::CommonJs {
-                writeln!(
-                    output,
-                    "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, &result, &result);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}"
-                )
-                .unwrap();
+            match graph_import_value(graph, modules, &indices, node, import)? {
+                NativeGraphImport::Internal => {}
+                NativeGraphImport::Binding {
+                    provider_index,
+                    export_index,
+                } => {
+                    if modules[provider_index].0.source == ModuleSource::CommonJs {
+                        writeln!(
+                            output,
+                            "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, &result, &result);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}"
+                        )
+                        .unwrap();
+                    }
+                    writeln!(
+                        output,
+                        "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
+                    )
+                    .unwrap();
+                }
+                NativeGraphImport::Namespace { provider_index } => {
+                    writeln!(
+                        output,
+                        "    kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];"
+                    )
+                    .unwrap();
+                }
             }
-            writeln!(
-                output,
-                "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
-            )
-            .unwrap();
         }
         let imports = if node.program.imports.is_empty() {
             "NULL".to_owned()
@@ -3284,6 +3667,15 @@ int main(void) {
             .unwrap();
             if node.path == graph.entry() {
                 output.push_str("    entry_result = result;\n");
+            }
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+                writeln!(
+                    output,
+                    "    if (status != 0) {{ result = kiln_graph_diagnostic(\"namespace\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                    native_c_string(&logical_paths[index])
+                )
+                .unwrap();
             }
             continue;
         }
@@ -3323,6 +3715,15 @@ int main(void) {
         if node.path == graph.entry() {
             output.push_str("    entry_result = result;\n");
         }
+        if let Some(plan) = &namespace_plans[index] {
+            write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+            writeln!(
+                output,
+                "    if (status != 0) {{ result = kiln_graph_diagnostic(\"namespace\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                native_c_string(&logical_paths[index])
+            )
+            .unwrap();
+        }
     }
     output.push_str(
         "    status = kiln_realm_drive(realm, &host, &result);\n    if (status != 0) { kiln_cli_report_failure(status, result); goto cleanup; }\n    if (kiln_cli_write_result(entry_result) != 0) { status = 1; goto cleanup; }\n",
@@ -3330,15 +3731,6 @@ int main(void) {
     output.push_str(
         "cleanup:\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
     );
-    // Keep this check in the launcher generation path so an unexpectedly empty graph fails as a
-    // structured graph error instead of producing a linker error with little context.
-    if modules.is_empty() {
-        return Err(NativeError::Graph(
-            ModuleGraphError::InternalMissingModule {
-                path: graph.entry().to_path_buf(),
-            },
-        ));
-    }
     Ok(output)
 }
 
@@ -3554,11 +3946,19 @@ fn graph_shared_wrapper_source(
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
     wrapper_symbol: &str,
 ) -> Result<String, NativeError> {
+    if modules.is_empty() {
+        return Err(NativeError::Graph(
+            ModuleGraphError::InternalMissingModule {
+                path: graph.entry().to_path_buf(),
+            },
+        ));
+    }
     let impl_symbol = format!("{}_impl", wrapper_symbol);
     let mut indices = std::collections::HashMap::with_capacity(modules.len());
     for (index, (node, _)) in modules.iter().enumerate() {
         indices.insert(node.path.clone(), index);
     }
+    let namespace_plans = graph_namespace_plans(graph, modules, &indices)?;
     let entry_index = modules
         .iter()
         .position(|(node, _)| node.path == graph.entry())
@@ -3594,6 +3994,12 @@ typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_val
         writeln!(
             output,
             "extern int {}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count);",
+            module.symbol
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "extern int {}_namespace_wrapper(kiln_value *result, const char *const *names, const size_t *name_lengths, const kiln_value *values, size_t count);",
             module.symbol
         )
         .unwrap();
@@ -3772,7 +4178,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     }
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;",
+        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -3800,36 +4206,37 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         if node.source != ModuleSource::CommonJs {
             continue;
         }
-        let filename = node.path.to_string_lossy();
-        let dirname = node
-            .path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .to_string_lossy();
-        writeln!(
-            output,
-            "    status = {}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, &commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
-            module.symbol,
-            native_c_string(&filename),
-            filename.len(),
-            native_c_string(&dirname),
-            dirname.len(),
-            module.symbol,
-        )
-        .unwrap();
+        let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
+        write_graph_commonjs_shared_setup(
+            &mut output,
+            index,
+            &module.symbol,
+            &paths.filename,
+            &paths.dirname,
+        );
     }
     for (index, (node, _)) in modules.iter().enumerate() {
         for (import_index, import) in node.program.imports.iter().enumerate() {
-            let Some((provider_index, export_index)) =
-                graph_import_slot(graph, modules, &indices, node, import)?
-            else {
-                continue;
-            };
-            writeln!(
-                output,
-                "    import_arrays[{index}][{import_index}] = export_arrays[{provider_index}][{export_index}];"
-            )
-            .unwrap();
+            match graph_import_value(graph, modules, &indices, node, import)? {
+                NativeGraphImport::Internal => {}
+                NativeGraphImport::Binding {
+                    provider_index,
+                    export_index,
+                } => {
+                    writeln!(
+                        output,
+                        "    import_arrays[{index}][{import_index}] = export_arrays[{provider_index}][{export_index}];"
+                    )
+                    .unwrap();
+                }
+                NativeGraphImport::Namespace { provider_index } => {
+                    writeln!(
+                        output,
+                        "    import_arrays[{index}][{import_index}] = namespaces[{provider_index}];"
+                    )
+                    .unwrap();
+                }
+            }
         }
         let import_count = node.program.imports.len();
         let export_count = native_graph_export_count(node);
@@ -3842,6 +4249,16 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             if index == entry_index {
                 output.push_str("    *result = module_result;\n");
             }
+            if let Some(plan) = &namespace_plans[index] {
+                write_graph_namespace_build(
+                    &mut output,
+                    index,
+                    &modules[index].1.symbol,
+                    plan,
+                    true,
+                );
+                output.push_str("    if (status != KILN_C99_OK) goto cleanup;\n");
+            }
             continue;
         }
         writeln!(
@@ -3853,9 +4270,13 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         if index == entry_index {
             output.push_str("    *result = module_result;\n");
         }
+        if let Some(plan) = &namespace_plans[index] {
+            write_graph_namespace_build(&mut output, index, &modules[index].1.symbol, plan, true);
+            output.push_str("    if (status != KILN_C99_OK) goto cleanup;\n");
+        }
     }
     output.push_str("cleanup:\n    for (index = 0; index < (size_t)");
-    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    free(commonjs_modules);\n    return status;\n}}\n", modules.len()).unwrap();
+    write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    free(namespaces);\n    free(commonjs_modules);\n    return status;\n}}\n", modules.len()).unwrap();
     writeln!(
         output,
         r#"
@@ -4833,9 +5254,9 @@ mod tests {
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
         // Same tripwire as the provider pin below, for the module ABI: it moved
-        // generator-3 -> generator-13 as generator semantics advanced. Update it
+        // generator-3 -> generator-14 as generator semantics advanced. Update it
         // with the change that moves it, so an *unintended* bump still fails here.
-        assert_eq!(module_abi_identity(), "host-2;c-1;generator-13");
+        assert_eq!(module_abi_identity(), "host-2;c-1;generator-14");
         assert!(runtime_abi_identity().contains("async-4"));
         // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
         // would silently invalidate every cached native artifact. When the bump is intended,
@@ -5206,14 +5627,19 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
         assert!(body.contains("exports[0] = kiln_c99_undefined();"));
         assert!(body.contains("exports[1] = kiln_c99_undefined();"));
         assert!(body.contains("exports[2] = server;"));
-        assert!(body.contains("exports[3] = kiln_c99_undefined();"));
+        assert!(body.contains("exports[3] = server_response;"));
         assert!(body.contains("exports[4] = create_server;"));
         assert!(body.contains("exports[5] = namespace;"));
         assert!(body.contains("exports[6] = get;"));
         assert!(body.contains("exports[7] = request;"));
         assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER"));
+        assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE"));
         assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER"));
         assert!(native_builtin_supports_export(NodeBuiltin::Http, "Server"));
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::Http,
+            "ServerResponse"
+        ));
     }
 
     #[test]
@@ -7062,8 +7488,16 @@ int main(void) {{
             program: Program {
                 source: "".into(),
                 version: BYTECODE_VERSION,
-                constants: vec![Constant::Undefined],
-                code: vec![Instruction::Const(0), Instruction::Return],
+                constants: vec![Constant::String("answer".into())],
+                code: vec![
+                    Instruction::LoadLocal(0),
+                    Instruction::GetProperty(0),
+                    Instruction::HostCall {
+                        op: HostOp::WriteStdout,
+                        argc: 1,
+                    },
+                    Instruction::Return,
+                ],
                 local_count: 1,
                 functions: Vec::new(),
             },
@@ -7156,8 +7590,11 @@ int main(void) {{
         fs::create_dir(root.path.join("pkg")).expect("create package directory");
         fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
             .expect("write CommonJS package");
-        fs::write(root.path.join("pkg/index.js"), "module.exports = 42;")
-            .expect("write CommonJS module");
+        fs::write(
+            root.path.join("pkg/index.js"),
+            "console.log(__filename, __dirname); module.exports = 42;",
+        )
+        .expect("write CommonJS module");
         fs::write(root.path.join("pkg/dep.js"), "module.exports = 41;")
             .expect("write CommonJS dependency");
         let entry = root.path.join("main.mjs");
@@ -7190,8 +7627,34 @@ int main(void) {{
             .collect::<Vec<_>>();
 
         let launcher = graph_launcher_source(&graph, &modules).expect("launcher reserves wrappers");
+        let commonjs_index = modules
+            .iter()
+            .position(|(node, _)| node.source == ModuleSource::CommonJs)
+            .expect("CommonJS module");
+        let commonjs_path = modules[commonjs_index].0.path.to_string_lossy();
+        let commonjs_dir = modules[commonjs_index]
+            .0
+            .path
+            .parent()
+            .expect("CommonJS module has a parent")
+            .to_string_lossy();
+        let logical_commonjs =
+            logical_module_path(graph.project_root(), &modules[commonjs_index].0.path)
+                .expect("logical CommonJS path");
         assert!(launcher.contains("static kiln_value kiln_imports_0[5];"));
         assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
+        assert!(launcher.contains(&format!(
+            "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",
+            modules[commonjs_index].1.symbol,
+            native_c_string(&commonjs_path),
+            commonjs_path.len(),
+            native_c_string(&commonjs_dir),
+            commonjs_dir.len(),
+        )));
+        assert!(launcher.contains(&format!(
+            "kiln_graph_diagnostic(\"commonjs-wrapper\", {})",
+            native_c_string(&logical_commonjs)
+        )));
         assert_eq!(
             launcher.matches("_commonjs_wrapper(kiln_imports_").count(),
             1
@@ -7205,6 +7668,8 @@ int main(void) {{
             .find("static int kiln_graph_load_commonjs")
             .expect("shared wrapper declares CommonJS loader");
         assert!(context < loader, "context must precede its first use");
+        assert!(wrapper.contains(&native_c_string(&commonjs_path)));
+        assert!(wrapper.contains(&native_c_string(&commonjs_dir)));
 
         let Some(toolchain) = Toolchain::discover().ok() else {
             eprintln!("skipping native CommonJS execution: no C compiler found");
@@ -7221,7 +7686,10 @@ int main(void) {{
                 },
             )
             .expect("native mixed graph builds and runs");
-        assert_eq!(report.stdout, b"42\n");
+        assert_eq!(
+            report.stdout,
+            format!("{commonjs_path} {commonjs_dir}\n42\n").as_bytes()
+        );
         builder
             .build_shared_graph(
                 &graph,
@@ -7585,7 +8053,7 @@ int main(void) {{
     }
 
     #[test]
-    fn native_graphs_reject_user_visible_namespace_values_explicitly() {
+    fn native_graphs_materialize_one_snapshot_namespace_per_provider() {
         let root = TestDirectory::new("kiln-native-namespace-graph");
         let graph = namespace_import_graph(&root.path.join("project"));
         let modules = graph
@@ -7598,16 +8066,184 @@ int main(void) {{
             })
             .collect::<Vec<_>>();
 
+        let launcher = graph_launcher_source(&graph, &modules).expect("launcher emits");
+        assert!(launcher.contains("kiln_imports_1[0] = kiln_namespaces[0];"));
+        assert_eq!(launcher.matches("kiln_namespaces[0]").count(), 2);
+        assert!(launcher.contains("_namespace_wrapper(&kiln_namespaces[0]"));
+        let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_namespace_graph")
+            .expect("shared wrapper emits");
+        assert!(wrapper.contains("import_arrays[1][0] = namespaces[0];"));
+        assert!(wrapper.contains("_namespace_wrapper(&namespaces[0]"));
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native namespace integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let report = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("namespace graph builds and runs");
+        assert_eq!(report.stdout, b"42\n");
+
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let shared = builder
+                .build_shared_graph(
+                    &graph,
+                    &NativeBuildOptions {
+                        output: root.path.join("namespace").with_extension(
+                            if cfg!(target_os = "macos") {
+                                "dylib"
+                            } else {
+                                "so"
+                            },
+                        ),
+                        profile: NativeProfile::Dev,
+                        realm: NativeRealmPolicy::default(),
+                    },
+                )
+                .expect("namespace shared graph links");
+            assert!(shared.output.is_file());
+        }
+    }
+
+    #[test]
+    fn native_namespace_reexport_reuses_the_provider_namespace_identity() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native namespace re-export integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-namespace-reexport");
+        let origin = root.path.join("origin.mjs");
+        let barrel = root.path.join("barrel.mjs");
+        let entry = root.path.join("main.mjs");
+        fs::write(&origin, "export const answer = 42;\n").expect("write namespace origin");
+        fs::write(&barrel, "export * as origin from './origin.mjs';\n")
+            .expect("write namespace barrel");
+        fs::write(
+            &entry,
+            r#"import * as direct from "./origin.mjs";
+import { origin as via } from "./barrel.mjs";
+console.log(direct === via, via.answer);
+"#,
+        )
+        .expect("write namespace consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("namespace re-export graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("namespace re-export graph builds and runs");
+        assert_eq!(report.stdout, b"true 42\n");
+    }
+
+    #[test]
+    fn native_namespace_refuses_reserved_string_exports_before_emission() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-namespace-reserved-export");
+        let origin = root.path.join("origin.mjs");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &origin,
+            "const value = 1; export { value as \"@@toStringTag\" };\n",
+        )
+        .expect("write reserved namespace export");
+        fs::write(
+            &entry,
+            "import * as namespace from './origin.mjs'; console.log(namespace);\n",
+        )
+        .expect("write namespace consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("reserved export graph compiles");
+        let modules = graph
+            .modules()
+            .map(|node| {
+                (
+                    node,
+                    kiln_backend_c::emit_module(&node.program).expect("module emits"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let error = graph_launcher_source(&graph, &modules)
+            .expect_err("reserved namespace export must refuse before C emission");
         assert!(matches!(
-            graph_launcher_source(&graph, &modules),
-            Err(NativeError::Emit(EmitError::Unsupported { feature }))
-                if feature.contains("namespace imports")
+            error,
+            NativeError::Emit(EmitError::Unsupported { feature })
+                if feature == "@@-prefixed exports in native module namespaces"
         ));
-        assert!(matches!(
-            graph_shared_wrapper_source(&graph, &modules, "kiln_namespace_graph"),
-            Err(NativeError::Emit(EmitError::Unsupported { feature }))
-                if feature.contains("namespace imports")
-        ));
+    }
+
+    #[test]
+    fn native_named_reexport_of_commonjs_default_keeps_slot_zero() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping CommonJS re-export integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-commonjs-named-reexport");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write root package");
+        fs::create_dir(root.path.join("pkg")).expect("create CommonJS package");
+        fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write CommonJS package metadata");
+        fs::write(root.path.join("pkg/index.js"), "module.exports = 42;\n")
+            .expect("write CommonJS provider");
+        fs::write(
+            root.path.join("barrel.mjs"),
+            "export { default as answer } from './pkg/index.js';\n",
+        )
+        .expect("write ESM barrel");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            "import { answer } from './barrel.mjs'; console.log(answer);\n",
+        )
+        .expect("write ESM consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("CommonJS re-export graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("CommonJS re-export graph builds and runs");
+        assert_eq!(report.stdout, b"42\n");
     }
 
     #[test]
@@ -8677,6 +9313,76 @@ int main(void) {{
         assert!(!edited.cache_hits.executable);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commonjs_shared_identity_includes_observable_absolute_path() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-commonjs-shared-path-identity");
+        let first = root.path.join("first");
+        let second = root.path.join("second");
+        for project in [&first, &second] {
+            fs::create_dir_all(project).expect("create CommonJS project");
+            fs::write(project.join("package.json"), r#"{"type":"commonjs"}"#)
+                .expect("write CommonJS package metadata");
+            fs::write(project.join("main.js"), "module.exports = __filename;")
+                .expect("write CommonJS entry");
+        }
+
+        let identity = |project: &Path| {
+            let entry = project.join("main.js");
+            let graph = ModuleGraph::build_node(
+                &entry,
+                NodeRuntimeResolver::new(project).expect("node resolver"),
+                |path: &Path| fs::read_to_string(path),
+                OxcFrontend,
+            )
+            .expect("build CommonJS graph");
+            let modules = graph
+                .modules()
+                .map(|node| {
+                    let logical = logical_module_path(graph.project_root(), &node.path)
+                        .expect("logical module path");
+                    (
+                        node,
+                        emit_native_graph_module(node, &logical, &NativeRealmPolicy::default())
+                            .expect("module emits"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let topology = graph_shared_topology_digest(&graph, &modules);
+            let public = graph_shared_public_digest(topology, &modules)
+                .expect("CommonJS graph has absolute module paths");
+            let module_sources = modules
+                .iter()
+                .map(|(_, module)| Digest::hash(module.source.as_bytes()))
+                .collect::<Vec<_>>();
+            let symbol = format!("kiln_shared_graph_{}", public.to_hex());
+            let wrapper = graph_shared_wrapper_source(&graph, &modules, &symbol)
+                .expect("shared wrapper emits");
+            (topology, public, module_sources, wrapper)
+        };
+
+        let first_identity = identity(&first);
+        let second_identity = identity(&second);
+        assert_eq!(first_identity.0, second_identity.0);
+        assert_eq!(first_identity.2, second_identity.2);
+        assert_ne!(first_identity.1, second_identity.1);
+        assert!(
+            first_identity.3.contains(&native_c_string(
+                &fs::canonicalize(first.join("main.js"))
+                    .expect("canonical first entry")
+                    .to_string_lossy()
+            ))
+        );
+        assert!(
+            second_identity.3.contains(&native_c_string(
+                &fs::canonicalize(second.join("main.js"))
+                    .expect("canonical second entry")
+                    .to_string_lossy()
+            ))
+        );
     }
 
     #[test]

@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 628
 expression: body(&unit)
 ---
 /* Program hash: 4e52426f9461bca0; bytecode version: 2. */
@@ -9,10 +10,10 @@ int kiln_module_4e52426f9461bca0f08880763e13e4ef(kiln_host *host, kiln_value *re
     kiln_value locals[1];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
 kiln_label_0:;
-    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL;
+    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     stack[sp++] = kiln_c99_undefined();
 kiln_label_1:;
-    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL;
+    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;
     goto kiln_refusal;
 kiln_refusal:;

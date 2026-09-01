@@ -16,9 +16,9 @@ use kiln_ir::{
 };
 use kiln_runtime::{
     ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, HttpCloseMode,
-    LocaleCapability, Realm, RealmCapabilities, RealmRuntime, RuntimeHttpClientEvent,
-    RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimeZoneCapability, TimerId, WorkItem,
-    duration_from_milliseconds,
+    HttpHostOp, HttpStreamAction, LocaleCapability, Realm, RealmCapabilities, RealmRuntime,
+    RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn,
+    TimeZoneCapability, TimerId, WorkItem, duration_from_milliseconds,
     node_http::HttpResponseEvent,
     node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
@@ -5457,7 +5457,7 @@ fn new_date(time: f64) -> Value {
 }
 
 /// A JavaScript scalar value represented by the interpreter.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Undefined,
     Null,
@@ -5554,6 +5554,16 @@ pub enum Value {
     /// through captured cells are not collected; that is a real limitation and the right fix is
     /// a collector, not a weaker representation here.
     Function(Rc<Closure>),
+}
+
+// Rust-side equality for interpreter values is JavaScript strict equality. Keeping this manual
+// rather than deriving it prevents `Rc<T>` payload equality from turning object identity into a
+// structural comparison, and `strict_equal` remains exhaustive so every new representation must
+// choose its semantics before the crate compiles.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        strict_equal(self, other)
+    }
 }
 
 /// Materialize the public exports of a Node builtin module.
@@ -9027,7 +9037,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "HTTP socket disappeared while destroying".into(),
             })?;
             for action in actions {
-                self.start_http_stream_action(&server, resource, action, instruction)?;
+                self.start_runtime_http_stream_action(&server, resource, action, instruction)?;
             }
             return Ok(receiver.clone());
         }
@@ -9685,14 +9695,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // match scrutinee borrow otherwise lives for the whole arm and panics when the
                 // arm closes each accepted stream.
                 let protocol = state.borrow().protocol;
-                let streams = match protocol {
+                match protocol {
                     ServerProtocol::Net => {
-                        let mut state = state.borrow_mut();
-                        state
-                            .streams
-                            .iter_mut()
-                            .map(|stream| (stream.resource(), stream.driver.close_actions()))
-                            .collect::<Vec<_>>()
+                        let streams = {
+                            let mut state = state.borrow_mut();
+                            state
+                                .streams
+                                .iter_mut()
+                                .map(|stream| (stream.resource(), stream.driver.close_actions()))
+                                .collect::<Vec<_>>()
+                        };
+                        for (resource, actions) in streams {
+                            for action in actions {
+                                self.start_http_stream_action(
+                                    &state,
+                                    resource,
+                                    action,
+                                    instruction,
+                                )?;
+                            }
+                        }
                     }
                     ServerProtocol::Http => {
                         // Mark every current connection first. A request handler can call
@@ -9719,33 +9741,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             instruction,
                             message: "node:http requires the realm HTTP runtime".into(),
                         })?;
-                        resources
-                            .into_iter()
-                            .map(|resource| {
-                                let actions = unsafe {
-                                    ActiveHttpRuntime::close_connection(
-                                        &mut *runtime,
-                                        resource,
-                                        HttpCloseMode::Graceful,
-                                    )
-                                }
-                                .ok_or_else(|| {
-                                    ExecutionError::Host {
-                                        instruction,
-                                        message: "HTTP server stream disappeared while closing"
-                                            .into(),
-                                    }
-                                })?;
-                                Ok((resource, actions))
-                            })
-                            .collect::<Result<Vec<_>, ExecutionError>>()?
+                        for resource in resources {
+                            let actions = unsafe {
+                                ActiveHttpRuntime::close_connection(
+                                    &mut *runtime,
+                                    resource,
+                                    HttpCloseMode::Graceful,
+                                )
+                            }
+                            .ok_or_else(|| ExecutionError::Host {
+                                instruction,
+                                message: "HTTP server stream disappeared while closing".into(),
+                            })?;
+                            for action in actions {
+                                self.start_runtime_http_stream_action(
+                                    &state,
+                                    resource,
+                                    action,
+                                    instruction,
+                                )?;
+                            }
+                        }
                     }
-                    _ => Vec::new(),
-                };
-                for (resource, actions) in streams {
-                    for action in actions {
-                        self.start_http_stream_action(&state, resource, action, instruction)?;
-                    }
+                    ServerProtocol::HttpClient => {}
                 }
                 Ok(receiver.clone())
             }
@@ -9896,7 +9914,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     closed: false,
                     applying_read_completion: false,
                 };
-                let actions = if protocol == ServerProtocol::Http {
+                let http_actions = if protocol == ServerProtocol::Http {
                     let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "node:http requires the realm HTTP runtime".into(),
@@ -9908,15 +9926,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .and_then(Weak::upgrade)
                         .and_then(|server| server.borrow().get("httpAllowHalfOpen"))
                         .is_some_and(|value| value.is_truthy());
-                    unsafe {
+                    Some(unsafe {
                         ActiveHttpRuntime::start_connection(
                             &mut *runtime,
                             accepted.resource.id,
                             allow_half_close,
                         )
-                    }
+                    })
                 } else {
+                    None
+                };
+                let net_actions = if protocol == ServerProtocol::Net {
                     stream.driver.start_reading()
+                } else {
+                    Vec::new()
                 };
                 state.borrow_mut().streams.push(stream);
                 if protocol == ServerProtocol::Net {
@@ -9931,13 +9954,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let handler = state.borrow().handler.clone();
                     self.call_value(&handler, Value::Undefined, vec![socket], instruction)?;
                 }
-                for action in actions {
+                for action in net_actions {
                     self.start_http_stream_action(
                         state,
                         accepted.resource.id,
                         action,
                         instruction,
                     )?;
+                }
+                if let Some(actions) = http_actions {
+                    for action in actions {
+                        self.start_runtime_http_stream_action(
+                            state,
+                            accepted.resource.id,
+                            action,
+                            instruction,
+                        )?;
+                    }
                 }
                 Ok(())
             }
@@ -10029,14 +10062,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(())
             }
             StreamAction::Start(operation) => {
-                let runtime_http = server
-                    .borrow()
-                    .streams
-                    .iter()
-                    .find(|stream| stream.resource() == resource)
-                    .is_some_and(|stream| stream.runtime_http);
                 if matches!(operation, AsyncHostOp::TcpRead { .. })
-                    && !runtime_http
                     && server
                         .borrow()
                         .streams
@@ -10047,7 +10073,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(());
                 }
                 if matches!(operation, AsyncHostOp::TcpRead { .. })
-                    && !runtime_http
                     && server
                         .borrow()
                         .streams
@@ -10061,38 +10086,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "node:http requires the Node execution Adapter".into(),
                 })?;
-                let referenced = !(runtime_http
-                    && matches!(operation, AsyncHostOp::TcpRead { .. }))
-                    && !matches!(
-                        operation,
-                        AsyncHostOp::SetResourceReferenced {
-                            referenced: false,
-                            ..
-                        }
-                    );
+                let referenced = !matches!(
+                    operation,
+                    AsyncHostOp::SetResourceReferenced {
+                        referenced: false,
+                        ..
+                    }
+                );
                 let request =
                     unsafe { ActiveAsyncHostOps::start(&mut *host, operation.clone(), referenced) };
-                let accepted = if runtime_http {
-                    let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-                        instruction,
-                        message: "node:http requires the realm HTTP runtime".into(),
-                    })?;
-                    unsafe {
-                        ActiveHttpRuntime::connection_started(
-                            &mut *runtime,
-                            resource,
-                            &operation,
-                            request,
-                        )
-                    }
-                } else {
-                    server
-                        .borrow_mut()
-                        .streams
-                        .iter_mut()
-                        .find(|stream| stream.resource() == resource)
-                        .is_some_and(|stream| stream.driver.started(&operation, request))
-                };
+                let accepted = server
+                    .borrow_mut()
+                    .streams
+                    .iter_mut()
+                    .find(|stream| stream.resource() == resource)
+                    .is_some_and(|stream| stream.driver.started(&operation, request));
                 if !accepted {
                     return Err(ExecutionError::Host {
                         instruction,
@@ -10244,6 +10252,103 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
+    fn start_runtime_http_stream_action(
+        &mut self,
+        server: &Rc<RefCell<NodeServerState>>,
+        resource: kiln_host_abi::ResourceId,
+        action: HttpStreamAction,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        match action {
+            HttpStreamAction::Start(operation) => {
+                let host = self.async_host.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http requires the Node execution Adapter".into(),
+                })?;
+                let referenced = !matches!(operation, HttpHostOp::TcpRead { .. });
+                let host_operation = operation.clone().into_host_op();
+                let request =
+                    unsafe { ActiveAsyncHostOps::start(&mut *host, host_operation, referenced) };
+                let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http requires the realm HTTP runtime".into(),
+                })?;
+                let accepted = unsafe {
+                    ActiveHttpRuntime::connection_started(
+                        &mut *runtime,
+                        resource,
+                        &operation,
+                        request,
+                    )
+                };
+                if !accepted {
+                    return Err(ExecutionError::Host {
+                        instruction,
+                        message: "node:http transport rejected its own host operation".into(),
+                    });
+                }
+                self.push_pending_node(PendingNodeRequest::Stream {
+                    request,
+                    server: Rc::clone(server),
+                    resource,
+                });
+                Ok(())
+            }
+            HttpStreamAction::Close(close_resource) => {
+                if close_resource.resource() != resource {
+                    return Err(ExecutionError::Host {
+                        instruction,
+                        message: "node:http transport selected a close for another resource".into(),
+                    });
+                }
+                let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http requires the realm HTTP runtime".into(),
+                })?;
+                let request = unsafe {
+                    ActiveHttpRuntime::start_connection_close_in_context(
+                        &mut *runtime,
+                        close_resource,
+                    )
+                }
+                .ok_or_else(|| ExecutionError::Host {
+                    instruction,
+                    message: "node:http transport rejected its authorized close".into(),
+                })?;
+                self.push_pending_node(PendingNodeRequest::Stream {
+                    request,
+                    server: Rc::clone(server),
+                    resource,
+                });
+                Ok(())
+            }
+            HttpStreamAction::Cancel(request) => self.start_http_stream_action(
+                server,
+                resource,
+                StreamAction::Cancel(request),
+                instruction,
+            ),
+            HttpStreamAction::Data(data) => self.start_http_stream_action(
+                server,
+                resource,
+                StreamAction::Data(data),
+                instruction,
+            ),
+            HttpStreamAction::Event(event) => self.start_http_stream_action(
+                server,
+                resource,
+                StreamAction::Event(event),
+                instruction,
+            ),
+            HttpStreamAction::Error(error) => self.start_http_stream_action(
+                server,
+                resource,
+                StreamAction::Error(error),
+                instruction,
+            ),
+        }
+    }
+
     fn dispatch_runtime_http_events(
         &mut self,
         server: &Rc<RefCell<NodeServerState>>,
@@ -10364,7 +10469,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             .into(),
                     })?;
                     for action in actions {
-                        self.start_http_stream_action(server, resource, action, instruction)?;
+                        self.start_runtime_http_stream_action(
+                            server,
+                            resource,
+                            action,
+                            instruction,
+                        )?;
                     }
                 }
             }
@@ -10483,7 +10593,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                         .unwrap_or_default();
                         for action in actions {
-                            self.start_http_stream_action(owner, resource, action, instruction)?;
+                            self.start_runtime_http_stream_action(
+                                owner,
+                                resource,
+                                action,
+                                instruction,
+                            )?;
                         }
                     }
                 }
@@ -10524,7 +10639,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .unwrap_or_default()
                     };
                     for action in actions {
-                        self.start_http_stream_action(owner, resource, action, instruction)?;
+                        self.start_runtime_http_stream_action(
+                            owner,
+                            resource,
+                            action,
+                            instruction,
+                        )?;
                     }
                     if let Some(request) = retry {
                         let queued = self.http_client_request(request).ok_or_else(|| {
@@ -10563,7 +10683,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     message: "runtime HTTP connection disappeared while writing".into(),
                 })?;
         for action in actions {
-            self.start_http_stream_action(&server, resource, action, instruction)?;
+            self.start_runtime_http_stream_action(&server, resource, action, instruction)?;
         }
         Ok(())
     }
@@ -10609,7 +10729,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             message: "HTTP server stream disappeared while closing".into(),
         })?;
         for action in actions {
-            self.start_http_stream_action(&server, resource, action, instruction)?;
+            self.start_runtime_http_stream_action(&server, resource, action, instruction)?;
         }
         Ok(())
     }
@@ -10894,7 +11014,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     message: "runtime HTTP connection disappeared after request dispatch".into(),
                 })?;
             for action in actions {
-                self.start_http_stream_action(server, resource, action, instruction)?;
+                self.start_runtime_http_stream_action(server, resource, action, instruction)?;
             }
         }
         Ok(incoming)
@@ -11659,12 +11779,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .iter()
                         .find(|stream| stream.resource() == resource)
                         .is_some_and(|stream| stream.runtime_http);
-                    let actions = if runtime_http {
+                    if runtime_http {
                         let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                             instruction: self.instruction,
                             message: "node:http requires the realm HTTP runtime".into(),
                         })?;
-                        unsafe {
+                        let actions = unsafe {
                             ActiveHttpRuntime::complete_connection(
                                 &mut *runtime,
                                 resource,
@@ -11674,10 +11794,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .ok_or_else(|| ExecutionError::Host {
                             instruction: self.instruction,
                             message: "completion lost its runtime HTTP connection".into(),
-                        })?
+                        })?;
+                        for action in actions {
+                            self.start_runtime_http_stream_action(
+                                &server,
+                                resource,
+                                action,
+                                self.instruction,
+                            )?;
+                        }
                     } else {
-                        let mut server = server.borrow_mut();
-                        let stream = server
+                        let mut server_state = server.borrow_mut();
+                        let stream = server_state
                             .streams
                             .iter_mut()
                             .find(|stream| stream.resource() == resource)
@@ -11686,19 +11814,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 message: "completion lost its node:http stream".into(),
                             })?;
                         stream.applying_read_completion = true;
-                        stream
-                            .driver
-                            .completed(completion)
-                            .ok_or_else(|| ExecutionError::Host {
+                        let actions = stream.driver.completed(completion).ok_or_else(|| {
+                            ExecutionError::Host {
                                 instruction: self.instruction,
                                 message: "completion lost its node:http stream".into(),
-                            })?
-                    };
+                            }
+                        })?;
+                        drop(server_state);
+                        for action in actions {
+                            self.start_http_stream_action(
+                                &server,
+                                resource,
+                                action,
+                                self.instruction,
+                            )?;
+                        }
+                    }
                     if !runtime_http {
                         sync_node_socket_ready_state(&server, resource);
-                    }
-                    for action in actions {
-                        self.start_http_stream_action(&server, resource, action, self.instruction)?;
                     }
                     if runtime_http {
                         let _ =
@@ -11822,18 +11955,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 .client_requests
                                 .insert(request_id, request.clone());
                         }
-                        let actions = if protocol == ServerProtocol::HttpClient {
+                        let http_actions = if protocol == ServerProtocol::HttpClient {
                             let runtime =
                                 self.http_runtime.ok_or_else(|| ExecutionError::Host {
                                     instruction: self.instruction,
                                     message: "node:http client requires the realm HTTP runtime"
                                         .into(),
                                 })?;
-                            unsafe {
+                            Some(unsafe {
                                 ActiveHttpRuntime::start_client_connection(&mut *runtime, resource)
-                            }
+                            })
                         } else {
+                            None
+                        };
+                        let net_actions = if protocol == ServerProtocol::Net {
                             connection.driver.start_reading()
+                        } else {
+                            Vec::new()
                         };
                         let owner = Rc::new(RefCell::new(NodeServerState {
                             driver: TcpServerDriver::default(),
@@ -11861,13 +11999,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         {
                             self.flush_http_client_request(state, &socket_state, self.instruction)?;
                         }
-                        for action in actions {
+                        for action in net_actions {
                             self.start_http_stream_action(
                                 &owner,
                                 resource,
                                 action,
                                 self.instruction,
                             )?;
+                        }
+                        if let Some(actions) = http_actions {
+                            for action in actions {
+                                self.start_runtime_http_stream_action(
+                                    &owner,
+                                    resource,
+                                    action,
+                                    self.instruction,
+                                )?;
+                            }
                         }
                         Ok(())
                     }
@@ -12070,7 +12218,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let had_actions = !actions.is_empty();
                 let had_events = runtime.enter(|| {
                     for action in actions {
-                        self.start_http_stream_action(&server, resource, action, self.instruction)?;
+                        self.start_runtime_http_stream_action(
+                            &server,
+                            resource,
+                            action,
+                            self.instruction,
+                        )?;
                     }
                     let event_count = if server.borrow().protocol == ServerProtocol::HttpClient {
                         self.dispatch_runtime_http_client_events(
@@ -42237,41 +42390,54 @@ fn index_key(key: &str) -> Option<u32> {
     (index != u32::MAX && index.to_string() == key).then_some(index)
 }
 
+#[deny(clippy::wildcard_enum_match_arm)]
 fn strict_equal(left: &Value, right: &Value) -> bool {
-    match (left, right) {
-        (Value::Undefined, Value::Undefined) | (Value::Null, Value::Null) => true,
-        (Value::Boolean(a), Value::Boolean(b)) => a == b,
-        (Value::Number(a), Value::Number(b)) => a == b,
-        (Value::String(a), Value::String(b)) => a == b,
-        // Objects and functions compare by identity: `===` asks whether two references name the
-        // same object, not whether their contents match. `Rc::ptr_eq` is that question exactly,
-        // and it also avoids borrowing a `RefCell` that a caller may already hold mutably.
-        (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
-        (Value::Function(a), Value::Function(b)) => Rc::ptr_eq(a, b),
-        // One `Error` per realm, so two references to it are the same function.
-        (Value::Native(a), Value::Native(b)) => a == b,
-        (Value::Callback(a), Value::Callback(b)) => a == b,
-        (Value::Generator(a), Value::Generator(b)) => Rc::ptr_eq(a, b),
-        (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
-        // Every other object kind compares by identity for the same reason: each is one object,
-        // and `x === x` has to hold for it. Leaving any of them out of this list makes a value
-        // unequal to itself, which is the kind of wrong answer nothing recovers from -- a `Map`
-        // keyed on one stops finding it, and a library checking whether a value is the same one
-        // it stored always says no.
-        (Value::Date(a), Value::Date(b)) => Rc::ptr_eq(a, b),
-        (Value::RegExp(a), Value::RegExp(b)) => Rc::ptr_eq(a, b),
-        (Value::Promise(a), Value::Promise(b)) => Rc::ptr_eq(a, b),
-        (Value::Proxy(a), Value::Proxy(b)) => Rc::ptr_eq(a, b),
-        (Value::TypedArray(a), Value::TypedArray(b)) => Rc::ptr_eq(a, b),
-        (Value::ArrayBuffer(a), Value::ArrayBuffer(b)) => Rc::ptr_eq(a, b),
-        (Value::DataView(a), Value::DataView(b)) => Rc::ptr_eq(a, b),
-        (Value::Bound(a), Value::Bound(b)) => Rc::ptr_eq(a, b),
-        (Value::Settler(a, one), Value::Settler(b, other)) => Rc::ptr_eq(a, b) && one == other,
+    // Exhaustive on `left` deliberately. A wildcard here made every new representation compile
+    // as "unequal to everything", including itself. Adding a `Value` variant must keep failing to
+    // compile until its JavaScript equality semantics are chosen explicitly.
+    match left {
+        Value::Undefined => matches!(right, Value::Undefined),
+        Value::Null => matches!(right, Value::Null),
+        Value::Boolean(a) => matches!(right, Value::Boolean(b) if a == b),
+        Value::Number(a) => matches!(right, Value::Number(b) if a == b),
+        Value::String(a) => matches!(right, Value::String(b) if a == b),
+        // A cell is compiler bookkeeping and never observable as a JavaScript value. Identity is
+        // still the least surprising answer if malformed bytecode lets one reach this boundary.
+        Value::Cell(a) => matches!(right, Value::Cell(b) if Rc::ptr_eq(a, b)),
+        // One instance of each runtime-provided callable exists per realm.
+        Value::Native(a) => matches!(right, Value::Native(b) if a == b),
+        Value::Callback(a) => matches!(right, Value::Callback(b) if a == b),
+        // Every object/function representation compares by identity: `===` asks whether two
+        // references name the same object, not whether their payloads happen to be equal.
+        Value::Generator(a) => matches!(right, Value::Generator(b) if Rc::ptr_eq(a, b)),
+        Value::Promise(a) => matches!(right, Value::Promise(b) if Rc::ptr_eq(a, b)),
+        Value::RegExp(a) => matches!(right, Value::RegExp(b) if Rc::ptr_eq(a, b)),
+        Value::Date(a) => matches!(right, Value::Date(b) if Rc::ptr_eq(a, b)),
+        Value::Temporal(a) => matches!(right, Value::Temporal(b) if Rc::ptr_eq(a, b)),
+        Value::Intl(a) => matches!(right, Value::Intl(b) if Rc::ptr_eq(a, b)),
         // A BigInt is a primitive: two of them are equal when the numbers are, however they were
-        // built. That is the one entry here that is not an identity comparison.
-        (Value::BigInt(a), Value::BigInt(b)) => a == b,
-        (Value::Symbol(a), Value::Symbol(b)) => a == b,
-        _ => false,
+        // built. This is deliberately value equality rather than `Rc` identity.
+        Value::BigInt(a) => matches!(right, Value::BigInt(b) if a == b),
+        Value::Settler(a, one) => matches!(
+            right,
+            Value::Settler(b, other) if Rc::ptr_eq(a, b) && one == other
+        ),
+        Value::Array(a) => matches!(right, Value::Array(b) if Rc::ptr_eq(a, b)),
+        Value::TypedArray(a) => matches!(right, Value::TypedArray(b) if Rc::ptr_eq(a, b)),
+        Value::ArrayBuffer(a) => matches!(right, Value::ArrayBuffer(b) if Rc::ptr_eq(a, b)),
+        Value::DataView(a) => matches!(right, Value::DataView(b) if Rc::ptr_eq(a, b)),
+        Value::Proxy(a) => matches!(right, Value::Proxy(b) if Rc::ptr_eq(a, b)),
+        Value::Bound(a) => matches!(right, Value::Bound(b) if Rc::ptr_eq(a, b)),
+        // `require` and `require.resolve` share lookup state but are distinct function objects.
+        Value::CommonJsRequire(a) => {
+            matches!(right, Value::CommonJsRequire(b) if Rc::ptr_eq(a, b))
+        }
+        Value::CommonJsResolve(a) => {
+            matches!(right, Value::CommonJsResolve(b) if Rc::ptr_eq(a, b))
+        }
+        Value::Symbol(a) => matches!(right, Value::Symbol(b) if a == b),
+        Value::Object(a) => matches!(right, Value::Object(b) if Rc::ptr_eq(a, b)),
+        Value::Function(a) => matches!(right, Value::Function(b) if Rc::ptr_eq(a, b)),
     }
 }
 
@@ -44131,11 +44297,61 @@ mod tests {
         let left = object(&[("a", Value::Number(1.0))]);
         let right = object(&[("a", Value::Number(1.0))]);
         assert!(strict_equal(&left, &left), "an object equals itself");
+        assert_eq!(&left, &left, "Rust equality uses JavaScript identity too");
         assert!(
             !strict_equal(&left, &right),
             "equal contents are not the same object"
         );
+        assert_ne!(
+            &left, &right,
+            "derived payload equality must not leak through Value"
+        );
         assert!(strict_equal(&left, &left.clone()), "a clone shares the Rc");
+    }
+
+    #[test]
+    fn engine_and_commonjs_values_are_reflexive_identity_objects() {
+        let temporal = Rc::new(
+            kiln_temporal::plain_date(2026.0, 8.0, 31.0, None)
+                .expect("construct Temporal.PlainDate"),
+        );
+        let intl = Rc::new(intl::IntlValue::Locale("en-US".to_owned()));
+        let require = Rc::new(CommonJsRequire::new(std::iter::empty::<(
+            String,
+            String,
+            Cell,
+        )>()));
+
+        let same_objects = [
+            Value::Temporal(Rc::clone(&temporal)),
+            Value::Intl(Rc::clone(&intl)),
+            Value::CommonJsRequire(Rc::clone(&require)),
+            Value::CommonJsResolve(Rc::clone(&require)),
+        ];
+        for value in &same_objects {
+            let cloned = value.clone();
+            assert!(
+                strict_equal(value, &cloned),
+                "{} must equal another reference to itself",
+                value.type_name()
+            );
+        }
+
+        let other_temporal = Value::Temporal(Rc::new(
+            kiln_temporal::plain_date(2026.0, 8.0, 31.0, None)
+                .expect("construct equal but distinct Temporal.PlainDate"),
+        ));
+        let other_intl = Value::Intl(Rc::new(intl::IntlValue::Locale("en-US".to_owned())));
+        let other_require = Value::CommonJsRequire(Rc::new(CommonJsRequire::new(
+            std::iter::empty::<(String, String, Cell)>(),
+        )));
+        assert!(!strict_equal(&same_objects[0], &other_temporal));
+        assert!(!strict_equal(&same_objects[1], &other_intl));
+        assert!(!strict_equal(&same_objects[2], &other_require));
+        assert!(
+            !strict_equal(&same_objects[2], &same_objects[3]),
+            "require and require.resolve share state, not function identity"
+        );
     }
 
     /// A missing property is `undefined`, not an error: reading one is legal JavaScript.

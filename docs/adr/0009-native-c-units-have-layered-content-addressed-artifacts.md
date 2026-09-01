@@ -155,15 +155,18 @@ outside the package.
 
 An acyclic module graph is embedded behind one content-derived public wrapper symbol with the same
 two-argument entry ABI as a scalar shared library. Its strong identity covers graph topology and
-the ordered generated module sources, so two loaded builds with identical paths and wiring but
-different bodies cannot interpose one public wrapper onto the other. The graph's generated module
-entries keep their private import/export-array ABI and path-derived identities, so their C and
-object cache keys remain independently reusable. The wrapper allocates import/export arrays per
-invocation, evaluates modules in dependency-first order, and links their PIC objects, one shared
-native-number object, and its own PIC object: it does not reuse the process-oriented CLI runtime or
-graph launcher. Wrapper source/object keys include the public graph identity and wiring, while the
-final shared-link key includes the ordered module objects, wrapper object, and platform library
-identity.
+the ordered generated module sources. CommonJS wrappers additionally include the canonical
+filesystem paths they expose as `__filename` and `__dirname`: those values are language semantics,
+not diagnostics, so two otherwise identical graphs rooted in different directories have different
+public identities and wrapper objects. Their independently emitted module C and PIC objects remain
+reusable. This prevents two loaded builds with identical logical paths and wiring but different
+bodies or observable CommonJS paths from interposing one public wrapper onto the other. The graph's
+generated module entries keep their private import/export-array ABI and path-derived identities.
+The wrapper allocates import/export arrays per invocation, evaluates modules in dependency-first
+order, and links their PIC objects, one shared native-number object, and its own PIC object: it does
+not reuse the process-oriented CLI runtime or graph launcher. Wrapper source/object keys include
+the public graph identity and wiring, while the final shared-link key includes the ordered module
+objects, wrapper object, and platform library identity.
 
 The private graph-module ABI is also private at dynamic-loader scope. Graph module objects compile
 with hidden symbol visibility while the public wrapper retains default visibility. Two loaded
