@@ -1304,12 +1304,47 @@ mod realm {
                 _ => return INVALID_ARGUMENT,
             };
             let resource = kiln_host_abi::ResourceId::new(resource);
+            let abort_owner = if mode == HttpCloseMode::Abort {
+                realm
+                    .http_connections
+                    .borrow()
+                    .get(&resource)
+                    .filter(|connection| connection.role == HttpRole::Server)
+                    .map(|connection| Rc::clone(&connection.events))
+            } else {
+                None
+            };
             // SAFETY: this private ABI call runs synchronously inside the active realm callback.
             let Some(actions) = (unsafe { &mut *runtime }).close_http_connection(resource, mode)
             else {
                 return INVALID_ARGUMENT;
             };
-            apply_http_actions(&realm, resource, actions, true)
+            let status = apply_http_actions(&realm, resource, actions, true);
+            if status != 0 {
+                return status;
+            }
+            // An abort closes the transport synchronously and removes its registration before
+            // Hyper can publish EngineEvent::Closed. Preserve the one Node-visible close event
+            // through the same realm microtask ingress used by ordinary protocol completion.
+            let Some(owner) = abort_owner else {
+                return 0;
+            };
+            queue_http_event(
+                &realm,
+                HttpEventPayload {
+                    owner,
+                    kind: HTTP_EVENT_CLOSED,
+                    flags: 0,
+                    id: 0,
+                    status: 0,
+                    version_minor: 0,
+                    method: Vec::new(),
+                    target: Vec::new(),
+                    reason: Vec::new(),
+                    headers: Vec::new(),
+                    data: Vec::new(),
+                },
+            )
         })
     }
 
@@ -2582,6 +2617,10 @@ mod realm {
 
         static CALLABLE_STORE_DROPS: AtomicUsize = AtomicUsize::new(0);
 
+        fn opaque_test_pointer(identity: usize) -> *mut c_void {
+            ptr::without_provenance_mut(identity)
+        }
+
         unsafe extern "C" fn record_callable_store_drop(_pointer: *mut c_void) {
             CALLABLE_STORE_DROPS.fetch_add(1, AtomicOrdering::SeqCst);
         }
@@ -2646,8 +2685,8 @@ mod realm {
                 0
             );
             assert_eq!(
-                String::from_utf8(rendered).unwrap(),
-                "module=node_modules/provider/index.js instruction=37 operation=CallMethod(listen) detail=unsupported receiver receiver_tag=19"
+                String::from_utf8(rendered),
+                Ok("module=node_modules/provider/index.js instruction=37 operation=CallMethod(listen) detail=unsupported receiver receiver_tag=19".to_owned())
             );
             assert_eq!(kiln_realm_diagnostic_reset(), INVALID_ARGUMENT);
             assert_eq!(kiln_realm_destroy(handle), 0);
@@ -2743,9 +2782,9 @@ mod realm {
 
         unsafe extern "C" fn exercises_callable_store_registry(context: *mut c_void) -> i32 {
             let output = unsafe { &mut *context.cast::<[*mut c_void; 3]>() };
-            let first_candidate = 1usize as *mut c_void;
-            let duplicate_candidate = 2usize as *mut c_void;
-            let other_candidate = 3usize as *mut c_void;
+            let first_candidate = opaque_test_pointer(1);
+            let duplicate_candidate = opaque_test_pointer(2);
+            let other_candidate = opaque_test_pointer(3);
             if unsafe {
                 kiln_realm_callable_store(8, 27, ptr::null_mut(), None, &raw mut output[0])
             } != 0
@@ -2789,7 +2828,7 @@ mod realm {
                 kiln_realm_callable_store(
                     8,
                     27,
-                    4usize as *mut c_void,
+                    opaque_test_pointer(4),
                     Some(record_callable_store_drop),
                     output,
                 )
@@ -2825,10 +2864,10 @@ mod realm {
                 },
                 0
             );
-            assert_eq!(first[0], 1usize as *mut c_void);
+            assert_eq!(first[0], opaque_test_pointer(1));
             assert_eq!(first[1], first[0]);
-            assert_eq!(first[2], 3usize as *mut c_void);
-            assert_eq!(second, 4usize as *mut c_void);
+            assert_eq!(first[2], opaque_test_pointer(3));
+            assert_eq!(second, opaque_test_pointer(4));
             assert_eq!(
                 unsafe { kiln_realm_callable_store(8, 27, ptr::null_mut(), None, ptr::null_mut()) },
                 INVALID_ARGUMENT

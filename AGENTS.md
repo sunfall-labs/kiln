@@ -71,6 +71,14 @@ and points at `scripts/thirdparty.sh`.
 in a single `kiln test`, and that one process has repeatedly grown until it filled the disk. Run it
 under an explicit cap and watch it; do not point `kiln test` at the corpus by hand.
 
+## Changing Node HTTP close behavior
+
+Run `bash scripts/check-http-close-contract.sh`. HTTP close authority spans the runtime transport,
+the provider FFI, generated C and a real native socket; testing only the crate you edited can miss
+the response-before-close ordering that `server.close()` depends on. The contract command runs the
+compile-fail authority checks and all four executable seams in order, and is intentionally much
+smaller than the workspace suite.
+
 ## The native number provider is a staticlib, and `cargo build` does not build it
 
 `crates/kiln-native-number-ffi` declares `crate-type = ["rlib"]`, which is what workspace tests

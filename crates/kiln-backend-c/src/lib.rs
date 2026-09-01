@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 14;
+pub const C_GENERATOR_VERSION: u32 = 15;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -2558,6 +2558,7 @@ struct kiln_node_server {
     uint64_t timeout_milliseconds;
     int protocol_http;
     int closing;
+    int closed;
     kiln_node_socket *sockets;
 };
 
@@ -2580,6 +2581,7 @@ struct kiln_node_socket {
     int shutdown_after_write;
     int utf8;
     int closing;
+    int closed;
 };
 
 typedef struct kiln_node_client_request {
@@ -12172,6 +12174,19 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
                                has_argument ? 2 : 1, depth, thrown);
 }
 
+static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
+                                                  kiln_value *thrown) {
+    kiln_node_socket *socket;
+    if (server == NULL || !server->closing || server->closed || server->listener != 0)
+        return KILN_C99_OK;
+    for (socket = server->sockets; socket != NULL; socket = socket->next) {
+        if (!socket->closed) return KILN_C99_OK;
+    }
+    server->closed = 1;
+    return kiln_c99_node_emit(server->host, server->object, "close",
+                              kiln_c99_undefined(), 0, 0, thrown);
+}
+
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
 static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 
@@ -12208,6 +12223,8 @@ static void kiln_c99_node_cancel_request(uint64_t *request) {
 
 static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     kiln_node_completion *work;
+    if (socket->closed) return KILN_C99_OK;
+    if (socket->closing) return KILN_C99_OK;
     if (socket->close_request != 0) return KILN_C99_OK;
     socket->closing = 1;
     kiln_c99_node_cancel_request(&socket->connect_request);
@@ -12555,11 +12572,15 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         return kiln_c99_node_emit(socket->host, object, "error", message, 1, 0, exception);
     }
     if (event->kind == 10) {
+        int status;
         socket->closing = 1;
+        socket->closed = 1;
         if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
             return KILN_C99_CONTROL_ERROR;
-        return kiln_c99_node_emit(socket->host, socket->object, "close",
-                                  kiln_c99_undefined(), 0, 0, exception);
+        status = kiln_c99_node_emit(socket->host, socket->object, "close",
+                                    kiln_c99_undefined(), 0, 0, exception);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_node_server_maybe_emit_close(socket->server, exception);
     }
     return KILN_C99_OK;
 }
@@ -12687,8 +12708,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
         if (work->kind == KILN_REALM_OP_CLOSE_RESOURCE) {
             server->listener = 0;
-            return kiln_c99_node_emit(server->host, server->object, "close",
-                                      kiln_c99_undefined(), 0, 0, exception);
+            return kiln_c99_node_server_maybe_emit_close(server, exception);
         }
     }
     if (work->socket != NULL) {
@@ -12748,11 +12768,15 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                                       kiln_c99_undefined(), 0, 0, exception);
         }
         if (work->kind == KILN_REALM_OP_CLOSE_RESOURCE) {
+            int status;
             socket->close_request = 0;
+            socket->closed = 1;
             if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
                 return KILN_C99_CONTROL_ERROR;
-            return kiln_c99_node_emit(socket->host, socket->object, "close",
-                                      kiln_c99_undefined(), 0, 0, exception);
+            status = kiln_c99_node_emit(socket->host, socket->object, "close",
+                                        kiln_c99_undefined(), 0, 0, exception);
+            if (status != KILN_C99_OK) return status;
+            return kiln_c99_node_server_maybe_emit_close(socket->server, exception);
         }
     }
     return KILN_C99_CONTROL_ERROR;
