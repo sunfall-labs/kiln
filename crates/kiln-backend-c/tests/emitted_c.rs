@@ -621,8 +621,12 @@ fn runtime_prelude_size() {
     // that touched it, so ~8 lines a commit leaves a couple of hundred commits of headroom before
     // anyone edits this -- against a snapshot that conflicted on every single merge. When it does
     // need widening, that is a real change of scale and the right moment for somebody to look.
-    const FLOOR_LINES: usize = 20_000;
-    const CEILING_LINES: usize = 24_000;
+    //
+    // Widened once on 2026-09-01, when the collector (ADR 0041) added its core, a tracer and a
+    // finaliser per heap kind, and the string-builder seam: about 700 lines, to 24,704. The band
+    // is again roughly +/-9% of that.
+    const FLOOR_LINES: usize = 22_500;
+    const CEILING_LINES: usize = 27_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

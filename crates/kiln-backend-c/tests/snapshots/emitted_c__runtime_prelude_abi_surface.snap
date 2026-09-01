@@ -585,6 +585,7 @@ typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
 static void kiln_c99_node_unlink_socket(kiln_node_socket *socket) {
 static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
+static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
 typedef struct kiln_node_completion {
 typedef struct kiln_node_fs_completion {
 typedef struct kiln_json_reader {
