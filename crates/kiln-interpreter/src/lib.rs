@@ -2202,6 +2202,13 @@ pub struct ObjectData {
     /// The built-in Error brand. This is an internal slot, not a reserved property: program code
     /// may read, write and delete every string key, including ones beginning with `@@`.
     error_brand: bool,
+    /// The `arguments` brand: `[[Class]]` is "Arguments", which only
+    /// `Object.prototype.toString` can see.
+    ///
+    /// An internal slot rather than a `Symbol.toStringTag` property, because the tag is *not* a
+    /// property: `Object.getOwnPropertyNames(arguments)` and `getOwnPropertySymbols(arguments)`
+    /// both have to come back without it, and a program can delete a tag it can see.
+    arguments_brand: bool,
     /// `Object.preventExtensions` and `Object.seal`. Weaker than frozen: the properties that
     /// are already there stay writable, only the shape is closed.
     extensible: bool,
@@ -2405,6 +2412,7 @@ impl Default for ObjectData {
         Self {
             properties: Vec::new(),
             error_brand: false,
+            arguments_brand: false,
             // Objects start open; closing one is always something a program asked for.
             extensible: true,
             frozen: false,
@@ -5165,6 +5173,17 @@ impl Closure {
     /// called from sloppy code is still strict, and a sloppy one called from strict code is not.
     pub fn is_strict(&self) -> bool {
         self.strictness.function(self.function)
+    }
+
+    /// Whether a call of this closure gets the *mapped* `arguments` object.
+    ///
+    /// Read off the proto rather than recomputed, because it takes both the strictness and the
+    /// shape of the parameter list to decide and only the compiler saw the second.
+    fn has_mapped_arguments(&self) -> bool {
+        self.program
+            .functions
+            .get(self.function as usize)
+            .is_some_and(|proto| proto.mapped_arguments)
     }
 
     /// The text this function was written as, which is what `Function.prototype.toString` answers.
@@ -8537,6 +8556,8 @@ struct Frame {
     arguments: Vec<Value>,
     /// The `arguments` object this frame handed out, restored with the frame.
     arguments_object: Option<Value>,
+    /// Whether the caller's `arguments` is the mapped kind, restored with the frame.
+    mapped_arguments: bool,
     /// The instance being built, when this frame is a `new` call.
     ///
     /// Held here rather than in a parallel stack so that `Return` can decide locally: a
@@ -8587,6 +8608,14 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// false -- a write went into an array nothing else could reach, and every definition made
     /// on it was discarded by the statement after it.
     arguments_object: Option<Value>,
+    /// Whether the running frame's `arguments` is the *mapped* kind: sloppy code with a simple
+    /// parameter list.
+    ///
+    /// Carried on the frame rather than read at the mention, because an arrow captures the
+    /// enclosing call's object where the arrow is *created*, which can be before anything has
+    /// mentioned `arguments` at all. Decided by the compiler, which is the only place the
+    /// parameter list and the strictness are both in view.
+    mapped_arguments: bool,
     /// One prototype per error kind for this execution, created on first use.
     ///
     /// One object per run per kind, because `e instanceof TypeError` compares it by identity:
@@ -8817,6 +8846,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             handlers: Vec::new(),
             arguments: Vec::new(),
             arguments_object: None,
+            // The module body has no `arguments` at all, mapped or not.
+            mapped_arguments: false,
             error_prototypes: [const { None }; ErrorKind::ALL.len()],
             async_context: AsyncContext::default(),
             this_value: Value::Undefined,
@@ -13967,6 +13998,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.new_target = frame.new_target;
                     self.arguments = frame.arguments;
                     self.arguments_object = frame.arguments_object;
+                    self.mapped_arguments = frame.mapped_arguments;
                     self.global_base = frame.global_base;
                     self.instruction = frame.instruction;
                     if let Some(instance) = frame.constructing
@@ -14044,6 +14076,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.new_target = frame.new_target;
                 self.arguments = frame.arguments;
                 self.arguments_object = frame.arguments_object;
+                self.mapped_arguments = frame.mapped_arguments;
                 self.global_base = frame.global_base;
                 self.instruction = frame.instruction;
             }
@@ -14062,6 +14095,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.new_target = frame.new_target;
             self.arguments = frame.arguments;
             self.arguments_object = frame.arguments_object;
+            self.mapped_arguments = frame.mapped_arguments;
             self.global_base = frame.global_base;
             self.instruction = frame.instruction;
         }
@@ -14174,6 +14208,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             new_target: std::mem::replace(&mut self.new_target, new_target.clone()),
             arguments: std::mem::replace(&mut self.arguments, arguments.to_vec()),
             arguments_object: self.arguments_object.take(),
+            mapped_arguments: self.mapped_arguments,
             constructing: None,
             locals: std::mem::replace(&mut self.locals, std::mem::take(locals)),
             // The binding reads the module scope its own function was written in, which is the
@@ -14183,6 +14218,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_base,
         });
         self.function = Some(Rc::clone(closure));
+        self.mapped_arguments = closure.has_mapped_arguments();
         self.instruction = 0;
         let depth = self.frames.len();
         // A throw here belongs to a handler outside this nested run loop, and jumping to one
@@ -14297,6 +14333,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
             arguments_object: self.arguments_object.take(),
+            mapped_arguments: self.mapped_arguments,
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
             // A generator body belongs to the module that wrote it, and so does the module scope
@@ -14306,6 +14343,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_base,
         });
         self.function = Some(closure);
+        self.mapped_arguments = self
+            .function
+            .as_ref()
+            .is_some_and(|closure| closure.has_mapped_arguments());
         self.instruction = instruction_pointer;
         self.stack.extend(saved_stack);
         // Re-base the generator's handlers onto wherever its stack landed this time.
@@ -14614,6 +14655,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.new_target = frame.new_target;
         self.arguments = frame.arguments;
         self.arguments_object = frame.arguments_object;
+        self.mapped_arguments = frame.mapped_arguments;
         self.global_base = frame.global_base;
         self.instruction = frame.instruction;
     }
@@ -24743,9 +24785,67 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(existing) = &self.arguments_object {
             return existing.clone();
         }
-        let built = Value::Array(ArrayData::new(self.arguments.clone()));
+        let built = self.build_arguments_object();
         self.arguments_object = Some(built.clone());
         built
+    }
+
+    /// `CreateUnmappedArgumentsObject`: an ordinary object carrying the call's arguments.
+    ///
+    /// It used to be an array, which is the wrong answer to four questions a program actually
+    /// asks. `Array.isArray(arguments)` said true, `Object.prototype.toString.call(arguments)`
+    /// said `[object Array]`, `Object.getPrototypeOf(arguments)` was `Array.prototype`, and
+    /// `length` was the array's own -- so `arguments.length = 100` either threw or allocated a
+    /// hundred slots, where the language says it is an ordinary writable property that nothing
+    /// keeps in step with the indices. Every array-generic idiom that reaches for `arguments`
+    /// -- `slice.call`, `apply`, `Array.from`, spread, `for-of` -- goes through the array-like
+    /// path instead, which is the path the language defines them on.
+    ///
+    /// `@@iterator` is `%Array.prototype.values%` as an *own* property rather than something
+    /// inherited: `arguments` inherits from `Object.prototype`, which has no iterator, so
+    /// without it `[...arguments]` would stop working the moment this stopped being an array.
+    ///
+    /// The one thing missing is the *parameter map* of a mapped `arguments`: in a sloppy
+    /// function with a simple parameter list, `arguments[0]` and the first parameter are two
+    /// names for one binding. That needs an exotic `[[GetOwnProperty]]`, `[[DefineOwnProperty]]`
+    /// and `[[Delete]]` reading through a live cell, in both engines, and is deliberately not
+    /// attempted here. `callee` still tells the two apart, because that much is decidable from
+    /// the function alone.
+    fn build_arguments_object(&mut self) -> Value {
+        let mut data = ObjectData {
+            arguments_brand: true,
+            ..ObjectData::default()
+        };
+        let length = self.arguments.len();
+        data.define_value("length", Value::Number(length as f64), Attributes::BUILT_IN);
+        for index in 0..length {
+            let value = self.arguments[index].clone();
+            data.define_value(&index.to_string(), value, Attributes::DEFAULT);
+        }
+        // An unmapped `arguments` refuses to name its function: reading `callee` is a
+        // `TypeError` rather than `undefined`, because a program that reaches for it is asking
+        // for the caller identity strict mode exists to withhold. Which of the two objects this
+        // is was decided where the parameter list could be seen, and travels on the instruction.
+        if !self.mapped_arguments {
+            data.define_accessor(
+                "callee",
+                Some(Value::Native(Native::ThrowTypeError)),
+                Some(Value::Native(Native::ThrowTypeError)),
+                Attributes::NONE,
+            );
+        } else {
+            let callee = self
+                .function
+                .clone()
+                .map_or(Value::Undefined, Value::Function);
+            data.define_value("callee", callee, Attributes::BUILT_IN);
+        }
+        data.define_value(
+            WellKnown::Iterator.property_key(),
+            Value::Native(Native::ArrayValues),
+            Attributes::BUILT_IN,
+        );
+        Value::Object(Rc::new(RefCell::new(data)))
     }
 
     /// The call stack as names, innermost first, at the moment this error object was built.
@@ -30653,6 +30753,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             new_target: std::mem::replace(&mut self.new_target, target),
             arguments: std::mem::replace(&mut self.arguments, received),
             arguments_object: self.arguments_object.take(),
+            mapped_arguments: self.mapped_arguments,
             constructing,
             locals: std::mem::replace(&mut self.locals, locals),
             // Inherited: a called function reads the same module bindings its caller does.
@@ -30661,6 +30762,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             stack_base: self.stack.len(),
         });
         self.function = Some(closure);
+        self.mapped_arguments = self
+            .function
+            .as_ref()
+            .is_some_and(|closure| closure.has_mapped_arguments());
         self.instruction = 0;
         Ok(())
     }
@@ -30750,12 +30855,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
             arguments_object: self.arguments_object.take(),
+            mapped_arguments: self.mapped_arguments,
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
             global_base: self.global_base,
             instruction: self.instruction,
             stack_base: self.stack.len(),
         });
+        // A direct eval evaluates in the caller's scope, so its `arguments` is the caller's --
+        // the same object, of the same kind. An indirect one is global code with no call around
+        // it and no `arguments` at all.
+        self.mapped_arguments = site.is_some() && self.mapped_arguments;
         // The eval program is its own module scope from here until its frame returns. It is not
         // in `frames` yet -- its locals are the running ones -- and the index it *will* occupy
         // when it makes a call of its own is exactly the depth the stack has now.
@@ -30994,6 +31104,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             new_target: std::mem::replace(&mut self.new_target, Value::Undefined),
             arguments: std::mem::take(&mut self.arguments),
             arguments_object: self.arguments_object.take(),
+            mapped_arguments: std::mem::replace(&mut self.mapped_arguments, false),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
             global_base: self.global_base,
@@ -33194,6 +33305,9 @@ fn call_native(
                 Value::Undefined => "Undefined",
                 Value::Null => "Null",
                 Value::Array(_) => "Array",
+                // The `arguments` object of a call. Ordinary in every other respect, so the
+                // brand is the only thing that separates it from the object it otherwise is.
+                Value::Object(object) if object.borrow().arguments_brand => "Arguments",
                 Value::Boolean(_) => "Boolean",
                 Value::Number(_) => "Number",
                 Value::String(_) => "String",
@@ -43454,6 +43568,7 @@ mod tests {
                 async_generator: false,
                 parameter_count: 2,
                 declared_length: 2,
+                mapped_arguments: false,
                 local_count: 2,
                 code: vec![Instruction::LoadLocal(1), Instruction::Return],
                 upvalues: Vec::new(),
@@ -45023,6 +45138,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 1,
                     code: vec![
                         Instruction::NewCell(0),
@@ -45043,6 +45159,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![
                         Instruction::LoadUpvalue(0),
@@ -45086,6 +45203,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 1,
                     code: vec![
                         Instruction::NewCell(0),
@@ -45106,6 +45224,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![Instruction::LoadUpvalue(0), Instruction::Return],
                     upvalues: vec![Upvalue::ParentLocal(0)],
@@ -45133,6 +45252,7 @@ mod tests {
                 async_generator: false,
                 parameter_count: 0,
                 declared_length: 0,
+                mapped_arguments: false,
                 local_count: 0,
                 code: vec![Instruction::Return],
                 upvalues: vec![Upvalue::ParentLocal(0)],
@@ -45230,6 +45350,7 @@ mod tests {
                 async_generator: false,
                 parameter_count: 0,
                 declared_length: 0,
+                mapped_arguments: false,
                 local_count: 0,
                 code: vec![
                     Instruction::MakeFunction(0),
@@ -45294,6 +45415,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![
                         Instruction::Const(0),
@@ -45313,6 +45435,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![Instruction::LoadGlobal(0), Instruction::Return],
                     upvalues: Vec::new(),
@@ -45437,6 +45560,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![
                         Instruction::Const(0),
@@ -45456,6 +45580,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![Instruction::Const(1), Instruction::Throw],
                     upvalues: Vec::new(),
@@ -46330,6 +46455,7 @@ mod tests {
                 async_generator: false,
                 parameter_count: 0,
                 declared_length: 0,
+                mapped_arguments: false,
                 local_count: 0,
                 code: vec![
                     Instruction::Const(tag_index),
@@ -46393,6 +46519,7 @@ mod tests {
                 async_generator: false,
                 parameter_count: 0,
                 declared_length: 0,
+                mapped_arguments: false,
                 local_count: 0,
                 code: vec![
                     Instruction::LoadThis,
@@ -46468,6 +46595,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![
                         Instruction::Const(3),
@@ -46489,6 +46617,7 @@ mod tests {
                     async_generator: false,
                     parameter_count: 0,
                     declared_length: 0,
+                    mapped_arguments: false,
                     local_count: 0,
                     code: vec![
                         Instruction::Const(4),
@@ -46525,6 +46654,7 @@ mod tests {
             async_generator: false,
             parameter_count: 0,
             declared_length: 0,
+            mapped_arguments: false,
             local_count: 0,
             code: vec![Instruction::MakeFunction(1), Instruction::Return],
             upvalues: Vec::new(),
@@ -46539,6 +46669,7 @@ mod tests {
             async_generator: false,
             parameter_count: 0,
             declared_length: 0,
+            mapped_arguments: false,
             local_count: 0,
             code: vec![
                 Instruction::LoadThis,
@@ -46557,6 +46688,7 @@ mod tests {
             async_generator: false,
             parameter_count: 1,
             declared_length: 1,
+            mapped_arguments: false,
             local_count: 1,
             code: vec![
                 Instruction::LoadLocal(0),

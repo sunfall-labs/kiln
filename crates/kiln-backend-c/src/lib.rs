@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 17;
+pub const C_GENERATOR_VERSION: u32 = 18;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -1201,6 +1201,7 @@ method_ids! {
     (KILN_C99_METHOD_NODE_QUERYSTRING_PARSE, 427, Direct),
     (KILN_C99_METHOD_FUNCTION_TO_STRING, 428, Generic),
     (KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW, 429, Generic),
+    (KILN_C99_METHOD_THROW_TYPE_ERROR, 430, Generic),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1682,6 +1683,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_ITERATOR_NEXT),
     emit_method_define!(KILN_C99_METHOD_ITERATOR_SELF),
     emit_method_define!(KILN_C99_METHOD_ARRAY_VALUES),
+    emit_method_define!(KILN_C99_METHOD_THROW_TYPE_ERROR),
     r#"
 /* Promise, and the two halves of driving an async function. */
 "#,
@@ -2301,6 +2303,10 @@ typedef struct kiln_object {
      * data properties report writable=true. This is deliberately separate from `frozen`: a
      * namespace is not an ordinary frozen object, and reflection must preserve that distinction. */
     int module_namespace;
+    /* The `arguments` object of a call. An internal slot rather than a `Symbol.toStringTag`
+     * property, because the tag is not a property: neither `getOwnPropertyNames` nor
+     * `getOwnPropertySymbols` may report it, and a program must not be able to delete it. */
+    int arguments_brand;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -3637,6 +3643,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->prototype = kiln_c99_undefined();
     object->frozen = 0;
     object->module_namespace = 0;
+    object->arguments_brand = 0;
     {
         int owned = kiln_realm_own_object(object, kiln_c99_drop_object);
         if (owned != KILN_C99_OK) {
@@ -5143,6 +5150,9 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_PRIMITIVE_TO_STRING: return "toString";
     case KILN_C99_METHOD_ITERATOR_SELF: return "@@iterator";
     case KILN_C99_METHOD_ARRAY_VALUES: return "values";
+    /* `%ThrowTypeError%` is the realm's one anonymous function, so the name is empty rather
+     * than descriptive: a program reading `arguments.callee`'s getter must not learn one. */
+    case KILN_C99_METHOD_THROW_TYPE_ERROR: return "";
     case KILN_C99_METHOD_THEN: return "then";
     case KILN_C99_METHOD_CATCH: return "catch";
     case KILN_C99_METHOD_FINALLY: return "finally";
@@ -5962,28 +5972,112 @@ static int kiln_c99_frame_is_arrow;
  * a fresh array per mention made both false, and every definition made on one was discarded by
  * the statement after it. Still built lazily, so a call nothing asks it of pays nothing. */
 static kiln_value kiln_c99_frame_arguments_object;
+/* Whether this call's `arguments` is the *mapped* kind: sloppy code with a simple parameter
+ * list. Written by the body's own prologue, because it is a fact about the function that the
+ * compiler decided and the emitted code carries as a constant. */
+static int kiln_c99_frame_mapped_arguments;
+/* The function this call is of, for a mapped `arguments` object's `callee`. */
+static kiln_value kiln_c99_frame_callee;
+
+/* `CreateUnmappedArgumentsObject`: an ordinary object carrying the call's arguments.
+ *
+ * It used to be an array, which is the wrong answer to four questions a program actually asks:
+ * `Array.isArray(arguments)` said true, `Object.prototype.toString.call(arguments)` said
+ * `[object Array]`, `Object.getPrototypeOf(arguments)` was not `Object.prototype`, and `length`
+ * was the array's own rather than an ordinary writable property nothing keeps in step with the
+ * indices. Every array-generic idiom that reaches for `arguments` -- `slice.call`, `apply`,
+ * `Array.from`, spread, `for-of` -- goes through the array-like path instead, which is where the
+ * language defines them.
+ *
+ * `@@iterator` is `%Array.prototype.values%` as an *own* property: `arguments` inherits from
+ * `Object.prototype`, which has no iterator, so without it a spread would stop working the
+ * moment this stopped being an array.
+ *
+ * The parameter *map* of a mapped `arguments` -- where `arguments[0]` and the first parameter
+ * are two names for one binding -- is deliberately not here; the interpreter does not have it
+ * either, and the two engines have to gain it together. `callee` still tells the two objects
+ * apart, because that much is decidable from the function alone. */
+static int kiln_c99_build_arguments_object(kiln_value *out) {
+    size_t at;
+    int status = kiln_c99_new_object(out);
+    kiln_property *slot;
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    kiln_c99_object_of(*out)->arguments_brand = 1;
+    /* `length` first, then the indices: integer keys sort ahead of string ones however they were
+     * inserted, so what this order decides is that `length` precedes `callee`. */
+    status = kiln_c99_own_slot(*out, "length", 6, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->accessor = 0;
+    slot->value = kiln_c99_number((double)kiln_c99_frame_argc);
+    slot->enumerable = 0;
+    slot->writable = 1;
+    slot->configurable = 1;
+    for (at = 0; at < kiln_c99_frame_argc; ++at) {
+        kiln_value key = kiln_c99_property_key(kiln_c99_number((double)at));
+        if (key.tag != KILN_VALUE_STRING) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        status = kiln_c99_own_slot(*out, key.ptr, key.len, &slot);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        slot->accessor = 0;
+        slot->value = kiln_c99_frame_args[at];
+        slot->enumerable = 1;
+        slot->writable = 1;
+        slot->configurable = 1;
+    }
+    status = kiln_c99_own_slot(*out, "callee", 6, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    if (kiln_c99_frame_mapped_arguments) {
+        slot->accessor = 0;
+        slot->value = kiln_c99_frame_callee;
+        slot->enumerable = 0;
+        slot->writable = 1;
+        slot->configurable = 1;
+    } else {
+        /* An unmapped `arguments` refuses to name its function: reading `callee` is a TypeError
+         * rather than `undefined`, because a program reaching for it wants the caller identity
+         * strict mode exists to withhold. */
+        slot->accessor = 1;
+        slot->getter = kiln_c99_method(KILN_C99_METHOD_THROW_TYPE_ERROR);
+        slot->setter = kiln_c99_method(KILN_C99_METHOD_THROW_TYPE_ERROR);
+        slot->enumerable = 0;
+        slot->writable = 0;
+        slot->configurable = 0;
+    }
+    status = kiln_c99_own_slot(*out, "@@iterator", 10, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->accessor = 0;
+    slot->value = kiln_c99_method(KILN_C99_METHOD_ARRAY_VALUES);
+    slot->enumerable = 0;
+    slot->writable = 1;
+    slot->configurable = 1;
+    return KILN_C99_OK;
+}
 
 /* The `arguments` this frame can see: an arrow's captured object, or this call's own. */
 static int kiln_c99_visible_arguments(kiln_value *out) {
-    size_t at;
     int status;
     if (kiln_c99_frame_is_arrow) {
         *out = kiln_c99_captured_arguments;
         return KILN_C99_OK;
     }
-    if (kiln_c99_frame_arguments_object.tag == KILN_VALUE_ARRAY) {
+    if (kiln_c99_frame_arguments_object.tag == KILN_VALUE_OBJECT) {
         *out = kiln_c99_frame_arguments_object;
         return KILN_C99_OK;
     }
-    status = kiln_c99_new_array(out);
+    status = kiln_c99_build_arguments_object(out);
     if (status != KILN_C99_OK) {
         return status;
-    }
-    for (at = 0; at < kiln_c99_frame_argc; ++at) {
-        status = kiln_c99_array_push(*out, kiln_c99_frame_args[at]);
-        if (status != KILN_C99_OK) {
-            return status;
-        }
     }
     kiln_c99_frame_arguments_object = *out;
     return KILN_C99_OK;
@@ -7318,6 +7412,8 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     kiln_value saved_captured = kiln_c99_captured_arguments;
     kiln_value saved_arguments_object = kiln_c99_frame_arguments_object;
     int saved_is_arrow = kiln_c99_frame_is_arrow;
+    int saved_mapped_arguments = kiln_c99_frame_mapped_arguments;
+    kiln_value saved_callee = kiln_c99_frame_callee;
     int saved_diagnostic_depth = kiln_c99_diagnostic_active_depth;
     int status;
     if (!inherit_new_target) {
@@ -7326,6 +7422,9 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     }
     kiln_c99_frame_is_arrow = closure->arrow;
     kiln_c99_frame_arguments_object = kiln_c99_undefined();
+    /* The body's prologue overwrites the kind with its own compiled constant; this is only what
+     * a body that never asks leaves behind. */
+    kiln_c99_frame_callee = kiln_c99_function(closure);
     if (closure->arrow) {
         kiln_c99_captured_arguments = closure->captured_arguments;
     } else {
@@ -7358,6 +7457,8 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     kiln_c99_captured_arguments = saved_captured;
     kiln_c99_frame_arguments_object = saved_arguments_object;
     kiln_c99_frame_is_arrow = saved_is_arrow;
+    kiln_c99_frame_mapped_arguments = saved_mapped_arguments;
+    kiln_c99_frame_callee = saved_callee;
     kiln_c99_diagnostic_active_depth = saved_diagnostic_depth;
     return status;
 }
@@ -16907,6 +17008,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = kiln_c99_boolean(found);
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_THROW_TYPE_ERROR:
+            /* `%ThrowTypeError%`, in full. It is both halves of an unmapped `arguments`
+             * object's `callee`, and the message is the one every engine gives. */
+            return kiln_c99_throw_error(
+                thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                "'caller', 'callee', and 'arguments' properties may not be accessed on strict "
+                "mode functions or the arguments objects for calls to them");
         case KILN_C99_METHOD_OBJECT_TO_STRING: {
             /* `Object.prototype.toString`, the oldest type test there is -- and it reports the
              * *kind* rather than converting: `[object Array]`, not `1,2,3`. A library that has to
@@ -16980,6 +17088,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             case KILN_VALUE_BOUND:
             case KILN_VALUE_COMMONJS_REQUIRE:
             case KILN_VALUE_SETTLER: tag = "Function"; break;
+            /* An `arguments` object is ordinary in every respect but this one, and this one is
+             * exactly what the type test above is asked to tell apart. */
+            case KILN_VALUE_OBJECT:
+                tag = kiln_c99_object_of(receiver)->arguments_brand ? "Arguments" : "Object";
+                break;
             default: tag = "Object"; break;
             }
             if (kiln_c99_text_append_c(&built, "[object ") != KILN_C99_OK ||
@@ -17188,6 +17301,43 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_array *array;
             if (receiver.tag == KILN_VALUE_TYPED_ARRAY) {
                 return kiln_c99_new_typed_iterator(result, receiver, 0);
+            }
+            /* An ordinary object with a `length` -- an `arguments` object above all, whose own
+             * `@@iterator` is this very method -- iterates as the array-like it is. Refusing
+             * here is what made `[...arguments]` stop compiling the moment `arguments` stopped
+             * being an array, and the interpreter has walked an array-like receiver all along. */
+            if (receiver.tag == KILN_VALUE_OBJECT) {
+                kiln_value length;
+                double count;
+                status = kiln_c99_get(host, receiver, "length", 6, &length, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                count = kiln_c99_as_number(length);
+                if (!(count > 0.0)) {
+                    count = 0.0;
+                }
+                if (count > 4294967295.0) {
+                    count = 4294967295.0;
+                }
+                status = kiln_c99_new_array(&snapshot);
+                for (index = 0; index < (size_t)count && status == KILN_C99_OK; ++index) {
+                    kiln_value element;
+                    kiln_value key = kiln_c99_property_key(kiln_c99_number((double)index));
+                    if (key.tag != KILN_VALUE_STRING) {
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    status = kiln_c99_get(host, receiver, key.ptr, key.len, &element, depth,
+                                          thrown);
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
+                    status = kiln_c99_array_push(snapshot, element);
+                }
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                return kiln_c99_new_iterator(result, snapshot);
             }
             if (receiver.tag != KILN_VALUE_ARRAY) {
                 return KILN_C99_CONTROL_ERROR;
@@ -23840,6 +23990,8 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_captured_arguments", C99StateOwner::Frame),
     ("kiln_c99_frame_arguments_object", C99StateOwner::Frame),
     ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
+    ("kiln_c99_frame_mapped_arguments", C99StateOwner::Frame),
+    ("kiln_c99_frame_callee", C99StateOwner::Frame),
     ("kiln_c99_symbols", C99StateOwner::Realm),
     ("kiln_c99_symbol_count", C99StateOwner::Realm),
     ("kiln_c99_symbol_capacity", C99StateOwner::Realm),
@@ -25011,6 +25163,15 @@ fn render_function(
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
+    // Which of the two `arguments` objects a mention in this body would build. Set on every
+    // entry, a generator's resumptions included, because the frame global it writes is shared
+    // by whatever else is running and is only restored at the call boundary.
+    writeln!(
+        output,
+        "    kiln_c99_frame_mapped_arguments = {};",
+        i32::from(proto.mapped_arguments)
+    )
+    .unwrap();
     let handlers = handler_targets(&proto.code);
     // A generator and an async function both suspend, and every part of their state has to
     // outlive the call that stopped in the middle of them.
@@ -28083,6 +28244,7 @@ int main(void) {
                         async_generator: false,
                         parameter_count: 0,
                         declared_length: 0,
+                        mapped_arguments: false,
                         local_count: 0,
                         code: vec![
                             Instruction::Const(0),
@@ -28102,6 +28264,7 @@ int main(void) {
                         async_generator: false,
                         parameter_count: 0,
                         declared_length: 0,
+                        mapped_arguments: false,
                         local_count: 0,
                         code: vec![
                             Instruction::Const(1),
@@ -28479,6 +28642,7 @@ int main(void) {
                 async_generator: false,
                 parameter_count: 0,
                 declared_length: 0,
+                mapped_arguments: false,
                 local_count: 0,
                 code: vec![
                     Instruction::LoadBuiltin(Builtin::Math),
@@ -29089,6 +29253,7 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
             async_generator: false,
             parameter_count: 0,
             declared_length: 0,
+            mapped_arguments: false,
             local_count: 0,
             code,
             upvalues: Vec::new(),
