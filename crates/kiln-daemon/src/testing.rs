@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
 use kiln_conformance::{
@@ -20,21 +20,99 @@ const MODULE_GRAPH_FEATURES: &[&str] = &["modules", "module-graph"];
 const MODULE_RESOLVER_FEATURES: &[&str] = &["builtin-modules", "node-packages", "node-resolution"];
 const MAX_CACHED_CORPORA: usize = 8;
 
-/// Process-lifetime conformance inventory owned by one resident daemon.
+/// Process-lifetime conformance inventory and per-corpus singleflight owned by one resident daemon.
 ///
 /// A changed-test request caused by compiler/runtime code can reuse the same parsed frontmatter,
 /// manifest, and Test262 harness. Changes that may alter the corpus deliberately rediscover it;
 /// a request without change provenance does too, because the daemon cannot prove the files stayed
-/// unchanged. Execution remains per-request and every case still creates a fresh realm.
-#[derive(Default)]
+/// unchanged. Equal cold requests share one discovery, while independent corpora never hold one
+/// another behind filesystem I/O. Execution remains per-request and every case still creates a
+/// fresh realm.
 pub(crate) struct ConformanceCoordinator {
     catalog: Mutex<ConformanceCatalog>,
+    discoverer: Arc<DiscoverCorpus>,
 }
 
 #[derive(Default)]
 struct ConformanceCatalog {
     clock: u64,
     corpora: BTreeMap<PathBuf, CachedCorpus>,
+    discovering: BTreeMap<PathBuf, Arc<InFlightDiscovery>>,
+}
+
+type DiscoverCorpus = dyn Fn(&Path) -> Result<Vec<ConformanceTest>, String> + Send + Sync;
+type DiscoveryResult = Result<Arc<Vec<ConformanceTest>>, String>;
+
+struct InFlightDiscovery {
+    provenance: DiscoveryProvenance,
+    result: Mutex<Option<DiscoveryResult>>,
+    ready: Condvar,
+}
+
+impl InFlightDiscovery {
+    fn new(provenance: DiscoveryProvenance) -> Self {
+        Self {
+            provenance,
+            result: Mutex::new(None),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> DiscoveryResult {
+        let mut result = self.result.lock().unwrap_or_else(PoisonError::into_inner);
+        while result.is_none() {
+            result = self
+                .ready
+                .wait(result)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        result
+            .as_ref()
+            .expect("discovery result is present after wait")
+            .clone()
+    }
+
+    fn publish(&self, result: DiscoveryResult) {
+        let mut slot = self.result.lock().unwrap_or_else(PoisonError::into_inner);
+        debug_assert!(slot.is_none(), "one owner publishes one discovery result");
+        *slot = Some(result);
+        self.ready.notify_all();
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DiscoveryProvenance {
+    changed_root: Option<PathBuf>,
+    changed_paths: Option<Vec<String>>,
+}
+
+impl DiscoveryProvenance {
+    fn new(changed_root: Option<&Path>, changed_paths: Option<&[String]>) -> Self {
+        let changed_root = changed_root.and_then(|root| root.canonicalize().ok());
+        let changed_paths = changed_paths.map(|paths| {
+            let mut paths = paths
+                .iter()
+                .map(|path| normalize_path(Path::new(path)))
+                .collect::<Vec<_>>();
+            paths.sort();
+            paths.dedup();
+            paths
+        });
+        Self {
+            changed_root,
+            changed_paths,
+        }
+    }
+
+    fn proves_unchanged(&self, root: &Path, tests: &[ConformanceTest]) -> bool {
+        let (Some(changed_root), Some(changed_paths)) =
+            (self.changed_root.as_deref(), self.changed_paths.as_deref())
+        else {
+            return false;
+        };
+        root.starts_with(changed_root)
+            && !corpus_inputs_changed(root, changed_root, tests, changed_paths)
+    }
 }
 
 struct CachedCorpus {
@@ -47,7 +125,28 @@ struct CatalogLookup {
     cache_hit: bool,
 }
 
+impl Default for ConformanceCoordinator {
+    fn default() -> Self {
+        Self {
+            catalog: Mutex::new(ConformanceCatalog::default()),
+            discoverer: Arc::new(|root| {
+                kiln_conformance::discover(root).map_err(|error| error.to_string())
+            }),
+        }
+    }
+}
+
 impl ConformanceCoordinator {
+    #[cfg(test)]
+    fn with_discoverer(
+        discoverer: impl Fn(&Path) -> Result<Vec<ConformanceTest>, String> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            catalog: Mutex::new(ConformanceCatalog::default()),
+            discoverer: Arc::new(discoverer),
+        }
+    }
+
     pub(crate) fn run(
         &self,
         root: &str,
@@ -83,51 +182,96 @@ impl ConformanceCoordinator {
                 root.display()
             )
         })?;
-        let mut catalog = self.catalog.lock().unwrap_or_else(PoisonError::into_inner);
-        catalog.clock = catalog.clock.wrapping_add(1);
-        let now = catalog.clock;
-        let changed_root = changed_root.and_then(|root| root.canonicalize().ok());
-        if let (Some(changed_root), Some(paths), Some(cached)) = (
-            changed_root.as_deref(),
-            changed_paths,
-            catalog.corpora.get_mut(&key),
-        ) && key.starts_with(changed_root)
-            && !corpus_inputs_changed(&key, changed_root, &cached.tests, paths)
-        {
-            cached.last_used = now;
-            return Ok(CatalogLookup {
-                tests: Arc::clone(&cached.tests),
-                cache_hit: true,
+        let provenance = DiscoveryProvenance::new(changed_root, changed_paths);
+        loop {
+            let (discovery, owns_discovery) = {
+                let mut catalog = self.catalog.lock().unwrap_or_else(PoisonError::into_inner);
+                catalog.clock = catalog.clock.wrapping_add(1);
+                let now = catalog.clock;
+
+                // A refresh already in flight takes precedence over the previous ready value.
+                // Waiters later compare provenance before accepting its result, so a change that
+                // arrived after this discovery began cannot be hidden by singleflight.
+                if let Some(discovery) = catalog.discovering.get(&key) {
+                    (Arc::clone(discovery), false)
+                } else if let Some(cached) = catalog.corpora.get_mut(&key)
+                    && provenance.proves_unchanged(&key, &cached.tests)
+                {
+                    cached.last_used = now;
+                    return Ok(CatalogLookup {
+                        tests: Arc::clone(&cached.tests),
+                        cache_hit: true,
+                    });
+                } else {
+                    // An invalid ready value is not a fallback: if refresh fails, the next request
+                    // must retry instead of silently reusing metadata already proven stale.
+                    catalog.corpora.remove(&key);
+                    let discovery = Arc::new(InFlightDiscovery::new(provenance.clone()));
+                    catalog
+                        .discovering
+                        .insert(key.clone(), Arc::clone(&discovery));
+                    (discovery, true)
+                }
+            };
+
+            if !owns_discovery {
+                let tests = discovery.wait()?;
+                if discovery.provenance == provenance || provenance.proves_unchanged(&key, &tests) {
+                    return Ok(CatalogLookup {
+                        tests,
+                        cache_hit: false,
+                    });
+                }
+                // This request names corpus inputs the completed discovery did not cover. The
+                // owner removes its in-flight marker before publishing, so looping elects exactly
+                // one follow-up owner and lets equivalent waiters join it.
+                continue;
+            }
+
+            // Filesystem traversal and frontmatter parsing deliberately happen outside the
+            // catalogue mutex. The per-root entry above is the singleflight seam: equal roots
+            // coalesce, while independent corpora no longer serialize their cold discovery.
+            let result = catch_unwind(AssertUnwindSafe(|| (self.discoverer)(&key)))
+                .map_err(|_| format!("conformance discovery panicked for {}", key.display()))
+                .and_then(|result| result)
+                .map(Arc::new);
+
+            {
+                let mut catalog = self.catalog.lock().unwrap_or_else(PoisonError::into_inner);
+                catalog.discovering.remove(&key);
+                if let Ok(discovered) = &result {
+                    catalog.clock = catalog.clock.wrapping_add(1);
+                    let now = catalog.clock;
+                    catalog.corpora.insert(
+                        key.clone(),
+                        CachedCorpus {
+                            tests: Arc::clone(discovered),
+                            last_used: now,
+                        },
+                    );
+                    while catalog.corpora.len() > MAX_CACHED_CORPORA {
+                        let Some(oldest) = catalog
+                            .corpora
+                            .iter()
+                            .min_by_key(|(path, cached)| (cached.last_used, *path))
+                            .map(|(path, _)| path.clone())
+                        else {
+                            break;
+                        };
+                        catalog.corpora.remove(&oldest);
+                    }
+                }
+                // Publish before removing the marker, under the same catalogue critical section.
+                // No equal invalidating request can slip between ready-cache insertion and waiter
+                // notification and accidentally elect a redundant owner.
+                discovery.publish(result.clone());
+                catalog.discovering.remove(&key);
+            }
+            return result.map(|tests| CatalogLookup {
+                tests,
+                cache_hit: false,
             });
         }
-
-        // Keep the small cache lock across discovery so two clients asking for the same cold
-        // corpus cannot both pay to read and parse it. Test execution happens after this guard is
-        // released, so independent batches still run concurrently.
-        let discovered =
-            Arc::new(kiln_conformance::discover(&key).map_err(|error| error.to_string())?);
-        catalog.corpora.insert(
-            key,
-            CachedCorpus {
-                tests: Arc::clone(&discovered),
-                last_used: now,
-            },
-        );
-        while catalog.corpora.len() > MAX_CACHED_CORPORA {
-            let Some(oldest) = catalog
-                .corpora
-                .iter()
-                .min_by_key(|(path, cached)| (cached.last_used, *path))
-                .map(|(path, _)| path.clone())
-            else {
-                break;
-            };
-            catalog.corpora.remove(&oldest);
-        }
-        Ok(CatalogLookup {
-            tests: discovered,
-            cache_hit: false,
-        })
     }
 }
 
@@ -540,7 +684,10 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
 
     static TEMP_CORPUS_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -729,6 +876,324 @@ expected_stdout = "bundle\n"
             ),
             "the least recently used corpus is evicted"
         );
+    }
+
+    #[test]
+    fn cold_discovery_of_independent_corpora_runs_concurrently() {
+        let first = TemporaryCorpus::new();
+        let second = TemporaryCorpus::new();
+        let (started_tx, started_rx) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let discover_release = Arc::clone(&release);
+        let coordinator = Arc::new(ConformanceCoordinator::with_discoverer(move |root| {
+            started_tx
+                .send(root.to_owned())
+                .expect("test observes discovery start");
+            let (released, ready) = &*discover_release;
+            let mut released = released.lock().unwrap_or_else(PoisonError::into_inner);
+            while !*released {
+                released = ready.wait(released).unwrap_or_else(PoisonError::into_inner);
+            }
+            kiln_conformance::discover(root).map_err(|error| error.to_string())
+        }));
+
+        let handles = [&first, &second]
+            .into_iter()
+            .map(|corpus| {
+                let coordinator = Arc::clone(&coordinator);
+                let root = corpus.path.clone();
+                thread::spawn(move || {
+                    coordinator.discover(
+                        &root,
+                        root.parent(),
+                        Some(&["crates/kiln-ir/src/lib.rs".to_owned()]),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let first_started = started_rx.recv_timeout(Duration::from_secs(2));
+        let second_started = started_rx.recv_timeout(Duration::from_secs(2));
+        {
+            let (released, ready) = &*release;
+            *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            ready.notify_all();
+        }
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("discovery thread does not panic"))
+            .collect::<Vec<_>>();
+
+        assert!(first_started.is_ok(), "first corpus starts discovery");
+        assert!(
+            second_started.is_ok(),
+            "a different corpus must not wait on the catalogue mutex"
+        );
+        assert!(results.into_iter().all(|result| result.is_ok()));
+    }
+
+    #[test]
+    fn equal_cold_discovery_is_singleflight_and_publishes_one_arc() {
+        let corpus = TemporaryCorpus::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::clone(&calls);
+        let (started_tx, started_rx) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let discover_release = Arc::clone(&release);
+        let coordinator = Arc::new(ConformanceCoordinator::with_discoverer(move |root| {
+            discover_calls.fetch_add(1, Ordering::SeqCst);
+            started_tx.send(()).expect("test observes discovery start");
+            let (released, ready) = &*discover_release;
+            let mut released = released.lock().unwrap_or_else(PoisonError::into_inner);
+            while !*released {
+                released = ready.wait(released).unwrap_or_else(PoisonError::into_inner);
+            }
+            kiln_conformance::discover(root).map_err(|error| error.to_string())
+        }));
+        let changed_path = format!(
+            "{}/effect/src/one.ts",
+            corpus
+                .path
+                .file_name()
+                .expect("temporary corpus name")
+                .to_string_lossy()
+        );
+
+        let spawn_discovery = || {
+            let coordinator = Arc::clone(&coordinator);
+            let root = corpus.path.clone();
+            let changed_path = changed_path.clone();
+            thread::spawn(move || coordinator.discover(&root, root.parent(), Some(&[changed_path])))
+        };
+        let owner = spawn_discovery();
+        started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("owner begins discovery");
+        let waiter = spawn_discovery();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let waiter_joined = loop {
+            let joined = {
+                let catalog = coordinator
+                    .catalog
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner);
+                catalog
+                    .discovering
+                    .values()
+                    .next()
+                    .is_some_and(|discovery| Arc::strong_count(discovery) >= 3)
+            };
+            if joined || Instant::now() >= deadline {
+                break joined;
+            }
+            thread::yield_now();
+        };
+        assert!(waiter_joined, "second request joins the in-flight root");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        {
+            let (released, ready) = &*release;
+            *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            ready.notify_all();
+        }
+        let owner = owner
+            .join()
+            .expect("owner thread does not panic")
+            .expect("owner discovery succeeds");
+        let waiter = waiter
+            .join()
+            .expect("waiter thread does not panic")
+            .expect("waiter discovery succeeds");
+        assert!(!owner.cache_hit);
+        assert!(!waiter.cache_hit);
+        assert!(Arc::ptr_eq(&owner.tests, &waiter.tests));
+        assert!(
+            coordinator
+                .catalog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .discovering
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn newer_corpus_change_waits_for_inflight_work_then_refreshes_once() {
+        let corpus = TemporaryCorpus::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::clone(&calls);
+        let (started_tx, started_rx) = mpsc::channel();
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let discover_release = Arc::clone(&release);
+        let coordinator = Arc::new(ConformanceCoordinator::with_discoverer(move |root| {
+            let call = discover_calls.fetch_add(1, Ordering::SeqCst);
+            started_tx
+                .send(call)
+                .expect("test observes discovery start");
+            if call == 0 {
+                let (released, ready) = &*discover_release;
+                let mut released = released.lock().unwrap_or_else(PoisonError::into_inner);
+                while !*released {
+                    released = ready.wait(released).unwrap_or_else(PoisonError::into_inner);
+                }
+            }
+            kiln_conformance::discover(root).map_err(|error| error.to_string())
+        }));
+        let root = corpus.path.clone();
+        let changed_root = root
+            .parent()
+            .expect("temporary corpus parent")
+            .to_path_buf();
+        let compiler_change = vec!["crates/kiln-ir/src/lib.rs".to_owned()];
+        let source_change = vec![format!(
+            "{}/effect/src/one.ts",
+            root.file_name()
+                .expect("temporary corpus name")
+                .to_string_lossy()
+        )];
+
+        let owner = {
+            let coordinator = Arc::clone(&coordinator);
+            let root = root.clone();
+            let changed_root = changed_root.clone();
+            thread::spawn(move || {
+                coordinator.discover(&root, Some(&changed_root), Some(&compiler_change))
+            })
+        };
+        assert_eq!(
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("first discovery starts"),
+            0
+        );
+        let waiter = {
+            let coordinator = Arc::clone(&coordinator);
+            let root = root.clone();
+            let changed_root = changed_root.clone();
+            thread::spawn(move || {
+                coordinator.discover(&root, Some(&changed_root), Some(&source_change))
+            })
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let joined = coordinator
+                .catalog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .discovering
+                .values()
+                .next()
+                .is_some_and(|discovery| Arc::strong_count(discovery) >= 3);
+            if joined {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "newer change first waits for the in-flight snapshot"
+            );
+            thread::yield_now();
+        }
+        {
+            let (released, ready) = &*release;
+            *released.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            ready.notify_all();
+        }
+        assert_eq!(
+            started_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("newer corpus change starts one follow-up refresh"),
+            1
+        );
+
+        let owner = owner
+            .join()
+            .expect("owner thread does not panic")
+            .expect("first discovery succeeds");
+        let waiter = waiter
+            .join()
+            .expect("waiter thread does not panic")
+            .expect("follow-up discovery succeeds");
+        assert!(!Arc::ptr_eq(&owner.tests, &waiter.tests));
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_failed_refresh_removes_stale_metadata_and_the_next_request_retries() {
+        let corpus = TemporaryCorpus::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::clone(&calls);
+        let coordinator = ConformanceCoordinator::with_discoverer(move |root| {
+            let call = discover_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 1 {
+                return Err("injected discovery failure".to_owned());
+            }
+            kiln_conformance::discover(root).map_err(|error| error.to_string())
+        });
+        let compiler_change = ["crates/kiln-ir/src/lib.rs".to_owned()];
+        let source_change = [format!(
+            "{}/effect/src/one.ts",
+            corpus
+                .path
+                .file_name()
+                .expect("temporary corpus name")
+                .to_string_lossy()
+        )];
+
+        let cold = coordinator
+            .discover(&corpus.path, corpus.path.parent(), Some(&compiler_change))
+            .expect("initial discovery succeeds");
+        assert!(!cold.cache_hit);
+        assert!(
+            coordinator
+                .discover(&corpus.path, corpus.path.parent(), Some(&source_change))
+                .is_err()
+        );
+        let retry = coordinator
+            .discover(&corpus.path, corpus.path.parent(), Some(&compiler_change))
+            .expect("failed discovery is retried");
+        assert!(!retry.cache_hit);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let warm = coordinator
+            .discover(&corpus.path, corpus.path.parent(), Some(&compiler_change))
+            .expect("successful retry becomes reusable");
+        assert!(warm.cache_hit);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn a_panicking_discoverer_publishes_an_error_and_does_not_poison_retry() {
+        let corpus = TemporaryCorpus::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let discover_calls = Arc::clone(&calls);
+        let coordinator = ConformanceCoordinator::with_discoverer(move |root| {
+            if discover_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                panic!("injected discovery panic");
+            }
+            kiln_conformance::discover(root).map_err(|error| error.to_string())
+        });
+
+        let error = match coordinator.discover(&corpus.path, None, None) {
+            Err(error) => error,
+            Ok(_) => panic!("discovery panic must become an ordinary coordinator error"),
+        };
+        assert!(error.contains("discovery panicked"), "{error}");
+        assert!(
+            coordinator
+                .catalog
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .discovering
+                .is_empty()
+        );
+
+        let retry = coordinator
+            .discover(&corpus.path, None, None)
+            .expect("next request retries after a panic");
+        assert!(!retry.cache_hit);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
