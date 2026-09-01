@@ -36,7 +36,7 @@ const RUNTIME_ERROR: i32 = -8;
 #[cfg(feature = "realm")]
 mod realm {
     use super::{INVALID_ARGUMENT, RUNTIME_ERROR};
-    use core::ffi::c_void;
+    use core::ffi::{CStr, c_char, c_void};
     use kiln_host_abi::{
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
@@ -629,6 +629,10 @@ mod realm {
         symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
         value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
+        /// The command line this realm's launcher was started with, copied out of `main`'s
+        /// `argv` before the realm is entered. Each element is its own allocation so that a
+        /// pointer handed to generated C stays put for as long as the realm holds the vector.
+        argv: RefCell<Vec<Box<[u8]>>>,
         entropy: Cell<Option<(u64, u64)>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
@@ -860,6 +864,7 @@ mod realm {
                 symbol_keys: RefCell::new(HashMap::new()),
                 callable_stores: RefCell::new(HashMap::new()),
                 value_slots: RefCell::new(HashMap::new()),
+                argv: RefCell::new(Vec::new()),
                 entropy: Cell::new(None),
                 entered: Cell::new(false),
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
@@ -2025,6 +2030,106 @@ mod realm {
         })
     }
 
+    /// Records the command line one launcher's `main` was handed, on a realm that is not yet
+    /// entered.
+    ///
+    /// The strings are copied here, which is what makes this safe to call with the OS's own
+    /// `argv`: nothing in the realm afterwards depends on that array, or on the environment
+    /// block behind it, still being alive. `argc` is taken as it arrived, so `argv[0]` is the
+    /// executable path exactly as the OS spelled it rather than a path this crate resolved --
+    /// resolving it would make two invocations of the same binary disagree about their own name.
+    ///
+    /// # Safety
+    ///
+    /// `argv` must point to `argc` NUL-terminated C strings, all live for this call.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_set_argv(
+        handle: u64,
+        argc: u64,
+        argv: *const *const c_char,
+    ) -> i32 {
+        ffi(|| {
+            let Some(realm) = realm(handle) else {
+                return INVALID_ARGUMENT;
+            };
+            // A realm that is already running would be handing out pointers into the vector this
+            // call replaces. The launcher sets the command line once, before it enters.
+            if realm.entered.get() {
+                return INVALID_ARGUMENT;
+            }
+            let Ok(count) = usize::try_from(argc) else {
+                return INVALID_ARGUMENT;
+            };
+            if count != 0 && argv.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let mut copied: Vec<Box<[u8]>> = Vec::with_capacity(count);
+            for index in 0..count {
+                // SAFETY: the caller promises `argc` live C strings at `argv`.
+                let entry = unsafe { *argv.add(index) };
+                if entry.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: as above; the string is NUL-terminated and live for this call.
+                let bytes = unsafe { CStr::from_ptr(entry) }.to_bytes();
+                copied.push(bytes.to_vec().into_boxed_slice());
+            }
+            *realm.argv.borrow_mut() = copied;
+            0
+        })
+    }
+
+    /// Reports how many command-line arguments the active Realm was given.
+    ///
+    /// Zero is the honest answer for an embedded realm: nothing called `main`, so there is no
+    /// command line to report and `process.argv` stays empty rather than inventing one.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_argv_count(out_count: *mut u64) -> i32 {
+        ffi(|| {
+            if out_count.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let count = realm.argv.borrow().len() as u64;
+            unsafe { out_count.write(count) };
+            0
+        })
+    }
+
+    /// Borrows one command-line argument from the active Realm.
+    ///
+    /// The bytes stay valid for the life of the realm, which is longer than the generated
+    /// prelude needs them: it copies each one into a language string as it builds `process.argv`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_argv_at(
+        index: u64,
+        out_bytes: *mut *const u8,
+        out_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_bytes.is_null() || out_len.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Ok(index) = usize::try_from(index) else {
+                return INVALID_ARGUMENT;
+            };
+            let argv = realm.argv.borrow();
+            let Some(entry) = argv.get(index) else {
+                return INVALID_ARGUMENT;
+            };
+            unsafe {
+                out_bytes.write(entry.as_ptr());
+                out_len.write(entry.len() as u64);
+            }
+            0
+        })
+    }
+
     /// Advances deterministic SplitMix64 state owned by the active realm.
     ///
     /// The seed is an explicit generated-artifact capability. It must agree on every draw in a
@@ -3129,6 +3234,82 @@ mod realm {
             );
             assert_eq!(kiln_realm_destroy(first_realm), 0);
             assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
+
+        unsafe extern "C" fn reads_realm_argv(context: *mut c_void) -> i32 {
+            let observed = unsafe { &mut *context.cast::<Vec<Vec<u8>>>() };
+            let mut count = 0_u64;
+            if unsafe { kiln_realm_argv_count(&raw mut count) } != 0 {
+                return RUNTIME_ERROR;
+            }
+            for index in 0..count {
+                let mut bytes = ptr::null();
+                let mut len = 0_u64;
+                if unsafe { kiln_realm_argv_at(index, &raw mut bytes, &raw mut len) } != 0 {
+                    return RUNTIME_ERROR;
+                }
+                observed.push(unsafe { std::slice::from_raw_parts(bytes, len as usize) }.to_vec());
+            }
+            // One past the end is a question with no answer, not an empty one.
+            let mut bytes = ptr::null();
+            let mut len = 0_u64;
+            i32::from(
+                unsafe { kiln_realm_argv_at(count, &raw mut bytes, &raw mut len) }
+                    != INVALID_ARGUMENT,
+            )
+        }
+
+        /// The launcher's `argv` is borrowed C memory owned by the OS. Copying it is what lets a
+        /// program keep reading `process.argv` after `main`'s frame has moved on, and what lets
+        /// this test hand over a buffer it then drops before the realm is ever entered.
+        #[test]
+        fn realm_argv_is_copied_from_the_launcher_and_read_back_in_order() {
+            let mut realm = 0;
+            assert_eq!(unsafe { kiln_realm_create(&raw mut realm) }, 0);
+            {
+                let owned: Vec<Vec<u8>> = [b"/tmp/program".as_slice(), b"--flag", b""]
+                    .into_iter()
+                    .map(|entry| {
+                        let mut terminated = entry.to_vec();
+                        terminated.push(0);
+                        terminated
+                    })
+                    .collect();
+                let pointers: Vec<*const c_char> = owned
+                    .iter()
+                    .map(|entry| entry.as_ptr().cast::<c_char>())
+                    .collect();
+                assert_eq!(
+                    unsafe { kiln_realm_set_argv(realm, 3, pointers.as_ptr()) },
+                    0
+                );
+            }
+            let mut observed: Vec<Vec<u8>> = Vec::new();
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(realm, Some(reads_realm_argv), (&raw mut observed).cast())
+                },
+                0
+            );
+            assert_eq!(
+                observed,
+                vec![b"/tmp/program".to_vec(), b"--flag".to_vec(), Vec::new()]
+            );
+            // A realm nobody gave a command line reports none rather than guessing at one.
+            let mut bare = 0;
+            let mut none: Vec<Vec<u8>> = Vec::new();
+            assert_eq!(unsafe { kiln_realm_create(&raw mut bare) }, 0);
+            assert_eq!(
+                unsafe { kiln_realm_enter(bare, Some(reads_realm_argv), (&raw mut none).cast()) },
+                0
+            );
+            assert!(none.is_empty());
+            assert_eq!(
+                unsafe { kiln_realm_set_argv(0, 0, ptr::null()) },
+                INVALID_ARGUMENT
+            );
+            assert_eq!(kiln_realm_destroy(realm), 0);
+            assert_eq!(kiln_realm_destroy(bare), 0);
         }
 
         unsafe extern "C" fn draws_realm_entropy(context: *mut c_void) -> i32 {
@@ -5180,6 +5361,15 @@ mod realm {
         };
         (realm, kiln_realm_value_slot, realm_value_slot) => {
             const _: unsafe extern "C" fn(u32, *mut *mut c_void) -> i32 = kiln_realm_value_slot;
+        };
+        (realm, kiln_realm_set_argv, realm_set_argv) => {
+            const _: unsafe extern "C" fn(u64, u64, *const *const c_char) -> i32 = kiln_realm_set_argv;
+        };
+        (realm, kiln_realm_argv_count, realm_argv_count) => {
+            const _: unsafe extern "C" fn(*mut u64) -> i32 = kiln_realm_argv_count;
+        };
+        (realm, kiln_realm_argv_at, realm_argv_at) => {
+            const _: unsafe extern "C" fn(u64, *mut *const u8, *mut u64) -> i32 = kiln_realm_argv_at;
         };
         (realm, kiln_realm_entropy_word, realm_entropy_word) => {
             const _: unsafe extern "C" fn(u64, *mut u64) -> i32 = kiln_realm_entropy_word;

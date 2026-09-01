@@ -2783,7 +2783,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 4
+#define KILN_REALM_ASYNC_ABI_VERSION 5
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -2858,6 +2858,11 @@ int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);
+/* The command line the launcher's `main` was handed, recorded on the realm before it was
+ * entered. A realm nobody launched -- an embedded module, a unit test -- reports zero, which is
+ * how `process.argv` stays empty instead of naming an executable that does not exist. */
+int kiln_realm_argv_count(uint64_t *out_count);
+int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
 int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
@@ -6932,6 +6937,47 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "pid", 3,
                               kiln_c99_number(1.0), 0, NULL);
+    /* `process.argv` follows node's single-executable-application convention, because a compiled
+     * kiln program is one: there is no separate interpreter to name in slot 0 and no script file
+     * to name in slot 1, so both name the executable and the program's own arguments still start
+     * at index 2 -- which is where every argv-parsing library, and `const [, , first] =
+     * process.argv`, already looks. Reporting a one-element argv would be more literal and would
+     * silently shift every argument by one. */
+    if (status == KILN_C99_OK) {
+        uint64_t argv_count = 0;
+        if (kiln_realm_argv_count(&argv_count) == KILN_C99_OK && argv_count != 0) {
+            const uint8_t *bytes = NULL;
+            uint64_t bytes_len = 0;
+            uint64_t index;
+            status = kiln_realm_argv_at(0, &bytes, &bytes_len);
+            /* Three copies rather than one shared allocation: a `kiln_value` string owns its
+             * bytes, and two array slots plus a property naming the same buffer would be three
+             * owners of one allocation. */
+            for (index = 0; status == KILN_C99_OK && index < 2; ++index) {
+                kiln_value executable = kiln_c99_copy_text((const char *)bytes,
+                                                           (size_t)bytes_len);
+                if (executable.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+                else status = kiln_c99_array_push(argv, executable);
+            }
+            if (status == KILN_C99_OK) {
+                kiln_value executable = kiln_c99_copy_text((const char *)bytes,
+                                                           (size_t)bytes_len);
+                if (executable.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+                else status = kiln_c99_put(NULL, *process, "execPath", 8, executable, 0, NULL);
+            }
+            for (index = 1; status == KILN_C99_OK && index < argv_count; ++index) {
+                kiln_value argument;
+                status = kiln_realm_argv_at(index, &bytes, &bytes_len);
+                if (status != KILN_C99_OK) break;
+                argument = kiln_c99_copy_text((const char *)bytes, (size_t)bytes_len);
+                if (argument.tag != KILN_VALUE_STRING) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                status = kiln_c99_array_push(argv, argument);
+            }
+        }
+    }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
@@ -30346,6 +30392,19 @@ int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
     (void)run;
     if (drop != NULL) drop(work);
     return KILN_C99_OK;
+}
+/* No launcher ran, so there is no command line. The prelude reads zero here and leaves
+ * `process.argv` empty, which is what a harness-hosted realm should report. */
+int kiln_realm_argv_count(uint64_t *out_count) {
+    if (!kiln_test_realm_active || out_count == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_count = 0;
+    return KILN_C99_OK;
+}
+int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len) {
+    (void)index;
+    (void)out_bytes;
+    (void)out_len;
+    return KILN_C99_INVALID_ARGUMENT;
 }
 static int kiln_test_set_timer(double delay_ms,
                                kiln_realm_work_fn run,
