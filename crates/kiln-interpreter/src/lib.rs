@@ -6277,6 +6277,17 @@ impl Value {
             // `typeof Math === "object"` has to find one.
             Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics, _)
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)), _)
+            // `Temporal` and `Temporal.Now` are namespaces for the same reason, and each of the
+            // eight `Temporal.X.prototype` values is an ordinary object. None of the three can be
+            // called. The native backend already answers "object" for the two namespaces, so
+            // "function" here was not merely wrong -- it was the two engines disagreeing
+            // somewhere no probe happened to look.
+            | Self::Native(
+                Native::Temporal(
+                    temporal::Op::Namespace | temporal::Op::Now | temporal::Op::Prototype(_),
+                ),
+                _,
+            )
             | Self::Intl(_) => "object",
             // A Node builtin's default export is the same shape of thing, and the same
             // feature-detection depends on it: `typeof http === "object"` is how a library
@@ -38261,6 +38272,25 @@ fn prototype_of(value: &Value) -> Value {
             Value::Native(Native::Intl(intl::Op::Prototype(built.service())), realm)
         }
         Value::Native(Native::Intl(intl::Op::Prototype(_) | intl::Op::Namespace), _) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm)
+        }
+        // Each of the eight `Temporal` types links to its own prototype, for exactly the reason
+        // an `Intl` formatter links to its service's. Without it the chain a `Temporal` value
+        // reports is empty, and `d instanceof Temporal.PlainDate` is false for a `d` the program
+        // built one line earlier -- a wrong answer rather than a missing one, because
+        // `d.constructor === Temporal.PlainDate` was already true and the brand tag already read
+        // `[object Temporal.PlainDate]`. The methods were found regardless because the value kind
+        // answers them itself, which is why the missing link stayed invisible until something
+        // walked the chain.
+        Value::Temporal(built) => Value::Native(
+            Native::Temporal(temporal::Op::Prototype(built.kind())),
+            realm,
+        ),
+        // And each of those eight prototypes is an ordinary object inheriting `Object.prototype`.
+        // It is not a callable, so it must not take the arm below and claim `Function.prototype`:
+        // `Object.getPrototypeOf(Temporal.PlainDate.prototype)` is what a program checks, and
+        // `Temporal.PlainDate.prototype instanceof Function` must be false.
+        Value::Native(Native::Temporal(temporal::Op::Prototype(_)), _) => {
             Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm)
         }
         // The nine view constructors inherit from `%TypedArray%` rather than straight from
