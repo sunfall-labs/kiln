@@ -1197,6 +1197,7 @@ method_ids! {
     (KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW, 424, Generic),
     (KILN_C99_METHOD_TEXT_ENCODER_ENCODE, 425, Generic),
     (KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE, 426, Direct, NodeHttp),
+    (KILN_C99_METHOD_NODE_QUERYSTRING_PARSE, 427, Direct),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1816,6 +1817,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
     emit_method_define!(KILN_C99_METHOD_TEXT_ENCODER_ENCODE),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
+    emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
@@ -3156,6 +3158,8 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                                           const kiln_value *args, size_t argc,
                                           kiln_value *thrown);
+static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
+static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                     kiln_value source, size_t byte_offset, size_t length,
@@ -4915,6 +4919,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     switch (code) {
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
+    case KILN_C99_METHOD_NODE_QUERYSTRING_PARSE: return "parse";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";
@@ -5396,6 +5401,113 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
         at = pair_end + 1;
     }
     *out = kiln_c99_null();
+    return KILN_C99_OK;
+}
+
+/* Decode one application/x-www-form-urlencoded component. Unlike decodeURIComponent, malformed
+ * percent escapes remain literal and `+` names a space. Query strings are deliberately forgiving:
+ * one bad escape must not make the whole request unreadable. */
+static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) {
+    kiln_text decoded = {NULL, 0, 0};
+    size_t index = 0;
+    int status;
+    while (index < len) {
+        char byte = bytes[index];
+        if (byte == '+') {
+            byte = ' ';
+        } else if (byte == '%' && index + 2 < len) {
+            int high = kiln_c99_hex_digit(bytes[index + 1]);
+            int low = kiln_c99_hex_digit(bytes[index + 2]);
+            if (high >= 0 && low >= 0) {
+                byte = (char)((high << 4) | low);
+                index += 2;
+            }
+        }
+        status = kiln_c99_text_append(&decoded, &byte, 1);
+        if (status != KILN_C99_OK) {
+            free(decoded.bytes);
+            return status;
+        }
+        index += 1;
+    }
+    if (kiln_c99_valid_utf8(decoded.bytes, decoded.len)) {
+        *out = kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+        return KILN_C99_OK;
+    }
+    {
+        kiln_value raw = kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+        uint16_t *units = NULL;
+        size_t count = 0;
+        status = kiln_c99_to_units(raw, &units, &count);
+        if (status == KILN_C99_OK) {
+            *out = kiln_c99_from_units(units, count);
+            if (out->tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+        }
+        free(units);
+        free(decoded.bytes);
+        return status;
+    }
+}
+
+/* The interpreter-first querystring surface: parse/decode form data into an own-property object,
+ * preserving the first `=` and collecting repeated names in encounter order. Definition-style
+ * insertion is intentional: a decoded `__proto__` is data, not a request to relink the result. */
+static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc) {
+    kiln_value input = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_copy_text("", 0);
+    size_t at = 0;
+    int status;
+    if (input.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    while (at < input.len) {
+        size_t pair_end = at;
+        size_t equal;
+        kiln_value name;
+        kiln_value value;
+        kiln_object *object;
+        kiln_property *property = NULL;
+        size_t index;
+        while (pair_end < input.len && input.ptr[pair_end] != '&') pair_end += 1;
+        if (pair_end == at) {
+            at = pair_end + 1;
+            continue;
+        }
+        equal = at;
+        while (equal < pair_end && input.ptr[equal] != '=') equal += 1;
+        status = kiln_c99_form_decode(input.ptr + at, equal - at, &name);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_form_decode(equal < pair_end ? input.ptr + equal + 1 : "",
+                                      equal < pair_end ? pair_end - equal - 1 : 0, &value);
+        if (status != KILN_C99_OK) {
+            free((void *)name.ptr);
+            return status;
+        }
+        object = kiln_c99_object_of(*out);
+        for (index = 0; index < object->count; ++index) {
+            if (kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
+                property = &object->properties[index];
+                break;
+            }
+        }
+        if (property == NULL) {
+            status = kiln_c99_own_slot(*out, name.ptr, name.len, &property);
+            if (status == KILN_C99_OK) property->value = value;
+        } else {
+            kiln_value previous = property->value;
+            free((void *)name.ptr);
+            if (previous.tag == KILN_VALUE_ARRAY) {
+                status = kiln_c99_array_push(previous, value);
+            } else {
+                kiln_value values;
+                status = kiln_c99_new_array(&values);
+                if (status == KILN_C99_OK) status = kiln_c99_array_push(values, previous);
+                if (status == KILN_C99_OK) status = kiln_c99_array_push(values, value);
+                if (status == KILN_C99_OK) property->value = values;
+            }
+        }
+        if (status != KILN_C99_OK) return status;
+        at = pair_end + 1;
+    }
     return KILN_C99_OK;
 }
 
@@ -14342,6 +14454,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_NODE_URL_PARSE) {
         return kiln_c99_url_construct(result, args, argc, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_QUERYSTRING_PARSE) {
+        return kiln_c99_node_querystring_parse(result, args, argc);
     }
     if (code == KILN_C99_METHOD_NODE_ASYNC_RESOURCE) {
         kiln_value resource = receiver;
