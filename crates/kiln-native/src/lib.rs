@@ -5254,17 +5254,17 @@ mod tests {
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
         // Same tripwire as the provider pin below, for the module ABI: it moved
-        // generator-3 -> generator-14 as generator semantics advanced. Update it
+        // generator-3 -> generator-15 as generator semantics advanced. Update it
         // with the change that moves it, so an *unintended* bump still fails here.
-        assert_eq!(module_abi_identity(), "host-2;c-1;generator-14");
+        assert_eq!(module_abi_identity(), "host-2;c-1;generator-15");
         assert!(runtime_abi_identity().contains("async-4"));
         // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
         // would silently invalidate every cached native artifact. When the bump is intended,
-        // update this with the change that makes it -- it went 15 -> 16 when HTTP close modes
-        // grew and nothing moved the expectation, leaving main red.
+        // update this with the change that makes it -- it went 17 -> 18 when callable stores
+        // moved into the realm.
         assert_eq!(
             native_number_abi_identity(),
-            "kiln-native-number-provider-16"
+            "kiln-native-number-provider-18"
         );
     }
 
@@ -6636,7 +6636,7 @@ const server = createServer((request, response) => {
   });
   setTimeout(() => { console.log("timer"); response.end("delayed"); }, 0);
   console.log("before-close");
-  server.close();
+  server.close(() => console.log("server-close"));
   console.log("after-close", request.socket.readyState);
 });
 server.httpAllowHalfOpen = true;
@@ -6732,7 +6732,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         assert_eq!(rest.matches("socket-close:").count(), 1, "stdout={rest:?}");
         assert_eq!(
             rest,
-            "request\nbefore-close\nafter-close open\ntimer\nsocket-close:1\n"
+            "request\nbefore-close\nafter-close open\ntimer\nsocket-close:1\nserver-close\n"
         );
     }
 
