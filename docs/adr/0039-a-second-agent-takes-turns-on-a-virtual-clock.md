@@ -1,4 +1,4 @@
-# ADR 0038: A second agent takes turns on a virtual clock, and needs no concurrency crate
+# ADR 0039: A second agent takes turns on a virtual clock, and needs no concurrency crate
 
 ## Status
 
@@ -8,6 +8,9 @@ Applies ADR 0029's adoption rule to the agent scheduler in `kiln-interpreter`, a
 0012's virtual clock from one realm's timers to the ordering between agents. It does not change
 ADR 0028's runtime decision: it uses the clause that already says additional runtime threads
 create additional current-thread runtimes rather than moving a live realm.
+
+It also needs ADR 0031's per-realm intrinsics, which is what makes a second agent's realm
+constructible on its own terms rather than as a copy of the first's.
 
 ## Context
 

@@ -39,7 +39,7 @@
 //! the clock is allowed to move anyway. The bound is a constant, so this stays a function of the
 //! program.
 //!
-//! # Why `std` and not `parking_lot` or `crossbeam` (ADR 0029, ADR 0038)
+//! # Why `std` and not `parking_lot` or `crossbeam` (ADR 0029, ADR 0039)
 //!
 //! Both crates are mature and both were considered. `parking_lot::Mutex` and its futex-backed
 //! `park`/`unpark` map almost onto `Atomics.wait`/`notify` -- and that is the reason they are
