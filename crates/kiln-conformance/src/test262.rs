@@ -337,7 +337,7 @@ fn run_variant_uncaught(
     }
 
     let (program, strictness) =
-        match kiln_ir::compile_with_strictness(&module, kiln_ir::CompileOptions::default()) {
+        match kiln_ir::compile_with_strictness(&module, script_compile_options()) {
             Ok(compiled) => compiled,
             Err(compile_diagnostics) => {
                 let unsupported = compile_diagnostics
@@ -413,6 +413,19 @@ fn run_variant_uncaught(
     }
 }
 
+/// A Test262 case is *global code*, so its top-level `var` and function declarations belong to
+/// the global object and not to a frame of their own.
+///
+/// Said here rather than derived from the parse goal, because kiln parses a CommonJS body with
+/// the script grammar too and a CommonJS body has a variable environment of its own. The module
+/// flag is handled inside the compiler, which refuses global code for a Module goal.
+fn script_compile_options() -> kiln_ir::CompileOptions {
+    kiln_ir::CompileOptions {
+        global_code: true,
+        ..kiln_ir::CompileOptions::default()
+    }
+}
+
 fn execute_positive(
     is_async: bool,
     module: &kiln_hir::Module,
@@ -423,7 +436,7 @@ fn execute_positive(
     started: Instant,
 ) -> CaseResult {
     let (program, strictness) =
-        match kiln_ir::compile_with_strictness(module, kiln_ir::CompileOptions::default()) {
+        match kiln_ir::compile_with_strictness(module, script_compile_options()) {
             Ok(compiled) => compiled,
             Err(compile_diagnostics) => {
                 return compile_failure(compile_diagnostics, diagnostics, prefix_len, started);
