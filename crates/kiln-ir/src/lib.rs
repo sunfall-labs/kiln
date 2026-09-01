@@ -1959,6 +1959,21 @@ struct Compiler {
     /// One-shot rather than a stack because it is read exactly once, at the function boundary it
     /// was set for: everything nested inside then reads `super_property` instead.
     next_is_method: bool,
+    /// The hidden binding holding `this` while a *derived* constructor runs, if that is what is
+    /// being compiled.
+    ///
+    /// A derived constructor's `this` does not exist until `super()` returns -- reading it before
+    /// then is a `ReferenceError`, and so is returning without having called `super()` at all.
+    /// Kiln allocates the instance up front, so there was no moment at which `this` was absent
+    /// and every one of those reads answered with a half-built object instead.
+    ///
+    /// A binding rather than a flag on the frame, because the check it needs is exactly the
+    /// temporal dead zone every `let` already has: an uninitialised cell, read through
+    /// `LoadCell`. That costs no new instruction, and -- what matters more -- the C backend
+    /// refuses nothing and implements nothing new, so the two cannot disagree about it.
+    this_binding: Option<String>,
+    /// Monotonic, for the reason `home_binding_count` is.
+    this_binding_count: usize,
     /// Whether the code being compiled is a class field initialiser or a `static {}` block.
     ///
     /// Kiln emits an instance field's initialiser straight into the constructor and a static
@@ -2052,6 +2067,8 @@ impl Compiler {
             home_binding_count: 0,
             in_function: false,
             super_property: false,
+            this_binding: None,
+            this_binding_count: 0,
             next_is_method: false,
             field_initialiser: false,
             scopes: vec![HashMap::new()],
@@ -4898,7 +4915,7 @@ impl Compiler {
                 arguments,
                 optional,
             } => self.call(callee, arguments, *optional, expression.span),
-            ExpressionKind::This => self.code.push(Instruction::LoadThis),
+            ExpressionKind::This => self.load_this(),
             // `undefined` in a field initialiser: the initialiser is its own function to the
             // language, and reading the frame's `new.target` there answered `C` for
             // `class C { x = new.target }` because Kiln emits the initialiser into the
@@ -4941,6 +4958,7 @@ impl Compiler {
                     self.load_super();
                     self.array_literal(arguments, expression.span);
                     self.code.push(Instruction::SuperApply);
+                    self.store_this_binding();
                     self.emit_elements_after_super(expression.span);
                     return;
                 }
@@ -4960,6 +4978,7 @@ impl Compiler {
                 self.code.push(Instruction::SuperCall {
                     argc: arguments.len() as u16,
                 });
+                self.store_this_binding();
                 self.emit_elements_after_super(expression.span);
             }
             // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
@@ -4971,7 +4990,9 @@ impl Compiler {
             }
             ExpressionKind::SuperMember { property } => {
                 // `super.m` resolves on the prototype of the object this method was defined on,
-                // not on `this` and not on the parent constructor.
+                // not on `this` and not on the parent constructor -- but it is still a reference
+                // *with* a `this`, so writing one before `super()` is the same ReferenceError.
+                self.require_this_binding();
                 self.load_home_prototype();
                 let name = self.constant_index(Constant::String(property.clone()));
                 self.code.push(Instruction::LoadSuperProperty(name));
@@ -4979,6 +5000,7 @@ impl Compiler {
             ExpressionKind::SuperComputedMember { property } => {
                 // The key first, then the prototype: `super[f()]` runs `f` before it asks the
                 // home object what it inherits from.
+                self.require_this_binding();
                 self.expression(property);
                 self.load_home_prototype();
                 self.code.push(Instruction::LoadSuperElement);
@@ -6072,6 +6094,89 @@ impl Compiler {
     /// The value is stored later, by [`Compiler::store_home_binding`], because the object it
     /// names does not exist yet when the methods that capture it are compiled -- a method
     /// closes over the *binding*, and reads it when it runs.
+    /// Reserve the hidden binding a derived constructor's `this` lives in, in its dead zone.
+    ///
+    /// Not `variable`, which would store `undefined` into it and so take it straight back out of
+    /// the zone. The cell is created and marked uninitialised and nothing else: the only thing
+    /// that fills it is the `super()` that brings the instance into existence.
+    fn declare_this_binding(&mut self) -> String {
+        let binding = format!("%this{}", self.this_binding_count);
+        self.this_binding_count += 1;
+        self.captured.insert(binding.clone());
+        let slot = self.local_count;
+        self.local_count += 1;
+        let scope = self.scopes.len() - 1;
+        self.scopes[scope].insert(
+            binding.clone(),
+            Local {
+                slot,
+                kind: VariableKind::Let,
+                imported: false,
+                // Initialised as far as *resolution* is concerned: the check is the cell's, at
+                // run time, because `super()` may be written in a branch or in an arrow and no
+                // compile-time flag can say whether it ran.
+                initialized: true,
+                celled: true,
+            },
+        );
+        self.code.push(Instruction::NewCell(slot));
+        self.code.push(Instruction::MarkUninitialized(slot));
+        binding
+    }
+
+    /// Push `this` from the hidden binding, raising the dead zone's `ReferenceError` if `super()`
+    /// has not run.
+    fn load_this_binding(&mut self, binding: &str) {
+        match self.resolve_or_capture(binding) {
+            Resolution::Local(local) => self.code.push(Instruction::LoadCell(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            _ => {
+                self.error(None, "a derived constructor's `this` binding lost its cell");
+                self.code.push(Instruction::LoadThis);
+            }
+        }
+    }
+
+    /// Record that `super()` has returned, so `this` may be read from here on.
+    ///
+    /// A second `super()` therefore does *not* raise -- the binding is simply written again.
+    /// That is a narrower fix than the specification's, which makes the second call a
+    /// `ReferenceError`, and it is named rather than hidden: what is fixed here is reading `this`
+    /// too early, not calling `super()` twice.
+    fn store_this_binding(&mut self) {
+        let Some(binding) = self.this_binding.clone() else {
+            return;
+        };
+        self.code.push(Instruction::LoadThis);
+        match self.resolve_or_capture(&binding) {
+            Resolution::Local(local) => self.code.push(Instruction::StoreCell(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::StoreUpvalue(index)),
+            _ => {
+                self.error(None, "a derived constructor's `this` binding lost its cell");
+                self.code.push(Instruction::Pop);
+            }
+        }
+    }
+
+    /// Push `this`, from wherever this context keeps it.
+    fn load_this(&mut self) {
+        match self.this_binding.clone() {
+            Some(binding) => self.load_this_binding(&binding),
+            None => self.code.push(Instruction::LoadThis),
+        }
+    }
+
+    /// `GetThisBinding()`, for its effect only.
+    ///
+    /// `super.x` resolves against `this` even though it does not read it, so writing one before
+    /// `super()` in a derived constructor is a `ReferenceError` just as writing `this` is.
+    fn require_this_binding(&mut self) {
+        if self.this_binding.is_some() {
+            self.load_this();
+            self.code.push(Instruction::Pop);
+        }
+    }
+
     fn declare_home_binding(&mut self, span: Span) -> String {
         let binding = format!("%home{}", self.home_binding_count);
         self.home_binding_count += 1;
@@ -6126,12 +6231,18 @@ impl Compiler {
     fn emit_field_value(&mut self, field: &ClassField) {
         let outer_super_property = std::mem::replace(&mut self.super_property, true);
         let outer_field_initialiser = std::mem::replace(&mut self.field_initialiser, true);
+        // An initialiser is its own function to the language, so its `this` is the instance
+        // being built rather than any enclosing constructor's dead-zoned binding. An instance
+        // field only runs after `super()` anyway; a *static* one is emitted where the class is
+        // defined, which may be inside a derived constructor that has not called it yet.
+        let outer_this_binding = self.this_binding.take();
         match &field.value {
             Some(value) => self.expression(value),
             None => self.push_constant(Constant::Undefined),
         }
         self.super_property = outer_super_property;
         self.field_initialiser = outer_field_initialiser;
+        self.this_binding = outer_this_binding;
     }
 
     fn load_local_or_cell(&mut self, local: Local) {
@@ -6445,10 +6556,16 @@ impl Compiler {
         let outer_in_function = self.in_function;
         let outer_super_property = self.super_property;
         let outer_field_initialiser = self.field_initialiser;
+        let outer_this_binding = self.this_binding.take();
         if !function.arrow {
             self.in_function = true;
             self.super_property = method;
             self.field_initialiser = false;
+        } else {
+            // An arrow has no `this` of its own, so it reads the enclosing one -- including a
+            // derived constructor's, which is what makes `constructor() { const go = () =>
+            // super(); go(); }` legal and its `this` still dead until `go` runs.
+            self.this_binding.clone_from(&outer_this_binding);
         }
         // A function body has a variable environment of its own, whatever encloses it: `var i`
         // inside a function written at the top of a script is that call's binding and not a
@@ -6466,6 +6583,36 @@ impl Compiler {
             cell_everything: std::mem::replace(&mut self.cell_everything, cell_everything),
         };
         self.enclosing.push(outer);
+
+        // A class constructor is not callable. `[[Call]]` on one throws before it looks at an
+        // argument, which is why this is the first thing in the body rather than part of the
+        // parameter prologue: `Derived.apply(obj, new Array(100))` must throw without binding a
+        // hundred parameters, and `C()` on a class whose constructor has a default must throw
+        // without running it.
+        //
+        // Emitted as ordinary bytecode rather than a flag on the proto, because `new.target` is
+        // exactly the question being asked and every backend already answers it -- so the C
+        // backend gets the same refusal from the same instructions rather than a second
+        // implementation that could disagree with this one.
+        if class.is_some() {
+            self.code.push(Instruction::LoadNewTarget);
+            let constructed = self.emit_jump(Instruction::JumpIfNotNullish(0));
+            self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+            self.push_constant(Constant::String(match &function.name {
+                Some(name) if !name.is_empty() => {
+                    format!("Class constructor {name} cannot be invoked without 'new'")
+                }
+                _ => "Class constructor cannot be invoked without 'new'".to_owned(),
+            }));
+            self.code.push(Instruction::New { argc: 1 });
+            self.code.push(Instruction::Throw);
+            self.patch_jump(constructed);
+        }
+
+        // A derived constructor's `this` starts in a dead zone that only `super()` ends.
+        if class.as_ref().is_some_and(|class| class.derived) {
+            self.this_binding = Some(self.declare_this_binding());
+        }
 
         // A captured parameter arrives as a plain value in its slot, so the cell has to be
         // created and seeded before the body can read it.
@@ -6532,6 +6679,7 @@ impl Compiler {
                 self.load_super();
                 self.code.push(Instruction::SuperForward);
                 self.code.push(Instruction::Pop);
+                self.store_this_binding();
             }
             // A derived class with a constructor of its own installs its elements when *that*
             // constructor's `super()` returns, which is a place only the body knows. Anywhere
@@ -6554,10 +6702,15 @@ impl Compiler {
         if class.is_some() {
             self.pending_elements.pop();
         }
-        // Falling off the end of a function returns undefined. Emitted unconditionally rather
-        // than only when the body cannot fall through: proving that needs flow analysis, and an
-        // unreachable epilogue costs two instructions.
-        self.push_constant(Constant::Undefined);
+        // Falling off the end of a function returns undefined -- except a derived constructor,
+        // which returns `this`, and so raises the dead zone's ReferenceError when it reaches
+        // here without having called `super()`. Emitted unconditionally rather than only when
+        // the body cannot fall through: proving that needs flow analysis, and an unreachable
+        // epilogue costs two instructions.
+        match self.this_binding.clone() {
+            Some(binding) => self.load_this_binding(&binding),
+            None => self.push_constant(Constant::Undefined),
+        }
         self.code.push(Instruction::Return);
 
         let restored = self
@@ -6570,6 +6723,7 @@ impl Compiler {
         self.in_function = outer_in_function;
         self.super_property = outer_super_property;
         self.field_initialiser = outer_field_initialiser;
+        self.this_binding = outer_this_binding;
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
@@ -6607,20 +6761,40 @@ impl Compiler {
             self.error(Some(span), "`return` outside of a function");
             return;
         }
+        // `return;` in a derived constructor yields `this`, and reading it is what makes
+        // returning before `super()` a ReferenceError. But the read happens where `[[Construct]]`
+        // does it -- *after* the cleanups -- because a `finally` is allowed to be where `super()`
+        // is called: `constructor() { try { return; } finally { super(); } }` constructs, and
+        // reading `this` at the `return` would have refused it.
+        let deferred_this = value.is_none() && self.this_binding.is_some();
         match value {
             Some(value) => self.expression(value),
+            None if deferred_this => {}
+            // Anywhere else a bare `return` is `undefined`, and reaching for `this` there would
+            // have made every one of them answer with the receiver.
             None => self.push_constant(Constant::Undefined),
         }
         if !self.finalizers.is_empty() {
-            // The value is computed before the cleanups run -- that is the observable order --
-            // but the cleanups may use the stack, so it is parked in a local across them.
-            let slot = format!("%ret{}", self.hidden_bindings);
-            self.hidden_bindings += 1;
-            self.scopes.push(HashMap::new());
-            self.declare_bound(VariableKind::Let, &slot, span);
-            self.unwind_finalizers(self.function_finalizer_depth);
-            self.load_hidden(&slot);
-            self.scopes.pop().expect("return scope was just pushed");
+            if deferred_this {
+                self.unwind_finalizers(self.function_finalizer_depth);
+            } else {
+                // The value is computed before the cleanups run -- that is the observable order
+                // -- but the cleanups may use the stack, so it is parked in a local across them.
+                let slot = format!("%ret{}", self.hidden_bindings);
+                self.hidden_bindings += 1;
+                self.scopes.push(HashMap::new());
+                self.declare_bound(VariableKind::Let, &slot, span);
+                self.unwind_finalizers(self.function_finalizer_depth);
+                self.load_hidden(&slot);
+                self.scopes.pop().expect("return scope was just pushed");
+            }
+        }
+        if deferred_this {
+            let binding = self
+                .this_binding
+                .clone()
+                .expect("a deferred `this` has a binding to read");
+            self.load_this_binding(&binding);
         }
         self.code.push(Instruction::Return);
     }
@@ -7352,7 +7526,7 @@ impl Compiler {
             // `Object.prototype.toString` is not a constructor. `SuperCall` now means `super()`
             // and nothing else.
             ExpressionKind::SuperMember { .. } | ExpressionKind::SuperComputedMember { .. } => {
-                self.code.push(Instruction::LoadThis);
+                self.load_this();
                 self.expression(callee);
                 self.array_literal(arguments, span);
                 self.code.push(Instruction::Apply);
