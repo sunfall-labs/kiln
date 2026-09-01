@@ -1634,6 +1634,16 @@ struct Compiler {
     /// tell a borrowed binding from one of its own: a sloppy `var` takes the caller's over, and
     /// everything else shadows it.
     outer_names: HashSet<String>,
+    /// Names of the block-level function declarations Annex B B.3.2.1/B.3.3.2 gives a var-scoped
+    /// binding in the body being compiled.
+    ///
+    /// `{ function f() {} }` is two bindings, not one: a block-scoped one, which is all the main
+    /// grammar creates, and -- in sloppy code -- a var-scoped one in the enclosing function or
+    /// script, which the declaration writes to as it is evaluated. Legacy, and load-bearing:
+    /// bundled JavaScript still relies on it. Names that are blocked -- by a lexical declaration
+    /// between here and the block, by a formal parameter, or by being `arguments` -- are never in
+    /// this set, so the write is emitted only where the specification asks for it.
+    annexb_var_functions: HashSet<String>,
     /// Box every binding of the function being compiled, not only the ones a nested function
     /// names.
     ///
@@ -1795,6 +1805,7 @@ impl Compiler {
             module_body: false,
             parameter_dead_zone: false,
             outer_names: HashSet::new(),
+            annexb_var_functions: HashSet::new(),
             // Module scope is boxed too when the module contains a direct eval: a script's
             // top-level bindings are exactly the ones an eval written there can see.
             cell_everything: body_contains_direct_eval(&module.body),
@@ -1839,6 +1850,9 @@ impl Compiler {
         // A module body is a variable environment like a function's, so its `var`s are hoisted
         // to the top of it rather than to the top of whichever block they were written in.
         self.hoist_var_names(&module.body);
+        // Script code, so B.3.3.2 rather than B.3.2.1: there are no parameters to decline for.
+        // A module body is strict and `hoist_annexb_function_names` returns immediately for it.
+        self.hoist_annexb_function_names(&module.body, &HashSet::new());
         self.plain_statements(&module.body);
         self.push_constant(Constant::Undefined);
         self.code.push(Instruction::Return);
@@ -1863,6 +1877,7 @@ impl Compiler {
         // The same three passes `statements` makes -- names, then hoisted function values, then
         // the rest -- with the expression statements diverted into the completion slot.
         self.hoist_var_names(&module.body);
+        self.hoist_annexb_function_names(&module.body, &HashSet::new());
         for statement in &module.body {
             self.hoist_names(statement);
         }
@@ -3214,6 +3229,67 @@ impl Compiler {
             // A function owns its own `var`s, and everything else declares nothing.
             _ => {}
         }
+    }
+
+    /// Give every block-level function declaration the var-scoped binding Annex B promises it.
+    ///
+    /// B.3.2.1 for a function body and B.3.3.2 for a script: in sloppy code a `FunctionDeclaration`
+    /// directly inside a `Block`, a `CaseClause`, a `DefaultClause` or an `if` branch also
+    /// declares a `var` of the same name in the enclosing variable environment, initialised to
+    /// `undefined` and written when the declaration is evaluated. It is the reason
+    /// `{ function f() {} } typeof f` is `"function"` in a browser and `"undefined"` under a
+    /// reading of the main grammar alone, and bundlers still emit code that depends on it.
+    ///
+    /// A name is skipped when replacing the declaration with a `var` would be an early error --
+    /// a `let`, `const`, `class` or `using` of the same name anywhere between the variable
+    /// environment and the block, a destructured catch parameter -- and, in a function, when it
+    /// is a formal parameter or `arguments`. `blocked` carries exactly those names down.
+    fn hoist_annexb_function_names(&mut self, body: &[Statement], parameters: &HashSet<String>) {
+        if self.strict {
+            return;
+        }
+        let mut blocked: Vec<String> = parameters.iter().cloned().collect();
+        let mut names = Vec::new();
+        collect_annexb_function_names(body, false, &mut blocked, &mut names);
+        for name in names {
+            if self.annexb_var_functions.contains(&name) {
+                continue;
+            }
+            // A `var` or a top-level function declaration of the same name already owns the
+            // binding; Annex B only adds the write, never a second slot.
+            self.predeclare(VariableKind::Var, &name, true);
+            self.annexb_var_functions.insert(name);
+        }
+    }
+
+    /// The var-scoped write Annex B adds to a block-level function declaration's evaluation.
+    ///
+    /// Emitted after the block-scoped binding has been given its value, and reading that binding
+    /// rather than rebuilding the closure: the specification copies what the block holds, so the
+    /// two bindings start as the same function object and diverge from there --
+    /// `{ function f() {} f = 123; }` leaves the outer `f` a function.
+    fn emit_annexb_var_write(&mut self, name: &str, block: Local) {
+        if !self.annexb_var_functions.contains(name) {
+            return;
+        }
+        let Some(target) = self.scopes[0].get(name).copied() else {
+            return;
+        };
+        // The declaration is at the top level of the variable environment after all, so the
+        // binding it just wrote *is* the var-scoped one.
+        if target.slot == block.slot {
+            return;
+        }
+        self.code.push(if block.celled {
+            Instruction::LoadCell(block.slot)
+        } else {
+            Instruction::LoadLocal(block.slot)
+        });
+        self.code.push(if target.celled {
+            Instruction::StoreCell(target.slot)
+        } else {
+            Instruction::StoreLocal(target.slot)
+        });
     }
 
     /// Allocate a slot for a name the block declares, leaving its value for the declaration.
@@ -5735,6 +5811,7 @@ impl Compiler {
                 } else {
                     Instruction::StoreLocal(local.slot)
                 });
+                self.emit_annexb_var_write(&name, local);
             }
             // The binding was just created in the current function's innermost scope, so any
             // other resolution means the scope bookkeeping is inconsistent.
@@ -5920,6 +5997,19 @@ impl Compiler {
         }
 
         let parameter_count = function.parameters.len() as u32;
+        // Annex B declines to give a block-level function declaration a var-scoped binding when
+        // the name is a formal parameter or `arguments`: the call already owns that binding, and
+        // the block's function must not take it over. `arguments` is here even when the function
+        // never mentions it, because the object exists whether or not it is named.
+        let mut parameter_names: HashSet<String> = parameters.keys().cloned().collect();
+        if let Some(rest) = &function.rest {
+            let mut rest_names = Vec::new();
+            pattern_names_in_order(rest, &mut rest_names);
+            parameter_names.extend(rest_names);
+        }
+        if !function.arrow {
+            parameter_names.insert("arguments".to_owned());
+        }
         // A rest parameter is already excluded: it lives in `function.rest` rather than among
         // the positional ones, so counting stops at the first default on its own.
         let declared_length = function
@@ -6027,6 +6117,9 @@ impl Compiler {
         // are established here rather than wherever the block containing it happens to be
         // compiled.
         self.hoist_var_names(&function.body);
+        // After the `var`s, because Annex B only adds a binding a `var` did not already make --
+        // and after the parameters, whose names it must not take over.
+        self.hoist_annexb_function_names(&function.body, &parameter_names);
         if let Some(class) = &class {
             if class.forwards_to_super {
                 // `super(...arguments)`, and nothing else can run before it -- so by the line
@@ -8211,6 +8304,176 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
     }
 }
+/// The block-level function declarations Annex B gives a var-scoped binding, in source order.
+///
+/// `nested` says whether this list is one the specification calls a `Block`, `CaseClause` or
+/// `DefaultClause` rather than the top level of the variable environment: a declaration written
+/// at the top level is already var-scoped by the main grammar and is not Annex B's business.
+///
+/// `blocked` is every name a lexical declaration between the variable environment and here has
+/// taken, because replacing the function declaration with a `var` of that name would be an early
+/// error and Annex B declines exactly when it would be.
+fn collect_annexb_function_names(
+    body: &[Statement],
+    nested: bool,
+    blocked: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
+    let depth = blocked.len();
+    for statement in body {
+        collect_lexical_names(statement, blocked);
+    }
+    for statement in body {
+        if nested
+            && let StatementKind::Function(function) = &statement.kind
+            && let Some(name) = &function.name
+            // Only a plain function declaration. A generator or an async function inside a block
+            // is block-scoped and nothing more; Annex B never mentions either.
+            && !function.generator
+            && !function.asynchronous
+            && !blocked.contains(name)
+            && !out.contains(name)
+        {
+            out.push(name.clone());
+        }
+        collect_annexb_in_statement(statement, blocked, out);
+    }
+    blocked.truncate(depth);
+}
+
+/// Walk one statement for the nested lists Annex B looks inside, without leaving this variable
+/// environment: a nested function owns its own, and so does a class body.
+fn collect_annexb_in_statement(
+    statement: &Statement,
+    blocked: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
+    match &statement.kind {
+        StatementKind::Block(body) => collect_annexb_function_names(body, true, blocked, out),
+        StatementKind::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            collect_annexb_branch(consequent, blocked, out);
+            if let Some(alternate) = alternate {
+                collect_annexb_branch(alternate, blocked, out);
+            }
+        }
+        StatementKind::While { body, .. } | StatementKind::DoWhile { body, .. } => {
+            collect_annexb_in_statement(body, blocked, out);
+        }
+        // A label does not open a scope, so a declaration under one is at whatever level the
+        // label is: `l: function f() {}` at the top of a body is var-scoped already.
+        StatementKind::Labelled { body, .. } => collect_annexb_in_statement(body, blocked, out),
+        StatementKind::With { body, .. } => collect_annexb_in_statement(body, blocked, out),
+        StatementKind::For { init, body, .. } => {
+            let depth = blocked.len();
+            if let Some(init) = init {
+                collect_lexical_names(init, blocked);
+            }
+            collect_annexb_in_statement(body, blocked, out);
+            blocked.truncate(depth);
+        }
+        StatementKind::ForIn {
+            kind, name, body, ..
+        } => {
+            let depth = blocked.len();
+            if *kind != VariableKind::Var {
+                blocked.push(name.clone());
+            }
+            collect_annexb_in_statement(body, blocked, out);
+            blocked.truncate(depth);
+        }
+        StatementKind::ForOf {
+            kind,
+            pattern,
+            body,
+            ..
+        } => {
+            let depth = blocked.len();
+            if *kind != VariableKind::Var {
+                pattern_names_in_order(pattern, blocked);
+            }
+            collect_annexb_in_statement(body, blocked, out);
+            blocked.truncate(depth);
+        }
+        // Every clause of a `switch` shares one lexical scope, so a `let` in any of them blocks
+        // a function declaration in all of them.
+        StatementKind::Switch { cases, .. } => {
+            let depth = blocked.len();
+            for case in cases {
+                for statement in &case.body {
+                    collect_lexical_names(statement, blocked);
+                }
+            }
+            for case in cases {
+                for statement in &case.body {
+                    if let StatementKind::Function(function) = &statement.kind
+                        && let Some(name) = &function.name
+                        && !function.generator
+                        && !function.asynchronous
+                        && !blocked.contains(name)
+                        && !out.contains(name)
+                    {
+                        out.push(name.clone());
+                    }
+                    collect_annexb_in_statement(statement, blocked, out);
+                }
+            }
+            blocked.truncate(depth);
+        }
+        StatementKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            collect_annexb_function_names(block, true, blocked, out);
+            if let Some(handler) = handler {
+                // B.3.4 removes the early error for `catch (e) { var e; }`, so a catch parameter
+                // does not block -- and the HIR carries only the simple form, which is exactly
+                // the one the exemption is written for.
+                collect_annexb_function_names(&handler.body, true, blocked, out);
+            }
+            collect_annexb_function_names(finalizer, true, blocked, out);
+        }
+        _ => {}
+    }
+}
+
+/// An `if` branch is a statement rather than a list, and a function declaration written directly
+/// as one is the form Annex B B.3.4 exists for: `if (x) function f() {}`.
+fn collect_annexb_branch(statement: &Statement, blocked: &mut Vec<String>, out: &mut Vec<String>) {
+    if let StatementKind::Function(function) = &statement.kind
+        && let Some(name) = &function.name
+        && !function.generator
+        && !function.asynchronous
+        && !blocked.contains(name)
+        && !out.contains(name)
+    {
+        out.push(name.clone());
+    }
+    collect_annexb_in_statement(statement, blocked, out);
+}
+
+/// The names one statement declares lexically, which are the ones a `var` of the same name could
+/// not join.
+fn collect_lexical_names(statement: &Statement, names: &mut Vec<String>) {
+    match &statement.kind {
+        StatementKind::Variable { kind, declarations } if *kind != VariableKind::Var => {
+            for declaration in declarations {
+                pattern_names_in_order(&declaration.pattern, names);
+            }
+        }
+        StatementKind::Class(class) => {
+            if let Some(name) = &class.name {
+                names.push(name.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
