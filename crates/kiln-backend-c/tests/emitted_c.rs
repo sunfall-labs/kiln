@@ -72,6 +72,7 @@ fn function(
         async_generator: false,
         parameter_count,
         declared_length: parameter_count,
+        mapped_arguments: false,
         local_count,
         code,
         upvalues,

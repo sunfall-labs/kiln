@@ -10,6 +10,7 @@ static const char kiln_module_27fa8b6597e5ef7e31f23509c9a5d6af_name_0[] = "read"
 static int kiln_module_27fa8b6597e5ef7e31f23509c9a5d6af_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {
     size_t sp = 0;
     size_t slot;
+    kiln_c99_frame_mapped_arguments = 0;
     kiln_value stack[1];
     kiln_value locals[1];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
