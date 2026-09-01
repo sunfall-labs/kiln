@@ -28634,6 +28634,10 @@ static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
+static kiln_value kiln_test_value_slots[3];
+static uint64_t kiln_test_entropy_seed = 0;
+static uint64_t kiln_test_entropy_state = 0;
+static int kiln_test_entropy_initialized = 0;
 static void *kiln_test_owned_pointers[4096];
 static kiln_drop_opaque_fn kiln_test_owned_drops[4096];
 static size_t kiln_test_owned_count = 0;
@@ -28741,6 +28745,29 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     kiln_test_callable_codes[index] = code;
     kiln_test_callable_stores[index] = candidate;
     *out_store = candidate;
+    return KILN_C99_OK;
+}
+int kiln_realm_value_slot(uint32_t key, void **out_slot) {
+    if (!kiln_test_realm_active || key == 0 || key > 3 || out_slot == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    *out_slot = &kiln_test_value_slots[key - 1];
+    return KILN_C99_OK;
+}
+int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word) {
+    uint64_t mixed;
+    if (!kiln_test_realm_active || out_word == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (!kiln_test_entropy_initialized) {
+        kiln_test_entropy_seed = seed;
+        kiln_test_entropy_state = seed;
+        kiln_test_entropy_initialized = 1;
+    } else if (kiln_test_entropy_seed != seed) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    kiln_test_entropy_state += UINT64_C(0x9E3779B97F4A7C15);
+    mixed = kiln_test_entropy_state;
+    mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+    mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94D049BB133111EB);
+    *out_word = mixed ^ (mixed >> 31);
     return KILN_C99_OK;
 }
 int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer) {
