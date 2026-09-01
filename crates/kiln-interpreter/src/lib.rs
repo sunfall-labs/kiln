@@ -2811,18 +2811,26 @@ impl ObjectData {
     /// chain, and [`ObjectData::lookup`] stops there because a marker is not an object with
     /// properties to read. This carries the read its last step, which is the whole of what makes
     /// `class T extends Iterator {}` give its instances `toArray`.
-    pub fn prototype_table(&self) -> Option<PrototypeTable> {
+    pub fn prototype_table(&self) -> Option<(PrototypeTable, Option<RealmId>)> {
         let mut current = self.prototype.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             current = match current {
-                Some(Value::Native(Native::PrototypeOf(table), _)) => return Some(table),
+                // The marker's own realm travels with the table it names. An ordinary object
+                // has no realm of its own to ask -- `value_realm` of one is always the primary
+                // -- so the chain is the only thing that knows which realm's methods this
+                // object inherits. Dropping it here made every object built in a second realm
+                // read the *first* realm's methods off its own prototype.
+                Some(Value::Native(Native::PrototypeOf(table), realm)) => {
+                    return Some((table, Some(realm)));
+                }
                 Some(Value::Object(parent)) => parent.borrow().prototype.clone(),
                 Some(Value::Function(parent)) => parent.properties.borrow().prototype.clone(),
                 // An array's own chain ends at `Array.prototype` unless the program moved it,
-                // which is where an object linked to an array finds the array methods.
+                // which is where an object linked to an array finds the array methods. There is
+                // no marker to read a realm off, so the caller's own answer stands.
                 Some(Value::Array(items)) => match items.properties.borrow().prototype.clone() {
                     Some(moved) => Some(moved),
-                    None => return Some(PrototypeTable::Array),
+                    None => return Some((PrototypeTable::Array, None)),
                 },
                 _ => return None,
             };
@@ -29642,15 +29650,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::Undefined
                     } else if let Some(found) = object
                         .prototype_table()
-                        .and_then(|table| {
+                        .and_then(|(table, realm)| {
                             // The realm's store in front of the table, so an object whose chain
                             // ends at `Array.prototype` finds what a program put there.
+                            let realm = realm.unwrap_or_else(|| value_realm(target));
                             Some(table_step(
                                 &self.intrinsics,
                                 table,
                                 name,
                                 Native::PrototypeOf(table).property(name)?,
-                                value_realm(target),
+                                realm,
                             ))
                         })
                         .filter(|found| !matches!(found, Value::Undefined))
@@ -37884,10 +37893,13 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 || object
                     .borrow()
                     .prototype_table()
-                    .is_some_and(|table| {
+                    .is_some_and(|(table, realm)| {
                         own_attributes(
                             intrinsics,
-                            &Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY),
+                            &Value::Native(
+                                Native::PrototypeOf(table),
+                                realm.unwrap_or(RealmId::PRIMARY),
+                            ),
                             &name,
                         )
                         .is_some()
