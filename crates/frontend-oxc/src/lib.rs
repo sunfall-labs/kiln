@@ -1727,8 +1727,118 @@ impl Lowerer<'_> {
                     }));
                     continue;
                 }
-                ClassElement::AccessorProperty(_) => {
-                    return Err("class accessor property".into());
+                // `accessor x = v` is three members written as one: a backing slot, and the
+                // pair of functions that read and write it. Lowered here rather than in the IR
+                // because that is all it is -- a private field plus `get x` / `set x` -- and
+                // putting the getter and setter among the class's other methods, at the
+                // position the source wrote them, is what makes a getter or setter written
+                // beside it override exactly the half it declares.
+                ClassElement::AccessorProperty(accessor) => {
+                    // A computed key would have to be evaluated *once* and used by all three
+                    // members. Two of them are separate `ClassMethod`s here, so lowering one
+                    // would evaluate the key twice -- an observable wrong answer, where a
+                    // refusal is only a missing feature.
+                    if accessor.computed {
+                        return Err("computed class accessor property".into());
+                    }
+                    // `accessor #x` needs a private getter/setter pair under `#x` beside a
+                    // second private name for the storage, and the duplicate-name rules that
+                    // go with it. Not attempted.
+                    if matches!(
+                        accessor.key,
+                        oxc_ast::ast::PropertyKey::PrivateIdentifier(_)
+                    ) {
+                        return Err("private class accessor property".into());
+                    }
+                    let Some(key) = accessor.key.static_name() else {
+                        return Err("class accessor property name".into());
+                    };
+                    let key = key.to_string();
+                    // The backing slot is a private name the program cannot have written: `%`
+                    // is not an identifier character, so this can never collide with a `#x` the
+                    // class declares, and nothing can reach the storage except the two
+                    // functions below.
+                    let storage = format!("%accessor:{key}");
+                    let member_span = span(accessor.span);
+                    let this = || HirExpression {
+                        kind: HirExpressionKind::This,
+                        span: member_span,
+                    };
+                    let read = HirExpression {
+                        kind: HirExpressionKind::PrivateMember {
+                            object: Box::new(this()),
+                            name: storage.clone(),
+                            optional: false,
+                        },
+                        span: member_span,
+                    };
+                    // The parameter is named where no source can name it, so the body cannot be
+                    // shadowed by anything and reads exactly the value it was handed.
+                    let written = HirExpression {
+                        kind: HirExpressionKind::PrivateAssignment {
+                            operator: kiln_hir::AssignmentOperator::Assign,
+                            object: Box::new(this()),
+                            name: storage.clone(),
+                            value: Box::new(HirExpression {
+                                kind: HirExpressionKind::Identifier("%value".to_owned()),
+                                span: member_span,
+                            }),
+                        },
+                        span: member_span,
+                    };
+                    let accessor_function =
+                        |parameters: Vec<kiln_hir::Parameter>, body: Vec<HirStatement>| {
+                            HirFunction {
+                                name: None,
+                                binds_own_name: false,
+                                arrow: false,
+                                generator: false,
+                                asynchronous: false,
+                                parameters,
+                                rest: None,
+                                body,
+                                // A class body is strict whatever encloses it.
+                                strict: true,
+                                span: member_span,
+                            }
+                        };
+                    let mut value = accessor.value.as_ref().map(|value| self.expression(value));
+                    if let Some(value) = &mut value {
+                        name_anonymous_function(value, &key);
+                    }
+                    initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
+                        key: kiln_hir::ObjectKey::Private(storage),
+                        value,
+                        is_static: accessor.r#static,
+                    }));
+                    methods.push(kiln_hir::ClassMethod {
+                        key: kiln_hir::ObjectKey::Static(key.clone()),
+                        function: accessor_function(
+                            Vec::new(),
+                            vec![HirStatement {
+                                kind: HirStatementKind::Return(Some(read)),
+                                span: member_span,
+                            }],
+                        ),
+                        is_static: accessor.r#static,
+                        kind: kiln_hir::MethodKind::Get,
+                    });
+                    methods.push(kiln_hir::ClassMethod {
+                        key: kiln_hir::ObjectKey::Static(key),
+                        function: accessor_function(
+                            vec![kiln_hir::Parameter {
+                                pattern: kiln_hir::Pattern::Identifier("%value".to_owned()),
+                                span: member_span,
+                            }],
+                            vec![HirStatement {
+                                kind: HirStatementKind::Expression(written),
+                                span: member_span,
+                            }],
+                        ),
+                        is_static: accessor.r#static,
+                        kind: kiln_hir::MethodKind::Set,
+                    });
+                    continue;
                 }
                 ClassElement::TSIndexSignature(_) => {
                     return Err("TypeScript index signature".into());
@@ -2637,7 +2747,7 @@ mod tests {
         // protected here is that the reported name describes the *member*, not the syntactic
         // position the class sat in. If a case here starts failing, the member was lowered:
         // delete the line.
-        let module = parse("module.js", "const value = class { accessor x = 1; };");
+        let module = parse("module.js", "const value = class { accessor #x = 1; };");
         let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
             panic!("expected a variable declaration");
         };
@@ -2647,15 +2757,17 @@ mod tests {
             .expect("fixture has an initializer");
         assert!(matches!(
             &initializer.kind,
-            HirExpressionKind::Unsupported { feature } if feature == "class accessor property"
+            HirExpressionKind::Unsupported { feature }
+                if feature == "private class accessor property"
         ));
 
         // The declaration form reports the same name: the two callers differ only in what they
         // wrap it in, which is what made them report two different useless ones.
-        let module = parse("module.js", "class Holder { accessor x = 1; }");
+        let module = parse("module.js", "class Holder { accessor #x = 1; }");
         assert!(matches!(
             &module.body[0].kind,
-            HirStatementKind::Unsupported { feature } if feature == "class accessor property"
+            HirStatementKind::Unsupported { feature }
+                if feature == "private class accessor property"
         ));
     }
 

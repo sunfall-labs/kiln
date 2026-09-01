@@ -2,6 +2,6 @@
 description: unsupported language features stay visible
 flags: [raw]
 ---*/
-class FixtureWithAccessorProperty {
-  accessor value = 1;
+class FixtureWithPrivateAccessorProperty {
+  accessor #value = 1;
 }
