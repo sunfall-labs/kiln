@@ -17041,7 +17041,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // entered as a frame and run -- so neither can live in `call_native`, which is a
             // free function with no VM to enter one on.
             Native::Eval => self.indirect_eval(arguments),
-            Native::FunctionConstructor => self.function_from_source(arguments),
+            Native::FunctionConstructor => self.function_from_source(arguments, instruction),
             _ => call_native(&self.intrinsics, native, receiver, arguments),
         }
     }
@@ -24379,7 +24379,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::DataViewConstructor => self.construct_data_view(arguments, current)?,
             Native::PromiseConstructor => self.construct_promise(arguments, current)?,
-            Native::FunctionConstructor => self.function_from_source(arguments)?,
+            Native::FunctionConstructor => self.function_from_source(arguments, current)?,
             Native::UrlConstructor => self.dispatch_native(
                 Native::UrlConstructor,
                 &Value::Undefined,
@@ -24643,7 +24643,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // specification routes both through the same steps and differs only in a `NewTarget`
             // that decides which prototype the result inherits, which this realm does not model.
             Value::Native(Native::FunctionConstructor) => {
-                let built = self.function_from_source(&arguments)?;
+                let built = self.function_from_source(&arguments, current)?;
                 self.stack.push(built);
             }
             Value::Native(Native::ArrayBufferConstructor) => {
@@ -30367,20 +30367,54 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Global scope, never the caller's: `Function` is reached as a value, and a value carries
     /// no scope. That is the difference between it and a direct `eval`, and it is why a function
     /// built this way cannot see the locals around the call that built it.
-    fn function_from_source(&mut self, arguments: &[Value]) -> Result<Value, ExecutionError> {
-        let (body, parameters) = match arguments.split_last() {
-            Some((body, parameters)) => (body.to_display_string(), parameters),
-            None => (String::new(), &[] as &[Value]),
+    fn function_from_source(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Some((body, parameters)) = arguments.split_last() else {
+            return self.drive_eval("(function anonymous(\n) {\n\n})", None);
         };
-        let parameters = parameters
-            .iter()
-            .map(Value::to_display_string)
-            .collect::<Vec<_>>()
-            .join(",");
+        // Every parameter first, in order, and only then the body. That order is the
+        // specification's and it is observable: when both a parameter's `toString` and the
+        // body's throw, the parameter's throw is the one the program sees.
+        let mut joined = String::new();
+        for parameter in parameters {
+            if !joined.is_empty() {
+                joined.push(',');
+            }
+            joined.push_str(&self.as_string(parameter, instruction)?);
+        }
+        let body = self.as_string(body, instruction)?;
         // The newlines are the specification's own: they stop a `//` comment in the parameter
         // list from swallowing the brace, and one in the body from swallowing the close.
-        let source = format!("(function anonymous({parameters}\n) {{\n{body}\n}})");
+        let source = format!("(function anonymous({joined}\n) {{\n{body}\n}})");
         self.drive_eval(&source, None)
+    }
+
+    /// `ToString`: the conversion the *program* defines, which runs its code and can throw.
+    ///
+    /// Named `as_` rather than `to_` for the reason [`Vm::as_primitive`] is: it takes `&mut self`
+    /// because converting an object *calls* one of its methods.
+    ///
+    /// This is not [`Value::to_display_string`], and the distinction is not cosmetic. That one is
+    /// the host's own spelling of a value -- what the console prints -- and it answers
+    /// `"[object Object]"` for any plain object without consulting it. Where the specification
+    /// says `ToString`, using it silently skips the program's `toString`: `new Function` built
+    /// `function anonymous([object Object]) {}` and died on a parse error inside a string the
+    /// program never wrote, instead of either calling the `toString` that was there or
+    /// propagating what it threw.
+    fn as_string(&mut self, value: &Value, instruction: usize) -> Result<String, ExecutionError> {
+        if let Value::String(text) = value {
+            return Ok(text.clone());
+        }
+        let primitive = self.as_primitive(value, true, instruction)?;
+        // A symbol is the one primitive `ToString` refuses: it has a description, not a
+        // spelling, and reading one as text is the mistake `String(symbol)` exists for.
+        if matches!(primitive, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        Ok(primitive.to_display_string())
     }
 
     fn pop(&mut self, instruction: usize) -> Result<Value, ExecutionError> {
