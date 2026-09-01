@@ -835,8 +835,11 @@ impl ModuleGraph {
         Ok(pending
             .entry((origin, exported))
             .or_insert_with(|| {
+                // The primary realm: this cell is a placeholder for a binding a cycle has not
+                // initialised yet, and `Uninitialized` carries no realm-observable identity.
                 std::rc::Rc::new(std::cell::RefCell::new(Value::Native(
                     kiln_interpreter::Native::Uninitialized,
+                    kiln_interpreter::RealmId::PRIMARY,
                 )))
             })
             .clone())

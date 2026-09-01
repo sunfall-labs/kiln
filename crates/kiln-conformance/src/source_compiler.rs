@@ -19,6 +19,9 @@ pub(crate) fn capabilities() -> ExecutionCapabilities {
     ExecutionCapabilities::default()
         .with_source_compiler(compile_source)
         .with_module_loader(crate::module_loader::load)
+        // Test262's `$262.createRealm`. A host capability rather than a language feature, so it
+        // is named here beside the compiler rather than assumed by the engine.
+        .with_host_realms()
 }
 
 fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError> {
@@ -31,8 +34,10 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
     } else {
         request.source.to_owned()
     };
-    // Always a Script. Eval code cannot import or export, and choosing the module goal would
-    // silently accept syntax the language does not allow here.
+    // Always the Script *goal*. Eval code cannot import or export, and choosing the module goal
+    // would silently accept syntax the language does not allow here. That is a different
+    // question from `request.script`, which says whether this text is a Script rather than eval
+    // code and so decides where its `var`s live and whether they can be deleted.
     let module = parse_with_goal("<eval>", &source, SourceGoal::Script);
     if let Some(diagnostic) = module.diagnostics.first() {
         return Err(EvalCompileError::Syntax(diagnostic.message.clone()));
@@ -48,6 +53,7 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
             outer: request.outer.to_vec(),
             strict: request.strict,
             global_var_scope: request.global_var_scope,
+            script: request.script,
         },
     )
     .map_err(|diagnostics| {

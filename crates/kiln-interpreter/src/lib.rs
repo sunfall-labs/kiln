@@ -437,6 +437,21 @@ pub enum Native {
     /// `Error.isError(value)`: whether a value really is an error rather than an object shaped
     /// like one. The distinction cannot be made from JavaScript, which is why it exists.
     ErrorIsError,
+    /// Make a second realm and answer with its global object.
+    ///
+    /// Not a language built-in: it is reachable only from a realm whose host asked for it
+    /// (`ExecutionCapabilities::with_host_realms`), which is how ADR 0031 says a realm takes
+    /// what the host gives it. Test262's `$262.createRealm` is the only caller there is, and
+    /// the `$262` object it hangs off is assembled by the runner rather than here, because what
+    /// a host can do is the host's statement to make.
+    HostCreateRealm,
+    /// Evaluate source as a *Script* in this realm, the way Test262's `$262.evalScript` does.
+    ///
+    /// Not `eval`. An indirect `eval` gives strict code a variable environment of its own and
+    /// makes every global binding it does create configurable; a Script does neither, and both
+    /// differences are what the tests reaching for this are about. Reachable only from a realm
+    /// whose host asked for it, for the same reason [`Native::HostCreateRealm`] is.
+    HostEvalScript,
     /// `Map.prototype.getOrInsert` and its three siblings. `weak` says which collection this is
     /// reached through and `computed` whether the value is a callback's result, because the two
     /// differ only in where the value comes from and when it is asked for.
@@ -1462,16 +1477,28 @@ impl Native {
         match (self, name) {
             // `realpathSync.native` is the only member any of these publishes, and it is the
             // same refusal reached one level down.
-            (Self::NodeFsSync, "native") => Some(Value::Native(Self::NodeFsSync)),
-            (Self::NodeFsPromises, "readFile") => Some(Value::Native(Self::NodeFsReadFile)),
-            (Self::NodeFsPromises, "writeFile") => Some(Value::Native(Self::NodeFsWriteFile)),
-            (Self::NodeFsPromises, "stat") => Some(Value::Native(Self::NodeFsStat)),
-            (Self::AbortSignalConstructor, "abort") => Some(Value::Native(Self::AbortSignalAbort)),
-            (Self::AbortSignalConstructor, "timeout") => {
-                Some(Value::Native(Self::AbortSignalTimeout))
+            (Self::NodeFsSync, "native") => Some(Value::Native(Self::NodeFsSync, RealmId::PRIMARY)),
+            (Self::NodeFsPromises, "readFile") => {
+                Some(Value::Native(Self::NodeFsReadFile, RealmId::PRIMARY))
             }
-            (Self::AbortSignalConstructor, "any") => Some(Value::Native(Self::AbortSignalAny)),
-            (Self::NodeFs, "existsSync") => Some(Value::Native(Self::NodeFsExistsSync)),
+            (Self::NodeFsPromises, "writeFile") => {
+                Some(Value::Native(Self::NodeFsWriteFile, RealmId::PRIMARY))
+            }
+            (Self::NodeFsPromises, "stat") => {
+                Some(Value::Native(Self::NodeFsStat, RealmId::PRIMARY))
+            }
+            (Self::AbortSignalConstructor, "abort") => {
+                Some(Value::Native(Self::AbortSignalAbort, RealmId::PRIMARY))
+            }
+            (Self::AbortSignalConstructor, "timeout") => {
+                Some(Value::Native(Self::AbortSignalTimeout, RealmId::PRIMARY))
+            }
+            (Self::AbortSignalConstructor, "any") => {
+                Some(Value::Native(Self::AbortSignalAny, RealmId::PRIMARY))
+            }
+            (Self::NodeFs, "existsSync") => {
+                Some(Value::Native(Self::NodeFsExistsSync, RealmId::PRIMARY))
+            }
             // The synchronous readers exist and refuse when *called*, which is the shape
             // `existsSync` already had. A library that merely reaches for one during start-up --
             // the TypeScript compiler's `getNodeSystem` reads `fs.realpathSync.native` to pick
@@ -1484,29 +1511,49 @@ impl Native {
                 | "mkdirSync" | "realpathSync" | "openSync" | "readSync" | "closeSync"
                 | "appendFileSync" | "unlinkSync" | "rmSync" | "renameSync" | "readlinkSync"
                 | "accessSync" | "copyFileSync",
-            ) => Some(Value::Native(Self::NodeFsSync)),
-            (Self::NodeFs, "promises") => Some(Value::Native(Self::NodeFsPromises)),
-            (Self::NodeDiagnosticsChannel, "channel") => {
-                Some(Value::Native(Self::NodeDiagnosticsChannelCreate))
+            ) => Some(Value::Native(Self::NodeFsSync, RealmId::PRIMARY)),
+            (Self::NodeFs, "promises") => {
+                Some(Value::Native(Self::NodeFsPromises, RealmId::PRIMARY))
             }
-            (Self::NodeDiagnosticsChannel, "tracingChannel") => {
-                Some(Value::Native(Self::NodeDiagnosticsTracingChannel))
-            }
+            (Self::NodeDiagnosticsChannel, "channel") => Some(Value::Native(
+                Self::NodeDiagnosticsChannelCreate,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeDiagnosticsChannel, "tracingChannel") => Some(Value::Native(
+                Self::NodeDiagnosticsTracingChannel,
+                RealmId::PRIMARY,
+            )),
             (Self::NodeDiagnosticsChannel, "hasSubscribers") => Some(Value::Boolean(false)),
-            (Self::NodeUtil, "inherits") => Some(Value::Native(Self::NodeUtilInherits)),
-            (Self::NodeUtil, "debuglog") => Some(Value::Native(Self::NodeUtilDebuglog)),
-            (Self::NodeUtil, "deprecate") => Some(Value::Native(Self::NodeUtilDeprecate)),
-            (Self::NodeUtil, "inspect") => Some(Value::Native(Self::NodeUtilInspect)),
+            (Self::NodeUtil, "inherits") => {
+                Some(Value::Native(Self::NodeUtilInherits, RealmId::PRIMARY))
+            }
+            (Self::NodeUtil, "debuglog") => {
+                Some(Value::Native(Self::NodeUtilDebuglog, RealmId::PRIMARY))
+            }
+            (Self::NodeUtil, "deprecate") => {
+                Some(Value::Native(Self::NodeUtilDeprecate, RealmId::PRIMARY))
+            }
+            (Self::NodeUtil, "inspect") => {
+                Some(Value::Native(Self::NodeUtilInspect, RealmId::PRIMARY))
+            }
             (Self::NodeUtilInspect, "custom") => Some(Value::Symbol(Symbol::WellKnown(
                 WellKnown::NodeInspectCustom,
             ))),
-            (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
+            (Self::NodeUtil, "format") => {
+                Some(Value::Native(Self::NodeUtilFormat, RealmId::PRIMARY))
+            }
             // The same two constructors the global scope already has. `node:util` is where they
             // were before they were global and where library code still reaches for them:
             // `react-dom/server` opens with `new (require("util").TextEncoder)()`, and finding
             // `undefined` there stopped the module while it was still loading.
-            (Self::NodeUtil, "TextEncoder") => Some(Value::Native(Self::TextEncoderConstructor)),
-            (Self::NodeUtil, "TextDecoder") => Some(Value::Native(Self::TextDecoderConstructor)),
+            (Self::NodeUtil, "TextEncoder") => Some(Value::Native(
+                Self::TextEncoderConstructor,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeUtil, "TextDecoder") => Some(Value::Native(
+                Self::TextDecoderConstructor,
+                RealmId::PRIMARY,
+            )),
             // `default` binds to the module namespace unless an arm below overrides it, and an
             // override is only correct where node's own default is callable. Measured against
             // node v25.9.0, exactly four are: `assert`, `events`, `module` and `stream`.
@@ -1514,203 +1561,328 @@ impl Native {
             // their defaults to `AsyncResource`, `StringDecoder` and `performance` and made
             // `typeof` answer "function" where node answers "object".
             (Self::NodeAssert, "default" | "ok" | "strict") => {
-                Some(Value::Native(Self::NodeAssertOk))
+                Some(Value::Native(Self::NodeAssertOk, RealmId::PRIMARY))
             }
-            (Self::NodeAsyncHooks, "AsyncResource") => Some(Value::Native(Self::NodeAsyncResource)),
+            (Self::NodeAsyncHooks, "AsyncResource") => {
+                Some(Value::Native(Self::NodeAsyncResource, RealmId::PRIMARY))
+            }
             (Self::NodeAsyncHooks, "AsyncLocalStorage") => {
-                Some(Value::Native(Self::NodeAsyncLocalStorage))
+                Some(Value::Native(Self::NodeAsyncLocalStorage, RealmId::PRIMARY))
             }
-            (Self::NodeCrypto, "randomUUID") => Some(Value::Native(Self::NodeCryptoRandomUuid)),
-            (Self::NodeCrypto, "createHash") => Some(Value::Native(Self::NodeCryptoCreateHash)),
-            (Self::NodeStringDecoder, "StringDecoder") => {
-                Some(Value::Native(Self::NodeStringDecoderConstructor))
+            (Self::NodeCrypto, "randomUUID") => {
+                Some(Value::Native(Self::NodeCryptoRandomUuid, RealmId::PRIMARY))
             }
-            (Self::NodeStream, "Readable") => Some(Value::Native(Self::NodeReadable)),
-            (Self::NodeStream, "Writable") => Some(Value::Native(Self::NodeWritable)),
-            (Self::NodeStream, "addAbortSignal") => {
-                Some(Value::Native(Self::NodeStreamAddAbortSignal))
+            (Self::NodeCrypto, "createHash") => {
+                Some(Value::Native(Self::NodeCryptoCreateHash, RealmId::PRIMARY))
             }
-            (Self::NodeStream, "finished") => Some(Value::Native(Self::NodeStreamFinished)),
-            (Self::NodeReadable, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Readable)))
+            (Self::NodeStringDecoder, "StringDecoder") => Some(Value::Native(
+                Self::NodeStringDecoderConstructor,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeStream, "Readable") => {
+                Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
             }
-            (Self::NodeWritable, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Writable)))
+            (Self::NodeStream, "Writable") => {
+                Some(Value::Native(Self::NodeWritable, RealmId::PRIMARY))
             }
-            (Self::NodeHttpServerResponse, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Writable)))
+            (Self::NodeStream, "addAbortSignal") => Some(Value::Native(
+                Self::NodeStreamAddAbortSignal,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeStream, "finished") => {
+                Some(Value::Native(Self::NodeStreamFinished, RealmId::PRIMARY))
             }
-            (Self::NodeDns, "lookup") => Some(Value::Native(Self::NodeDnsLookup)),
-            (Self::NodeOs, "networkInterfaces") => {
-                Some(Value::Native(Self::NodeOsNetworkInterfaces))
+            (Self::NodeReadable, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Readable),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeWritable, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Writable),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeHttpServerResponse, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Writable),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeDns, "lookup") => Some(Value::Native(Self::NodeDnsLookup, RealmId::PRIMARY)),
+            (Self::NodeOs, "networkInterfaces") => Some(Value::Native(
+                Self::NodeOsNetworkInterfaces,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "hostname") => {
+                Some(Value::Native(Self::NodeOsHostname, RealmId::PRIMARY))
             }
-            (Self::NodeOs, "hostname") => Some(Value::Native(Self::NodeOsHostname)),
-            (Self::NodeOs, "platform") => Some(Value::Native(Self::NodeOsFact(OsFact::Platform))),
-            (Self::NodeOs, "arch") => Some(Value::Native(Self::NodeOsFact(OsFact::Arch))),
-            (Self::NodeOs, "type") => Some(Value::Native(Self::NodeOsFact(OsFact::Type))),
-            (Self::NodeOs, "endianness") => {
-                Some(Value::Native(Self::NodeOsFact(OsFact::Endianness)))
-            }
-            (Self::NodeOs, "tmpdir") => Some(Value::Native(Self::NodeOsFact(OsFact::TmpDir))),
-            (Self::NodeOs, "homedir") => Some(Value::Native(Self::NodeOsFact(OsFact::HomeDir))),
-            (Self::NodeOs, "release") => Some(Value::Native(Self::NodeOsFact(OsFact::Release))),
-            (Self::NodeOs, "version") => Some(Value::Native(Self::NodeOsFact(OsFact::Version))),
-            (Self::NodeOs, "machine") => Some(Value::Native(Self::NodeOsFact(OsFact::Machine))),
-            (Self::NodeOs, "availableParallelism") => {
-                Some(Value::Native(Self::NodeOsFact(OsFact::Parallelism)))
-            }
-            (Self::NodeOs, "cpus") => Some(Value::Native(Self::NodeOsFact(OsFact::Cpus))),
-            (Self::NodeOs, "totalmem") => Some(Value::Native(Self::NodeOsFact(OsFact::TotalMem))),
-            (Self::NodeOs, "freemem") => Some(Value::Native(Self::NodeOsFact(OsFact::FreeMem))),
-            (Self::NodeOs, "uptime") => Some(Value::Native(Self::NodeOsFact(OsFact::Uptime))),
-            (Self::NodeOs, "loadavg") => Some(Value::Native(Self::NodeOsFact(OsFact::LoadAvg))),
-            (Self::NodeOs, "userInfo") => Some(Value::Native(Self::NodeOsFact(OsFact::UserInfo))),
+            (Self::NodeOs, "platform") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Platform),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "arch") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Arch),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "type") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Type),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "endianness") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Endianness),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "tmpdir") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::TmpDir),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "homedir") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::HomeDir),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "release") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Release),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "version") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Version),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "machine") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Machine),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "availableParallelism") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Parallelism),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "cpus") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Cpus),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "totalmem") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::TotalMem),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "freemem") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::FreeMem),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "uptime") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::Uptime),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "loadavg") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::LoadAvg),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeOs, "userInfo") => Some(Value::Native(
+                Self::NodeOsFact(OsFact::UserInfo),
+                RealmId::PRIMARY,
+            )),
             (Self::NodeOs, "EOL") => Some(Value::String("\n".to_owned())),
             (Self::NodeOs, "devNull") => Some(Value::String("/dev/null".to_owned())),
-            (Self::NodeTty, "isatty") => Some(Value::Native(Self::NodeTtyIsatty)),
-            (Self::NodeZlib, "createInflate" | "createGunzip" | "createBrotliDecompress") => {
-                Some(Value::Native(Self::NodeZlibCreateDecompress))
+            (Self::NodeTty, "isatty") => Some(Value::Native(Self::NodeTtyIsatty, RealmId::PRIMARY)),
+            (Self::NodeZlib, "createInflate" | "createGunzip" | "createBrotliDecompress") => Some(
+                Value::Native(Self::NodeZlibCreateDecompress, RealmId::PRIMARY),
+            ),
+            (Self::NodePerfHooks, "performance") => {
+                Some(Value::Native(Self::Performance, RealmId::PRIMARY))
             }
-            (Self::NodePerfHooks, "performance") => Some(Value::Native(Self::Performance)),
-            (Self::NodeHttps, "createServer") => Some(Value::Native(Self::NodeHttpsCreateServer)),
-            (Self::NodeHttp2, "createServer") => Some(Value::Native(Self::NodeHttp2CreateServer)),
-            (Self::NodeHttp2, "createSecureServer") => {
-                Some(Value::Native(Self::NodeHttp2CreateSecureServer))
+            (Self::NodeHttps, "createServer") => {
+                Some(Value::Native(Self::NodeHttpsCreateServer, RealmId::PRIMARY))
             }
-            (Self::NodeModule, "createRequire") => {
-                Some(Value::Native(Self::NodeModuleCreateRequire))
+            (Self::NodeHttp2, "createServer") => {
+                Some(Value::Native(Self::NodeHttp2CreateServer, RealmId::PRIMARY))
             }
-            (Self::NodePath, "join") => Some(Value::Native(Self::NodePathJoin)),
-            (Self::NodePath, "dirname") => Some(Value::Native(Self::NodePathPart(PathPart::Dir))),
-            (Self::NodePath, "basename") => Some(Value::Native(Self::NodePathPart(PathPart::Base))),
-            (Self::NodePath, "extname") => Some(Value::Native(Self::NodePathPart(PathPart::Ext))),
-            (Self::NodePath, "normalize") => {
-                Some(Value::Native(Self::NodePathPart(PathPart::Normalize)))
+            (Self::NodeHttp2, "createSecureServer") => Some(Value::Native(
+                Self::NodeHttp2CreateSecureServer,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodeModule, "createRequire") => Some(Value::Native(
+                Self::NodeModuleCreateRequire,
+                RealmId::PRIMARY,
+            )),
+            (Self::NodePath, "join") => Some(Value::Native(Self::NodePathJoin, RealmId::PRIMARY)),
+            (Self::NodePath, "dirname") => Some(Value::Native(
+                Self::NodePathPart(PathPart::Dir),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodePath, "basename") => Some(Value::Native(
+                Self::NodePathPart(PathPart::Base),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodePath, "extname") => Some(Value::Native(
+                Self::NodePathPart(PathPart::Ext),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodePath, "normalize") => Some(Value::Native(
+                Self::NodePathPart(PathPart::Normalize),
+                RealmId::PRIMARY,
+            )),
+            (Self::NodePath, "relative") => {
+                Some(Value::Native(Self::NodePathRelative, RealmId::PRIMARY))
             }
-            (Self::NodePath, "relative") => Some(Value::Native(Self::NodePathRelative)),
-            (Self::NodePath, "parse") => Some(Value::Native(Self::NodePathParse)),
-            (Self::NodePath, "format") => Some(Value::Native(Self::NodePathFormat)),
+            (Self::NodePath, "parse") => Some(Value::Native(Self::NodePathParse, RealmId::PRIMARY)),
+            (Self::NodePath, "format") => {
+                Some(Value::Native(Self::NodePathFormat, RealmId::PRIMARY))
+            }
             (Self::NodePath, "delimiter") => Some(Value::String(":".to_owned())),
             // `path.posix` is this module: the realm's paths are POSIX paths, and `path.win32`
             // is deliberately absent rather than answered with them -- a `win32.sep` of "/" is
             // the kind of confident wrong answer a bundler's platform check acts on.
-            (Self::NodePath, "posix") => Some(Value::Native(Self::NodePath)),
-            (Self::NodePath, "resolve") => Some(Value::Native(Self::NodePathResolve)),
-            (Self::NodePath, "isAbsolute") => Some(Value::Native(Self::NodePathIsAbsolute)),
+            (Self::NodePath, "posix") => Some(Value::Native(Self::NodePath, RealmId::PRIMARY)),
+            (Self::NodePath, "resolve") => {
+                Some(Value::Native(Self::NodePathResolve, RealmId::PRIMARY))
+            }
+            (Self::NodePath, "isAbsolute") => {
+                Some(Value::Native(Self::NodePathIsAbsolute, RealmId::PRIMARY))
+            }
             (Self::NodePath, "sep") => Some(Value::String("/".to_owned())),
-            (Self::NodeWorkerThreads, "Worker") => Some(Value::Native(Self::NodeWorkerConstructor)),
+            (Self::NodeWorkerThreads, "Worker") => {
+                Some(Value::Native(Self::NodeWorkerConstructor, RealmId::PRIMARY))
+            }
             (Self::NodeQueryString, "parse" | "decode") => {
-                Some(Value::Native(Self::NodeQueryStringParse))
+                Some(Value::Native(Self::NodeQueryStringParse, RealmId::PRIMARY))
             }
-            (Self::NodeQueryString, "default") => Some(Value::Native(Self::NodeQueryString)),
-            (Self::NodeUrl, "URL") => Some(Value::Native(Self::UrlConstructor)),
-            (Self::NodeUrl, "parse") => Some(Value::Native(Self::NodeUrlParse)),
-            (Self::NodeUrl, "fileURLToPath") => Some(Value::Native(Self::NodeUrlFileUrlToPath)),
-            (Self::NodeUrl, "pathToFileURL") => Some(Value::Native(Self::NodeUrlPathToFileUrl)),
-            (Self::NodeUrl, "default") => Some(Value::Native(Self::NodeUrl)),
+            (Self::NodeQueryString, "default") => {
+                Some(Value::Native(Self::NodeQueryString, RealmId::PRIMARY))
+            }
+            (Self::NodeUrl, "URL") => Some(Value::Native(Self::UrlConstructor, RealmId::PRIMARY)),
+            (Self::NodeUrl, "parse") => Some(Value::Native(Self::NodeUrlParse, RealmId::PRIMARY)),
+            (Self::NodeUrl, "fileURLToPath") => {
+                Some(Value::Native(Self::NodeUrlFileUrlToPath, RealmId::PRIMARY))
+            }
+            (Self::NodeUrl, "pathToFileURL") => {
+                Some(Value::Native(Self::NodeUrlPathToFileUrl, RealmId::PRIMARY))
+            }
+            (Self::NodeUrl, "default") => Some(Value::Native(Self::NodeUrl, RealmId::PRIMARY)),
             (Self::NodeEvents, "EventEmitter" | "default") => {
-                Some(Value::Native(Self::NodeEventEmitter))
+                Some(Value::Native(Self::NodeEventEmitter, RealmId::PRIMARY))
             }
-            (Self::NodeNet, "createServer") => Some(Value::Native(Self::NodeNetCreateServer)),
+            (Self::NodeNet, "createServer") => {
+                Some(Value::Native(Self::NodeNetCreateServer, RealmId::PRIMARY))
+            }
             (Self::NodeNet, "connect" | "createConnection") => {
-                Some(Value::Native(Self::NodeNetConnect))
+                Some(Value::Native(Self::NodeNetConnect, RealmId::PRIMARY))
             }
-            (Self::NodeHttp, "createServer") => Some(Value::Native(Self::NodeHttpCreateServer)),
-            (Self::NodeHttp, "Server") => Some(Value::Native(Self::NodeHttpServer)),
-            (Self::NodeHttp, "IncomingMessage") => Some(Value::Native(Self::NodeReadable)),
-            (Self::NodeHttp, "request") => Some(Value::Native(Self::NodeHttpRequest)),
-            (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet)),
-            (Self::NodeHttp, "ServerResponse") => Some(Value::Native(Self::NodeHttpServerResponse)),
+            (Self::NodeHttp, "createServer") => {
+                Some(Value::Native(Self::NodeHttpCreateServer, RealmId::PRIMARY))
+            }
+            (Self::NodeHttp, "Server") => {
+                Some(Value::Native(Self::NodeHttpServer, RealmId::PRIMARY))
+            }
+            (Self::NodeHttp, "IncomingMessage") => {
+                Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
+            }
+            (Self::NodeHttp, "request") => {
+                Some(Value::Native(Self::NodeHttpRequest, RealmId::PRIMARY))
+            }
+            (Self::NodeHttp, "get") => Some(Value::Native(Self::NodeHttpGet, RealmId::PRIMARY)),
+            (Self::NodeHttp, "ServerResponse") => Some(Value::Native(
+                Self::NodeHttpServerResponse,
+                RealmId::PRIMARY,
+            )),
             (Self::NodeHttp, "METHODS") => Some(Value::Array(ArrayData::new(
                 HTTP_METHODS
                     .iter()
                     .map(|method| Value::String((*method).to_owned()))
                     .collect(),
             ))),
-            (Self::NodeBuffer, "from") => Some(Value::Native(Self::NodeBufferFrom)),
-            (Self::NodeBuffer, "alloc" | "allocUnsafe" | "allocUnsafeSlow") => {
-                Some(Value::Native(Self::NodeBufferAlloc))
+            (Self::NodeBuffer, "from") => {
+                Some(Value::Native(Self::NodeBufferFrom, RealmId::PRIMARY))
             }
-            (Self::NodeBuffer, "isBuffer") => Some(Value::Native(Self::NodeBufferIsBuffer)),
-            (Self::NodeBuffer, "byteLength") => Some(Value::Native(Self::NodeBufferByteLength)),
-            (Self::NodeBuffer, "concat") => Some(Value::Native(Self::NodeBufferConcat)),
-            (Self::NodeBuffer, "Buffer" | "default") => Some(Value::Native(Self::NodeBuffer)),
+            (Self::NodeBuffer, "alloc" | "allocUnsafe" | "allocUnsafeSlow") => {
+                Some(Value::Native(Self::NodeBufferAlloc, RealmId::PRIMARY))
+            }
+            (Self::NodeBuffer, "isBuffer") => {
+                Some(Value::Native(Self::NodeBufferIsBuffer, RealmId::PRIMARY))
+            }
+            (Self::NodeBuffer, "byteLength") => {
+                Some(Value::Native(Self::NodeBufferByteLength, RealmId::PRIMARY))
+            }
+            (Self::NodeBuffer, "concat") => {
+                Some(Value::Native(Self::NodeBufferConcat, RealmId::PRIMARY))
+            }
+            (Self::NodeBuffer, "Buffer" | "default") => {
+                Some(Value::Native(Self::NodeBuffer, RealmId::PRIMARY))
+            }
             (Self::NodeBuffer, "constants") => Some(ordinary_object([(
                 "MAX_STRING_LENGTH".to_owned(),
                 Value::Number(536_870_888.0),
             )])),
-            (Self::ProcessHrtime, "bigint") => Some(Value::Native(Self::ProcessHrtimeBigInt)),
-            (Self::NodeEventEmitter, "prototype") => Some(Value::Native(Self::PrototypeOf(
-                PrototypeTable::EventEmitter,
-            ))),
+            (Self::ProcessHrtime, "bigint") => {
+                Some(Value::Native(Self::ProcessHrtimeBigInt, RealmId::PRIMARY))
+            }
+            (Self::NodeEventEmitter, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::EventEmitter),
+                RealmId::PRIMARY,
+            )),
             (Self::NodeEventEmitter, "EventEmitter" | "default") => {
-                Some(Value::Native(Self::NodeEventEmitter))
+                Some(Value::Native(Self::NodeEventEmitter, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "constructor") => {
-                Some(Value::Native(Self::NodeEventEmitter))
+                Some(Value::Native(Self::NodeEventEmitter, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "on" | "addListener") => {
-                Some(Value::Native(Self::NodeEventOn))
+                Some(Value::Native(Self::NodeEventOn, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "once") => {
-                Some(Value::Native(Self::NodeEventOnce))
+                Some(Value::Native(Self::NodeEventOnce, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "emit") => {
-                Some(Value::Native(Self::NodeEventEmit))
+                Some(Value::Native(Self::NodeEventEmit, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "listeners") => {
-                Some(Value::Native(Self::NodeEventListeners))
+                Some(Value::Native(Self::NodeEventListeners, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::EventEmitter), "eventNames") => {
-                Some(Value::Native(Self::NodeEventNames))
+                Some(Value::Native(Self::NodeEventNames, RealmId::PRIMARY))
             }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeListener" | "off") => {
-                Some(Value::Native(Self::NodeEventRemoveListener))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeAllListeners") => {
-                Some(Value::Native(Self::NodeEventRemoveAllListeners))
-            }
-            (Self::PrototypeOf(PrototypeTable::EventEmitter), "setMaxListeners") => {
-                Some(Value::Native(Self::NodeEventSetMaxListeners))
-            }
+            (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeListener" | "off") => Some(
+                Value::Native(Self::NodeEventRemoveListener, RealmId::PRIMARY),
+            ),
+            (Self::PrototypeOf(PrototypeTable::EventEmitter), "removeAllListeners") => Some(
+                Value::Native(Self::NodeEventRemoveAllListeners, RealmId::PRIMARY),
+            ),
+            (Self::PrototypeOf(PrototypeTable::EventEmitter), "setMaxListeners") => Some(
+                Value::Native(Self::NodeEventSetMaxListeners, RealmId::PRIMARY),
+            ),
             (Self::PrototypeOf(PrototypeTable::Readable), "constructor") => {
-                Some(Value::Native(Self::NodeReadable))
+                Some(Value::Native(Self::NodeReadable, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Readable), "push") => {
-                Some(Value::Native(Self::NodeReadablePush))
+                Some(Value::Native(Self::NodeReadablePush, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Readable), "read") => {
-                Some(Value::Native(Self::NodeReadableRead))
+                Some(Value::Native(Self::NodeReadableRead, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Readable), "destroy") => {
-                Some(Value::Native(Self::NodeReadableDestroy))
+                Some(Value::Native(Self::NodeReadableDestroy, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Readable), "pause") => {
-                Some(Value::Native(Self::NodeReadablePause))
+                Some(Value::Native(Self::NodeReadablePause, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Readable), "resume") => {
-                Some(Value::Native(Self::NodeReadableResume))
+                Some(Value::Native(Self::NodeReadableResume, RealmId::PRIMARY))
             }
-            (Self::PrototypeOf(PrototypeTable::Readable), "setEncoding") => {
-                Some(Value::Native(Self::NodeReadableSetEncoding))
-            }
+            (Self::PrototypeOf(PrototypeTable::Readable), "setEncoding") => Some(Value::Native(
+                Self::NodeReadableSetEncoding,
+                RealmId::PRIMARY,
+            )),
             (Self::PrototypeOf(PrototypeTable::Readable), "pipe") => {
-                Some(Value::Native(Self::NodeReadablePipe))
+                Some(Value::Native(Self::NodeReadablePipe, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Readable), "unpipe") => {
-                Some(Value::Native(Self::NodeReadableUnpipe))
+                Some(Value::Native(Self::NodeReadableUnpipe, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Writable), "constructor") => {
-                Some(Value::Native(Self::NodeWritable))
+                Some(Value::Native(Self::NodeWritable, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Writable), "write") => {
-                Some(Value::Native(Self::NodeWritableWrite))
+                Some(Value::Native(Self::NodeWritableWrite, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Writable), "end") => {
-                Some(Value::Native(Self::NodeWritableEnd))
+                Some(Value::Native(Self::NodeWritableEnd, RealmId::PRIMARY))
             }
             (Self::PrototypeOf(PrototypeTable::Writable), "destroy") => {
-                Some(Value::Native(Self::NodeWritableDestroy))
+                Some(Value::Native(Self::NodeWritableDestroy, RealmId::PRIMARY))
             }
             // Every `Temporal` namespace, constructor and prototype answers from one place, so
             // the eight types cannot drift on what they expose.
@@ -1718,166 +1890,255 @@ impl Native {
             // The same arrangement for `Intl`: one table for the namespace, the six
             // constructors and their prototypes, so none of them can drift from the others.
             (Self::Intl(op), name) => intl::static_property(op, name),
-            (Self::Error(_), "captureStackTrace") => {
-                Some(Value::Native(Self::ErrorCaptureStackTrace))
-            }
+            (Self::Error(_), "captureStackTrace") => Some(Value::Native(
+                Self::ErrorCaptureStackTrace,
+                RealmId::PRIMARY,
+            )),
             // `e.constructor.name` reaches this: the instance finds its constructor through the
             // prototype, and the constructor knows which kind it is.
             (Self::Error(kind), "name") => Some(Value::String(kind.name().to_owned())),
-            (Self::RegExpConstructor, "escape") => Some(Value::Native(Self::RegExpEscape)),
-            (Self::Error(ErrorKind::Error), "isError") => Some(Value::Native(Self::ErrorIsError)),
-            (Self::ArrayConstructor, "isArray") => Some(Value::Native(Self::ArrayIsArray)),
-            (Self::ArrayConstructor, "from") => Some(Value::Native(Self::ArrayFrom)),
-            (Self::ArrayConstructor, "fromAsync") => Some(Value::Native(Self::ArrayFromAsync)),
-            (Self::ObjectConstructor, "keys") => Some(Value::Native(Self::ObjectKeys)),
+            (Self::RegExpConstructor, "escape") => {
+                Some(Value::Native(Self::RegExpEscape, RealmId::PRIMARY))
+            }
+            (Self::Error(ErrorKind::Error), "isError") => {
+                Some(Value::Native(Self::ErrorIsError, RealmId::PRIMARY))
+            }
+            (Self::ArrayConstructor, "isArray") => {
+                Some(Value::Native(Self::ArrayIsArray, RealmId::PRIMARY))
+            }
+            (Self::ArrayConstructor, "from") => {
+                Some(Value::Native(Self::ArrayFrom, RealmId::PRIMARY))
+            }
+            (Self::ArrayConstructor, "fromAsync") => {
+                Some(Value::Native(Self::ArrayFromAsync, RealmId::PRIMARY))
+            }
+            (Self::ObjectConstructor, "keys") => {
+                Some(Value::Native(Self::ObjectKeys, RealmId::PRIMARY))
+            }
             // Not `Object.keys`: this reports every own property and that one reports only
             // the enumerated ones. They were the same function until an error object gave them
             // different answers.
             (Self::ObjectConstructor, "getOwnPropertyNames") => {
-                Some(Value::Native(Self::ObjectOwnNames))
+                Some(Value::Native(Self::ObjectOwnNames, RealmId::PRIMARY))
             }
-            (Self::ObjectConstructor, "assign") => Some(Value::Native(Self::ObjectAssign)),
-            (Self::ObjectConstructor, "entries") => Some(Value::Native(Self::ObjectEntries)),
-            (Self::ObjectConstructor, "values") => Some(Value::Native(Self::ObjectValues)),
-            (Self::ObjectConstructor, "freeze") => Some(Value::Native(Self::ObjectFreeze)),
-            (Self::ObjectConstructor, "isFrozen") => Some(Value::Native(Self::ObjectIsFrozen)),
-            (Self::ObjectConstructor, "create") => Some(Value::Native(Self::ObjectCreate)),
+            (Self::ObjectConstructor, "assign") => {
+                Some(Value::Native(Self::ObjectAssign, RealmId::PRIMARY))
+            }
+            (Self::ObjectConstructor, "entries") => {
+                Some(Value::Native(Self::ObjectEntries, RealmId::PRIMARY))
+            }
+            (Self::ObjectConstructor, "values") => {
+                Some(Value::Native(Self::ObjectValues, RealmId::PRIMARY))
+            }
+            (Self::ObjectConstructor, "freeze") => {
+                Some(Value::Native(Self::ObjectFreeze, RealmId::PRIMARY))
+            }
+            (Self::ObjectConstructor, "isFrozen") => {
+                Some(Value::Native(Self::ObjectIsFrozen, RealmId::PRIMARY))
+            }
+            (Self::ObjectConstructor, "create") => {
+                Some(Value::Native(Self::ObjectCreate, RealmId::PRIMARY))
+            }
             (Self::ObjectConstructor, "defineProperty") => {
-                Some(Value::Native(Self::ObjectDefineProperty))
+                Some(Value::Native(Self::ObjectDefineProperty, RealmId::PRIMARY))
             }
             (Self::ObjectConstructor, "fromEntries") => {
-                Some(Value::Native(Self::ObjectFromEntries))
+                Some(Value::Native(Self::ObjectFromEntries, RealmId::PRIMARY))
             }
-            (Self::ArrayConstructor, "of") => Some(Value::Native(Self::ArrayOf)),
-            (Self::StringConstructor, "raw") => Some(Value::Native(Self::StringRaw)),
+            (Self::ArrayConstructor, "of") => Some(Value::Native(Self::ArrayOf, RealmId::PRIMARY)),
+            (Self::StringConstructor, "raw") => {
+                Some(Value::Native(Self::StringRaw, RealmId::PRIMARY))
+            }
             (Self::StringConstructor, "fromCharCode") => {
-                Some(Value::Native(Self::StringFromCharCode))
+                Some(Value::Native(Self::StringFromCharCode, RealmId::PRIMARY))
             }
             (Self::StringConstructor, "fromCodePoint") => {
-                Some(Value::Native(Self::StringFromCodePoint))
+                Some(Value::Native(Self::StringFromCodePoint, RealmId::PRIMARY))
             }
             // `Reflect` is mostly the `Object` statics with a different failure convention, and
             // the ones a program actually reaches are the ones that behave identically here.
-            (Self::Reflect, "ownKeys") => Some(Value::Native(Self::ReflectOwnKeys)),
-            (Self::Reflect, "get") => Some(Value::Native(Self::ReflectGet)),
-            (Self::Reflect, "set") => Some(Value::Native(Self::ReflectSet)),
-            (Self::Reflect, "has") => Some(Value::Native(Self::ReflectHas)),
-            (Self::Reflect, "apply") => Some(Value::Native(Self::ReflectApply)),
-            (Self::Reflect, "construct") => Some(Value::Native(Self::ReflectConstruct)),
-            (Self::Reflect, "getPrototypeOf") => Some(Value::Native(Self::ReflectGetPrototypeOf)),
-            (Self::Reflect, "setPrototypeOf") => Some(Value::Native(Self::ReflectSetPrototypeOf)),
-            (Self::Reflect, "defineProperty") => Some(Value::Native(Self::ReflectDefineProperty)),
-            (Self::Reflect, "getOwnPropertyDescriptor") => {
-                Some(Value::Native(Self::ReflectGetOwnPropertyDescriptor))
+            (Self::Reflect, "ownKeys") => {
+                Some(Value::Native(Self::ReflectOwnKeys, RealmId::PRIMARY))
             }
-            (Self::Reflect, "deleteProperty") => Some(Value::Native(Self::ReflectDeleteProperty)),
-            (Self::Reflect, "isExtensible") => Some(Value::Native(Self::ReflectIsExtensible)),
-            (Self::Reflect, "preventExtensions") => {
-                Some(Value::Native(Self::ReflectPreventExtensions))
+            (Self::Reflect, "get") => Some(Value::Native(Self::ReflectGet, RealmId::PRIMARY)),
+            (Self::Reflect, "set") => Some(Value::Native(Self::ReflectSet, RealmId::PRIMARY)),
+            (Self::Reflect, "has") => Some(Value::Native(Self::ReflectHas, RealmId::PRIMARY)),
+            (Self::Reflect, "apply") => Some(Value::Native(Self::ReflectApply, RealmId::PRIMARY)),
+            (Self::Reflect, "construct") => {
+                Some(Value::Native(Self::ReflectConstruct, RealmId::PRIMARY))
             }
-            (Self::ObjectConstructor, "hasOwn") => Some(Value::Native(Self::ObjectHasOwn)),
-            (Self::ObjectConstructor, "groupBy") => Some(Value::Native(Self::ObjectGroupBy)),
-            (Self::MapConstructor, "groupBy") => Some(Value::Native(Self::MapGroupBy)),
+            (Self::Reflect, "getPrototypeOf") => {
+                Some(Value::Native(Self::ReflectGetPrototypeOf, RealmId::PRIMARY))
+            }
+            (Self::Reflect, "setPrototypeOf") => {
+                Some(Value::Native(Self::ReflectSetPrototypeOf, RealmId::PRIMARY))
+            }
+            (Self::Reflect, "defineProperty") => {
+                Some(Value::Native(Self::ReflectDefineProperty, RealmId::PRIMARY))
+            }
+            (Self::Reflect, "getOwnPropertyDescriptor") => Some(Value::Native(
+                Self::ReflectGetOwnPropertyDescriptor,
+                RealmId::PRIMARY,
+            )),
+            (Self::Reflect, "deleteProperty") => {
+                Some(Value::Native(Self::ReflectDeleteProperty, RealmId::PRIMARY))
+            }
+            (Self::Reflect, "isExtensible") => {
+                Some(Value::Native(Self::ReflectIsExtensible, RealmId::PRIMARY))
+            }
+            (Self::Reflect, "preventExtensions") => Some(Value::Native(
+                Self::ReflectPreventExtensions,
+                RealmId::PRIMARY,
+            )),
+            (Self::ObjectConstructor, "hasOwn") => {
+                Some(Value::Native(Self::ObjectHasOwn, RealmId::PRIMARY))
+            }
+            (Self::ObjectConstructor, "groupBy") => {
+                Some(Value::Native(Self::ObjectGroupBy, RealmId::PRIMARY))
+            }
+            (Self::MapConstructor, "groupBy") => {
+                Some(Value::Native(Self::MapGroupBy, RealmId::PRIMARY))
+            }
             (Self::PromiseConstructor, "withResolvers") => {
-                Some(Value::Native(Self::PromiseWithResolvers))
+                Some(Value::Native(Self::PromiseWithResolvers, RealmId::PRIMARY))
             }
-            (Self::PromiseConstructor, "try") => Some(Value::Native(Self::PromiseTry)),
-            (Self::ObjectConstructor, "is") => Some(Value::Native(Self::ObjectIs)),
-            (Self::ObjectConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Object)))
+            (Self::PromiseConstructor, "try") => {
+                Some(Value::Native(Self::PromiseTry, RealmId::PRIMARY))
             }
-            (Self::ArrayConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Array)))
+            (Self::ObjectConstructor, "is") => {
+                Some(Value::Native(Self::ObjectIs, RealmId::PRIMARY))
             }
-            (Self::StringConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::String)))
-            }
-            (Self::NumberConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Number)))
-            }
-            (Self::RegExpConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::RegExp)))
-            }
-            (Self::DateConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Date)))
-            }
-            (Self::ArrayBufferConstructor, "prototype") => Some(Value::Native(Self::PrototypeOf(
-                PrototypeTable::ArrayBuffer,
-            ))),
+            (Self::ObjectConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Object),
+                RealmId::PRIMARY,
+            )),
+            (Self::ArrayConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Array),
+                RealmId::PRIMARY,
+            )),
+            (Self::StringConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::String),
+                RealmId::PRIMARY,
+            )),
+            (Self::NumberConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Number),
+                RealmId::PRIMARY,
+            )),
+            (Self::RegExpConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::RegExp),
+                RealmId::PRIMARY,
+            )),
+            (Self::DateConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Date),
+                RealmId::PRIMARY,
+            )),
+            (Self::ArrayBufferConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::ArrayBuffer),
+                RealmId::PRIMARY,
+            )),
             (Self::ArrayBufferConstructor, "isView") => {
-                Some(Value::Native(Self::ArrayBufferIsView))
+                Some(Value::Native(Self::ArrayBufferIsView, RealmId::PRIMARY))
             }
             (Self::SharedArrayBufferConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::SharedArrayBuffer),
+                RealmId::PRIMARY,
             )),
-            (Self::DataViewConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::DataView)))
+            (Self::DataViewConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::DataView),
+                RealmId::PRIMARY,
+            )),
+            (Self::IteratorConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Iterator),
+                RealmId::PRIMARY,
+            )),
+            (Self::IteratorConstructor, "from") => {
+                Some(Value::Native(Self::IteratorFrom, RealmId::PRIMARY))
             }
-            (Self::IteratorConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Iterator)))
+            (Self::IteratorConstructor, "concat") => {
+                Some(Value::Native(Self::IteratorConcat, RealmId::PRIMARY))
             }
-            (Self::IteratorConstructor, "from") => Some(Value::Native(Self::IteratorFrom)),
-            (Self::IteratorConstructor, "concat") => Some(Value::Native(Self::IteratorConcat)),
-            (Self::IteratorConstructor, "zip") => {
-                Some(Value::Native(Self::IteratorZip { keyed: false }))
+            (Self::IteratorConstructor, "zip") => Some(Value::Native(
+                Self::IteratorZip { keyed: false },
+                RealmId::PRIMARY,
+            )),
+            (Self::IteratorConstructor, "zipKeyed") => Some(Value::Native(
+                Self::IteratorZip { keyed: true },
+                RealmId::PRIMARY,
+            )),
+            (Self::BooleanConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Boolean),
+                RealmId::PRIMARY,
+            )),
+            (Self::SymbolConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Symbol),
+                RealmId::PRIMARY,
+            )),
+            (Self::BigIntConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::BigInt),
+                RealmId::PRIMARY,
+            )),
+            (Self::BigIntConstructor, "asIntN") => {
+                Some(Value::Native(Self::BigIntAsIntN, RealmId::PRIMARY))
             }
-            (Self::IteratorConstructor, "zipKeyed") => {
-                Some(Value::Native(Self::IteratorZip { keyed: true }))
+            (Self::BigIntConstructor, "asUintN") => {
+                Some(Value::Native(Self::BigIntAsUintN, RealmId::PRIMARY))
             }
-            (Self::BooleanConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Boolean)))
-            }
-            (Self::SymbolConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Symbol)))
-            }
-            (Self::BigIntConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::BigInt)))
-            }
-            (Self::BigIntConstructor, "asIntN") => Some(Value::Native(Self::BigIntAsIntN)),
-            (Self::BigIntConstructor, "asUintN") => Some(Value::Native(Self::BigIntAsUintN)),
-            (Self::PromiseConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Promise)))
-            }
-            (Self::MapConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Map)))
-            }
-            (Self::SetConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Set)))
-            }
-            (Self::WeakMapConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::WeakMap)))
-            }
-            (Self::WeakSetConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::WeakSet)))
-            }
-            (Self::WeakRefConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::WeakRef)))
-            }
+            (Self::PromiseConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Promise),
+                RealmId::PRIMARY,
+            )),
+            (Self::MapConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Map),
+                RealmId::PRIMARY,
+            )),
+            (Self::SetConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Set),
+                RealmId::PRIMARY,
+            )),
+            (Self::WeakMapConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::WeakMap),
+                RealmId::PRIMARY,
+            )),
+            (Self::WeakSetConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::WeakSet),
+                RealmId::PRIMARY,
+            )),
+            (Self::WeakRefConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::WeakRef),
+                RealmId::PRIMARY,
+            )),
             (Self::DisposableStackConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::DisposableStack),
+                RealmId::PRIMARY,
             )),
             (Self::AsyncDisposableStackConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::AsyncDisposableStack),
+                RealmId::PRIMARY,
             )),
             (Self::FinalizationRegistryConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::FinalizationRegistry),
+                RealmId::PRIMARY,
             )),
-            (Self::TypedArrayIntrinsic, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::TypedArray)))
-            }
+            (Self::TypedArrayIntrinsic, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::TypedArray),
+                RealmId::PRIMARY,
+            )),
             (Self::TypedArrayConstructor(kind), "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::TypedArrayFor(kind)),
+                RealmId::PRIMARY,
             )),
             // A method read off one of these tables is unbound, exactly as reading it off an
             // instance is: `call` and `apply` are what supply the receiver.
             // `Proxy.revocable(target, handler)` hands back the proxy and the switch that turns
             // it off, as a pair.
-            (Self::ProxyConstructor, "revocable") => Some(Value::Native(Self::ProxyRevocable)),
+            (Self::ProxyConstructor, "revocable") => {
+                Some(Value::Native(Self::ProxyRevocable, RealmId::PRIMARY))
+            }
             (Self::TypedArrayConstructor(kind), "of") => {
-                Some(Value::Native(Self::TypedArrayOf(kind)))
+                Some(Value::Native(Self::TypedArrayOf(kind), RealmId::PRIMARY))
             }
             (Self::TypedArrayConstructor(kind), "from") => {
-                Some(Value::Native(Self::TypedArrayFrom(kind)))
+                Some(Value::Native(Self::TypedArrayFrom(kind), RealmId::PRIMARY))
             }
             (Self::TypedArrayConstructor(kind), "BYTES_PER_ELEMENT") => {
                 Some(Value::Number(kind.width() as f64))
@@ -1887,41 +2148,45 @@ impl Native {
             (Self::TypedArrayConstructor(kind), _) => byte_text_method(kind, name, true),
             // Every function inherits from `Function.prototype`, which is what the interop
             // shims test when they clone a module's shape.
-            (Self::FunctionConstructor, "prototype") => {
-                Some(Value::Native(Self::PrototypeOf(PrototypeTable::Function)))
-            }
+            (Self::FunctionConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::Function),
+                RealmId::PRIMARY,
+            )),
             // A method table's `constructor` is the built-in it belongs to, which is what
             // `Object.prototype.constructor` has to answer for a plain-object check to work.
-            (Self::PrototypeOf(table), "constructor") => Some(Value::Native(match table {
-                PrototypeTable::Object => Self::ObjectConstructor,
-                PrototypeTable::Array => Self::ArrayConstructor,
-                PrototypeTable::String => Self::StringConstructor,
-                PrototypeTable::Number => Self::NumberConstructor,
-                PrototypeTable::Function => Self::FunctionConstructor,
-                PrototypeTable::RegExp => Self::RegExpConstructor,
-                PrototypeTable::Date => Self::DateConstructor,
-                PrototypeTable::ArrayBuffer => Self::ArrayBufferConstructor,
-                PrototypeTable::SharedArrayBuffer => Self::SharedArrayBufferConstructor,
-                PrototypeTable::TypedArray => Self::TypedArrayIntrinsic,
-                PrototypeTable::TypedArrayFor(kind) => Self::TypedArrayConstructor(kind),
-                PrototypeTable::DataView => Self::DataViewConstructor,
-                PrototypeTable::Iterator => Self::IteratorConstructor,
-                PrototypeTable::Boolean => Self::BooleanConstructor,
-                PrototypeTable::Symbol => Self::SymbolConstructor,
-                PrototypeTable::BigInt => Self::BigIntConstructor,
-                PrototypeTable::Promise => Self::PromiseConstructor,
-                PrototypeTable::Map => Self::MapConstructor,
-                PrototypeTable::Set => Self::SetConstructor,
-                PrototypeTable::WeakMap => Self::WeakMapConstructor,
-                PrototypeTable::WeakSet => Self::WeakSetConstructor,
-                PrototypeTable::WeakRef => Self::WeakRefConstructor,
-                PrototypeTable::DisposableStack => Self::DisposableStackConstructor,
-                PrototypeTable::AsyncDisposableStack => Self::AsyncDisposableStackConstructor,
-                PrototypeTable::FinalizationRegistry => Self::FinalizationRegistryConstructor,
-                PrototypeTable::EventEmitter => Self::NodeEventEmitter,
-                PrototypeTable::Readable => Self::NodeReadable,
-                PrototypeTable::Writable => Self::NodeWritable,
-            })),
+            (Self::PrototypeOf(table), "constructor") => Some(Value::Native(
+                match table {
+                    PrototypeTable::Object => Self::ObjectConstructor,
+                    PrototypeTable::Array => Self::ArrayConstructor,
+                    PrototypeTable::String => Self::StringConstructor,
+                    PrototypeTable::Number => Self::NumberConstructor,
+                    PrototypeTable::Function => Self::FunctionConstructor,
+                    PrototypeTable::RegExp => Self::RegExpConstructor,
+                    PrototypeTable::Date => Self::DateConstructor,
+                    PrototypeTable::ArrayBuffer => Self::ArrayBufferConstructor,
+                    PrototypeTable::SharedArrayBuffer => Self::SharedArrayBufferConstructor,
+                    PrototypeTable::TypedArray => Self::TypedArrayIntrinsic,
+                    PrototypeTable::TypedArrayFor(kind) => Self::TypedArrayConstructor(kind),
+                    PrototypeTable::DataView => Self::DataViewConstructor,
+                    PrototypeTable::Iterator => Self::IteratorConstructor,
+                    PrototypeTable::Boolean => Self::BooleanConstructor,
+                    PrototypeTable::Symbol => Self::SymbolConstructor,
+                    PrototypeTable::BigInt => Self::BigIntConstructor,
+                    PrototypeTable::Promise => Self::PromiseConstructor,
+                    PrototypeTable::Map => Self::MapConstructor,
+                    PrototypeTable::Set => Self::SetConstructor,
+                    PrototypeTable::WeakMap => Self::WeakMapConstructor,
+                    PrototypeTable::WeakSet => Self::WeakSetConstructor,
+                    PrototypeTable::WeakRef => Self::WeakRefConstructor,
+                    PrototypeTable::DisposableStack => Self::DisposableStackConstructor,
+                    PrototypeTable::AsyncDisposableStack => Self::AsyncDisposableStackConstructor,
+                    PrototypeTable::FinalizationRegistry => Self::FinalizationRegistryConstructor,
+                    PrototypeTable::EventEmitter => Self::NodeEventEmitter,
+                    PrototypeTable::Readable => Self::NodeReadable,
+                    PrototypeTable::Writable => Self::NodeWritable,
+                },
+                RealmId::PRIMARY,
+            )),
             (Self::PrototypeOf(table), _) => Some(inherit_from_object(
                 table,
                 match table {
@@ -1966,63 +2231,72 @@ impl Native {
                 },
                 name,
             )),
-            (Self::ObjectConstructor, "preventExtensions") => {
-                Some(Value::Native(Self::ObjectPreventExtensions))
-            }
+            (Self::ObjectConstructor, "preventExtensions") => Some(Value::Native(
+                Self::ObjectPreventExtensions,
+                RealmId::PRIMARY,
+            )),
             (Self::ObjectConstructor, "isExtensible") => {
-                Some(Value::Native(Self::ObjectIsExtensible))
+                Some(Value::Native(Self::ObjectIsExtensible, RealmId::PRIMARY))
             }
             // Sealing is preventing extensions plus making each property non-configurable, and
             // configurability is not tracked per-property, so the two coincide here. The
             // difference only shows through `delete`, which `frozen` already covers.
-            (Self::ObjectConstructor, "seal") => Some(Value::Native(Self::ObjectSeal)),
-            (Self::ObjectConstructor, "isSealed") => Some(Value::Native(Self::ObjectIsSealed)),
-            (Self::ObjectConstructor, "getOwnPropertySymbols") => {
-                Some(Value::Native(Self::ObjectGetOwnPropertySymbols))
+            (Self::ObjectConstructor, "seal") => {
+                Some(Value::Native(Self::ObjectSeal, RealmId::PRIMARY))
             }
-            (Self::ObjectConstructor, "defineProperties") => {
-                Some(Value::Native(Self::ObjectDefineProperties))
+            (Self::ObjectConstructor, "isSealed") => {
+                Some(Value::Native(Self::ObjectIsSealed, RealmId::PRIMARY))
             }
-            (Self::ObjectConstructor, "getOwnPropertyDescriptor") => {
-                Some(Value::Native(Self::ObjectGetOwnPropertyDescriptor))
-            }
-            (Self::ObjectConstructor, "getOwnPropertyDescriptors") => {
-                Some(Value::Native(Self::ObjectGetOwnPropertyDescriptors))
-            }
+            (Self::ObjectConstructor, "getOwnPropertySymbols") => Some(Value::Native(
+                Self::ObjectGetOwnPropertySymbols,
+                RealmId::PRIMARY,
+            )),
+            (Self::ObjectConstructor, "defineProperties") => Some(Value::Native(
+                Self::ObjectDefineProperties,
+                RealmId::PRIMARY,
+            )),
+            (Self::ObjectConstructor, "getOwnPropertyDescriptor") => Some(Value::Native(
+                Self::ObjectGetOwnPropertyDescriptor,
+                RealmId::PRIMARY,
+            )),
+            (Self::ObjectConstructor, "getOwnPropertyDescriptors") => Some(Value::Native(
+                Self::ObjectGetOwnPropertyDescriptors,
+                RealmId::PRIMARY,
+            )),
             (Self::ObjectConstructor, "setPrototypeOf") => {
-                Some(Value::Native(Self::ObjectSetPrototypeOf))
+                Some(Value::Native(Self::ObjectSetPrototypeOf, RealmId::PRIMARY))
             }
             (Self::ObjectConstructor, "getPrototypeOf") => {
-                Some(Value::Native(Self::ObjectGetPrototypeOf))
+                Some(Value::Native(Self::ObjectGetPrototypeOf, RealmId::PRIMARY))
             }
-            (Self::Math, "abs") => Some(Value::Native(Self::MathAbs)),
-            (Self::Math, "floor") => Some(Value::Native(Self::MathFloor)),
-            (Self::Math, "ceil") => Some(Value::Native(Self::MathCeil)),
-            (Self::Math, "round") => Some(Value::Native(Self::MathRound)),
-            (Self::Math, "trunc") => Some(Value::Native(Self::MathTrunc)),
-            (Self::Math, "sign") => Some(Value::Native(Self::MathSign)),
-            (Self::Math, "sqrt") => Some(Value::Native(Self::MathSqrt)),
-            (Self::Math, "cbrt") => Some(Value::Native(Self::MathCbrt)),
-            (Self::Math, "random") => Some(Value::Native(Self::MathRandom)),
-            (Self::Math, "sinh") => Some(Value::Native(Self::MathSinh)),
-            (Self::Math, "cosh") => Some(Value::Native(Self::MathCosh)),
-            (Self::Math, "tanh") => Some(Value::Native(Self::MathTanh)),
-            (Self::Math, "asinh") => Some(Value::Native(Self::MathAsinh)),
-            (Self::Math, "acosh") => Some(Value::Native(Self::MathAcosh)),
-            (Self::Math, "atanh") => Some(Value::Native(Self::MathAtanh)),
-            (Self::Math, "log1p") => Some(Value::Native(Self::MathLog1p)),
-            (Self::Math, "expm1") => Some(Value::Native(Self::MathExpm1)),
-            (Self::Math, "fround") => Some(Value::Native(Self::MathFround)),
-            (Self::Math, "f16round") => Some(Value::Native(Self::MathF16Round)),
-            (Self::Math, "clz32") => Some(Value::Native(Self::MathClz32)),
-            (Self::Math, "imul") => Some(Value::Native(Self::MathImul)),
-            (Self::Math, "pow") => Some(Value::Native(Self::MathPow)),
-            (Self::Math, "min") => Some(Value::Native(Self::MathMin)),
-            (Self::Math, "max") => Some(Value::Native(Self::MathMax)),
-            (Self::Math, "log") => Some(Value::Native(Self::MathLog)),
-            (Self::Math, "log2") => Some(Value::Native(Self::MathLog2)),
-            (Self::Math, "log10") => Some(Value::Native(Self::MathLog10)),
-            (Self::Math, "exp") => Some(Value::Native(Self::MathExp)),
+            (Self::Math, "abs") => Some(Value::Native(Self::MathAbs, RealmId::PRIMARY)),
+            (Self::Math, "floor") => Some(Value::Native(Self::MathFloor, RealmId::PRIMARY)),
+            (Self::Math, "ceil") => Some(Value::Native(Self::MathCeil, RealmId::PRIMARY)),
+            (Self::Math, "round") => Some(Value::Native(Self::MathRound, RealmId::PRIMARY)),
+            (Self::Math, "trunc") => Some(Value::Native(Self::MathTrunc, RealmId::PRIMARY)),
+            (Self::Math, "sign") => Some(Value::Native(Self::MathSign, RealmId::PRIMARY)),
+            (Self::Math, "sqrt") => Some(Value::Native(Self::MathSqrt, RealmId::PRIMARY)),
+            (Self::Math, "cbrt") => Some(Value::Native(Self::MathCbrt, RealmId::PRIMARY)),
+            (Self::Math, "random") => Some(Value::Native(Self::MathRandom, RealmId::PRIMARY)),
+            (Self::Math, "sinh") => Some(Value::Native(Self::MathSinh, RealmId::PRIMARY)),
+            (Self::Math, "cosh") => Some(Value::Native(Self::MathCosh, RealmId::PRIMARY)),
+            (Self::Math, "tanh") => Some(Value::Native(Self::MathTanh, RealmId::PRIMARY)),
+            (Self::Math, "asinh") => Some(Value::Native(Self::MathAsinh, RealmId::PRIMARY)),
+            (Self::Math, "acosh") => Some(Value::Native(Self::MathAcosh, RealmId::PRIMARY)),
+            (Self::Math, "atanh") => Some(Value::Native(Self::MathAtanh, RealmId::PRIMARY)),
+            (Self::Math, "log1p") => Some(Value::Native(Self::MathLog1p, RealmId::PRIMARY)),
+            (Self::Math, "expm1") => Some(Value::Native(Self::MathExpm1, RealmId::PRIMARY)),
+            (Self::Math, "fround") => Some(Value::Native(Self::MathFround, RealmId::PRIMARY)),
+            (Self::Math, "f16round") => Some(Value::Native(Self::MathF16Round, RealmId::PRIMARY)),
+            (Self::Math, "clz32") => Some(Value::Native(Self::MathClz32, RealmId::PRIMARY)),
+            (Self::Math, "imul") => Some(Value::Native(Self::MathImul, RealmId::PRIMARY)),
+            (Self::Math, "pow") => Some(Value::Native(Self::MathPow, RealmId::PRIMARY)),
+            (Self::Math, "min") => Some(Value::Native(Self::MathMin, RealmId::PRIMARY)),
+            (Self::Math, "max") => Some(Value::Native(Self::MathMax, RealmId::PRIMARY)),
+            (Self::Math, "log") => Some(Value::Native(Self::MathLog, RealmId::PRIMARY)),
+            (Self::Math, "log2") => Some(Value::Native(Self::MathLog2, RealmId::PRIMARY)),
+            (Self::Math, "log10") => Some(Value::Native(Self::MathLog10, RealmId::PRIMARY)),
+            (Self::Math, "exp") => Some(Value::Native(Self::MathExp, RealmId::PRIMARY)),
             (Self::Math, "PI") => Some(Value::Number(std::f64::consts::PI)),
             (Self::Math, "E") => Some(Value::Number(std::f64::consts::E)),
             (Self::Math, "LN2") => Some(Value::Number(std::f64::consts::LN_2)),
@@ -2031,25 +2305,35 @@ impl Native {
             (Self::Math, "SQRT1_2") => Some(Value::Number(std::f64::consts::FRAC_1_SQRT_2)),
             (Self::Math, "LOG2E") => Some(Value::Number(std::f64::consts::LOG2_E)),
             (Self::Math, "LOG10E") => Some(Value::Number(std::f64::consts::LOG10_E)),
-            (Self::Math, "hypot") => Some(Value::Native(Self::MathHypot)),
-            (Self::Math, "atan2") => Some(Value::Native(Self::MathAtan2)),
-            (Self::Math, "sin") => Some(Value::Native(Self::MathSin)),
-            (Self::Math, "cos") => Some(Value::Native(Self::MathCos)),
-            (Self::Math, "tan") => Some(Value::Native(Self::MathTan)),
-            (Self::Math, "asin") => Some(Value::Native(Self::MathAsin)),
-            (Self::Math, "acos") => Some(Value::Native(Self::MathAcos)),
-            (Self::Math, "atan") => Some(Value::Native(Self::MathAtan)),
-            (Self::NumberConstructor, "isInteger") => Some(Value::Native(Self::NumberIsInteger)),
+            (Self::Math, "hypot") => Some(Value::Native(Self::MathHypot, RealmId::PRIMARY)),
+            (Self::Math, "atan2") => Some(Value::Native(Self::MathAtan2, RealmId::PRIMARY)),
+            (Self::Math, "sin") => Some(Value::Native(Self::MathSin, RealmId::PRIMARY)),
+            (Self::Math, "cos") => Some(Value::Native(Self::MathCos, RealmId::PRIMARY)),
+            (Self::Math, "tan") => Some(Value::Native(Self::MathTan, RealmId::PRIMARY)),
+            (Self::Math, "asin") => Some(Value::Native(Self::MathAsin, RealmId::PRIMARY)),
+            (Self::Math, "acos") => Some(Value::Native(Self::MathAcos, RealmId::PRIMARY)),
+            (Self::Math, "atan") => Some(Value::Native(Self::MathAtan, RealmId::PRIMARY)),
+            (Self::NumberConstructor, "isInteger") => {
+                Some(Value::Native(Self::NumberIsInteger, RealmId::PRIMARY))
+            }
             (Self::NumberConstructor, "isSafeInteger") => {
-                Some(Value::Native(Self::NumberIsSafeInteger))
+                Some(Value::Native(Self::NumberIsSafeInteger, RealmId::PRIMARY))
             }
             // `Number.isNaN` is not the global `isNaN`: it does not coerce, so
             // `Number.isNaN("x")` is false where `isNaN("x")` is true. Same code, different
             // entry points would be wrong -- these are genuinely two functions.
-            (Self::NumberConstructor, "isNaN") => Some(Value::Native(Self::NumberIsNaN)),
-            (Self::NumberConstructor, "isFinite") => Some(Value::Native(Self::NumberIsFinite)),
-            (Self::NumberConstructor, "parseInt") => Some(Value::Native(Self::ParseInt)),
-            (Self::NumberConstructor, "parseFloat") => Some(Value::Native(Self::ParseFloat)),
+            (Self::NumberConstructor, "isNaN") => {
+                Some(Value::Native(Self::NumberIsNaN, RealmId::PRIMARY))
+            }
+            (Self::NumberConstructor, "isFinite") => {
+                Some(Value::Native(Self::NumberIsFinite, RealmId::PRIMARY))
+            }
+            (Self::NumberConstructor, "parseInt") => {
+                Some(Value::Native(Self::ParseInt, RealmId::PRIMARY))
+            }
+            (Self::NumberConstructor, "parseFloat") => {
+                Some(Value::Native(Self::ParseFloat, RealmId::PRIMARY))
+            }
             (Self::NumberConstructor, "MAX_SAFE_INTEGER") => {
                 Some(Value::Number(9_007_199_254_740_991.0))
             }
@@ -2064,20 +2348,34 @@ impl Native {
                 Some(Value::Number(f64::NEG_INFINITY))
             }
             (Self::NumberConstructor, "NaN") => Some(Value::Number(f64::NAN)),
-            (Self::Performance, "now") => Some(Value::Native(Self::PerformanceNow)),
-            (Self::DateConstructor, "now") => Some(Value::Native(Self::DateNow)),
-            (Self::DateConstructor, "UTC") => Some(Value::Native(Self::DateUtc)),
-            (Self::DateConstructor, "parse") => Some(Value::Native(Self::DateParse)),
-            (Self::PromiseConstructor, "resolve") => Some(Value::Native(Self::PromiseResolve)),
-            (Self::PromiseConstructor, "reject") => Some(Value::Native(Self::PromiseReject)),
-            (Self::PromiseConstructor, "all") => Some(Value::Native(Self::PromiseAll)),
-            (Self::PromiseConstructor, "allSettled") => {
-                Some(Value::Native(Self::PromiseAllSettled))
+            (Self::Performance, "now") => {
+                Some(Value::Native(Self::PerformanceNow, RealmId::PRIMARY))
             }
-            (Self::PromiseConstructor, "race") => Some(Value::Native(Self::PromiseRace)),
-            (Self::PromiseConstructor, "any") => Some(Value::Native(Self::PromiseAny)),
-            (Self::Json, "parse") => Some(Value::Native(Self::JsonParse)),
-            (Self::Json, "rawJSON") => Some(Value::Native(Self::JsonRawJson)),
+            (Self::DateConstructor, "now") => Some(Value::Native(Self::DateNow, RealmId::PRIMARY)),
+            (Self::DateConstructor, "UTC") => Some(Value::Native(Self::DateUtc, RealmId::PRIMARY)),
+            (Self::DateConstructor, "parse") => {
+                Some(Value::Native(Self::DateParse, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "resolve") => {
+                Some(Value::Native(Self::PromiseResolve, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "reject") => {
+                Some(Value::Native(Self::PromiseReject, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "all") => {
+                Some(Value::Native(Self::PromiseAll, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "allSettled") => {
+                Some(Value::Native(Self::PromiseAllSettled, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "race") => {
+                Some(Value::Native(Self::PromiseRace, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "any") => {
+                Some(Value::Native(Self::PromiseAny, RealmId::PRIMARY))
+            }
+            (Self::Json, "parse") => Some(Value::Native(Self::JsonParse, RealmId::PRIMARY)),
+            (Self::Json, "rawJSON") => Some(Value::Native(Self::JsonRawJson, RealmId::PRIMARY)),
             // The tag `Object.prototype.toString` reads. A namespace has no prototype to hang it
             // on, so it is the object's own -- which is exactly how the specification defines it.
             (Self::Math | Self::Json | Self::Reflect, key)
@@ -2100,11 +2398,15 @@ impl Native {
             (Self::Atomics, _) => AtomicsOp::ALL
                 .into_iter()
                 .find(|op| op.property_key() == name)
-                .map(|op| Value::Native(Self::AtomicsOp(op))),
-            (Self::Json, "isRawJSON") => Some(Value::Native(Self::JsonIsRawJson)),
-            (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify)),
-            (Self::SymbolConstructor, "for") => Some(Value::Native(Self::SymbolFor)),
-            (Self::SymbolConstructor, "keyFor") => Some(Value::Native(Self::SymbolKeyFor)),
+                .map(|op| Value::Native(Self::AtomicsOp(op), RealmId::PRIMARY)),
+            (Self::Json, "isRawJSON") => Some(Value::Native(Self::JsonIsRawJson, RealmId::PRIMARY)),
+            (Self::Json, "stringify") => Some(Value::Native(Self::JsonStringify, RealmId::PRIMARY)),
+            (Self::SymbolConstructor, "for") => {
+                Some(Value::Native(Self::SymbolFor, RealmId::PRIMARY))
+            }
+            (Self::SymbolConstructor, "keyFor") => {
+                Some(Value::Native(Self::SymbolKeyFor, RealmId::PRIMARY))
+            }
             // The well-known symbols a program can name. Each is the *same* symbol every time,
             // which is the whole point of them -- and each is published even where nothing here
             // consults it yet, because a program that feature-detects one and finds it missing
@@ -2484,7 +2786,7 @@ impl ObjectData {
         let mut current = self.prototype.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             current = match current {
-                Some(Value::Native(Native::PrototypeOf(table))) => return Some(table),
+                Some(Value::Native(Native::PrototypeOf(table), _)) => return Some(table),
                 Some(Value::Object(parent)) => parent.borrow().prototype.clone(),
                 Some(Value::Function(parent)) => parent.properties.borrow().prototype.clone(),
                 // An array's own chain ends at `Array.prototype` unless the program moved it,
@@ -2995,9 +3297,10 @@ fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
         Value::Function(closure) => closure.properties.borrow().is_extensible(),
         Value::Array(items) => items.properties.borrow().is_extensible(),
         Value::Bound(bound) => bound.properties.borrow().is_extensible(),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
-            intrinsics.extensible(target)
-        }
+        Value::Native(_, _)
+        | Value::Callback(_, _)
+        | Value::Settler(..)
+        | Value::Capability(..) => intrinsics.extensible(target),
         // An exotic object carries an ordinary store for its named properties, and closing it is
         // what `Object.preventExtensions(sample)` has to mean: the elements are not properties
         // of that store and are unaffected, which is what the specification says too.
@@ -3065,7 +3368,10 @@ fn own_property_state(
             .get_own_property(key)
             .cloned()
             .or_else(|| tabulated_property(target, key)),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
+        Value::Native(_, _)
+        | Value::Callback(_, _)
+        | Value::Settler(..)
+        | Value::Capability(..) => {
             match intrinsics.overridden(target, key) {
                 Overridden::Held(property, _) => Some(property),
                 // Unreachable: `own_attributes` answered `None` for a removed property, so the
@@ -3091,6 +3397,7 @@ fn own_property_state(
 
 /// What a built-in's own property held when the realm was built.
 fn tabulated_property(target: &Value, key: &str) -> Option<Property> {
+    let realm = value_realm(target);
     // An accessor is asked about first, because one of them is named `length`:
     // `%TypedArray%.prototype.length` is a getter over the view's element count, and reading it
     // as the arity of a callable answered `None` for a property that is really there.
@@ -3099,7 +3406,7 @@ fn tabulated_property(target: &Value, key: &str) -> Option<Property> {
     }
     if let Some(accessor) = machine_accessor(target, key) {
         return Some(Property::Accessor {
-            get: Some(Value::Native(Native::BuiltinAccessor(accessor))),
+            get: Some(Value::Native(Native::BuiltinAccessor(accessor), realm)),
             set: None,
         });
     }
@@ -3110,7 +3417,7 @@ fn tabulated_property(target: &Value, key: &str) -> Option<Property> {
         }
         "prototype" => intrinsic_prototype(target).map(Property::Value),
         _ => match target {
-            Value::Native(native) => match native.property(key) {
+            Value::Native(native, _) => match native.property(key) {
                 Some(Value::Undefined) | None => None,
                 Some(found) => Some(Property::Value(found)),
             },
@@ -3189,7 +3496,7 @@ fn install_property(
                     let mut elements = items.borrow_mut();
                     if index >= elements.len() {
                         items.sparse.set(true);
-                        elements.resize(index + 1, Value::Native(Native::Hole));
+                        elements.resize(index + 1, Value::Native(Native::Hole, RealmId::PRIMARY));
                     }
                     // A data property keeps its value in the dense storage whatever its flags,
                     // so every reader that walks the elements still sees it. An accessor leaves
@@ -3199,7 +3506,7 @@ fn install_property(
                         Property::Value(value) => value.clone(),
                         Property::Accessor { .. } => {
                             items.sparse.set(true);
-                            Value::Native(Native::Hole)
+                            Value::Native(Native::Hole, RealmId::PRIMARY)
                         }
                     };
                 }
@@ -3222,7 +3529,7 @@ fn install_property(
         },
         // A built-in's own properties live in the realm's store, which is the only place a
         // change to one can go: the tables it is otherwise answered from are `match` arms.
-        Value::Native(_) | Value::Callback(_) => {
+        Value::Native(_, _) | Value::Callback(_, _) => {
             intrinsics.install(target, key, property, attributes);
         }
         // An exotic object takes an ordinary named property in the store beside its own state.
@@ -3321,7 +3628,7 @@ fn array_set_length(
             || items
                 .borrow()
                 .get(index)
-                .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)));
+                .is_some_and(|value| !matches!(value, Value::Native(Native::Hole, _)));
         let removable = match &defined {
             Some(entry) => entry.attributes.configurable && !frozen,
             None => !frozen,
@@ -3338,7 +3645,7 @@ fn array_set_length(
         } else {
             // Growing leaves holes, which read as undefined and are not the same thing.
             items.sparse.set(true);
-            elements.resize(reached, Value::Native(Native::Hole));
+            elements.resize(reached, Value::Native(Native::Hole, RealmId::PRIMARY));
         }
     }
     items
@@ -3406,7 +3713,7 @@ fn inherited_builtin(closure: &Rc<Closure>) -> Option<Native> {
     let mut current = closure.properties.borrow().prototype().cloned();
     for _ in 0..MAX_PROTOTYPE_DEPTH {
         current = match current {
-            Some(Value::Native(native)) => return Some(native),
+            Some(Value::Native(native, _)) => return Some(native),
             Some(Value::Function(parent)) => parent.properties.borrow().prototype().cloned(),
             Some(Value::Object(object)) => object.borrow().prototype().cloned(),
             _ => return None,
@@ -4147,7 +4454,7 @@ fn byte_text_method(kind: TypedKind, name: &str, statics: bool) -> Option<Value>
     ]
     .into_iter()
     .find(|conversion| conversion.key() == name && conversion.is_static() == statics)?;
-    Some(Value::Native(Native::Uint8Text(found)))
+    Some(Value::Native(Native::Uint8Text(found), RealmId::PRIMARY))
 }
 
 /// The methods a concrete view's prototype publishes, as a value rather than an option, for the
@@ -5077,6 +5384,12 @@ pub struct Closure {
     pub name: Option<Rc<str>>,
     /// One cell per [`kiln_ir::FunctionProto::upvalues`] entry, in the same order.
     pub upvalues: Vec<Cell>,
+    /// The realm this function was created in.
+    ///
+    /// `GetFunctionRealm`, and the only thing that makes it observable: a constructor whose
+    /// `prototype` is not an object falls back to *its own* realm's intrinsic prototype, so a
+    /// `new.target` from another realm decides what the built-in it is passed to produces.
+    pub realm: RealmId,
     /// The enclosing function's `arguments`, captured for an arrow.
     ///
     /// An arrow has no `arguments` of its own; it sees the enclosing function's, from where it
@@ -5277,7 +5590,7 @@ impl ArrayData {
             sparse: std::cell::Cell::new(
                 items
                     .iter()
-                    .any(|item| matches!(item, Value::Native(Native::Hole))),
+                    .any(|item| matches!(item, Value::Native(Native::Hole, _))),
             ),
             items: RefCell::new(items),
             properties: RefCell::new(ObjectData::default()),
@@ -5492,6 +5805,15 @@ fn new_date(time: f64) -> Value {
     }))
 }
 
+/// Identifies one realm within an execution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct RealmId(pub u32);
+
+impl RealmId {
+    /// The realm an execution starts in.
+    pub const PRIMARY: RealmId = RealmId(0);
+}
+
 /// A JavaScript scalar value represented by the interpreter.
 #[derive(Clone, Debug)]
 pub enum Value {
@@ -5512,7 +5834,7 @@ pub enum Value {
     /// `Copy` and compared by value: there is exactly one `Error` in a realm, so two references
     /// to it are the same function, which is what `===` should say. That stops being true when
     /// built-ins move into JavaScript (design.md §5) and become ordinary objects.
-    Native(Native),
+    Native(Native, RealmId),
     /// A suspended generator: a frame that can stop and resume, which nothing else here needs.
     Generator(Rc<RefCell<GeneratorState>>),
     Promise(Rc<PromiseData>),
@@ -5557,7 +5879,7 @@ pub enum Value {
     /// `Vec` is the representation that makes indexing the common case it is.
     Array(Rc<ArrayData>),
     /// A built-in that takes a callback, invoked by the VM rather than by `call_native`.
-    Callback(CallbackMethod),
+    Callback(CallbackMethod, RealmId),
     /// A view over a byte buffer: `Uint8Array` and its siblings.
     ///
     /// Separate from `Array` because the difference is the point: the elements are bytes in a
@@ -5650,6 +5972,7 @@ fn node_builtin_namespace(specifier: &str) -> Option<Value> {
             "url" => Native::NodeUrl,
             _ => return None,
         },
+        RealmId::PRIMARY,
     ))
 }
 
@@ -5690,7 +6013,7 @@ fn node_builtin_specifier(native: Native) -> Option<&'static str> {
 
 pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
     let namespace = node_builtin_namespace(specifier)?;
-    let Value::Native(namespace) = namespace else {
+    let Value::Native(namespace, _) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
     let names = node_builtin_export_names(specifier)?;
@@ -5703,7 +6026,7 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
                     if *name == "default" {
                         namespace
                             .property("default")
-                            .unwrap_or(Value::Native(namespace))
+                            .unwrap_or(Value::Native(namespace, RealmId::PRIMARY))
                     } else {
                         namespace
                             .property(name)
@@ -5723,12 +6046,14 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
 /// the two projections cannot drift onto different implementations.
 pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
     let namespace = node_builtin_namespace(specifier)?;
-    let Value::Native(native) = namespace else {
+    let Value::Native(native, _) = namespace else {
         unreachable!("builtin namespaces are native values")
     };
     if let Some(abi) = kiln_node_abi::builtin_abi(specifier) {
         return match abi.commonjs {
-            kiln_node_abi::CommonJsProjection::Namespace => Some(Value::Native(native)),
+            kiln_node_abi::CommonJsProjection::Namespace => {
+                Some(Value::Native(native, RealmId::PRIMARY))
+            }
             kiln_node_abi::CommonJsProjection::Callable { export, properties } => {
                 let callable = native.property(export)?;
                 for (property, target) in properties {
@@ -5776,13 +6101,13 @@ impl Value {
             // A method table stands for a prototype *object*, and `typeof Object.prototype` is
             // "object". `Function.prototype` is the exception the specification makes: it is a
             // function that does nothing.
-            Self::Native(Native::PrototypeOf(PrototypeTable::Function)) => "function",
-            Self::Native(Native::PrototypeOf(_)) => "object",
+            Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
+            Self::Native(Native::PrototypeOf(_), _) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
-            Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics)
-            | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
+            Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics, _)
+            | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)), _)
             | Self::Intl(_) => "object",
             // A Node builtin's default export is the same shape of thing, and the same
             // feature-detection depends on it: `typeof http === "object"` is how a library
@@ -5815,8 +6140,9 @@ impl Value {
                 | Native::NodeUtil
                 | Native::NodeWorkerThreads
                 | Native::NodeZlib,
+                _,
             ) => "object",
-            Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
+            Self::Native(_, _) | Self::Callback(_, _) | Self::Bound(_) => "function",
             Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
@@ -5846,13 +6172,13 @@ impl Value {
             Self::String(_) => "string",
             Self::Function(_) => "function",
             Self::Object(_) => "object",
-            Self::Native(Native::PrototypeOf(PrototypeTable::Function)) => "function",
-            Self::Native(Native::PrototypeOf(_)) => "object",
+            Self::Native(Native::PrototypeOf(PrototypeTable::Function), _) => "function",
+            Self::Native(Native::PrototypeOf(_), _) => "object",
             // A namespace is an object holding functions, not a function: `Math` and `JSON`
             // and `Reflect` cannot be called, and a library that feature-detects with
             // `typeof Math === "object"` has to find one.
-            Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics)
-            | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
+            Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics, _)
+            | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)), _)
             | Self::Intl(_) => "object",
             // A Node builtin's default export is the same shape of thing, and the same
             // feature-detection depends on it: `typeof http === "object"` is how a library
@@ -5885,8 +6211,9 @@ impl Value {
                 | Native::NodeUtil
                 | Native::NodeWorkerThreads
                 | Native::NodeZlib,
+                _,
             ) => "object",
-            Self::Native(_) | Self::Callback(_) | Self::Bound(_) => "function",
+            Self::Native(_, _) | Self::Callback(_, _) | Self::Bound(_) => "function",
             Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
             Self::TypedArray(view) => view.kind.name(),
@@ -5927,8 +6254,8 @@ impl Value {
             // `Number({})` is NaN: ToPrimitive on a plain object yields "[object Object]",
             // which does not parse as a number.
             Self::Object(_)
-            | Self::Native(_)
-            | Self::Callback(_)
+            | Self::Native(_, _)
+            | Self::Callback(_, _)
             | Self::Generator(_)
             | Self::Promise(_)
             | Self::RegExp(_)
@@ -5982,8 +6309,8 @@ impl Value {
             Self::Function(_) => true,
             // Every object is truthy, including an empty one.
             Self::Object(_)
-            | Self::Native(_)
-            | Self::Callback(_)
+            | Self::Native(_, _)
+            | Self::Callback(_, _)
             | Self::Array(_)
             | Self::Generator(_)
             | Self::Promise(_)
@@ -6038,14 +6365,16 @@ impl Value {
             // saying nothing, because feature detection is written as
             // `/native code/.test(String(x))` -- a built-in that reported a body would be read as
             // a polyfill, and a user function that reported `[native code]` as already-native.
-            Self::Native(native) => match namespace_name(native) {
+            Self::Native(native, _) => match namespace_name(native) {
                 // A namespace is an object that happens to hold functions, and `String` of an
                 // object is its `toString` tag. `typeof Math` already answered `"object"`; this
                 // is the same fact reaching the other conversion.
                 Some(name) => format!("[object {name}]"),
                 None => native_code_source(&native_js_name(native)),
             },
-            Self::Callback(method) => native_code_source(&builtin_js_name(&format!("{method:?}"))),
+            Self::Callback(method, _) => {
+                native_code_source(&builtin_js_name(&format!("{method:?}")))
+            }
             Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
@@ -6202,6 +6531,9 @@ pub struct EvalSource<'a> {
     /// Whether this eval's `var` and function declarations belong to the global environment
     /// record, and so become properties of the global object rather than slots of its own frame.
     pub global_var_scope: bool,
+    /// Whether this source is a Script rather than eval code: its `var`s reach the global object
+    /// even in strict mode, and the bindings it makes there are not configurable.
+    pub script: bool,
 }
 
 /// Why a run-time compilation produced no program.
@@ -6234,6 +6566,7 @@ pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), E
 pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
     module_loader: Option<ModuleLoader>,
+    host_realms: bool,
 }
 
 impl ExecutionCapabilities {
@@ -6253,6 +6586,21 @@ impl ExecutionCapabilities {
 
     pub const fn module_loader(self) -> Option<ModuleLoader> {
         self.module_loader
+    }
+
+    /// Let this execution make further realms, and publish the hook that does it.
+    ///
+    /// Off by default and named by the host rather than inferred, for ADR 0031's reason: a realm
+    /// takes what it can do from the host explicitly, so a program cannot acquire a second realm
+    /// because it happened to be run by a runner that had one. Test262's `$262.createRealm` is
+    /// what asks for it.
+    pub const fn with_host_realms(mut self) -> Self {
+        self.host_realms = true;
+        self
+    }
+
+    pub const fn host_realms(self) -> bool {
+        self.host_realms
     }
 }
 
@@ -7664,37 +8012,43 @@ fn call_site_object(name: String) -> Value {
         (CALL_SITE_NAME.to_owned(), Value::String(name)),
         (
             "getFileName".to_owned(),
-            Value::Native(Native::CallSiteGetFileName),
+            Value::Native(Native::CallSiteGetFileName, RealmId::PRIMARY),
         ),
         (
             "getLineNumber".to_owned(),
-            Value::Native(Native::CallSiteGetLineNumber),
+            Value::Native(Native::CallSiteGetLineNumber, RealmId::PRIMARY),
         ),
         (
             "getColumnNumber".to_owned(),
-            Value::Native(Native::CallSiteGetColumnNumber),
+            Value::Native(Native::CallSiteGetColumnNumber, RealmId::PRIMARY),
         ),
         (
             "getFunctionName".to_owned(),
-            Value::Native(Native::CallSiteGetFunctionName),
+            Value::Native(Native::CallSiteGetFunctionName, RealmId::PRIMARY),
         ),
         (
             "getMethodName".to_owned(),
-            Value::Native(Native::CallSiteGetMethodName),
+            Value::Native(Native::CallSiteGetMethodName, RealmId::PRIMARY),
         ),
         (
             "getTypeName".to_owned(),
-            Value::Native(Native::CallSiteGetTypeName),
+            Value::Native(Native::CallSiteGetTypeName, RealmId::PRIMARY),
         ),
-        ("getThis".to_owned(), Value::Native(Native::CallSiteGetThis)),
+        (
+            "getThis".to_owned(),
+            Value::Native(Native::CallSiteGetThis, RealmId::PRIMARY),
+        ),
         (
             "getEvalOrigin".to_owned(),
-            Value::Native(Native::CallSiteGetEvalOrigin),
+            Value::Native(Native::CallSiteGetEvalOrigin, RealmId::PRIMARY),
         ),
-        ("isEval".to_owned(), Value::Native(Native::CallSiteIsEval)),
+        (
+            "isEval".to_owned(),
+            Value::Native(Native::CallSiteIsEval, RealmId::PRIMARY),
+        ),
         (
             "toString".to_owned(),
-            Value::Native(Native::CallSiteToString),
+            Value::Native(Native::CallSiteToString, RealmId::PRIMARY),
         ),
     ])
 }
@@ -7728,11 +8082,11 @@ fn diagnostics_channel() -> Value {
         ("hasSubscribers".to_owned(), Value::Boolean(false)),
         (
             "publish".to_owned(),
-            Value::Native(Native::NodeDiagnosticsPublish),
+            Value::Native(Native::NodeDiagnosticsPublish, RealmId::PRIMARY),
         ),
         (
             "runStores".to_owned(),
-            Value::Native(Native::NodeDiagnosticsRunStores),
+            Value::Native(Native::NodeDiagnosticsRunStores, RealmId::PRIMARY),
         ),
     ])
 }
@@ -8066,7 +8420,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
                     index: *slot as usize,
                 });
             };
-            *local = Value::Native(Native::Uninitialized);
+            *local = Value::Native(Native::Uninitialized, RealmId::PRIMARY);
         }
     }
     for self_import in self_imports {
@@ -8075,7 +8429,10 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
                 import_slot,
                 export_slot,
             } => {
-                let cell = Rc::new(RefCell::new(Value::Native(Native::Uninitialized)));
+                let cell = Rc::new(RefCell::new(Value::Native(
+                    Native::Uninitialized,
+                    RealmId::PRIMARY,
+                )));
                 self_bindings.push((Rc::clone(&cell), *export_slot));
                 let Some(local) = locals.get_mut(*import_slot as usize) else {
                     return Err(ExecutionError::LocalOutOfBounds {
@@ -8091,7 +8448,9 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
             } => {
                 let object = namespace_object(exports.iter().map(|(name, source)| {
                     let value = match source {
-                        ModuleSelfExport::Slot(_) => Value::Native(Native::Uninitialized),
+                        ModuleSelfExport::Slot(_) => {
+                            Value::Native(Native::Uninitialized, RealmId::PRIMARY)
+                        }
                         ModuleSelfExport::Settled(value) => value.clone(),
                     };
                     (name.clone(), value)
@@ -8572,6 +8931,12 @@ struct Frame {
     /// constructor yields its instance unless the body returned an object, which wins.
     constructing: Option<Value>,
     locals: Vec<Value>,
+    /// The realm the caller was running in, restored with the frame.
+    ///
+    /// A call into a function from another realm *is* a realm switch: everything the callee
+    /// mints -- an intrinsic it reads off a table, a `TypeError` it throws, an object it
+    /// constructs -- belongs to its realm and not to the caller's.
+    realm: RealmId,
     /// Which frame's locals were module scope for the code that pushed this one.
     ///
     /// Every ordinary call inherits it, because a callee shares its module's bindings. An eval
@@ -8631,7 +8996,13 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// subclass's prototype chains to `Error.prototype`, which is what makes a `TypeError` an
     /// `Error` too. This is the smallest thing a realm is, and it is where a real realm object
     /// will start.
-    error_prototypes: [Option<Value>; ErrorKind::ALL.len()],
+    error_prototypes: Vec<[Option<Value>; ErrorKind::ALL.len()]>,
+    /// Which realm the running code belongs to, saved and restored with the frame.
+    ///
+    /// Not a property of the *value* being run but of the execution: an intrinsic minted while
+    /// realm 1 is current belongs to realm 1, which is what `GetFunctionRealm` and every
+    /// "throw *this* realm's TypeError" step in the specification are asking about.
+    current_realm: RealmId,
     /// `this` in the running frame. At module scope it is `undefined`, because a module body is
     /// always strict and strict code does not get the global object.
     this_value: Value,
@@ -8641,7 +9012,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// stashes state on it -- `globalThis.__something ??= {}` is a common singleton idiom -- has
     /// to find it again. What it does *not* do is back variable lookup: writing
     /// `globalThis.x = 1` does not make a bare `x` resolve, since bindings live in module slots.
-    global_object: Option<Value>,
+    global_objects: Vec<Option<Value>>,
     /// How many built-ins are currently between the running code and the interpreter loop.
     native_depth: usize,
     /// `process`, built on first use and shared from then on.
@@ -8693,6 +9064,9 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Runtime source compilation is explicit realm authority, absent unless the caller selects
     /// a compiler. It is copied into each short-lived module VM from the graph session policy.
     source_compiler: Option<SourceCompiler>,
+    /// Whether this execution's host allows a second realm, and therefore publishes the hook
+    /// that makes one. False for every ordinary run.
+    host_realms: bool,
     module_loader: Option<ModuleLoader>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
@@ -8856,12 +9230,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             arguments_object: None,
             // The module body has no `arguments` at all, mapped or not.
             mapped_arguments: false,
-            error_prototypes: [const { None }; ErrorKind::ALL.len()],
+            error_prototypes: vec![[const { None }; ErrorKind::ALL.len()]],
+            current_realm: RealmId::PRIMARY,
             async_context: AsyncContext::default(),
             this_value: Value::Undefined,
             new_target: Value::Undefined,
             suspended_awaiting: false,
-            global_object: None,
+            global_objects: vec![None],
             process_object: None,
             intrinsics: Intrinsics::default(),
             native_depth: 0,
@@ -8876,6 +9251,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             default_locale,
             source_compiler: execution.source_compiler(),
             module_loader: execution.module_loader(),
+            host_realms: execution.host_realms(),
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
@@ -8991,10 +9367,19 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // The realm's own roots. `globalThis.globalThis` is the global object itself, so the
         // realm is a cycle on its own and survives the machine that built it -- taking with it
         // everything the program hung off the global object.
-        let roots = [self.global_object.take(), self.process_object.take()];
+        let roots: Vec<Option<Value>> = self
+            .global_objects
+            .iter_mut()
+            .map(Option::take)
+            .chain(std::iter::once(self.process_object.take()))
+            .collect();
         for root in roots
             .into_iter()
-            .chain(self.error_prototypes.iter_mut().map(Option::take))
+            .chain(
+                self.error_prototypes
+                    .iter_mut()
+                    .flat_map(|realm| realm.iter_mut().map(Option::take)),
+            )
             .flatten()
         {
             if let Value::Object(object) = root {
@@ -9610,7 +9995,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if let Some(writer) = writer {
                     let done = callback
                         .clone()
-                        .unwrap_or(Value::Native(Native::NodeUtilDebugNoop));
+                        .unwrap_or(Value::Native(Native::NodeUtilDebugNoop, RealmId::PRIMARY));
                     self.call_value(
                         &writer,
                         receiver.clone(),
@@ -10948,18 +11333,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )))),
                     ..Default::default()
                 };
-                incoming
-                    .set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Readable)));
+                incoming.set_prototype(Value::Native(
+                    Native::PrototypeOf(PrototypeTable::Readable),
+                    RealmId::PRIMARY,
+                ));
                 incoming.set("statusCode", Value::Number(f64::from(head.status)));
                 incoming.set("statusMessage", Value::String(head.reason.clone()));
-                incoming.set("on", Value::Native(Native::NodeEventOn));
-                incoming.set("once", Value::Native(Native::NodeEventOnce));
-                incoming.set("emit", Value::Native(Native::NodeEventEmit));
-                incoming.set("pause", Value::Native(Native::NodeReadablePause));
-                incoming.set("resume", Value::Native(Native::NodeReadableResume));
+                incoming.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+                incoming.set(
+                    "once",
+                    Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+                );
+                incoming.set(
+                    "emit",
+                    Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+                );
+                incoming.set(
+                    "pause",
+                    Value::Native(Native::NodeReadablePause, RealmId::PRIMARY),
+                );
+                incoming.set(
+                    "resume",
+                    Value::Native(Native::NodeReadableResume, RealmId::PRIMARY),
+                );
                 incoming.set(
                     "setEncoding",
-                    Value::Native(Native::NodeReadableSetEncoding),
+                    Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
                 );
                 let mut headers = ObjectData::default();
                 for (name, value) in head.headers_object() {
@@ -11070,26 +11469,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             )))),
             ..Default::default()
         };
-        incoming.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Readable)));
+        incoming.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Readable),
+            RealmId::PRIMARY,
+        ));
         incoming.set("method", Value::String(request.method.clone()));
         incoming.set("url", Value::String(request.target.clone()));
-        incoming.set("on", Value::Native(Native::NodeEventOn));
-        incoming.set("once", Value::Native(Native::NodeEventOnce));
+        incoming.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+        incoming.set(
+            "once",
+            Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+        );
         incoming.set(
             "removeListener",
-            Value::Native(Native::NodeEventRemoveListener),
+            Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
         );
-        incoming.set("off", Value::Native(Native::NodeEventRemoveListener));
+        incoming.set(
+            "off",
+            Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+        );
         incoming.set(
             "removeAllListeners",
-            Value::Native(Native::NodeEventRemoveAllListeners),
+            Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
         );
-        incoming.set("emit", Value::Native(Native::NodeEventEmit));
-        incoming.set("pause", Value::Native(Native::NodeReadablePause));
-        incoming.set("resume", Value::Native(Native::NodeReadableResume));
+        incoming.set(
+            "emit",
+            Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "pause",
+            Value::Native(Native::NodeReadablePause, RealmId::PRIMARY),
+        );
+        incoming.set(
+            "resume",
+            Value::Native(Native::NodeReadableResume, RealmId::PRIMARY),
+        );
         incoming.set(
             "setEncoding",
-            Value::Native(Native::NodeReadableSetEncoding),
+            Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
         );
         let mut headers = ObjectData::default();
         for (name, value) in request.headers_object() {
@@ -11129,20 +11546,47 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             node_object: Some(NodeObject::HttpResponse(Rc::clone(&response_state))),
             ..Default::default()
         };
-        response.set("setHeader", Value::Native(Native::NodeResponseSetHeader));
-        response.set("getHeader", Value::Native(Native::NodeResponseGetHeader));
-        response.set("getHeaders", Value::Native(Native::NodeResponseGetHeaders));
-        response.set("hasHeader", Value::Native(Native::NodeResponseHasHeader));
+        response.set(
+            "setHeader",
+            Value::Native(Native::NodeResponseSetHeader, RealmId::PRIMARY),
+        );
+        response.set(
+            "getHeader",
+            Value::Native(Native::NodeResponseGetHeader, RealmId::PRIMARY),
+        );
+        response.set(
+            "getHeaders",
+            Value::Native(Native::NodeResponseGetHeaders, RealmId::PRIMARY),
+        );
+        response.set(
+            "hasHeader",
+            Value::Native(Native::NodeResponseHasHeader, RealmId::PRIMARY),
+        );
         response.set(
             "removeHeader",
-            Value::Native(Native::NodeResponseRemoveHeader),
+            Value::Native(Native::NodeResponseRemoveHeader, RealmId::PRIMARY),
         );
-        response.set("writeHead", Value::Native(Native::NodeResponseWriteHead));
-        response.set("write", Value::Native(Native::NodeResponseWrite));
-        response.set("end", Value::Native(Native::NodeResponseEnd));
-        response.set("on", Value::Native(Native::NodeEventOn));
-        response.set("once", Value::Native(Native::NodeEventOnce));
-        response.set("emit", Value::Native(Native::NodeEventEmit));
+        response.set(
+            "writeHead",
+            Value::Native(Native::NodeResponseWriteHead, RealmId::PRIMARY),
+        );
+        response.set(
+            "write",
+            Value::Native(Native::NodeResponseWrite, RealmId::PRIMARY),
+        );
+        response.set(
+            "end",
+            Value::Native(Native::NodeResponseEnd, RealmId::PRIMARY),
+        );
+        response.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+        response.set(
+            "once",
+            Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+        );
+        response.set(
+            "emit",
+            Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+        );
         response.set("req", incoming.clone());
         response.set("socket", socket.clone());
         response.set("connection", socket);
@@ -12505,7 +12949,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         });
                     };
                     let value = value.clone();
-                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                    if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         self.throw_error(
                             ErrorKind::Reference,
                             "cannot access a binding before its declaration".to_owned(),
@@ -12605,7 +13049,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // creating the one being tested against is what makes the comparison
                     // meaningful for a kind nothing has constructed yet.
                     let prototype = match &right {
-                        Value::Native(Native::Error(kind)) => Some(self.error_prototype(*kind)),
+                        Value::Native(Native::Error(kind), _) => Some(self.error_prototype(*kind)),
                         _ => None,
                     };
                     let answer = self.instance_of_value(&left, &right, prototype.as_ref(), current);
@@ -13108,12 +13552,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.stack.push(new_target);
                 }
                 Instruction::GetProperty(name)
-                    if matches!(self.stack.last(), Some(Value::Native(Native::Error(_))))
+                    if matches!(self.stack.last(), Some(Value::Native(Native::Error(_), _)))
                         && self.string_constant(*name, current)? == "prototype" =>
                 {
                     // `Error.prototype` has to be the same object instances inherit from, or
                     // `extends Error` would link to something no error descends from.
-                    let Some(Value::Native(Native::Error(kind))) = self.stack.pop() else {
+                    let Some(Value::Native(Native::Error(kind), _)) = self.stack.pop() else {
                         unreachable!("checked by the guard");
                     };
                     let prototype = self.error_prototype(kind);
@@ -13153,121 +13597,126 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Entered rather than driven: the interpreter loop runs the eval's frame
                     // next, and its `Return` leaves the completion value where this instruction's
                     // result belongs. Nothing is pushed here.
-                    let entered = self.enter_eval(&source, Some(site));
+                    let entered = self.enter_eval(&source, Some(site), false);
                     if self.catchable(entered, current)?.is_none() {
                         continue;
                     }
                 }
                 Instruction::LoadBuiltin(builtin) => {
-                    self.stack.push(Value::Native(match builtin {
-                        kiln_ir::Builtin::Error => Native::Error(ErrorKind::Error),
-                        kiln_ir::Builtin::TypeError => Native::Error(ErrorKind::Type),
-                        kiln_ir::Builtin::RangeError => Native::Error(ErrorKind::Range),
-                        kiln_ir::Builtin::ReferenceError => Native::Error(ErrorKind::Reference),
-                        kiln_ir::Builtin::SyntaxError => Native::Error(ErrorKind::Syntax),
-                        kiln_ir::Builtin::UriError => Native::Error(ErrorKind::Uri),
-                        kiln_ir::Builtin::EvalError => Native::Error(ErrorKind::Eval),
-                        kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
-                        kiln_ir::Builtin::String => Native::StringConstructor,
-                        kiln_ir::Builtin::Set => Native::SetConstructor,
-                        kiln_ir::Builtin::Map => Native::MapConstructor,
-                        kiln_ir::Builtin::GlobalThis => {
-                            let globals = self.global_object();
-                            self.stack.push(globals);
-                            continue;
-                        }
-                        kiln_ir::Builtin::Process => {
-                            let process = self.process_object();
-                            self.stack.push(process);
-                            continue;
-                        }
-                        kiln_ir::Builtin::Buffer => Native::NodeBuffer,
-                        kiln_ir::Builtin::Url => Native::UrlConstructor,
-                        kiln_ir::Builtin::TextDecoder => Native::TextDecoderConstructor,
-                        kiln_ir::Builtin::Array => Native::ArrayConstructor,
-                        kiln_ir::Builtin::Object => Native::ObjectConstructor,
-                        kiln_ir::Builtin::Json => Native::Json,
-                        kiln_ir::Builtin::Math => Native::Math,
-                        kiln_ir::Builtin::Atomics => Native::Atomics,
-                        kiln_ir::Builtin::Number => Native::NumberConstructor,
-                        kiln_ir::Builtin::Boolean => Native::BooleanConstructor,
-                        kiln_ir::Builtin::ParseInt => Native::ParseInt,
-                        kiln_ir::Builtin::Escape => Native::Escape,
-                        kiln_ir::Builtin::Unescape => Native::Unescape,
-                        kiln_ir::Builtin::EncodeUri => Native::EncodeUri,
-                        kiln_ir::Builtin::EncodeUriComponent => Native::EncodeUriComponent,
-                        kiln_ir::Builtin::DecodeUri => Native::DecodeUri,
-                        kiln_ir::Builtin::DecodeUriComponent => Native::DecodeUriComponent,
-                        kiln_ir::Builtin::ParseFloat => Native::ParseFloat,
-                        kiln_ir::Builtin::IsNaN => Native::IsNaN,
-                        kiln_ir::Builtin::IsFinite => Native::IsFinite,
-                        kiln_ir::Builtin::SetTimeout => Native::SetTimeout,
-                        kiln_ir::Builtin::SetInterval => Native::SetInterval,
-                        kiln_ir::Builtin::ClearTimeout => Native::ClearTimeout,
-                        kiln_ir::Builtin::ClearInterval => Native::ClearInterval,
-                        kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
-                        kiln_ir::Builtin::SetImmediate => Native::SetImmediate,
-                        kiln_ir::Builtin::ClearImmediate => Native::ClearImmediate,
-                        kiln_ir::Builtin::Promise => Native::PromiseConstructor,
-                        kiln_ir::Builtin::RegExp => Native::RegExpConstructor,
-                        kiln_ir::Builtin::Date => Native::DateConstructor,
-                        kiln_ir::Builtin::WeakMap => Native::WeakMapConstructor,
-                        kiln_ir::Builtin::WeakSet => Native::WeakSetConstructor,
-                        kiln_ir::Builtin::Performance => Native::Performance,
-                        kiln_ir::Builtin::Reflect => Native::Reflect,
-                        kiln_ir::Builtin::BigInt => Native::BigIntConstructor,
-                        kiln_ir::Builtin::Function => Native::FunctionConstructor,
-                        kiln_ir::Builtin::Eval => Native::Eval,
-                        kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
-                        kiln_ir::Builtin::DisposableStack => Native::DisposableStackConstructor,
-                        kiln_ir::Builtin::AsyncDisposableStack => {
-                            Native::AsyncDisposableStackConstructor
-                        }
-                        kiln_ir::Builtin::SuppressedError => Native::Error(ErrorKind::Suppressed),
-                        kiln_ir::Builtin::AggregateError => Native::Error(ErrorKind::Aggregate),
-                        kiln_ir::Builtin::AbortController => Native::AbortControllerConstructor,
-                        kiln_ir::Builtin::AbortSignal => Native::AbortSignalConstructor,
-                        kiln_ir::Builtin::TextEncoder => Native::TextEncoderConstructor,
-                        kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
-                        kiln_ir::Builtin::Int8Array => {
-                            Native::TypedArrayConstructor(TypedKind::Int8)
-                        }
-                        kiln_ir::Builtin::Uint8Array => {
-                            Native::TypedArrayConstructor(TypedKind::Uint8)
-                        }
-                        kiln_ir::Builtin::Uint8ClampedArray => {
-                            Native::TypedArrayConstructor(TypedKind::Uint8Clamped)
-                        }
-                        kiln_ir::Builtin::Int16Array => {
-                            Native::TypedArrayConstructor(TypedKind::Int16)
-                        }
-                        kiln_ir::Builtin::Uint16Array => {
-                            Native::TypedArrayConstructor(TypedKind::Uint16)
-                        }
-                        kiln_ir::Builtin::Int32Array => {
-                            Native::TypedArrayConstructor(TypedKind::Int32)
-                        }
-                        kiln_ir::Builtin::Uint32Array => {
-                            Native::TypedArrayConstructor(TypedKind::Uint32)
-                        }
-                        kiln_ir::Builtin::Float32Array => {
-                            Native::TypedArrayConstructor(TypedKind::Float32)
-                        }
-                        kiln_ir::Builtin::Float64Array => {
-                            Native::TypedArrayConstructor(TypedKind::Float64)
-                        }
+                    self.stack.push(Value::Native(
+                        match builtin {
+                            kiln_ir::Builtin::Error => Native::Error(ErrorKind::Error),
+                            kiln_ir::Builtin::TypeError => Native::Error(ErrorKind::Type),
+                            kiln_ir::Builtin::RangeError => Native::Error(ErrorKind::Range),
+                            kiln_ir::Builtin::ReferenceError => Native::Error(ErrorKind::Reference),
+                            kiln_ir::Builtin::SyntaxError => Native::Error(ErrorKind::Syntax),
+                            kiln_ir::Builtin::UriError => Native::Error(ErrorKind::Uri),
+                            kiln_ir::Builtin::EvalError => Native::Error(ErrorKind::Eval),
+                            kiln_ir::Builtin::Symbol => Native::SymbolConstructor,
+                            kiln_ir::Builtin::String => Native::StringConstructor,
+                            kiln_ir::Builtin::Set => Native::SetConstructor,
+                            kiln_ir::Builtin::Map => Native::MapConstructor,
+                            kiln_ir::Builtin::GlobalThis => {
+                                let globals = self.global_object();
+                                self.stack.push(globals);
+                                continue;
+                            }
+                            kiln_ir::Builtin::Process => {
+                                let process = self.process_object();
+                                self.stack.push(process);
+                                continue;
+                            }
+                            kiln_ir::Builtin::Buffer => Native::NodeBuffer,
+                            kiln_ir::Builtin::Url => Native::UrlConstructor,
+                            kiln_ir::Builtin::TextDecoder => Native::TextDecoderConstructor,
+                            kiln_ir::Builtin::Array => Native::ArrayConstructor,
+                            kiln_ir::Builtin::Object => Native::ObjectConstructor,
+                            kiln_ir::Builtin::Json => Native::Json,
+                            kiln_ir::Builtin::Math => Native::Math,
+                            kiln_ir::Builtin::Atomics => Native::Atomics,
+                            kiln_ir::Builtin::Number => Native::NumberConstructor,
+                            kiln_ir::Builtin::Boolean => Native::BooleanConstructor,
+                            kiln_ir::Builtin::ParseInt => Native::ParseInt,
+                            kiln_ir::Builtin::Escape => Native::Escape,
+                            kiln_ir::Builtin::Unescape => Native::Unescape,
+                            kiln_ir::Builtin::EncodeUri => Native::EncodeUri,
+                            kiln_ir::Builtin::EncodeUriComponent => Native::EncodeUriComponent,
+                            kiln_ir::Builtin::DecodeUri => Native::DecodeUri,
+                            kiln_ir::Builtin::DecodeUriComponent => Native::DecodeUriComponent,
+                            kiln_ir::Builtin::ParseFloat => Native::ParseFloat,
+                            kiln_ir::Builtin::IsNaN => Native::IsNaN,
+                            kiln_ir::Builtin::IsFinite => Native::IsFinite,
+                            kiln_ir::Builtin::SetTimeout => Native::SetTimeout,
+                            kiln_ir::Builtin::SetInterval => Native::SetInterval,
+                            kiln_ir::Builtin::ClearTimeout => Native::ClearTimeout,
+                            kiln_ir::Builtin::ClearInterval => Native::ClearInterval,
+                            kiln_ir::Builtin::QueueMicrotask => Native::QueueMicrotask,
+                            kiln_ir::Builtin::SetImmediate => Native::SetImmediate,
+                            kiln_ir::Builtin::ClearImmediate => Native::ClearImmediate,
+                            kiln_ir::Builtin::Promise => Native::PromiseConstructor,
+                            kiln_ir::Builtin::RegExp => Native::RegExpConstructor,
+                            kiln_ir::Builtin::Date => Native::DateConstructor,
+                            kiln_ir::Builtin::WeakMap => Native::WeakMapConstructor,
+                            kiln_ir::Builtin::WeakSet => Native::WeakSetConstructor,
+                            kiln_ir::Builtin::Performance => Native::Performance,
+                            kiln_ir::Builtin::Reflect => Native::Reflect,
+                            kiln_ir::Builtin::BigInt => Native::BigIntConstructor,
+                            kiln_ir::Builtin::Function => Native::FunctionConstructor,
+                            kiln_ir::Builtin::Eval => Native::Eval,
+                            kiln_ir::Builtin::Proxy => Native::ProxyConstructor,
+                            kiln_ir::Builtin::DisposableStack => Native::DisposableStackConstructor,
+                            kiln_ir::Builtin::AsyncDisposableStack => {
+                                Native::AsyncDisposableStackConstructor
+                            }
+                            kiln_ir::Builtin::SuppressedError => {
+                                Native::Error(ErrorKind::Suppressed)
+                            }
+                            kiln_ir::Builtin::AggregateError => Native::Error(ErrorKind::Aggregate),
+                            kiln_ir::Builtin::AbortController => Native::AbortControllerConstructor,
+                            kiln_ir::Builtin::AbortSignal => Native::AbortSignalConstructor,
+                            kiln_ir::Builtin::TextEncoder => Native::TextEncoderConstructor,
+                            kiln_ir::Builtin::ArrayBuffer => Native::ArrayBufferConstructor,
+                            kiln_ir::Builtin::Int8Array => {
+                                Native::TypedArrayConstructor(TypedKind::Int8)
+                            }
+                            kiln_ir::Builtin::Uint8Array => {
+                                Native::TypedArrayConstructor(TypedKind::Uint8)
+                            }
+                            kiln_ir::Builtin::Uint8ClampedArray => {
+                                Native::TypedArrayConstructor(TypedKind::Uint8Clamped)
+                            }
+                            kiln_ir::Builtin::Int16Array => {
+                                Native::TypedArrayConstructor(TypedKind::Int16)
+                            }
+                            kiln_ir::Builtin::Uint16Array => {
+                                Native::TypedArrayConstructor(TypedKind::Uint16)
+                            }
+                            kiln_ir::Builtin::Int32Array => {
+                                Native::TypedArrayConstructor(TypedKind::Int32)
+                            }
+                            kiln_ir::Builtin::Uint32Array => {
+                                Native::TypedArrayConstructor(TypedKind::Uint32)
+                            }
+                            kiln_ir::Builtin::Float32Array => {
+                                Native::TypedArrayConstructor(TypedKind::Float32)
+                            }
+                            kiln_ir::Builtin::Float64Array => {
+                                Native::TypedArrayConstructor(TypedKind::Float64)
+                            }
 
-                        // Values rather than callables, so they leave the loop early like
-                        // `globalThis` does rather than being wrapped in a `Native`.
-                        kiln_ir::Builtin::NotANumber => {
-                            self.stack.push(Value::Number(f64::NAN));
-                            continue;
-                        }
-                        kiln_ir::Builtin::Infinity => {
-                            self.stack.push(Value::Number(f64::INFINITY));
-                            continue;
-                        }
-                    }));
+                            // Values rather than callables, so they leave the loop early like
+                            // `globalThis` does rather than being wrapped in a `Native`.
+                            kiln_ir::Builtin::NotANumber => {
+                                self.stack.push(Value::Number(f64::NAN));
+                                continue;
+                            }
+                            kiln_ir::Builtin::Infinity => {
+                                self.stack.push(Value::Number(f64::INFINITY));
+                                continue;
+                            }
+                        },
+                        RealmId::PRIMARY,
+                    ));
                 }
                 Instruction::New { argc } => {
                     let argc = *argc as usize;
@@ -13392,7 +13841,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::MarkUninitialized(slot) => {
                     let slot = *slot as usize;
-                    let marker = Value::Native(Native::Uninitialized);
+                    let marker = Value::Native(Native::Uninitialized, RealmId::PRIMARY);
                     match self.locals.get_mut(slot) {
                         // A cell may already be in the slot, because the binding is captured and
                         // the cell has to exist before anything captures it.
@@ -13521,7 +13970,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         globals.borrow_mut().set(&name, value);
                     }
                 }
-                Instruction::PushHole => self.stack.push(Value::Native(Native::Hole)),
+                Instruction::PushHole => self
+                    .stack
+                    .push(Value::Native(Native::Hole, RealmId::PRIMARY)),
                 Instruction::NewRegExp { pattern, flags } => {
                     let pattern = self.string_constant(*pattern, current)?;
                     let flags = self.string_constant(*flags, current)?;
@@ -13935,7 +14386,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::LoadCell(slot) => {
                     let cell = self.cell(*slot as usize)?;
                     let value = cell.borrow().clone();
-                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                    if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         self.throw_error(
                             ErrorKind::Reference,
                             "cannot access a binding before its declaration".to_owned(),
@@ -13952,7 +14403,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::LoadUpvalue(index) => {
                     let value = self.upvalue(*index)?.borrow().clone();
-                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                    if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         self.throw_error(
                             ErrorKind::Reference,
                             "cannot access a binding before its declaration".to_owned(),
@@ -14017,15 +14468,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             };
                             self.stack.push(result);
                         }
-                        Value::Native(native) => {
+                        Value::Native(native, realm) => {
                             let native = *native;
+                            let realm = *realm;
                             let arguments = self.take_arguments(argc, current)?;
-                            let called = self.dispatch_native(
-                                native,
-                                &Value::Undefined,
-                                &arguments,
-                                current,
-                            );
+                            let called = self.entering(realm, |vm| {
+                                vm.dispatch_native(native, &Value::Undefined, &arguments, current)
+                            });
                             let Some(result) = self.catchable(called, current)? else {
                                 continue;
                             };
@@ -14047,7 +14496,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // A module binding read from inside a function that ran too early: the one
                     // dead-zone read the compiler cannot see, because whether the function is
                     // called before the declaration is a question about the run, not the text.
-                    if matches!(value, Value::Native(Native::Uninitialized)) {
+                    if matches!(value, Value::Native(Native::Uninitialized, _)) {
                         self.throw_error(
                             ErrorKind::Reference,
                             "cannot access a binding before its declaration".to_owned(),
@@ -14086,6 +14535,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.locals = frame.locals;
                     self.program = frame.program;
                     self.strictness = frame.strictness;
+                    self.current_realm = frame.realm;
                     self.strict = frame.strict;
                     self.function = frame.function;
                     self.this_value = frame.this_value;
@@ -14145,7 +14595,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let Some(handler) = self.handlers.pop() else {
             // A `.return()` signal that reaches the top has run every `finally` between the
             // suspension point and here, which is the whole reason it was thrown.
-            if matches!(thrown, Value::Native(Native::ReturnSignal)) {
+            if matches!(thrown, Value::Native(Native::ReturnSignal, _)) {
                 return Err(ExecutionError::GeneratorReturned);
             }
             let trace = captured_trace(&thrown);
@@ -14164,6 +14614,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.locals = frame.locals;
                 self.program = frame.program;
                 self.strictness = frame.strictness;
+                self.current_realm = frame.realm;
                 self.strict = frame.strict;
                 self.function = frame.function;
                 self.this_value = frame.this_value;
@@ -14183,6 +14634,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.locals = frame.locals;
             self.program = frame.program;
             self.strictness = frame.strictness;
+            self.current_realm = frame.realm;
             self.strict = frame.strict;
             self.function = frame.function;
             self.this_value = frame.this_value;
@@ -14294,6 +14746,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let stack_base = self.stack.len();
         self.frames.push(Frame {
+            realm: std::mem::replace(&mut self.current_realm, closure.realm),
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
@@ -14419,6 +14872,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
 
         self.frames.push(Frame {
+            realm: std::mem::replace(&mut self.current_realm, closure.realm),
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
@@ -14463,7 +14917,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Throwing at the suspension point runs every `finally` between there and the top of
             // the generator, then arrives as `GeneratorReturned`.
             let raised = match &resume {
-                Resume::Return(_) => Value::Native(Native::ReturnSignal),
+                Resume::Return(_) => Value::Native(Native::ReturnSignal, RealmId::PRIMARY),
                 // A rejection is raised as itself, so the generator's own `catch` can see it.
                 other => match other {
                     Resume::Throw(value) => value.clone(),
@@ -14492,7 +14946,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // symptom was a program that caught `[Function: returnSignal]` from an ordinary
                 // `for (const x of gen) { break; }` written inside a `try`.
                 Err(ExecutionError::ThrownAcrossNative)
-                    if matches!(self.caught, Some(Value::Native(Native::ReturnSignal))) =>
+                    if matches!(self.caught, Some(Value::Native(Native::ReturnSignal, _))) =>
                 {
                     self.caught = None;
                     self.stack.truncate(stack_base);
@@ -14743,6 +15197,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.locals = frame.locals;
         self.program = frame.program;
         self.strictness = frame.strictness;
+        self.current_realm = frame.realm;
         self.strict = frame.strict;
         self.function = frame.function;
         self.this_value = frame.this_value;
@@ -14906,6 +15361,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if native == Native::ErrorCaptureStackTrace {
             return self.capture_stack_trace(arguments, instruction);
+        }
+        if native == Native::HostCreateRealm {
+            return self.create_realm();
+        }
+        if native == Native::HostEvalScript {
+            let source = match arguments.first() {
+                Some(Value::String(source)) => source.clone(),
+                // Unlike `eval`, which hands a non-string straight back: `evalScript` is given
+                // source text or it is given nothing it can run.
+                Some(value) => self.as_string(value, instruction)?,
+                None => String::new(),
+            };
+            return self.drive_eval(&source, None, true);
         }
         // A write through a view onto an immutable buffer is refused before its arguments are
         // converted, and that order is observable: a `valueOf` handed to a setter on such a view
@@ -15238,7 +15706,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return self.call_value(&callback, this_value, forwarded, instruction);
             }
             Native::NodeUtilDebuglog => {
-                return Ok(Value::Native(Native::NodeUtilDebugNoop));
+                return Ok(Value::Native(Native::NodeUtilDebugNoop, RealmId::PRIMARY));
             }
             Native::NodeUtilDebugNoop => return Ok(Value::Undefined),
             // Warning delivery is an embedding policy. A deterministic realm preserves the
@@ -15432,7 +15900,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 } else {
                     self.call_value(&callback, Value::Undefined, Vec::new(), instruction)?;
                 }
-                return Ok(Value::Native(Native::NodeUtilDebugNoop));
+                return Ok(Value::Native(Native::NodeUtilDebugNoop, RealmId::PRIMARY));
             }
             Native::NodeStreamAddAbortSignal => {
                 let stream = arguments.get(1).cloned().unwrap_or(Value::Undefined);
@@ -15541,7 +16009,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ("ignoreBOM".to_owned(), Value::Boolean(false)),
                     (
                         "decode".to_owned(),
-                        Value::Native(Native::TextDecoderDecode),
+                        Value::Native(Native::TextDecoderDecode, RealmId::PRIMARY),
                     ),
                 ]));
             }
@@ -15628,7 +16096,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let timer = Timer {
                     callback: Value::Bound(Rc::new(BoundFunction {
-                        target: Value::Native(Native::AbortSignalSettle),
+                        target: Value::Native(Native::AbortSignalSettle, RealmId::PRIMARY),
                         this_value: signal.clone(),
                         arguments: vec![reason],
                         properties: RefCell::new(ObjectData::default()),
@@ -15656,7 +16124,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         return Ok(signal);
                     }
                     let follower = Value::Bound(Rc::new(BoundFunction {
-                        target: Value::Native(Native::AbortSignalFollow),
+                        target: Value::Native(Native::AbortSignalFollow, RealmId::PRIMARY),
                         this_value: signal.clone(),
                         arguments: vec![source.clone()],
                         properties: RefCell::new(ObjectData::default()),
@@ -17107,7 +17575,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let entry = entries.borrow().get(index).cloned();
                     let Some(entry) = entry else { break };
                     index += 1;
-                    if matches!(entry, Value::Native(Native::Tombstone)) {
+                    if matches!(entry, Value::Native(Native::Tombstone, _)) {
                         continue;
                     }
                     let (key, value) = match (is_map, &entry) {
@@ -17407,8 +17875,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         items.properties.borrow_mut().prevent_extensions();
                         true
                     }
-                    Value::Native(_)
-                    | Value::Callback(_)
+                    Value::Native(_, _)
+                    | Value::Callback(_, _)
                     | Value::Bound(_)
                     | Value::Settler(..)
                     | Value::Capability(..) => {
@@ -17562,7 +18030,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(arguments.first(), Some(Value::RegExp(_)))
                     || matches!(
                         arguments.get(1),
-                        Some(Value::Function(_) | Value::Native(_) | Value::Callback(_))
+                        Some(Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _))
                     ) =>
             {
                 self.replace_with_pattern(receiver, arguments, native, instruction)
@@ -17941,7 +18409,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // where a program looks when it feature-detects a flag.
             if matches!(
                 receiver,
-                Value::Native(Native::PrototypeOf(PrototypeTable::RegExp))
+                Value::Native(Native::PrototypeOf(PrototypeTable::RegExp), _)
             ) {
                 return Ok(match accessor {
                     RegExpAccessor::Source => Value::String("(?:)".to_owned()),
@@ -18026,7 +18494,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let mut data = ObjectData::default();
             data.set("@@entries", Value::Array(ArrayData::new(entries)));
             data.set("@@map", Value::Boolean(true));
-            data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Map)));
+            data.set_prototype(Value::Native(
+                Native::PrototypeOf(PrototypeTable::Map),
+                RealmId::PRIMARY,
+            ));
             data.set(COLLECTION_SIZE, Value::Number(size));
             return Ok(Value::Object(Rc::new(RefCell::new(data))));
         }
@@ -18262,7 +18733,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         let held = entries.borrow().get(index).cloned();
                         index += 1;
                         let Some(held) = held else { break };
-                        if matches!(held, Value::Native(Native::Tombstone)) {
+                        if matches!(held, Value::Native(Native::Tombstone, _)) {
                             continue;
                         }
                         if self.set_like_has(&other, &held, instruction)?
@@ -18587,9 +19058,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Value::Promise(_)
                 | Value::RegExp(_)
                 | Value::Proxy(_)
-                | Value::Native(_)
+                | Value::Native(_, _)
                 | Value::Bound(_)
-                | Value::Callback(_)
+                | Value::Callback(_, _)
         ) {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "Date.prototype[Symbol.toPrimitive] called on a non-object".to_owned(),
@@ -19003,11 +19474,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         helper.set_non_enumerable(HELPER_PARTIAL, Value::Boolean(allow_partial));
         helper.set_non_enumerable(HELPER_COUNTER, Value::Number(0.0));
         helper.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
-        helper.set_non_enumerable("next", Value::Native(Native::IteratorHelperNext(kind)));
-        helper.set_non_enumerable("return", Value::Native(Native::IteratorHelperReturn));
+        helper.set_non_enumerable(
+            "next",
+            Value::Native(Native::IteratorHelperNext(kind), RealmId::PRIMARY),
+        );
+        helper.set_non_enumerable(
+            "return",
+            Value::Native(Native::IteratorHelperReturn, RealmId::PRIMARY),
+        );
         helper.set_non_enumerable(
             WellKnown::Iterator.property_key(),
-            Value::Native(Native::IteratorSelf),
+            Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
         );
         Ok(Value::Object(Rc::new(RefCell::new(helper))))
     }
@@ -19051,7 +19528,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let next = self.iterator_direct(&iterator, instruction)?;
         // Already on the chain, so there is nothing to add: wrapping it would give a second
         // object with the same behaviour and a different identity.
-        let table = Value::Native(Native::PrototypeOf(PrototypeTable::Iterator));
+        let table = Value::Native(
+            Native::PrototypeOf(PrototypeTable::Iterator),
+            RealmId::PRIMARY,
+        );
         let mut chain = prototype_of(&iterator);
         for _ in 0..MAX_PROTOTYPE_DEPTH {
             if matches!(chain, Value::Null) {
@@ -19065,13 +19545,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut wrapper = ObjectData::default();
         wrapper.set_non_enumerable(HELPER_SOURCE, iterator);
         wrapper.set_non_enumerable(HELPER_NEXT, next);
-        wrapper.set_non_enumerable("next", Value::Native(Native::IteratorWrapNext));
+        wrapper.set_non_enumerable(
+            "next",
+            Value::Native(Native::IteratorWrapNext, RealmId::PRIMARY),
+        );
         // The same `return` the lazy helpers use: it forwards to the wrapped iterator's, and
         // answers a finished result when there is none.
-        wrapper.set_non_enumerable("return", Value::Native(Native::IteratorHelperReturn));
+        wrapper.set_non_enumerable(
+            "return",
+            Value::Native(Native::IteratorHelperReturn, RealmId::PRIMARY),
+        );
         // On `Iterator.prototype`, which is the entire reason a program reaches for this: the
         // wrapped iterator gets `map`, `filter` and the rest.
-        wrapper.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Iterator)));
+        wrapper.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Iterator),
+            RealmId::PRIMARY,
+        ));
         Ok(Value::Object(Rc::new(RefCell::new(wrapper))))
     }
 
@@ -19567,11 +20056,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         helper.set_non_enumerable(ZIP_KEYED, Value::Boolean(keyed));
         helper.set_non_enumerable(ZIP_MODE, Value::Number(mode as u8 as f64));
         helper.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
-        helper.set_non_enumerable("next", Value::Native(Native::IteratorZipNext));
-        helper.set_non_enumerable("return", Value::Native(Native::IteratorZipReturn));
+        helper.set_non_enumerable(
+            "next",
+            Value::Native(Native::IteratorZipNext, RealmId::PRIMARY),
+        );
+        helper.set_non_enumerable(
+            "return",
+            Value::Native(Native::IteratorZipReturn, RealmId::PRIMARY),
+        );
         helper.set_non_enumerable(
             WellKnown::Iterator.property_key(),
-            Value::Native(Native::IteratorSelf),
+            Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
         );
         Ok(Value::Object(Rc::new(RefCell::new(helper))))
     }
@@ -19959,11 +20454,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         helper.set_non_enumerable(HELPER_SOURCE, Value::Undefined);
         helper.set_non_enumerable(HELPER_NEXT, Value::Undefined);
         helper.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
-        helper.set_non_enumerable("next", Value::Native(Native::IteratorConcatNext));
-        helper.set_non_enumerable("return", Value::Native(Native::IteratorConcatReturn));
+        helper.set_non_enumerable(
+            "next",
+            Value::Native(Native::IteratorConcatNext, RealmId::PRIMARY),
+        );
+        helper.set_non_enumerable(
+            "return",
+            Value::Native(Native::IteratorConcatReturn, RealmId::PRIMARY),
+        );
         helper.set_non_enumerable(
             WellKnown::Iterator.property_key(),
-            Value::Native(Native::IteratorSelf),
+            Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
         );
         Ok(Value::Object(Rc::new(RefCell::new(helper))))
     }
@@ -20703,7 +21204,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // `Symbol.iterator` is a different sequence, and a mapper is user code that runs between
         // the steps: one that shortens the array as it goes must see the shorter array, because
         // the specification re-reads `length` on every step of the array iterator.
-        if let (Value::Array(items), None, Value::Native(Native::ArrayValues)) =
+        if let (Value::Array(items), None, Value::Native(Native::ArrayValues, _)) =
             (&source, &mapper, &method)
         {
             return Ok(Value::Array(ArrayData::new(dense_items(&items.borrow()))));
@@ -20887,7 +21388,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // that produced nothing would shorten the array and shift everything after it.
             if Self::is_hole(&item) {
                 if matches!(method, CallbackMethod::Map) {
-                    collected.push(Value::Native(Native::Hole));
+                    collected.push(Value::Native(Native::Hole, RealmId::PRIMARY));
                 }
                 index += 1;
                 continue;
@@ -21328,6 +21829,49 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         outcome
     }
 
+    /// Run `body` with `realm` as the running realm, and put the caller's back afterwards.
+    ///
+    /// Restores on the error path as well as the ordinary one, which is the whole reason it is
+    /// a function: a `?` that skipped the restore would leave the *caller* running as another
+    /// realm, and every intrinsic it minted after that would belong to the wrong one.
+    fn entering<T>(
+        &mut self,
+        realm: RealmId,
+        body: impl FnOnce(&mut Self) -> Result<T, ExecutionError>,
+    ) -> Result<T, ExecutionError> {
+        if realm == self.current_realm {
+            return body(self);
+        }
+        let caller = std::mem::replace(&mut self.current_realm, realm);
+        let produced = body(self);
+        // An error the machine raises carries a kind and a sentence, not an object, and stays
+        // that way until the frame it unwinds into builds one. In one realm that is free. Across
+        // two it is a wrong answer: the object would take its prototype from whichever realm
+        // happened to catch it, so `other.Array.prototype.sort.call(a, "nope")` would throw
+        // *this* realm's `TypeError` and `e instanceof other.TypeError` would be false. Built
+        // here, while the realm that raised it is still the running one.
+        let produced = match produced {
+            Err(error)
+                if !matches!(
+                    error,
+                    ExecutionError::ThrownAcrossNative | ExecutionError::CaughtByHost
+                ) =>
+            {
+                match error.as_javascript_error() {
+                    Some((kind, message)) => {
+                        let thrown = self.construct_error(kind, &[Value::String(message)]);
+                        self.caught = Some(thrown);
+                        Err(ExecutionError::ThrownAcrossNative)
+                    }
+                    None => Err(error),
+                }
+            }
+            other => other,
+        };
+        self.current_realm = caller;
+        produced
+    }
+
     fn call_value_inner(
         &mut self,
         callee: &Value,
@@ -21335,8 +21879,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
+        // Calling a function from another realm enters that realm. Everything the callee mints
+        // while it runs -- an intrinsic read off a table, a `TypeError` it throws, the object it
+        // constructs -- belongs to the realm the *function* came from, which is what
+        // `GetFunctionRealm` and the specification's "throw a TypeError exception" both mean.
+        let realm = value_realm(callee);
+        self.entering(realm, |vm| {
+            vm.call_value_dispatch(callee, this_value, arguments, instruction)
+        })
+    }
+
+    fn call_value_dispatch(
+        &mut self,
+        callee: &Value,
+        this_value: Value,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
         match callee {
-            Value::Native(native) => {
+            Value::Native(native, _) => {
                 // The head of every `%TypedArray%.prototype` method, run before anything else
                 // here can look at the receiver or the arguments. A branded one then hands the
                 // call on to the `Array.prototype` method it shares, so the work below is done
@@ -21397,7 +21958,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A callback method reaches here when a built-in drives another built-in -- a spread
             // over a generator, for instance. `invoke` is the one place that knows how to run
             // each kind, so this defers to it rather than repeating the dispatch.
-            Value::Callback(_) => {
+            Value::Callback(_, _) => {
                 let this_value = self.as_array_like(callee, this_value, instruction)?;
                 Ok(self
                     .invoke(callee.clone(), this_value, arguments, instruction)?
@@ -21616,7 +22177,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // all answer to it, and none of their chains reaches an object this walk could compare.
         // A value carrying no marker still falls through to the ordinary walk below, which is
         // what answers for an iterator a program wrote by extending `Iterator` itself.
-        if matches!(constructor, Value::Native(Native::IteratorConstructor))
+        if matches!(constructor, Value::Native(Native::IteratorConstructor, _))
             && match value {
                 Value::Generator(_) => true,
                 Value::Object(object) => {
@@ -21639,14 +22200,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Some(prototype) => prototype,
                 None => return Ok(false),
             },
-            Value::Native(Native::Error(_)) => match error_prototype {
+            Value::Native(Native::Error(_), _) => match error_prototype {
                 Some(prototype) => prototype.clone(),
                 None => return Ok(false),
             },
             Value::Bound(bound) => {
                 return self.instance_of_value(value, &bound.target, error_prototype, instruction);
             }
-            Value::Native(native) => match native.property("prototype") {
+            Value::Native(native, _) => match native.property("prototype") {
                 Some(prototype) => prototype,
                 None => return Ok(false),
             },
@@ -21800,7 +22361,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // than being handed its properties. That is the whole of `class A extends Array`:
             // an array is not an ordinary object with elements copied onto it, it is an array.
             // It also replaces what used to be an Error-shaped special case here.
-            Value::Native(parent) => {
+            Value::Native(parent, _) => {
                 let Some(built) = self.construct_exotic(parent, &arguments, current)? else {
                     return Err(ExecutionError::NotConstructable {
                         instruction: current,
@@ -21844,7 +22405,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// A subclass's prototype chains to `Error.prototype`, so `e instanceof Error` holds for
     /// every kind and `toString` is inherited rather than copied.
     fn error_prototype(&mut self, kind: ErrorKind) -> Value {
-        if let Some(prototype) = &self.error_prototypes[kind.index()] {
+        self.error_prototype_in(kind, self.current_realm)
+    }
+
+    /// `realm`'s `TypeError.prototype` and its siblings, built on first use.
+    ///
+    /// Per realm rather than per execution, because `e instanceof TypeError` compares it by
+    /// identity: an error thrown by realm 1's built-in is an instance of *its* `TypeError` and
+    /// not of the one the primary realm hands out, and one shared object would make both
+    /// answers wrong at once.
+    fn error_prototype_in(&mut self, kind: ErrorKind, realm: RealmId) -> Value {
+        let index = realm.0 as usize;
+        if let Some(prototype) = &self.error_prototypes[index][kind.index()] {
             return prototype.clone();
         }
         let mut data = ObjectData::default();
@@ -21854,21 +22426,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         data.set_non_enumerable("message", Value::String(String::new()));
         // `e.constructor.name` is how a program asks which kind it caught, and this is the link
         // that answers it.
-        data.set_non_enumerable("constructor", Value::Native(Native::Error(kind)));
+        data.set_non_enumerable("constructor", Value::Native(Native::Error(kind), realm));
         if matches!(kind, ErrorKind::Error) {
             // Marks the chain for `String(e)`. A real `toString` would be invoked through the
             // normal method path; this is the placeholder that keeps the observable behaviour
             // right until built-ins can be written in JavaScript (design.md §5).
-            data.set_non_enumerable("toString", Value::Native(Native::ErrorToString));
+            data.set_non_enumerable("toString", Value::Native(Native::ErrorToString, realm));
         }
         let prototype = Value::Object(Rc::new(RefCell::new(data)));
         if !matches!(kind, ErrorKind::Error) {
-            let base = self.error_prototype(ErrorKind::Error);
+            let base = self.error_prototype_in(ErrorKind::Error, realm);
             if let Value::Object(object) = &prototype {
                 object.borrow_mut().set_prototype(base);
             }
         }
-        self.error_prototypes[kind.index()] = Some(prototype.clone());
+        self.error_prototypes[index][kind.index()] = Some(prototype.clone());
         prototype
     }
 
@@ -21888,7 +22460,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // The body threw and nothing in it caught: that is the function's rejection -- with
             // the one exception that is not a thrown value at all. See the same guard in
             // `drive_async_generator`.
-            Err(Value::Native(Native::ReturnSignal)) => {
+            Err(Value::Native(Native::ReturnSignal, _)) => {
                 self.resolve_promise(promise, Value::Undefined);
             }
             Err(thrown) => self.settle(promise, &Settled::Rejected(thrown)),
@@ -21930,7 +22502,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match self.locals.get(slot as usize) {
             Some(Value::Cell(cell)) => cell.borrow().clone(),
             Some(other) => other.clone(),
-            None => Value::Native(Native::Uninitialized),
+            None => Value::Native(Native::Uninitialized, RealmId::PRIMARY),
         }
     }
 
@@ -22129,7 +22701,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // reason is not a JavaScript value at all -- `[Function: returnSignal]`, from
                 // code that had merely written `break` inside `for await`. Ending the step is
                 // what the marker means, so that is what it does.
-                if matches!(thrown, Value::Native(Native::ReturnSignal)) {
+                if matches!(thrown, Value::Native(Native::ReturnSignal, _)) {
                     let result = iteration_result(Value::Undefined, true);
                     self.resolve_promise(step, result);
                 } else {
@@ -22222,7 +22794,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Err(ExecutionError::CaughtByHost) => {
                 let caught = self.caught.take().unwrap_or(Value::Undefined);
-                if let (Value::Native(Native::ReturnSignal), Some(value)) = (&caught, returning) {
+                if let (Value::Native(Native::ReturnSignal, _), Some(value)) = (&caught, returning)
+                {
                     let mut state = generator.borrow_mut();
                     state.done = true;
                     state.returning = None;
@@ -22697,7 +23270,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// when there is something to observe. For `%Promise%` the executor it would call is this
     /// machine's own, and the promise it would produce is the one built directly here.
     fn reached_through_intrinsic_promise(receiver: &Value) -> bool {
-        matches!(receiver, Value::Native(Native::PromiseConstructor))
+        matches!(receiver, Value::Native(Native::PromiseConstructor, _))
     }
 
     /// `SpeciesConstructor(promise, %Promise%)`, reduced to the prototype the promise `then`
@@ -23257,8 +23830,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Whether this callee has a generic implementation that walks its receiver live.
     fn walks_a_live_receiver(callee: &Value) -> bool {
         match callee {
-            Value::Native(native) => native.walks_a_live_receiver(),
-            Value::Callback(method) => matches!(
+            Value::Native(native, _) => native.walks_a_live_receiver(),
+            Value::Callback(method, _) => matches!(
                 method,
                 CallbackMethod::Map
                     | CallbackMethod::ForEach
@@ -23326,7 +23899,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         // The plain `Array` constructor is the common case and builds exactly what
         // `ArrayCreate` would, so it is answered without a call.
-        if matches!(species, Value::Native(Native::ArrayConstructor)) {
+        if matches!(species, Value::Native(Native::ArrayConstructor, _)) {
             return Self::create_array_of_length(length);
         }
         #[expect(clippy::cast_precision_loss)]
@@ -23351,7 +23924,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let length = length as usize;
         Ok(Value::Array(ArrayData::new(vec![
             Value::Native(
-                Native::Hole
+                Native::Hole,
+                RealmId::PRIMARY
             );
             length
         ])))
@@ -23393,7 +23967,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut elements = items.borrow_mut();
         if index >= elements.len() {
             items.sparse.set(true);
-            elements.resize(index + 1, Value::Native(Native::Hole));
+            elements.resize(index + 1, Value::Native(Native::Hole, RealmId::PRIMARY));
         }
         elements[index] = value;
         Ok(())
@@ -23467,7 +24041,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             elements.truncate(length);
         } else {
             items.sparse.set(true);
-            elements.resize(length, Value::Native(Native::Hole));
+            elements.resize(length, Value::Native(Native::Hole, RealmId::PRIMARY));
         }
     }
 
@@ -24561,7 +25135,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // was missing from this list, so reading `g.next` off an async generator and calling
             // it as a value -- which is exactly what any code driving the protocol by hand does
             // -- coerced the generator to an array and then complained the array was not callable.
-            Value::Callback(method) => !matches!(
+            Value::Callback(method, _) => !matches!(
                 method,
                 CallbackMethod::GeneratorNext
                     | CallbackMethod::GeneratorReturn
@@ -24570,13 +25144,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     | CallbackMethod::AsyncGeneratorReturn
                     | CallbackMethod::AsyncGeneratorThrow
             ),
-            Value::Native(native) => native.walks_an_array(),
+            Value::Native(native, _) => native.walks_an_array(),
             _ => false,
         };
         let preserves_live_typed_array = matches!(receiver, Value::TypedArray(_))
             && match callee {
-                Value::Native(native) => native.creates_array_iterator(),
-                Value::Callback(method) => Self::callback_walks_live(*method),
+                Value::Native(native, _) => native.creates_array_iterator(),
+                Value::Callback(method, _) => Self::callback_walks_live(*method),
                 _ => false,
             };
         // `ValidateTypedArray`, which every `%TypedArray%.prototype` method performs before it
@@ -24590,7 +25164,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let validates_typed_array = walks_an_array
             || matches!(
                 callee,
-                Value::Native(Native::ArrayJoinDefault | Native::ArrayCopyWithin)
+                Value::Native(Native::ArrayJoinDefault | Native::ArrayCopyWithin, _)
             );
         if validates_typed_array
             && let Value::TypedArray(view) = &receiver
@@ -24648,7 +25222,43 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// The realm's global object, created on first use.
     fn global_object(&mut self) -> Value {
-        if let Some(existing) = &self.global_object {
+        self.global_object_in(self.current_realm)
+    }
+
+    /// Make a realm and answer with its global object.
+    ///
+    /// A realm here is exactly three things: a global object, a set of error prototypes, and its
+    /// share of the built-in mutation store -- the three `Vm` fields whose comments already said
+    /// they were per-realm. Everything else the new realm has is the execution's and is shared
+    /// deliberately: the clock, the entropy stream, the timezone and the locale are the
+    /// capabilities ADR 0031 gives the *execution*, and a second realm that quietly reached past
+    /// them for the host's would undo ADR 0015 in the one place nobody would look. The global
+    /// symbol registry is shared because the specification shares it: `Symbol.for("x")` is the
+    /// same symbol in every realm of an agent, which is the whole of what makes it a registry.
+    ///
+    /// The realm's clock therefore starts where this one is and runs on the same virtual time,
+    /// which is what ADR 0015 asks for -- one clock, not the host's, and not a second one that
+    /// could disagree with it.
+    fn create_realm(&mut self) -> Result<Value, ExecutionError> {
+        let realm = RealmId(u32::try_from(self.global_objects.len()).map_err(|_| {
+            ExecutionError::TypeErrorMessage {
+                message: "too many realms".to_owned(),
+            }
+        })?);
+        self.global_objects.push(None);
+        self.error_prototypes
+            .push([const { None }; ErrorKind::ALL.len()]);
+        Ok(self.global_object_in(realm))
+    }
+
+    /// `realm`'s global object, built on first use and shared from then on.
+    ///
+    /// Every binding it publishes is minted *in that realm*, which is the whole of what makes
+    /// a second realm a second realm: `other.Array` and `Array` name the same built-in and are
+    /// not the same function, so `[] instanceof other.Array` is false while `Array.isArray([])`
+    /// stays true.
+    fn global_object_in(&mut self, realm: RealmId) -> Value {
+        if let Some(existing) = &self.global_objects[realm.0 as usize] {
             return existing.clone();
         }
         // Every one of these is *non-enumerable*, which is what node does and what stops
@@ -24657,139 +25267,163 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // worth asking at all.
         let mut globals = ObjectData::default();
         for kind in ErrorKind::ALL {
-            globals.set_non_enumerable(kind.name(), Value::Native(Native::Error(kind)));
+            globals.set_non_enumerable(kind.name(), Value::Native(Native::Error(kind), realm));
         }
-        globals.set_non_enumerable("Array", Value::Native(Native::ArrayConstructor));
-        globals.set_non_enumerable("Object", Value::Native(Native::ObjectConstructor));
-        globals.set_non_enumerable("JSON", Value::Native(Native::Json));
+        globals.set_non_enumerable("Array", Value::Native(Native::ArrayConstructor, realm));
+        globals.set_non_enumerable("Object", Value::Native(Native::ObjectConstructor, realm));
+        globals.set_non_enumerable("JSON", Value::Native(Native::Json, realm));
         globals.set_non_enumerable(
             "Temporal",
-            Value::Native(Native::Temporal(temporal::Op::Namespace)),
+            Value::Native(Native::Temporal(temporal::Op::Namespace), realm),
         );
-        globals.set_non_enumerable("Symbol", Value::Native(Native::SymbolConstructor));
-        globals.set_non_enumerable("String", Value::Native(Native::StringConstructor));
-        globals.set_non_enumerable("Math", Value::Native(Native::Math));
-        globals.set_non_enumerable("Atomics", Value::Native(Native::Atomics));
-        globals.set_non_enumerable("Promise", Value::Native(Native::PromiseConstructor));
-        globals.set_non_enumerable("RegExp", Value::Native(Native::RegExpConstructor));
-        globals.set_non_enumerable("Date", Value::Native(Native::DateConstructor));
-        globals.set_non_enumerable("WeakMap", Value::Native(Native::WeakMapConstructor));
-        globals.set_non_enumerable("WeakSet", Value::Native(Native::WeakSetConstructor));
-        globals.set_non_enumerable("WeakRef", Value::Native(Native::WeakRefConstructor));
+        globals.set_non_enumerable("Symbol", Value::Native(Native::SymbolConstructor, realm));
+        globals.set_non_enumerable("String", Value::Native(Native::StringConstructor, realm));
+        globals.set_non_enumerable("Math", Value::Native(Native::Math, realm));
+        globals.set_non_enumerable("Atomics", Value::Native(Native::Atomics, realm));
+        globals.set_non_enumerable("Promise", Value::Native(Native::PromiseConstructor, realm));
+        globals.set_non_enumerable("RegExp", Value::Native(Native::RegExpConstructor, realm));
+        globals.set_non_enumerable("Date", Value::Native(Native::DateConstructor, realm));
+        globals.set_non_enumerable("WeakMap", Value::Native(Native::WeakMapConstructor, realm));
+        globals.set_non_enumerable("WeakSet", Value::Native(Native::WeakSetConstructor, realm));
+        globals.set_non_enumerable("WeakRef", Value::Native(Native::WeakRefConstructor, realm));
         globals.set_non_enumerable(
             "DisposableStack",
-            Value::Native(Native::DisposableStackConstructor),
+            Value::Native(Native::DisposableStackConstructor, realm),
         );
         globals.set_non_enumerable(
             "AsyncDisposableStack",
-            Value::Native(Native::AsyncDisposableStackConstructor),
+            Value::Native(Native::AsyncDisposableStackConstructor, realm),
         );
         globals.set_non_enumerable(
             "FinalizationRegistry",
-            Value::Native(Native::FinalizationRegistryConstructor),
+            Value::Native(Native::FinalizationRegistryConstructor, realm),
         );
-        globals.set_non_enumerable("Set", Value::Native(Native::SetConstructor));
-        globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor));
-        globals.set_non_enumerable("performance", Value::Native(Native::Performance));
-        globals.set_non_enumerable("Reflect", Value::Native(Native::Reflect));
-        globals.set_non_enumerable("Intl", Value::Native(Native::Intl(intl::Op::Namespace)));
-        globals.set_non_enumerable("BigInt", Value::Native(Native::BigIntConstructor));
-        globals.set_non_enumerable("Number", Value::Native(Native::NumberConstructor));
-        globals.set_non_enumerable("Boolean", Value::Native(Native::BooleanConstructor));
-        globals.set_non_enumerable("Function", Value::Native(Native::FunctionConstructor));
-        globals.set_non_enumerable("eval", Value::Native(Native::Eval));
-        globals.set_non_enumerable("escape", Value::Native(Native::Escape));
-        globals.set_non_enumerable("unescape", Value::Native(Native::Unescape));
-        globals.set_non_enumerable("encodeURI", Value::Native(Native::EncodeUri));
+        globals.set_non_enumerable("Set", Value::Native(Native::SetConstructor, realm));
+        globals.set_non_enumerable("Map", Value::Native(Native::MapConstructor, realm));
+        globals.set_non_enumerable("performance", Value::Native(Native::Performance, realm));
+        globals.set_non_enumerable("Reflect", Value::Native(Native::Reflect, realm));
+        globals.set_non_enumerable(
+            "Intl",
+            Value::Native(Native::Intl(intl::Op::Namespace), realm),
+        );
+        globals.set_non_enumerable("BigInt", Value::Native(Native::BigIntConstructor, realm));
+        globals.set_non_enumerable("Number", Value::Native(Native::NumberConstructor, realm));
+        globals.set_non_enumerable("Boolean", Value::Native(Native::BooleanConstructor, realm));
+        globals.set_non_enumerable(
+            "Function",
+            Value::Native(Native::FunctionConstructor, realm),
+        );
+        globals.set_non_enumerable("eval", Value::Native(Native::Eval, realm));
+        globals.set_non_enumerable("escape", Value::Native(Native::Escape, realm));
+        globals.set_non_enumerable("unescape", Value::Native(Native::Unescape, realm));
+        globals.set_non_enumerable("encodeURI", Value::Native(Native::EncodeUri, realm));
         globals.set_non_enumerable(
             "encodeURIComponent",
-            Value::Native(Native::EncodeUriComponent),
+            Value::Native(Native::EncodeUriComponent, realm),
         );
-        globals.set_non_enumerable("decodeURI", Value::Native(Native::DecodeUri));
+        globals.set_non_enumerable("decodeURI", Value::Native(Native::DecodeUri, realm));
         globals.set_non_enumerable(
             "decodeURIComponent",
-            Value::Native(Native::DecodeUriComponent),
+            Value::Native(Native::DecodeUriComponent, realm),
         );
-        globals.set_non_enumerable("Proxy", Value::Native(Native::ProxyConstructor));
-        globals.set_non_enumerable("ArrayBuffer", Value::Native(Native::ArrayBufferConstructor));
-        globals.set_non_enumerable("Buffer", Value::Native(Native::NodeBuffer));
-        globals.set_non_enumerable("URL", Value::Native(Native::UrlConstructor));
+        globals.set_non_enumerable("Proxy", Value::Native(Native::ProxyConstructor, realm));
+        globals.set_non_enumerable(
+            "ArrayBuffer",
+            Value::Native(Native::ArrayBufferConstructor, realm),
+        );
+        globals.set_non_enumerable("Buffer", Value::Native(Native::NodeBuffer, realm));
+        globals.set_non_enumerable("URL", Value::Native(Native::UrlConstructor, realm));
         globals.set_non_enumerable(
             "SharedArrayBuffer",
-            Value::Native(Native::SharedArrayBufferConstructor),
+            Value::Native(Native::SharedArrayBufferConstructor, realm),
         );
-        globals.set_non_enumerable("DataView", Value::Native(Native::DataViewConstructor));
-        globals.set_non_enumerable("Iterator", Value::Native(Native::IteratorConstructor));
+        globals.set_non_enumerable(
+            "DataView",
+            Value::Native(Native::DataViewConstructor, realm),
+        );
+        globals.set_non_enumerable(
+            "Iterator",
+            Value::Native(Native::IteratorConstructor, realm),
+        );
         globals.set_non_enumerable(
             "Int8Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Int8)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Int8), realm),
         );
         globals.set_non_enumerable(
             "Uint8Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8), realm),
         );
         globals.set_non_enumerable(
             "Uint8ClampedArray",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8Clamped)),
+            Value::Native(
+                Native::TypedArrayConstructor(TypedKind::Uint8Clamped),
+                realm,
+            ),
         );
         globals.set_non_enumerable(
             "Int16Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Int16)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Int16), realm),
         );
         globals.set_non_enumerable(
             "Uint16Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint16)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint16), realm),
         );
         globals.set_non_enumerable(
             "Int32Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Int32)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Int32), realm),
         );
         globals.set_non_enumerable(
             "Uint32Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint32)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Uint32), realm),
         );
         globals.set_non_enumerable(
             "Float16Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Float16)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Float16), realm),
         );
         globals.set_non_enumerable(
             "Float32Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Float32)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Float32), realm),
         );
         globals.set_non_enumerable(
             "Float64Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::Float64)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::Float64), realm),
         );
         globals.set_non_enumerable(
             "BigInt64Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::BigInt64)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::BigInt64), realm),
         );
         globals.set_non_enumerable(
             "BigUint64Array",
-            Value::Native(Native::TypedArrayConstructor(TypedKind::BigUint64)),
+            Value::Native(Native::TypedArrayConstructor(TypedKind::BigUint64), realm),
         );
 
         // The global functions, which a program can also reach by their bare names -- and has to
         // find the *same* value both ways: `globalThis.parseInt === parseInt`.
-        globals.set_non_enumerable("parseInt", Value::Native(Native::ParseInt));
-        globals.set_non_enumerable("parseFloat", Value::Native(Native::ParseFloat));
-        globals.set_non_enumerable("isNaN", Value::Native(Native::IsNaN));
-        globals.set_non_enumerable("isFinite", Value::Native(Native::IsFinite));
-        globals.set_non_enumerable("queueMicrotask", Value::Native(Native::QueueMicrotask));
-        globals.set_non_enumerable("setTimeout", Value::Native(Native::SetTimeout));
-        globals.set_non_enumerable("setInterval", Value::Native(Native::SetInterval));
-        globals.set_non_enumerable("clearTimeout", Value::Native(Native::ClearTimeout));
-        globals.set_non_enumerable("clearInterval", Value::Native(Native::ClearInterval));
-        globals.set_non_enumerable("setImmediate", Value::Native(Native::SetImmediate));
-        globals.set_non_enumerable("clearImmediate", Value::Native(Native::ClearImmediate));
+        globals.set_non_enumerable("parseInt", Value::Native(Native::ParseInt, realm));
+        globals.set_non_enumerable("parseFloat", Value::Native(Native::ParseFloat, realm));
+        globals.set_non_enumerable("isNaN", Value::Native(Native::IsNaN, realm));
+        globals.set_non_enumerable("isFinite", Value::Native(Native::IsFinite, realm));
+        globals.set_non_enumerable(
+            "queueMicrotask",
+            Value::Native(Native::QueueMicrotask, realm),
+        );
+        globals.set_non_enumerable("setTimeout", Value::Native(Native::SetTimeout, realm));
+        globals.set_non_enumerable("setInterval", Value::Native(Native::SetInterval, realm));
+        globals.set_non_enumerable("clearTimeout", Value::Native(Native::ClearTimeout, realm));
+        globals.set_non_enumerable("clearInterval", Value::Native(Native::ClearInterval, realm));
+        globals.set_non_enumerable("setImmediate", Value::Native(Native::SetImmediate, realm));
+        globals.set_non_enumerable(
+            "clearImmediate",
+            Value::Native(Native::ClearImmediate, realm),
+        );
         let mut console = ObjectData::default();
-        console.set_non_enumerable("log", Value::Native(Native::ConsoleLog));
+        console.set_non_enumerable("log", Value::Native(Native::ConsoleLog, realm));
         // Host ABI v2 exposes one captured standard-output operation. Keep error delivery on the
         // same explicit boundary until stderr receives its own versioned op; this preserves the
         // realm's no-ambient-I/O guarantee while making console an ordinary cross-module value.
-        console.set_non_enumerable("error", Value::Native(Native::ConsoleError));
-        console.set_non_enumerable("warn", Value::Native(Native::ConsoleError));
-        console.set_non_enumerable("info", Value::Native(Native::ConsoleLog));
+        console.set_non_enumerable("error", Value::Native(Native::ConsoleError, realm));
+        console.set_non_enumerable("warn", Value::Native(Native::ConsoleError, realm));
+        console.set_non_enumerable("info", Value::Native(Native::ConsoleLog, realm));
         globals.set_non_enumerable("console", Value::Object(Rc::new(RefCell::new(console))));
         // The three value properties of the global object are the only ones the specification
         // locks on every axis: `{ writable: false, enumerable: false, configurable: false }`.
@@ -24809,7 +25443,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         object
             .borrow_mut()
             .set_non_enumerable("global", value.clone());
-        self.global_object = Some(value.clone());
+        // The host's, not the language's: present only because the runner asked for it, and
+        // spelled with the `$` that no ECMAScript name uses so it cannot shadow one. The `$262`
+        // object that wraps it is assembled by the runner, which is where a statement about what
+        // this host can do belongs.
+        if self.host_realms {
+            object.borrow_mut().set_non_enumerable(
+                "$262CreateRealm",
+                Value::Native(Native::HostCreateRealm, realm),
+            );
+            // Published per realm and carrying it, so `other.$262EvalScript(src)` enters that
+            // realm before it runs and its declarations land on *that* global object.
+            object.borrow_mut().set_non_enumerable(
+                "$262EvalScript",
+                Value::Native(Native::HostEvalScript, realm),
+            );
+        }
+        self.global_objects[realm.0 as usize] = Some(value.clone());
         value
     }
 
@@ -24848,12 +25498,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "stderr",
             ordinary_object([("fd".to_owned(), Value::Number(2.0))]),
         );
-        process.set_non_enumerable("hrtime", Value::Native(Native::ProcessHrtime));
-        process.set_non_enumerable("cwd", Value::Native(Native::ProcessCwd));
-        process.set_non_enumerable("nextTick", Value::Native(Native::ProcessNextTick));
+        process.set_non_enumerable(
+            "hrtime",
+            Value::Native(Native::ProcessHrtime, RealmId::PRIMARY),
+        );
+        process.set_non_enumerable("cwd", Value::Native(Native::ProcessCwd, RealmId::PRIMARY));
+        process.set_non_enumerable(
+            "nextTick",
+            Value::Native(Native::ProcessNextTick, RealmId::PRIMARY),
+        );
         process.set_non_enumerable(
             "getBuiltinModule",
-            Value::Native(Native::ProcessGetBuiltinModule),
+            Value::Native(Native::ProcessGetBuiltinModule, RealmId::PRIMARY),
         );
         let value = Value::Object(Rc::new(RefCell::new(process)));
         self.process_object = Some(value.clone());
@@ -24928,8 +25584,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !self.mapped_arguments {
             data.define_accessor(
                 "callee",
-                Some(Value::Native(Native::ThrowTypeError)),
-                Some(Value::Native(Native::ThrowTypeError)),
+                Some(Value::Native(Native::ThrowTypeError, RealmId::PRIMARY)),
+                Some(Value::Native(Native::ThrowTypeError, RealmId::PRIMARY)),
                 Attributes::NONE,
             );
         } else {
@@ -24941,7 +25597,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         data.define_value(
             WellKnown::Iterator.property_key(),
-            Value::Native(Native::ArrayValues),
+            Value::Native(Native::ArrayValues, RealmId::PRIMARY),
             Attributes::BUILT_IN,
         );
         Value::Object(Rc::new(RefCell::new(data)))
@@ -24995,7 +25651,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let sites = Value::Array(ArrayData::new(
             names.into_iter().map(call_site_object).collect(),
         ));
-        let error_constructor = Value::Native(Native::Error(ErrorKind::Error));
+        let error_constructor = Value::Native(Native::Error(ErrorKind::Error), RealmId::PRIMARY);
         let prepare = self.read_property(&error_constructor, "prepareStackTrace", instruction)?;
         let stack = if is_callable(&prepare) {
             self.call_value(
@@ -25047,12 +25703,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // than `Object.prototype`. Method lookup does not go through it -- the reserved state
         // above is what answers a read, so the two cannot disagree -- but every question a
         // program asks *about* the chain does.
-        data.set_prototype(Value::Native(Native::PrototypeOf(match (is_map, weak) {
-            (true, false) => PrototypeTable::Map,
-            (false, false) => PrototypeTable::Set,
-            (true, true) => PrototypeTable::WeakMap,
-            (false, true) => PrototypeTable::WeakSet,
-        })));
+        data.set_prototype(Value::Native(
+            Native::PrototypeOf(match (is_map, weak) {
+                (true, false) => PrototypeTable::Map,
+                (false, false) => PrototypeTable::Set,
+                (true, true) => PrototypeTable::WeakMap,
+                (false, true) => PrototypeTable::WeakSet,
+            }),
+            RealmId::PRIMARY,
+        ));
         data.set(COLLECTION_SIZE, Value::Number(0.0));
         let collection = Value::Object(Rc::new(RefCell::new(data)));
         // A seeded collection goes through `add`/`set`, so deduplication and size accounting are
@@ -25248,6 +25907,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         new_target: Value,
         current: usize,
     ) -> Result<(), ExecutionError> {
+        let realm = value_realm(&callee);
+        self.entering(realm, |vm| {
+            vm.construct_as_dispatch(callee, arguments, new_target, current)
+        })
+    }
+
+    fn construct_as_dispatch(
+        &mut self,
+        callee: Value,
+        arguments: Vec<Value>,
+        new_target: Value,
+        current: usize,
+    ) -> Result<(), ExecutionError> {
         // `OrdinaryCreateFromConstructor` for the built-ins: every one of them takes its
         // instance's prototype from `NewTarget` rather than from itself, which is only visible
         // when the two differ -- `Reflect.construct(Date, [0], D)` and the `super()` of a
@@ -25259,22 +25931,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let subclassed = match (&callee, &new_target) {
             // `new Proxy` is the one built-in whose `[[Construct]]` ignores `NewTarget`: a proxy
             // has no prototype of its own, it forwards the question to its target.
-            (Value::Native(Native::ProxyConstructor), _) => false,
-            (Value::Native(built_in), Value::Native(target)) => built_in != target,
-            (Value::Native(_), _) => true,
+            (Value::Native(Native::ProxyConstructor, _), _) => false,
+            (Value::Native(built_in, _), Value::Native(target, _)) => built_in != target,
+            (Value::Native(_, _), _) => true,
             _ => false,
         };
         let depth = self.stack.len();
         match callee {
             // `new Temporal.PlainDate(...)`. The engine builds the value; what is decided here is
             // only what the arguments meant, which is the half the language owns.
-            Value::Native(Native::Temporal(temporal::Op::Constructor(kind))) => {
+            Value::Native(Native::Temporal(temporal::Op::Constructor(kind)), _) => {
                 let built = self.temporal_construct(kind, &arguments, current)?;
                 self.stack.push(built);
             }
             // `new Proxy(target, handler)` is the constructor; a proxy *of* something
             // constructible is the `construct` trap.
-            Value::Native(Native::ProxyConstructor) => {
+            Value::Native(Native::ProxyConstructor, _) => {
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let handler = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 // Both have to be objects: every operation on a proxy asks one of them a
@@ -25314,27 +25986,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     None => return self.construct_as(inner, arguments, new_target, current),
                 }
             }
-            Value::Native(Native::Error(kind)) => {
+            Value::Native(Native::Error(kind), _) => {
                 let error = self.construct_error_reached(kind, &arguments, current)?;
                 self.stack.push(error);
             }
-            Value::Native(Native::ArrayConstructor) => {
+            Value::Native(Native::ArrayConstructor, _) => {
                 let array = construct_array(&arguments)?;
                 self.stack.push(array);
             }
-            Value::Native(Native::NodeEventEmitter) => {
+            Value::Native(Native::NodeEventEmitter, _) => {
                 self.stack.push(node_event_emitter());
             }
-            Value::Native(Native::NodeReadable) => {
+            Value::Native(Native::NodeReadable, _) => {
                 self.stack.push(node_readable(&arguments, None));
             }
-            Value::Native(Native::NodeWritable) => {
+            Value::Native(Native::NodeWritable, _) => {
                 self.stack.push(node_writable(&arguments, None));
             }
-            Value::Native(Native::NodeHttpServerResponse) => {
+            Value::Native(Native::NodeHttpServerResponse, _) => {
                 self.stack.push(node_writable(&arguments, None));
             }
-            Value::Native(Native::NodeHttpServer) => {
+            Value::Native(Native::NodeHttpServer, _) => {
                 let built = self.dispatch_node_http(
                     Native::NodeHttpServer,
                     &Value::Undefined,
@@ -25343,22 +26015,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 self.stack.push(built);
             }
-            Value::Native(Native::NodeAsyncLocalStorage) => {
+            Value::Native(Native::NodeAsyncLocalStorage, _) => {
                 self.stack.push(node_async_local_storage());
             }
-            Value::Native(Native::NodeAsyncResource) => {
+            Value::Native(Native::NodeAsyncResource, _) => {
                 self.stack.push(ordinary_object([
                     (
                         "bind".to_owned(),
-                        Value::Native(Native::NodeAsyncResourceBind),
+                        Value::Native(Native::NodeAsyncResourceBind, RealmId::PRIMARY),
                     ),
                     (
                         "emitDestroy".to_owned(),
-                        Value::Native(Native::NodeAsyncResourceEmitDestroy),
+                        Value::Native(Native::NodeAsyncResourceEmitDestroy, RealmId::PRIMARY),
                     ),
                 ]));
             }
-            Value::Native(Native::UrlConstructor) => {
+            Value::Native(Native::UrlConstructor, _) => {
                 let built = self.dispatch_native(
                     Native::UrlConstructor,
                     &Value::Undefined,
@@ -25367,7 +26039,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 self.stack.push(built);
             }
-            Value::Native(Native::TextDecoderConstructor) => {
+            Value::Native(Native::TextDecoderConstructor, _) => {
                 let built = self.dispatch_native(
                     Native::TextDecoderConstructor,
                     &Value::Undefined,
@@ -25376,13 +26048,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 self.stack.push(built);
             }
-            Value::Native(Native::NodeStringDecoderConstructor) => {
+            Value::Native(Native::NodeStringDecoderConstructor, _) => {
                 self.stack.push(node_string_decoder());
             }
             // `new Object(v)` and `Object(v)` are the same operation: the specification routes
             // both to ToObject, and differs only in a `NewTarget` this interpreter has no other
             // use for.  Sharing the call behaviour keeps them from drifting apart.
-            Value::Native(Native::ObjectConstructor) => {
+            Value::Native(Native::ObjectConstructor, _) => {
                 let object = call_native(
                     &self.intrinsics,
                     Native::ObjectConstructor,
@@ -25398,7 +26070,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // which the corpus builds a typed array from on almost every path. `Array.from`
             // already decides between the two protocols, so the argument is collected with it,
             // exactly as `%TypedArray%.from` does.
-            Value::Native(Native::TypedArrayConstructor(kind))
+            Value::Native(Native::TypedArrayConstructor(kind), _)
                 if arguments.first().is_some_and(|argument| {
                     // A buffer, an array and another view each have a construction of their own
                     // above; every other object is one of the two protocols `Array.from` knows.
@@ -25440,7 +26112,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 self.stack.push(built);
             }
-            Value::Native(native @ Native::TypedArrayConstructor(_)) => {
+            Value::Native(native @ Native::TypedArrayConstructor(_), _) => {
                 let built = call_native(&self.intrinsics, native, &Value::Undefined, &arguments)?;
                 self.stack.push(built);
             }
@@ -25450,7 +26122,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `String(symbol)` describes the symbol; `new String(symbol)` refuses it. A symbol
             // is the one value with no string of its own, and boxing the description would hand
             // back an object that no longer knows which symbol it came from.
-            Value::Native(Native::StringConstructor)
+            Value::Native(Native::StringConstructor, _)
                 if matches!(arguments.first(), Some(Value::Symbol(_))) =>
             {
                 return Err(ExecutionError::TypeErrorMessage {
@@ -25461,6 +26133,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 native @ (Native::StringConstructor
                 | Native::NumberConstructor
                 | Native::BooleanConstructor),
+                _,
             ) => {
                 let primitive =
                     self.dispatch_native(native, &Value::Undefined, &arguments, current)?;
@@ -25469,29 +26142,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `new Function(source)` and `Function(source)` build the same function: the
             // specification routes both through the same steps and differs only in a `NewTarget`
             // that decides which prototype the result inherits, which this realm does not model.
-            Value::Native(Native::FunctionConstructor) => {
+            Value::Native(Native::FunctionConstructor, _) => {
                 let built = self.function_from_source(&arguments, current)?;
                 self.stack.push(built);
             }
-            Value::Native(Native::ArrayBufferConstructor) => {
+            Value::Native(Native::ArrayBufferConstructor, _) => {
                 let built = self.construct_array_buffer(false, &arguments, current)?;
                 self.stack.push(built);
             }
-            Value::Native(Native::SharedArrayBufferConstructor) => {
+            Value::Native(Native::SharedArrayBufferConstructor, _) => {
                 let built = self.construct_array_buffer(true, &arguments, current)?;
                 self.stack.push(built);
             }
-            Value::Native(Native::DataViewConstructor) => {
+            Value::Native(Native::DataViewConstructor, _) => {
                 let built = self.construct_data_view(&arguments, current)?;
                 self.stack.push(built);
             }
             // `new Intl.NumberFormat(...)`. The engine builds the formatter; what is decided
             // here is only what the options meant, which is the half the language owns.
-            Value::Native(Native::Intl(intl::Op::Constructor(service))) => {
+            Value::Native(Native::Intl(intl::Op::Constructor(service)), _) => {
                 let built = self.intl_construct(service, &arguments, current)?;
                 self.stack.push(built);
             }
-            Value::Native(Native::DateConstructor) => {
+            Value::Native(Native::DateConstructor, _) => {
                 let date = self.dispatch_native(
                     Native::DateConstructor,
                     &Value::Undefined,
@@ -25500,7 +26173,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 self.stack.push(date);
             }
-            Value::Native(Native::RegExpConstructor) => {
+            Value::Native(Native::RegExpConstructor, _) => {
                 let regexp = self.dispatch_native(
                     Native::RegExpConstructor,
                     &Value::Undefined,
@@ -25509,18 +26182,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 self.stack.push(regexp);
             }
-            Value::Native(Native::PromiseConstructor) => {
+            Value::Native(Native::PromiseConstructor, _) => {
                 let promise = self.construct_promise(&arguments, current)?;
                 self.stack.push(promise);
             }
-            Value::Native(Native::AbortControllerConstructor) => {
+            Value::Native(Native::AbortControllerConstructor, _) => {
                 self.stack.push(abort_controller());
             }
-            Value::Native(Native::TextEncoderConstructor) => {
+            Value::Native(Native::TextEncoderConstructor, _) => {
                 self.stack.push(text_encoder());
             }
             // A signal comes from a controller or from one of the statics, never from a caller.
-            Value::Native(Native::AbortSignalConstructor) => {
+            Value::Native(Native::AbortSignalConstructor, _) => {
                 return Err(ExecutionError::TypeErrorMessage {
                     message: "Illegal constructor".to_owned(),
                 });
@@ -25530,6 +26203,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::MapConstructor
                 | Native::WeakSetConstructor
                 | Native::WeakMapConstructor),
+                _,
             ) => {
                 let collection = self.construct_collection(kind, &arguments, current)?;
                 self.stack.push(collection);
@@ -25537,6 +26211,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(
                 native @ (Native::DisposableStackConstructor
                 | Native::AsyncDisposableStackConstructor),
+                _,
             ) => {
                 let flavour = if native == Native::DisposableStackConstructor {
                     Disposal::Sync
@@ -25545,11 +26220,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 self.stack.push(new_disposable_stack(flavour));
             }
-            Value::Native(Native::WeakRefConstructor) => {
+            Value::Native(Native::WeakRefConstructor, _) => {
                 let built = self.construct_weak_ref(&arguments, current)?;
                 self.stack.push(built);
             }
-            Value::Native(Native::FinalizationRegistryConstructor) => {
+            Value::Native(Native::FinalizationRegistryConstructor, _) => {
                 let built = self.construct_finalization_registry(&arguments, current)?;
                 self.stack.push(built);
             }
@@ -25583,11 +26258,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // object leaves the intrinsic chain in place, which is what the specification
         // substitutes rather than failing, and a value with no store to keep a link in keeps the
         // one its kind gives it.
-        if subclassed && self.stack.len() == depth + 1 {
+        if self.stack.len() == depth + 1 {
             let built = self.stack[depth].clone();
-            let named = self.read_property(&new_target, "prototype", current)?;
-            if is_reflect_target(&named) {
-                record_prototype(&built, named);
+            let mut linked = false;
+            if subclassed {
+                let named = self.read_property(&new_target, "prototype", current)?;
+                if is_reflect_target(&named) {
+                    record_prototype(&built, named);
+                    linked = true;
+                }
+            }
+            // `GetPrototypeFromConstructor` falls back to *`NewTarget`'s realm's* intrinsic
+            // default prototype -- when `prototype` is not an object, and when the constructor is
+            // its own `NewTarget` and there is nothing to read. In one realm that fallback is the
+            // prototype the value already has implicitly, so nothing is recorded and the fast
+            // path is untouched. Across two it is the whole difference: without it
+            // `new other.Array()` would be an array of *this* realm, and
+            // `new other.Array() instanceof Array` would answer true where the language says
+            // false. It is also what the seventy-seven `proto-from-ctor-realm` files test.
+            if !linked {
+                let realm = value_realm(&new_target);
+                if realm != RealmId::PRIMARY {
+                    record_prototype(&built, in_realm(prototype_of(&built), realm));
+                }
             }
         }
         Ok(())
@@ -26050,7 +26743,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         let mut data = ObjectData::default();
         data.set_non_enumerable(WEAK_REF_TARGET, target);
-        data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::WeakRef)));
+        data.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::WeakRef),
+            RealmId::PRIMARY,
+        ));
         Ok(Value::Object(Rc::new(RefCell::new(data))))
     }
 
@@ -26070,9 +26766,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let mut data = ObjectData::default();
         data.set_non_enumerable(REGISTRY_CALLBACK, callback);
         data.set_non_enumerable(REGISTRY_CELLS, Value::Array(ArrayData::new(Vec::new())));
-        data.set_prototype(Value::Native(Native::PrototypeOf(
-            PrototypeTable::FinalizationRegistry,
-        )));
+        data.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::FinalizationRegistry),
+            RealmId::PRIMARY,
+        ));
         Ok(Value::Object(Rc::new(RefCell::new(data))))
     }
 
@@ -26259,7 +26956,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let prototype = if is_reflect_target(&named) {
             named
         } else {
-            Value::Native(Native::PrototypeOf(PrototypeTable::Object))
+            Value::Native(
+                Native::PrototypeOf(PrototypeTable::Object),
+                RealmId::PRIMARY,
+            )
         };
         let mut instance = ObjectData::default();
         instance.set_prototype(prototype);
@@ -26312,6 +27012,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // caller had fewer functions than the eval did.
             name: proto.name.as_deref().map(Rc::from),
             upvalues,
+            realm: self.current_realm,
             // An arrow takes `this` from where it is written; an ordinary function takes it from
             // how it is called, so it captures nothing here.
             captured_this: if proto.arrow {
@@ -26593,10 +27294,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Boolean(flags.contains('u') || flags.contains('v')),
         );
         iterator.set_non_enumerable(HELPER_DONE, Value::Boolean(false));
-        iterator.set_non_enumerable("next", Value::Native(Native::RegExpStringIteratorNext));
+        iterator.set_non_enumerable(
+            "next",
+            Value::Native(Native::RegExpStringIteratorNext, RealmId::PRIMARY),
+        );
         iterator.set_non_enumerable(
             WellKnown::Iterator.property_key(),
-            Value::Native(Native::IteratorSelf),
+            Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
         );
         Ok(Value::Object(Rc::new(RefCell::new(iterator))))
     }
@@ -26668,7 +27372,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         let constructor = self.read_property(target, "constructor", instruction)?;
         let species = if matches!(constructor, Value::Undefined) {
-            Value::Native(Native::RegExpConstructor)
+            Value::Native(Native::RegExpConstructor, RealmId::PRIMARY)
         } else if !is_reflect_target(&constructor) {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "constructor is not an object".to_owned(),
@@ -26677,7 +27381,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let found =
                 self.read_property(&constructor, WellKnown::Species.property_key(), instruction)?;
             if found.is_nullish() {
-                Value::Native(Native::RegExpConstructor)
+                Value::Native(Native::RegExpConstructor, RealmId::PRIMARY)
             } else {
                 found
             }
@@ -26984,7 +27688,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let replacement = arguments.get(1).cloned().unwrap_or(Value::Undefined);
         let callable = matches!(
             replacement,
-            Value::Function(_) | Value::Native(_) | Value::Callback(_)
+            Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
         );
 
         // A string pattern replaces the first occurrence, or every one for `replaceAll`; a
@@ -27118,7 +27822,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.read_property(value, WellKnown::ToPrimitive.property_key(), instruction)?;
         if matches!(
             exotic,
-            Value::Function(_) | Value::Native(_) | Value::Callback(_)
+            Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
         ) {
             let hint = Value::String(if prefer_string { "string" } else { "default" }.to_owned());
             let produced =
@@ -27144,7 +27848,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let method = self.read_property(value, name, instruction)?;
             if !matches!(
                 method,
-                Value::Function(_) | Value::Native(_) | Value::Callback(_)
+                Value::Function(_) | Value::Native(_, _) | Value::Callback(_, _)
             ) {
                 continue;
             }
@@ -28051,11 +28755,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // included: `Object.defineProperty(Math, "x", { get })` has to run its getter here
             // rather than read as undefined.
             Value::Bound(bound) => bound.properties.borrow().lookup(name),
-            Value::Native(_) | Value::Callback(_) => match self.intrinsics.overridden(target, name)
-            {
-                Overridden::Held(property, _) => Some(property),
-                Overridden::Removed | Overridden::Untouched => None,
-            },
+            Value::Native(_, _) | Value::Callback(_, _) => {
+                match self.intrinsics.overridden(target, name) {
+                    Overridden::Held(property, _) => Some(property),
+                    Overridden::Removed | Overridden::Untouched => None,
+                }
+            }
             // An exotic object's named properties live in a store beside its own state,
             // accessors included: `Object.defineProperty(sample, "x", { get })` has to run its
             // getter here rather than read as undefined.
@@ -28079,7 +28784,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let value = self.read_property_inner(target, name, instruction)?;
-        if matches!(value, Value::Native(Native::Uninitialized)) {
+        if matches!(value, Value::Native(Native::Uninitialized, _)) {
             return Err(uninitialized_export_error(name));
         }
         Ok(value)
@@ -28314,11 +29019,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     table,
                     name,
                     collection_property(is_map, weak, name),
+                    value_realm(target),
                 ) {
-                    Value::Undefined => object
-                        .borrow()
-                        .get(name)
-                        .unwrap_or_else(|| inherited_object_property(&self.intrinsics, name)),
+                    Value::Undefined => object.borrow().get(name).unwrap_or_else(|| {
+                        inherited_object_property(&self.intrinsics, name, value_realm(target))
+                    }),
                     method => method,
                 }
             }
@@ -28337,7 +29042,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // object methods -- which is what stops adding the helpers from taking
                     // `hasOwnProperty` away from every iterator in the realm.
                     match iterator_method(name) {
-                        Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                        Value::Undefined => {
+                            inherited_object_property(&self.intrinsics, name, value_realm(target))
+                        }
                         found => found,
                     }
                 })
@@ -28354,9 +29061,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         "statusCode" => Value::Number(f64::from(state.borrow().status)),
                         "headersSent" => Value::Boolean(state.borrow().streaming),
                         "writableEnded" | "finished" => Value::Boolean(state.borrow().ended),
-                        _ => object
-                            .get(name)
-                            .unwrap_or_else(|| inherited_object_property(&self.intrinsics, name)),
+                        _ => object.get(name).unwrap_or_else(|| {
+                            inherited_object_property(&self.intrinsics, name, value_realm(target))
+                        }),
                     };
                 }
                 if let Some(NodeObject::Url(state)) = &object.node_object {
@@ -28377,7 +29084,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // value": postcss's `CssSyntaxError` constructor stringifies the file URL
                         // it built, so a *CSS syntax error* surfaced as a TypeError from the
                         // reporter rather than as the located error it had already worked out.
-                        "toString" | "toJSON" => Value::Native(Native::UrlToString),
+                        "toString" | "toJSON" => {
+                            Value::Native(Native::UrlToString, RealmId::PRIMARY)
+                        }
                         _ => object.get(name).unwrap_or(Value::Undefined),
                     };
                 }
@@ -28397,6 +29106,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 table,
                                 name,
                                 Native::PrototypeOf(table).property(name)?,
+                                value_realm(target),
                             ))
                         })
                         .filter(|found| !matches!(found, Value::Undefined))
@@ -28412,9 +29122,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // because a class instance finds its own on the way down, and this must
                         // not shadow it: `x.constructor === Object` is how a library asks
                         // whether something is a *plain* object.
-                        Value::Native(Native::ObjectConstructor)
+                        Value::Native(Native::ObjectConstructor, RealmId::PRIMARY)
                     } else {
-                        inherited_object_property(&self.intrinsics, name)
+                        inherited_object_property(&self.intrinsics, name, value_realm(target))
                     }
                 })
             }
@@ -28427,7 +29137,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // owns, then whatever `Function.prototype` supplies. A table that answered
             // `undefined` has still answered -- `Object.prototype.call` is not a function -- so
             // the fallback to `function_property` applies only where there was no arm at all.
-            Value::Native(native) => match self.intrinsics.overridden(target, name) {
+            // A table answer names the *receiver's* realm: `other.Array.prototype` is realm 1's
+            // array prototype, not this one's. The tables cannot say so themselves -- they are
+            // pure functions of a `Copy` marker and a name, with no receiver to ask -- so what
+            // comes back is retagged here, where the receiver is in hand. A value the program
+            // *stored* is returned untouched: it keeps the realm it already had.
+            Value::Native(native, realm) => match self.intrinsics.overridden(target, name) {
                 Overridden::Held(Property::Value(value), _) => value,
                 // A getter is ordinary code and this path cannot call one; `read_property`
                 // looks for the accessor before it gets here.
@@ -28435,21 +29150,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Deleted, so the read carries on *up* the chain rather than back into the
                 // table that still has the answer the program removed.
                 Overridden::Removed => native_inherited_property(&self.intrinsics, target, name),
-                Overridden::Untouched => match native.property(name) {
-                    Some(found) if !matches!(found, Value::Undefined) => found,
-                    // `String.prototype` boxes the empty string, so it owns a `length` of 0 the
-                    // same way any other String object does.
-                    _ if string_exotic(target, name).is_some() => {
-                        string_exotic(target, name).unwrap_or(Value::Undefined)
+                Overridden::Untouched => {
+                    match native.property(name).map(|found| in_realm(found, *realm)) {
+                        Some(found) if !matches!(found, Value::Undefined) => found,
+                        // `String.prototype` boxes the empty string, so it owns a `length` of 0 the
+                        // same way any other String object does.
+                        _ if string_exotic(target, name).is_some() => {
+                            string_exotic(target, name).unwrap_or(Value::Undefined)
+                        }
+                        Some(Value::Undefined) => {
+                            native_inherited_property(&self.intrinsics, target, name)
+                        }
+                        Some(found) => found,
+                        None => identity_property(target, name).unwrap_or_else(|| {
+                            native_inherited_property(&self.intrinsics, target, name)
+                        }),
                     }
-                    Some(Value::Undefined) => {
-                        native_inherited_property(&self.intrinsics, target, name)
-                    }
-                    Some(found) => found,
-                    None => identity_property(target, name).unwrap_or_else(|| {
-                        native_inherited_property(&self.intrinsics, target, name)
-                    }),
-                },
+                }
             },
             // `f.prototype` is the object `new f()` gives instances. Reading it creates it, so
             // that `f.prototype.m = ...` before any `new` reaches the same object the instances
@@ -28468,14 +29185,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // `Promise.resolve` is seen from the subclass too.
                     .or_else(|| {
                         inherited_builtin(closure)
-                            .map(|native| self.property(&Value::Native(native), name))
+                            .map(|native| {
+                                self.property(&Value::Native(native, RealmId::PRIMARY), name)
+                            })
                             .filter(|found| !matches!(found, Value::Undefined))
                     })
                     // No fallback for `name` or `length`: both are stored on the closure, and
                     // answering them from the proto as well would resurrect one a program had
                     // just deleted -- which is precisely the observation `configurable: true`
                     // promises it can make.
-                    .unwrap_or_else(|| function_property(&self.intrinsics, name))
+                    .unwrap_or_else(|| {
+                        function_property(&self.intrinsics, name, value_realm(target))
+                    })
             }
             // A bound function reports the arity still to be supplied and the name of what it
             // wraps, which is what makes a stack trace through one readable.
@@ -28486,23 +29207,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .borrow()
                 .get(name)
                 .or_else(|| identity_property(target, name))
-                .unwrap_or_else(|| function_property(&self.intrinsics, name)),
+                .unwrap_or_else(|| function_property(&self.intrinsics, name, value_realm(target))),
             Value::CommonJsRequire(require) if name == "resolve" => {
                 Value::CommonJsResolve(Rc::clone(require))
             }
             Value::CommonJsRequire(_) | Value::CommonJsResolve(_) => {
-                identity_property(target, name)
-                    .unwrap_or_else(|| function_property(&self.intrinsics, name))
+                identity_property(target, name).unwrap_or_else(|| {
+                    function_property(&self.intrinsics, name, value_realm(target))
+                })
             }
             // Every other callable answers to the same three, and to nothing else: none of them
             // has a property store to shadow them with.
-            Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
+            Value::Callback(_, _) | Value::Settler(..) | Value::Capability(..) => {
                 match self.intrinsics.overridden(target, name) {
                     Overridden::Held(Property::Value(value), _) => value,
                     Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
-                    Overridden::Removed => function_property(&self.intrinsics, name),
-                    Overridden::Untouched => identity_property(target, name)
-                        .unwrap_or_else(|| function_property(&self.intrinsics, name)),
+                    Overridden::Removed => {
+                        function_property(&self.intrinsics, name, value_realm(target))
+                    }
+                    Overridden::Untouched => identity_property(target, name).unwrap_or_else(|| {
+                        function_property(&self.intrinsics, name, value_realm(target))
+                    }),
                 }
             }
             Value::Function(closure) if name == "prototype" => prototype_object(closure),
@@ -28521,8 +29246,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 PrototypeTable::String,
                 name,
                 string_property(name),
+                value_realm(target),
             ) {
-                Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                Value::Undefined => {
+                    inherited_object_property(&self.intrinsics, name, value_realm(target))
+                }
                 method => method,
             },
             Value::Number(_) => match table_step(
@@ -28530,8 +29258,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 PrototypeTable::Number,
                 name,
                 number_property(name),
+                value_realm(target),
             ) {
-                Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                Value::Undefined => {
+                    inherited_object_property(&self.intrinsics, name, value_realm(target))
+                }
                 method => method,
             },
             // The array's own named properties, then `Array.prototype`, then
@@ -28546,11 +29277,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     PrototypeTable::Array,
                     name,
                     array_property(name),
+                    value_realm(target),
                 ) {
                     // Past `Array.prototype` the chain reaches `Object.prototype`, which is
                     // where `hasOwnProperty` lives -- and reaching it is what the plain-object
                     // check every library ships depends on.
-                    Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                    Value::Undefined => {
+                        inherited_object_property(&self.intrinsics, name, value_realm(target))
+                    }
                     method => method,
                 }
             }),
@@ -28565,8 +29299,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 PrototypeTable::Boolean,
                 name,
                 boolean_method(name),
+                value_realm(target),
             ) {
-                Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                Value::Undefined => {
+                    inherited_object_property(&self.intrinsics, name, value_realm(target))
+                }
                 method => method,
             },
             Value::BigInt(_) => match table_step(
@@ -28574,8 +29311,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 PrototypeTable::BigInt,
                 name,
                 bigint_method(name),
+                value_realm(target),
             ) {
-                Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                Value::Undefined => {
+                    inherited_object_property(&self.intrinsics, name, value_realm(target))
+                }
                 method => method,
             },
             // A symbol reaches `Symbol.prototype` like any other primitive. `description` is the
@@ -28594,8 +29334,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 PrototypeTable::Symbol,
                 name,
                 symbol_method(name),
+                value_realm(target),
             ) {
-                Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                Value::Undefined => {
+                    inherited_object_property(&self.intrinsics, name, value_realm(target))
+                }
                 method => method,
             },
             // Through the realm's store first, so that a program which replaced a method on
@@ -28605,8 +29348,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 PrototypeTable::Date,
                 name,
                 date_method(name),
+                value_realm(target),
             ) {
-                Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                Value::Undefined => {
+                    inherited_object_property(&self.intrinsics, name, value_realm(target))
+                }
                 method => method,
             },
             Value::TypedArray(view) => match name {
@@ -28622,12 +29368,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }),
                 "BYTES_PER_ELEMENT" => Value::Number(view.kind.width() as f64),
                 "buffer" => Value::ArrayBuffer(Rc::clone(&view.buffer)),
-                "constructor" => Value::Native(Native::TypedArrayConstructor(view.kind)),
+                "constructor" => {
+                    Value::Native(Native::TypedArrayConstructor(view.kind), RealmId::PRIMARY)
+                }
                 key if key == WellKnown::ToStringTag.property_key() => {
                     Value::String(view.kind.name().to_owned())
                 }
                 "toString" if view.kind == TypedKind::Uint8 => {
-                    Value::Native(Native::NodeBufferToString)
+                    Value::Native(Native::NodeBufferToString, RealmId::PRIMARY)
                 }
                 // The chain a view actually has, walked in the order it has it:
                 // `Int8Array.prototype`, then `%TypedArray%.prototype` where the shared methods
@@ -28641,14 +29389,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     PrototypeTable::TypedArrayFor(view.kind),
                     other,
                     typed_array_for_method(view.kind, other),
+                    value_realm(target),
                 ) {
                     Value::Undefined => match table_step(
                         &self.intrinsics,
                         PrototypeTable::TypedArray,
                         other,
                         typed_array_method(other),
+                        value_realm(target),
                     ) {
-                        Value::Undefined => inherited_object_property(&self.intrinsics, other),
+                        Value::Undefined => {
+                            inherited_object_property(&self.intrinsics, other, value_realm(target))
+                        }
                         found => found,
                     },
                     found => found,
@@ -28678,9 +29430,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "detached" if !buffer.shared => Value::Boolean(buffer.detached()),
                 "immutable" if !buffer.shared => Value::Boolean(buffer.immutable),
                 "constructor" if buffer.shared => {
-                    Value::Native(Native::SharedArrayBufferConstructor)
+                    Value::Native(Native::SharedArrayBufferConstructor, RealmId::PRIMARY)
                 }
-                "constructor" => Value::Native(Native::ArrayBufferConstructor),
+                "constructor" => Value::Native(Native::ArrayBufferConstructor, RealmId::PRIMARY),
                 // Through the realm's store and then the table, and on to `Object.prototype`
                 // above it -- the chain a buffer actually has. Stopping at the table left
                 // `buffer.hasOwnProperty` undefined, and a change to `ArrayBuffer.prototype`
@@ -28694,8 +29446,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     },
                     other,
                     array_buffer_method(buffer.shared, other),
+                    value_realm(target),
                 ) {
-                    Value::Undefined => inherited_object_property(&self.intrinsics, other),
+                    Value::Undefined => {
+                        inherited_object_property(&self.intrinsics, other, value_realm(target))
+                    }
                     method => method,
                 },
             },
@@ -28711,23 +29466,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 } else {
                     view.offset as f64
                 }),
-                "constructor" => Value::Native(Native::DataViewConstructor),
+                "constructor" => Value::Native(Native::DataViewConstructor, RealmId::PRIMARY),
                 other => match table_step(
                     &self.intrinsics,
                     PrototypeTable::DataView,
                     other,
                     data_view_method(other),
+                    value_realm(target),
                 ) {
-                    Value::Undefined => inherited_object_property(&self.intrinsics, other),
+                    Value::Undefined => {
+                        inherited_object_property(&self.intrinsics, other, value_realm(target))
+                    }
                     method => method,
                 },
             },
             Value::RegExp(regexp) => match name {
-                "test" => Value::Native(Native::RegExpTest),
-                "exec" => Value::Native(Native::RegExpExec),
+                "test" => Value::Native(Native::RegExpTest, RealmId::PRIMARY),
+                "exec" => Value::Native(Native::RegExpExec, RealmId::PRIMARY),
                 // Its own, not the error one: a regexp prints as `/source/flags`, and reusing
                 // `Error.prototype.toString` made every regexp stringify as "Error".
-                "toString" => Value::Native(Native::RegExpToString),
+                "toString" => Value::Native(Native::RegExpToString, RealmId::PRIMARY),
                 // Escaped, exactly as the accessor on the prototype escapes it: the two must
                 // not disagree about what `re.source` is, and the raw pattern would not survive
                 // being written back between slashes.
@@ -28752,8 +29510,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     PrototypeTable::RegExp,
                     other,
                     regexp_method(other),
+                    value_realm(target),
                 ) {
-                    Value::Undefined => inherited_object_property(&self.intrinsics, other),
+                    Value::Undefined => {
+                        inherited_object_property(&self.intrinsics, other, value_realm(target))
+                    }
                     method => method,
                 },
             },
@@ -28762,12 +29523,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // here, as every other built-in getter in this interpreter is.
             Value::Intl(value) => match intl::instance_property(value, name) {
                 Some(found) => found,
-                None => inherited_object_property(&self.intrinsics, name),
+                None => inherited_object_property(&self.intrinsics, name, value_realm(target)),
             },
             // The same table `Promise.prototype` answers from, so an instance and the
             // prototype can never resolve a name differently.
             Value::Promise(_) => match promise_method(name) {
-                Value::Undefined => inherited_object_property(&self.intrinsics, name),
+                Value::Undefined => {
+                    inherited_object_property(&self.intrinsics, name, value_realm(target))
+                }
                 method => method,
             },
             // A generator object is its own iterator, which is what lets one be used directly in
@@ -28777,25 +29540,25 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // objects that are promises, which is exactly the mistake `for await` exists to
             // avoid, so it is left to fail rather than half-work.
             Value::Generator(state) if is_async_generator(state) => match name {
-                "next" => Value::Callback(CallbackMethod::AsyncGeneratorNext),
+                "next" => Value::Callback(CallbackMethod::AsyncGeneratorNext, RealmId::PRIMARY),
                 // `return` and `throw` answer with promises for the same reason `next` does: the
                 // body may `await` inside a `finally`, or inside the `catch` that receives the
                 // thrown value, and none of that can finish inside this call.
-                "return" => Value::Callback(CallbackMethod::AsyncGeneratorReturn),
-                "throw" => Value::Callback(CallbackMethod::AsyncGeneratorThrow),
+                "return" => Value::Callback(CallbackMethod::AsyncGeneratorReturn, RealmId::PRIMARY),
+                "throw" => Value::Callback(CallbackMethod::AsyncGeneratorThrow, RealmId::PRIMARY),
                 key if key == WellKnown::AsyncIterator.property_key() => {
-                    Value::Native(Native::IteratorSelf)
+                    Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
                 }
                 _ => Value::Undefined,
             },
             // A generator object is its own iterator, which is what lets one be used directly in
             // `for-of` and in a spread.
             Value::Generator(_) => match name {
-                "next" => Value::Callback(CallbackMethod::GeneratorNext),
-                "return" => Value::Callback(CallbackMethod::GeneratorReturn),
+                "next" => Value::Callback(CallbackMethod::GeneratorNext, RealmId::PRIMARY),
+                "return" => Value::Callback(CallbackMethod::GeneratorReturn, RealmId::PRIMARY),
                 // `throw` raises at the suspension point, so the generator's own `try` sees it.
                 // Without it a delegating `yield*` had nothing to forward a thrown completion to.
-                "throw" => Value::Callback(CallbackMethod::GeneratorThrow),
+                "throw" => Value::Callback(CallbackMethod::GeneratorThrow, RealmId::PRIMARY),
                 // Everything else comes from `%IteratorPrototype%`, which a generator object
                 // reaches through two links of its chain -- and which is the only reason
                 // `g().map(f)` is a thing a program can write.
@@ -28829,27 +29592,45 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: Vec<Value>,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
+        let realm = value_realm(&method);
+        self.entering(realm, |vm| {
+            vm.invoke_dispatch(method, receiver, arguments, instruction)
+        })
+    }
+
+    fn invoke_dispatch(
+        &mut self,
+        method: Value,
+        receiver: Value,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
         // `ValidateTypedArray`, ahead of the dispatch rather than inside an arm of it: it is what
         // the specification does before a `%TypedArray%.prototype` method reads anything, and the
         // three methods a view owns outright still take the arm they always did afterwards.
-        if let Value::Native(native) = &method
+        if let Value::Native(native, _) = &method
             && let Some((name, brand_only)) = native.typed_array_prototype_method()
         {
             self.validate_typed_array(&receiver, name, brand_only)?;
             if let Native::TypedArrayGeneric(name) = native {
-                return self.invoke(array_property(name), receiver, arguments, instruction);
+                return self.invoke_dispatch(
+                    array_property(name),
+                    receiver,
+                    arguments,
+                    instruction,
+                );
             }
         }
         match method {
             // The same rule as in `call_value`: a mutating array method given a proxy has to
             // write through it, not into a snapshot.
-            Value::Native(native)
+            Value::Native(native, _)
                 if native.mutates_an_array() && matches!(receiver, Value::Proxy(_)) =>
             {
                 self.mutate_through_proxy(native, &receiver, &arguments, instruction)
                     .map(Some)
             }
-            Value::Native(native) => {
+            Value::Native(native, _) => {
                 // A typed array reached through one of the generic array methods walks as its
                 // elements, the same coercion `call_value` applies to a redirected one. The two
                 // named here do *not* walk a snapshot and are handed back untouched; they come
@@ -28859,7 +29640,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let receiver = if native.walks_an_array()
                     || matches!(native, Native::ArrayJoinDefault | Native::ArrayCopyWithin)
                 {
-                    self.as_array_like(&Value::Native(native), receiver, instruction)?
+                    self.as_array_like(
+                        &Value::Native(native, RealmId::PRIMARY),
+                        receiver,
+                        instruction,
+                    )?
                 } else {
                     receiver
                 };
@@ -28874,7 +29659,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `next` on an async generator answers with a promise rather than a result: the
             // body may await any number of times before it reaches the value the consumer asked
             // for, and none of that can happen inside this call.
-            Value::Callback(CallbackMethod::AsyncGeneratorNext) => {
+            Value::Callback(CallbackMethod::AsyncGeneratorNext, _) => {
                 let Value::Generator(generator) = &receiver else {
                     return Err(ExecutionError::NotCallable {
                         instruction,
@@ -28893,6 +29678,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Callback(
                 method @ (CallbackMethod::AsyncGeneratorReturn
                 | CallbackMethod::AsyncGeneratorThrow),
+                _,
             ) => {
                 let Value::Generator(generator) = &receiver else {
                     return Err(ExecutionError::NotCallable {
@@ -28944,7 +29730,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Some(Value::Promise(step)))
             }
             // Generator methods drive the machine, so they cannot go through `array_callback`.
-            Value::Callback(CallbackMethod::GeneratorThrow) => {
+            Value::Callback(CallbackMethod::GeneratorThrow, _) => {
                 let Value::Generator(generator) = &receiver else {
                     return Err(ExecutionError::NotCallable {
                         instruction,
@@ -28971,6 +29757,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Callback(
                 method @ (CallbackMethod::GeneratorNext | CallbackMethod::GeneratorReturn),
+                _,
             ) => {
                 let Value::Generator(generator) = &receiver else {
                     return Err(ExecutionError::NotCallable {
@@ -28999,26 +29786,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `reduce` threads an accumulator and `sort` compares pairs, so neither is the walk
             // the other callback methods share. All three coerce their receiver first, for the
             // same reason the native array methods do.
-            Value::Callback(CallbackMethod::Reduce | CallbackMethod::ReduceRight) => {
-                let backwards = matches!(method, Value::Callback(CallbackMethod::ReduceRight));
+            Value::Callback(CallbackMethod::Reduce | CallbackMethod::ReduceRight, _) => {
+                let backwards = matches!(method, Value::Callback(CallbackMethod::ReduceRight, _));
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
                 self.array_reduce(&receiver, &arguments, backwards, instruction)
                     .map(Some)
             }
             Value::Callback(
                 callback @ (CallbackMethod::FindLast | CallbackMethod::FindLastIndex),
+                _,
             ) => {
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
                 self.array_callback_backwards(callback, &receiver, &arguments, instruction)
                     .map(Some)
             }
-            Value::Callback(CallbackMethod::Sort) => {
+            Value::Callback(CallbackMethod::Sort, _) => {
                 let original = receiver.clone();
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
                 let produced = self.array_sort(&receiver, &arguments, instruction)?;
                 Ok(Some(self.typed_result(&original, produced, true, false)?))
             }
-            Value::Callback(callback) => {
+            Value::Callback(callback, _) => {
                 let original = receiver.clone();
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
                 let produced = self.array_callback(callback, &receiver, &arguments, instruction)?;
@@ -29072,7 +29860,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// `object[key]`. Array indices are numeric; everything else is a string key.
     /// Whether an array slot is a hole rather than a value.
     fn is_hole(value: &Value) -> bool {
-        matches!(value, Value::Native(Native::Hole))
+        matches!(value, Value::Native(Native::Hole, _))
     }
 
     fn computed(&self, target: &Value, key: &Value) -> Value {
@@ -29295,7 +30083,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let value = self.read_computed_with_receiver_inner(target, key, receiver, instruction)?;
-        if matches!(value, Value::Native(Native::Uninitialized)) {
+        if matches!(value, Value::Native(Native::Uninitialized, _)) {
             return Err(uninitialized_export_error(&key.to_display_string()));
         }
         Ok(value)
@@ -29329,7 +30117,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Bound(bound) => bound.properties.borrow().lookup(&property_key),
             Value::Array(_) => self.stored_property(target, &property_key),
-            Value::Native(_) | Value::Callback(_) => {
+            Value::Native(_, _) | Value::Callback(_, _) => {
                 match self.intrinsics.overridden(target, &property_key) {
                     Overridden::Held(property, _) => Some(property),
                     Overridden::Removed | Overridden::Untouched => None,
@@ -29605,7 +30393,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             return Err(ExecutionError::ArrayTooLarge { length: index + 1 });
                         }
                         items.sparse.set(true);
-                        elements.resize(index + 1, Value::Native(Native::Hole));
+                        elements.resize(index + 1, Value::Native(Native::Hole, RealmId::PRIMARY));
                     }
                     elements[index] = value;
                     Ok(())
@@ -29726,7 +30514,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // one writable: `Math.max = f` and `Array.prototype.mine = f` are ordinary
             // assignments. Refusing them as "not an object" was this engine reporting that it
             // had nowhere to put the answer, not that the language forbade the write.
-            Value::Native(_) | Value::Callback(_) => {
+            Value::Native(_, _) | Value::Callback(_, _) => {
                 let name = key.property_key();
                 // Bound out of the `if let`, because the setter is ordinary code that may write
                 // to this very built-in.
@@ -30851,6 +31639,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // rest parameter needs it, and `LoadArguments` is the one place that substitutes the
         // captured list instead.
         self.frames.push(Frame {
+            realm: std::mem::replace(&mut self.current_realm, closure.realm),
             program: std::mem::replace(&mut self.program, Rc::clone(&closure.program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::clone(&closure.strictness)),
             strict: std::mem::replace(&mut self.strict, closure.is_strict()),
@@ -30887,7 +31676,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// program binds by name, and its `this`, `arguments` and `new.target` are the caller's --
     /// which is the whole of what "evaluates in the caller's scope" means. Without one, this is
     /// an indirect eval: global scope, the global object as `this`, and no arguments.
-    fn enter_eval(&mut self, source: &str, site: Option<&EvalSite>) -> Result<(), ExecutionError> {
+    fn enter_eval(
+        &mut self,
+        source: &str,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<(), ExecutionError> {
         let Some(compile) = self.source_compiler else {
             return Err(ExecutionError::NoSourceCompiler);
         };
@@ -30914,6 +31708,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             outer: &outer,
             strict,
             global_var_scope,
+            script,
         })
         .map_err(|error| match error {
             EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
@@ -30958,6 +31753,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let program_is_strict = program_strictness.body;
         self.frames.push(Frame {
+            realm: self.current_realm,
             program: std::mem::replace(&mut self.program, Rc::new(program)),
             strictness: std::mem::replace(&mut self.strictness, Rc::new(program_strictness)),
             strict: std::mem::replace(&mut self.strict, program_is_strict),
@@ -30995,6 +31791,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         source: &str,
         site: Option<&EvalSite>,
+        script: bool,
     ) -> Result<Value, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -31004,7 +31801,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.native_depth += 1;
         let depth = self.frames.len();
         let outcome = self
-            .enter_eval(source, site)
+            .enter_eval(source, site, script)
             .and_then(|()| self.run_frames(depth).map(|result| result.value));
         self.native_depth -= 1;
         outcome
@@ -31205,6 +32002,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let depth = self.frames.len();
         let strictness = Rc::new(Strictness::always(&program));
         self.frames.push(Frame {
+            realm: self.current_realm,
             program: std::mem::replace(&mut self.program, program),
             strictness: std::mem::replace(&mut self.strictness, strictness),
             strict: std::mem::replace(&mut self.strict, true),
@@ -31245,7 +32043,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match arguments.first() {
             Some(Value::String(source)) => {
                 let source = source.clone();
-                self.drive_eval(&source, None)
+                self.drive_eval(&source, None, false)
             }
             Some(value) => Ok(value.clone()),
             None => Ok(Value::Undefined),
@@ -31268,7 +32066,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Some((body, parameters)) = arguments.split_last() else {
-            return self.drive_eval("(function anonymous(\n) {\n\n})", None);
+            return self.drive_eval("(function anonymous(\n) {\n\n})", None, false);
         };
         // Every parameter first, in order, and only then the body. That order is the
         // specification's and it is observable: when both a parameter's `toString` and the
@@ -31284,7 +32082,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The newlines are the specification's own: they stop a `//` comment in the parameter
         // list from swallowing the brace, and one in the body from swallowing the close.
         let source = format!("(function anonymous({joined}\n) {{\n{body}\n}})");
-        self.drive_eval(&source, None)
+        self.drive_eval(&source, None, false)
     }
 
     /// `ToString`: the conversion the *program* defines, which runs its code and can throw.
@@ -31434,9 +32232,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
 fn node_event_emitter() -> Value {
     let mut data = ObjectData::default();
-    data.set_prototype(Value::Native(Native::PrototypeOf(
-        PrototypeTable::EventEmitter,
-    )));
+    data.set_prototype(Value::Native(
+        Native::PrototypeOf(PrototypeTable::EventEmitter),
+        RealmId::PRIMARY,
+    ));
     data.node_events = Some(Vec::new());
     Value::Object(Rc::new(RefCell::new(data)))
 }
@@ -31461,7 +32260,10 @@ fn node_readable(arguments: &[Value], receiver: Option<&Value>) -> Value {
         data.node_events.get_or_insert_with(Vec::new);
         data.node_object = Some(NodeObject::Readable(Rc::clone(&state)));
         if !initializes_existing {
-            data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Readable)));
+            data.set_prototype(Value::Native(
+                Native::PrototypeOf(PrototypeTable::Readable),
+                RealmId::PRIMARY,
+            ));
         }
         data.set_non_enumerable("_readableState", Value::Object(public));
         data.set_non_enumerable("readableEnded", Value::Boolean(false));
@@ -31541,7 +32343,10 @@ fn node_writable(arguments: &[Value], receiver: Option<&Value>) -> Value {
         data.node_events.get_or_insert_with(Vec::new);
         data.node_object = Some(NodeObject::Writable(state));
         if !initializes_existing {
-            data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Writable)));
+            data.set_prototype(Value::Native(
+                Native::PrototypeOf(PrototypeTable::Writable),
+                RealmId::PRIMARY,
+            ));
         }
         data.set_non_enumerable("writableEnded", Value::Boolean(false));
         data.set_non_enumerable("writableFinished", Value::Boolean(false));
@@ -31579,25 +32384,46 @@ fn node_server_object(state: &Rc<RefCell<NodeServerState>>) -> Value {
         node_object: Some(NodeObject::NodeServer(Rc::clone(state))),
         ..Default::default()
     };
-    data.set("listen", Value::Native(Native::NodeServerListen));
-    data.set("close", Value::Native(Native::NodeServerClose));
-    data.set("address", Value::Native(Native::NodeServerAddress));
-    data.set("setTimeout", Value::Native(Native::NodeServerSetTimeout));
+    data.set(
+        "listen",
+        Value::Native(Native::NodeServerListen, RealmId::PRIMARY),
+    );
+    data.set(
+        "close",
+        Value::Native(Native::NodeServerClose, RealmId::PRIMARY),
+    );
+    data.set(
+        "address",
+        Value::Native(Native::NodeServerAddress, RealmId::PRIMARY),
+    );
+    data.set(
+        "setTimeout",
+        Value::Native(Native::NodeServerSetTimeout, RealmId::PRIMARY),
+    );
     data.set("timeout", Value::Number(0.0));
     data.set("keepAliveTimeout", Value::Number(5_000.0));
     data.set("requestTimeout", Value::Number(300_000.0));
     data.set("httpAllowHalfOpen", Value::Boolean(false));
-    data.set("on", Value::Native(Native::NodeEventOn));
-    data.set("once", Value::Native(Native::NodeEventOnce));
-    data.set("emit", Value::Native(Native::NodeEventEmit));
+    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+    data.set(
+        "once",
+        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+    );
+    data.set(
+        "emit",
+        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+    );
     data.set(
         "removeListener",
-        Value::Native(Native::NodeEventRemoveListener),
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
     );
-    data.set("off", Value::Native(Native::NodeEventRemoveListener));
+    data.set(
+        "off",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
     data.set(
         "removeAllListeners",
-        Value::Native(Native::NodeEventRemoveAllListeners),
+        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
     );
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::downgrade(&object));
@@ -31610,16 +32436,31 @@ fn node_socket_object(state: &Rc<RefCell<NetSocketState>>) -> Value {
         node_object: Some(NodeObject::NetSocket(Rc::clone(state))),
         ..Default::default()
     };
-    data.set("on", Value::Native(Native::NodeEventOn));
-    data.set("once", Value::Native(Native::NodeEventOnce));
-    data.set("emit", Value::Native(Native::NodeEventEmit));
-    data.set("write", Value::Native(Native::NodeSocketWrite));
-    data.set("end", Value::Native(Native::NodeSocketEnd));
-    data.set("destroy", Value::Native(Native::NodeSocketDestroy));
+    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+    data.set(
+        "once",
+        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+    );
+    data.set(
+        "emit",
+        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+    );
+    data.set(
+        "write",
+        Value::Native(Native::NodeSocketWrite, RealmId::PRIMARY),
+    );
+    data.set(
+        "end",
+        Value::Native(Native::NodeSocketEnd, RealmId::PRIMARY),
+    );
+    data.set(
+        "destroy",
+        Value::Native(Native::NodeSocketDestroy, RealmId::PRIMARY),
+    );
     data.set("readyState", Value::String("open".into()));
     data.set(
         "setEncoding",
-        Value::Native(Native::NodeReadableSetEncoding),
+        Value::Native(Native::NodeReadableSetEncoding, RealmId::PRIMARY),
     );
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::downgrade(&object));
@@ -31649,17 +32490,26 @@ fn node_http_socket_facade() -> Value {
         node_events: Some(Vec::new()),
         ..Default::default()
     };
-    data.set("on", Value::Native(Native::NodeEventOn));
-    data.set("once", Value::Native(Native::NodeEventOnce));
-    data.set("emit", Value::Native(Native::NodeEventEmit));
+    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+    data.set(
+        "once",
+        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+    );
+    data.set(
+        "emit",
+        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+    );
     data.set(
         "removeListener",
-        Value::Native(Native::NodeEventRemoveListener),
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
     );
-    data.set("off", Value::Native(Native::NodeEventRemoveListener));
+    data.set(
+        "off",
+        Value::Native(Native::NodeEventRemoveListener, RealmId::PRIMARY),
+    );
     data.set(
         "removeAllListeners",
-        Value::Native(Native::NodeEventRemoveAllListeners),
+        Value::Native(Native::NodeEventRemoveAllListeners, RealmId::PRIMARY),
     );
     data.set("destroyed", Value::Boolean(false));
     data.set("encrypted", Value::Boolean(false));
@@ -31756,11 +32606,23 @@ fn node_http_client_request_object(state: &Rc<RefCell<HttpClientRequestState>>) 
         node_object: Some(NodeObject::HttpClientRequest(Rc::clone(state))),
         ..Default::default()
     };
-    data.set("write", Value::Native(Native::NodeClientRequestWrite));
-    data.set("end", Value::Native(Native::NodeClientRequestEnd));
-    data.set("on", Value::Native(Native::NodeEventOn));
-    data.set("once", Value::Native(Native::NodeEventOnce));
-    data.set("emit", Value::Native(Native::NodeEventEmit));
+    data.set(
+        "write",
+        Value::Native(Native::NodeClientRequestWrite, RealmId::PRIMARY),
+    );
+    data.set(
+        "end",
+        Value::Native(Native::NodeClientRequestEnd, RealmId::PRIMARY),
+    );
+    data.set("on", Value::Native(Native::NodeEventOn, RealmId::PRIMARY));
+    data.set(
+        "once",
+        Value::Native(Native::NodeEventOnce, RealmId::PRIMARY),
+    );
+    data.set(
+        "emit",
+        Value::Native(Native::NodeEventEmit, RealmId::PRIMARY),
+    );
     let object = Rc::new(RefCell::new(data));
     state.borrow_mut().object = Some(Rc::clone(&object));
     Value::Object(object)
@@ -31932,8 +32794,14 @@ fn node_hash(arguments: &[Value]) -> Result<Value, ExecutionError> {
         })))),
         ..Default::default()
     };
-    data.set("update", Value::Native(Native::NodeHashUpdate));
-    data.set("digest", Value::Native(Native::NodeHashDigest));
+    data.set(
+        "update",
+        Value::Native(Native::NodeHashUpdate, RealmId::PRIMARY),
+    );
+    data.set(
+        "digest",
+        Value::Native(Native::NodeHashDigest, RealmId::PRIMARY),
+    );
     Ok(Value::Object(Rc::new(RefCell::new(data))))
 }
 
@@ -31971,19 +32839,25 @@ fn node_async_local_storage() -> Value {
         }))),
         ..Default::default()
     };
-    data.set("run", Value::Native(Native::NodeAsyncLocalStorageRun));
+    data.set(
+        "run",
+        Value::Native(Native::NodeAsyncLocalStorageRun, RealmId::PRIMARY),
+    );
     data.set(
         "getStore",
-        Value::Native(Native::NodeAsyncLocalStorageGetStore),
+        Value::Native(Native::NodeAsyncLocalStorageGetStore, RealmId::PRIMARY),
     );
     data.set(
         "enterWith",
-        Value::Native(Native::NodeAsyncLocalStorageEnterWith),
+        Value::Native(Native::NodeAsyncLocalStorageEnterWith, RealmId::PRIMARY),
     );
-    data.set("exit", Value::Native(Native::NodeAsyncLocalStorageExit));
+    data.set(
+        "exit",
+        Value::Native(Native::NodeAsyncLocalStorageExit, RealmId::PRIMARY),
+    );
     data.set(
         "disable",
-        Value::Native(Native::NodeAsyncLocalStorageDisable),
+        Value::Native(Native::NodeAsyncLocalStorageDisable, RealmId::PRIMARY),
     );
     Value::Object(Rc::new(RefCell::new(data)))
 }
@@ -32027,8 +32901,14 @@ fn node_string_decoder() -> Value {
         )))),
         ..Default::default()
     };
-    data.set("write", Value::Native(Native::NodeStringDecoderWrite));
-    data.set("end", Value::Native(Native::NodeStringDecoderEnd));
+    data.set(
+        "write",
+        Value::Native(Native::NodeStringDecoderWrite, RealmId::PRIMARY),
+    );
+    data.set(
+        "end",
+        Value::Native(Native::NodeStringDecoderEnd, RealmId::PRIMARY),
+    );
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
@@ -32088,15 +32968,18 @@ fn abort_signal() -> Value {
     data.set_non_enumerable("onabort", Value::Null);
     data.set_non_enumerable(
         "addEventListener",
-        Value::Native(Native::AbortSignalListen { remove: false }),
+        Value::Native(
+            Native::AbortSignalListen { remove: false },
+            RealmId::PRIMARY,
+        ),
     );
     data.set_non_enumerable(
         "removeEventListener",
-        Value::Native(Native::AbortSignalListen { remove: true }),
+        Value::Native(Native::AbortSignalListen { remove: true }, RealmId::PRIMARY),
     );
     data.set_non_enumerable(
         "throwIfAborted",
-        Value::Native(Native::AbortSignalThrowIfAborted),
+        Value::Native(Native::AbortSignalThrowIfAborted, RealmId::PRIMARY),
     );
     data.set_non_enumerable(ABORT_LISTENERS, Value::Array(ArrayData::new(Vec::new())));
     Value::Object(Rc::new(RefCell::new(data)))
@@ -32109,7 +32992,10 @@ fn abort_signal() -> Value {
 fn abort_controller() -> Value {
     let mut data = ObjectData::default();
     data.set_non_enumerable("signal", abort_signal());
-    data.set_non_enumerable("abort", Value::Native(Native::AbortControllerAbort));
+    data.set_non_enumerable(
+        "abort",
+        Value::Native(Native::AbortControllerAbort, RealmId::PRIMARY),
+    );
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
@@ -32117,7 +33003,10 @@ fn abort_controller() -> Value {
 fn text_encoder() -> Value {
     let mut data = ObjectData::default();
     data.set_non_enumerable("encoding", Value::String("utf-8".to_owned()));
-    data.set_non_enumerable("encode", Value::Native(Native::TextEncoderEncode));
+    data.set_non_enumerable(
+        "encode",
+        Value::Native(Native::TextEncoderEncode, RealmId::PRIMARY),
+    );
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
@@ -32135,7 +33024,10 @@ fn url_search_params_object(state: Rc<UrlState>) -> Value {
         node_object: Some(NodeObject::UrlSearchParams(state)),
         ..Default::default()
     };
-    object.set("get", Value::Native(Native::UrlSearchParamsGet));
+    object.set(
+        "get",
+        Value::Native(Native::UrlSearchParamsGet, RealmId::PRIMARY),
+    );
     Value::Object(Rc::new(RefCell::new(object)))
 }
 
@@ -33032,13 +33924,13 @@ fn json_stringify(
         // element that is omitted becomes null, which is also what a hole serialises as.
         // A method table serialises as the empty object it stands for; a function serialises as
         // nothing, which is what drops it from an object and turns it into null in an array.
-        Value::Native(Native::PrototypeOf(table)) if *table != PrototypeTable::Function => {
+        Value::Native(Native::PrototypeOf(table), _) if *table != PrototypeTable::Function => {
             Some("{}".to_owned())
         }
         Value::Undefined
         | Value::Function(_)
-        | Value::Native(_)
-        | Value::Callback(_)
+        | Value::Native(_, _)
+        | Value::Callback(_, _)
         | Value::CommonJsRequire(_)
         | Value::CommonJsResolve(_) => None,
         // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
@@ -33267,6 +34159,13 @@ fn call_native(
         // Routed through `Vm::temporal_dispatch` before it can reach here: every `Temporal`
         // method may read an options bag, and a property read is observable and needs the
         // machine. Arriving here would mean the two dispatch paths disagree.
+        // Making a realm is `Vm::create_realm`'s: it has to extend the machine's realm tables,
+        // and this path has no machine. Arriving here would mean the two dispatch paths disagree.
+        Native::HostCreateRealm | Native::HostEvalScript => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "a $262 host facility reached the machine-free dispatch path".to_owned(),
+            });
+        }
         Native::Temporal(_) => {
             return Err(ExecutionError::TemporalFailure {
                 kind: ErrorKind::Type,
@@ -33359,8 +34258,8 @@ fn call_native(
             // `hasOwnProperty` and `getOwnPropertyDescriptor` from disagreeing.
             Value::Object(_)
             | Value::Function(_)
-            | Value::Native(_)
-            | Value::Callback(_)
+            | Value::Native(_, _)
+            | Value::Callback(_, _)
             | Value::Bound(_)
             // An array's elements, its `length` and its property store are all own properties,
             // and `has_property` is the wrong question for any of them: it follows the chain,
@@ -33439,14 +34338,14 @@ fn call_native(
                 Value::Intl(built) => built.service().tag(),
                 // A namespace and a method table are objects that happen to be spelled as
                 // natives here; only the callable ones report as functions.
-                Value::Native(native) if namespace_name(native).is_some() => "Object",
-                Value::Native(Native::PrototypeOf(_)) => "Object",
+                Value::Native(native, _) if namespace_name(native).is_some() => "Object",
+                Value::Native(Native::PrototypeOf(_), _) => "Object",
                 // Each `Intl` prototype carries a `Symbol.toStringTag` of its own, so it reports
                 // the qualified name rather than the bare `Object` a shape test would give.
-                Value::Native(Native::Intl(intl::Op::Prototype(service))) => service.tag(),
+                Value::Native(Native::Intl(intl::Op::Prototype(service)), _) => service.tag(),
                 Value::Function(_)
-                | Value::Native(_)
-                | Value::Callback(_)
+                | Value::Native(_, _)
+                | Value::Callback(_, _)
                 | Value::Settler(..) | Value::Capability(..)
                 | Value::Bound(_) => "Function",
                 _ => "Object",
@@ -33512,7 +34411,7 @@ fn call_native(
             pair.set(
                 "revoke",
                 Value::Bound(Rc::new(BoundFunction {
-                    target: Value::Native(Native::ProxyRevoke),
+                    target: Value::Native(Native::ProxyRevoke, RealmId::PRIMARY),
                     this_value: proxy.clone(),
                     arguments: Vec::new(),
                     properties: RefCell::new(ObjectData::default()),
@@ -33688,7 +34587,7 @@ fn call_native(
                             .borrow()
                             .iter()
                             .enumerate()
-                            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+                            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
                             .map(|(index, _)| index)
                             .collect();
                         let mut elements = items.elements.borrow_mut();
@@ -33711,7 +34610,7 @@ fn call_native(
                 }
                 // A built-in has no store of its own; the realm keeps one for it, and that is
                 // where the closure has to be recorded or the next `isExtensible` undoes it.
-                Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
+                Value::Native(_, _) | Value::Callback(_, _) | Value::Settler(..) | Value::Capability(..) => {
                     intrinsics.close(&target, sealing);
                 }
                 // An exotic object closes its named store. Its elements are not slots of that
@@ -33852,7 +34751,7 @@ fn call_native(
                 // exports *are* enumerable. Asked of that function rather than of the realm
                 // store directly, so `Object.keys`, `Object.entries` and a spread cannot give
                 // three different answers about the same namespace.
-                Some(target @ (Value::Native(_) | Value::Callback(_))) => {
+                Some(target @ (Value::Native(_, _) | Value::Callback(_, _))) => {
                     own_properties(intrinsics, target)
                         .into_iter()
                         .map(|(key, _)| Value::String(key))
@@ -33868,7 +34767,7 @@ fn call_native(
                     .borrow()
                     .iter()
                     .enumerate()
-                    .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+                    .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
                     .map(|(index, _)| Value::String(index.to_string()))
                     .chain(
                         items
@@ -34558,7 +35457,7 @@ fn call_native(
                     // the undefined it behaves like everywhere else. The two disagree here and
                     // nowhere else, which is the whole difference between strict equality and
                     // SameValueZero plus this one rule.
-                    Value::Native(Native::Hole) => {
+                    Value::Native(Native::Hole, _) => {
                         includes && matches!(needle, Value::Undefined)
                     }
                     // `indexOf` uses strict equality, so NaN is never found and `-0` matches
@@ -35488,10 +36387,10 @@ fn call_native(
                 Value::Array(ArrayData::new(characters)),
             );
             iterator.set("@@index", Value::Number(0.0));
-            iterator.set("next", Value::Native(Native::StringIteratorNext));
+            iterator.set("next", Value::Native(Native::StringIteratorNext, RealmId::PRIMARY));
             iterator.set(
                 WellKnown::Iterator.property_key(),
-                Value::Native(Native::IteratorSelf),
+                Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
             );
             Value::Object(Rc::new(RefCell::new(iterator)))
         }
@@ -35567,7 +36466,7 @@ fn call_native(
             // shortening it underneath one would walk past the end.
             let count = entries.borrow().len();
             for index in 0..count {
-                entries.borrow_mut()[index] = Value::Native(Native::Tombstone);
+                entries.borrow_mut()[index] = Value::Native(Native::Tombstone, RealmId::PRIMARY);
             }
             set_size(receiver, 0.0);
             Value::Undefined
@@ -35580,7 +36479,7 @@ fn call_native(
                 Some(index) => {
                     // A hole, not a removal: compacting here would shift every later element
                     // past a live iterator's cursor and skip one.
-                    entries.borrow_mut()[index] = Value::Native(Native::Tombstone);
+                    entries.borrow_mut()[index] = Value::Native(Native::Tombstone, RealmId::PRIMARY);
                     bump_size(receiver, -1.0);
                     Value::Boolean(true)
                 }
@@ -35590,7 +36489,7 @@ fn call_native(
         Native::CollectionValues(_) | Native::CollectionKeys(_) | Native::CollectionEntries(_) => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let mut iterator = ObjectData::default();
-            iterator.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Iterator)));
+            iterator.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Iterator), RealmId::PRIMARY));
             iterator.set("@@iterated", Value::Array(entries));
             iterator.set("@@index", Value::Number(0.0));
             // What to hand back for each stored entry. Decided here, where the collection's kind
@@ -35607,10 +36506,10 @@ fn call_native(
                     .to_owned(),
                 ),
             );
-            iterator.set("next", Value::Native(Native::CollectionIteratorNext));
+            iterator.set("next", Value::Native(Native::CollectionIteratorNext, RealmId::PRIMARY));
             iterator.set(
                 WellKnown::Iterator.property_key(),
-                Value::Native(Native::IteratorSelf),
+                Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
             );
             Value::Object(Rc::new(RefCell::new(iterator)))
         }
@@ -35642,7 +36541,7 @@ fn call_native(
                             .set("@@index", Value::Number(index as f64));
                         return Ok(iteration_result(Value::Undefined, true));
                     }
-                    Some(Value::Native(Native::Tombstone)) => index += 1,
+                    Some(Value::Native(Native::Tombstone, _)) => index += 1,
                     Some(value) => {
                         state
                             .borrow_mut()
@@ -35700,7 +36599,7 @@ fn call_native(
                         .set("@@index", Value::Number(index as f64 + 1.0));
                     // An iterator walks *indices*, so it visits a hole -- and what it yields
                     // there is what a read yields, which is undefined.
-                    let value = if matches!(value, Value::Native(Native::Hole)) {
+                    let value = if matches!(value, Value::Native(Native::Hole, _)) {
                         Value::Undefined
                     } else {
                         value
@@ -35731,8 +36630,8 @@ fn call_native(
                 value @ (Value::Object(_)
                 | Value::Array(_)
                 | Value::Function(_)
-                | Value::Native(_)
-                | Value::Callback(_)
+                | Value::Native(_, _)
+                | Value::Callback(_, _)
                 | Value::Bound(_)
                 | Value::Promise(_)
                 | Value::Date(_)
@@ -35943,8 +36842,14 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
                 "@@kiln:node:is-directory",
                 Value::Boolean(stat.is_directory),
             );
-            object.set("isFile", Value::Native(Native::NodeStatIsFile));
-            object.set("isDirectory", Value::Native(Native::NodeStatIsDirectory));
+            object.set(
+                "isFile",
+                Value::Native(Native::NodeStatIsFile, RealmId::PRIMARY),
+            );
+            object.set(
+                "isDirectory",
+                Value::Native(Native::NodeStatIsDirectory, RealmId::PRIMARY),
+            );
             Value::Object(Rc::new(RefCell::new(object)))
         }
         AsyncHostValue::Resource(resource) => {
@@ -36045,7 +36950,7 @@ fn has_error_to_string(value: &Value) -> bool {
     match value {
         Value::Object(object) => matches!(
             object.borrow().get("toString"),
-            Some(Value::Native(Native::ErrorToString))
+            Some(Value::Native(Native::ErrorToString, _))
         ),
         _ => false,
     }
@@ -36079,7 +36984,7 @@ fn constructor_name(value: &Value) -> Option<String> {
             Some(Value::String(name)) => Some(name.clone()),
             _ => None,
         },
-        Value::Native(Native::Error(kind)) => Some(kind.name().to_owned()),
+        Value::Native(Native::Error(kind), _) => Some(kind.name().to_owned()),
         _ => None,
     }
 }
@@ -36102,38 +37007,38 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
             None => return false,
         },
         // A native constructor's prototype is the realm's, not one per closure.
-        Value::Native(Native::Error(_)) => match error_prototype {
+        Value::Native(Native::Error(_), _) => match error_prototype {
             Some(prototype) => prototype.clone(),
             None => return false,
         },
         // These have no prototype object to walk -- each is its own value kind -- so the test is
         // what the chain would have answered.
-        Value::Native(Native::PromiseConstructor) => {
+        Value::Native(Native::PromiseConstructor, _) => {
             return matches!(value, Value::Promise(_));
         }
-        Value::Native(Native::DateConstructor) => return matches!(value, Value::Date(_)),
+        Value::Native(Native::DateConstructor, _) => return matches!(value, Value::Date(_)),
         // An `Intl` value is an instance of its own service and of nothing else: a `Collator`
         // is not an `Intl.NumberFormat` even though both are `Value::Intl`.
-        Value::Native(Native::Intl(intl::Op::Constructor(service))) => {
+        Value::Native(Native::Intl(intl::Op::Constructor(service)), _) => {
             return matches!(value, Value::Intl(built) if built.service() == *service);
         }
-        Value::Native(Native::RegExpConstructor) => return matches!(value, Value::RegExp(_)),
-        Value::Native(Native::ArrayConstructor) => return matches!(value, Value::Array(_)),
+        Value::Native(Native::RegExpConstructor, _) => return matches!(value, Value::RegExp(_)),
+        Value::Native(Native::ArrayConstructor, _) => return matches!(value, Value::Array(_)),
         // A view is an instance of the constructor that names its element type, and of nothing
         // else: `new Uint8Array(1) instanceof Int8Array` is false.
-        Value::Native(Native::TypedArrayConstructor(kind)) => {
+        Value::Native(Native::TypedArrayConstructor(kind), _) => {
             return matches!(value, Value::TypedArray(view) if view.kind == *kind);
         }
         // The two buffer types are told apart by their flag and by nothing else: a shared
         // buffer is not an `ArrayBuffer`, which is what makes `ArrayBuffer.isView` and every
         // brand check in the specification able to refuse it.
-        Value::Native(Native::ArrayBufferConstructor) => {
+        Value::Native(Native::ArrayBufferConstructor, _) => {
             return matches!(value, Value::ArrayBuffer(buffer) if !buffer.shared);
         }
-        Value::Native(Native::SharedArrayBufferConstructor) => {
+        Value::Native(Native::SharedArrayBufferConstructor, _) => {
             return matches!(value, Value::ArrayBuffer(buffer) if buffer.shared);
         }
-        Value::Native(Native::DataViewConstructor) => {
+        Value::Native(Native::DataViewConstructor, _) => {
             return matches!(value, Value::DataView(_));
         }
         // Every iterator this realm makes inherits `%IteratorPrototype%`, and `Iterator` is what
@@ -36141,7 +37046,7 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         // cannot answer `map` and then deny being an iterator. A guard rather than an arm: a
         // value that carries no marker still gets the ordinary chain walk below, which is what
         // answers for an iterator a program wrote by extending `Iterator` itself.
-        Value::Native(Native::IteratorConstructor)
+        Value::Native(Native::IteratorConstructor, _)
             if match value {
                 Value::Generator(_) => true,
                 Value::Object(object) => {
@@ -36156,7 +37061,7 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         }
         // A Set or Map is an object carrying reserved state, so the test is for that state
         // rather than for a prototype the realm does not yet have as an object.
-        Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor)) => {
+        Value::Native(kind @ (Native::SetConstructor | Native::MapConstructor), _) => {
             let Value::Object(object) = value else {
                 return false;
             };
@@ -36168,7 +37073,7 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
         // what makes `Object instanceof Object` true -- `Object` is a function, so its chain
         // reaches `Function.prototype` and then `Object.prototype`, which is what it is being
         // compared against. A plain-object check asks exactly that.
-        Value::Native(native) => match native.property("prototype") {
+        Value::Native(native, _) => match native.property("prototype") {
             Some(table) => table,
             None => return false,
         },
@@ -36195,7 +37100,45 @@ fn instance_of(value: &Value, constructor: &Value, error_prototype: Option<&Valu
 /// One function so `Object.getPrototypeOf` and `instanceof` cannot disagree about the shape of
 /// the chain -- which is the sort of disagreement that makes `x instanceof C` false for an `x`
 /// the program just built.
+/// The realm a value belongs to: `GetFunctionRealm` for a callable, the marker's own realm for
+/// an intrinsic, and the primary realm for everything else.
+///
+/// Only the two `Copy` markers and a closure carry a realm of their own. Every other value
+/// expresses the realm it was made in through its `[[Prototype]]`, which is what the
+/// specification says the difference *is*: an array built in realm 1 links to realm 1's
+/// `Array.prototype` and is otherwise an ordinary array.
+fn value_realm(value: &Value) -> RealmId {
+    match value {
+        Value::Native(_, realm) | Value::Callback(_, realm) => *realm,
+        Value::Function(closure) => closure.realm,
+        // A bound function and a proxy both answer for what they wrap, which is what
+        // `GetFunctionRealm` says: neither has a realm of its own to report.
+        Value::Bound(bound) => value_realm(&bound.target),
+        Value::Proxy(proxy) => value_realm(&proxy.target),
+        _ => RealmId::PRIMARY,
+    }
+}
+
+/// Rewrite an intrinsic minted by a table so that it names `realm`'s copy of that built-in.
+///
+/// The property tables are pure and realm-blind by design -- `Native::property` cannot be handed
+/// a receiver -- so they mint every intrinsic in the primary realm and the caller retags what
+/// comes back from the receiver it asked. Anything that is not a marker is returned untouched,
+/// because it is not an intrinsic: a value a program *stored* on a built-in keeps whatever realm
+/// it already had.
+fn in_realm(value: Value, realm: RealmId) -> Value {
+    if realm == RealmId::PRIMARY {
+        return value;
+    }
+    match value {
+        Value::Native(native, RealmId::PRIMARY) => Value::Native(native, realm),
+        Value::Callback(method, RealmId::PRIMARY) => Value::Callback(method, realm),
+        other => other,
+    }
+}
+
 fn prototype_of(value: &Value) -> Value {
+    let realm = value_realm(value);
     // A subclassed value keeps its prototype with its other non-element properties, which is what
     // makes `new (class extends Array {})() instanceof that class` true -- and, through the same
     // store, what makes it true of a view, a buffer, a regexp and a bound function as well.
@@ -36205,74 +37148,82 @@ fn prototype_of(value: &Value) -> Value {
     }
     match value {
         // `Object.prototype` is the end of every chain; the other tables inherit from it.
-        Value::Native(Native::PrototypeOf(PrototypeTable::Object)) => Value::Null,
+        Value::Native(Native::PrototypeOf(PrototypeTable::Object), _) => Value::Null,
         // The one two-level chain among the tables: `Int8Array.prototype` inherits from
         // `%TypedArray%.prototype`, which is where the shared methods live and is why
         // `Int8Array.prototype.map` finds one at all.
-        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(_))) => {
-            Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray))
+        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(_)), _) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray), realm)
         }
-        Value::Native(Native::PrototypeOf(_)) => {
-            Value::Native(Native::PrototypeOf(PrototypeTable::Object))
+        Value::Native(Native::PrototypeOf(_), _) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm)
         }
         // Each `Intl` instance links to its own service's prototype, and each of those to
         // `Object.prototype`. Without the first link `Object.getPrototypeOf(new Intl.Collator())`
         // is null and every method on it is found only because the value kind answers directly --
         // which is a chain a program can see is missing.
-        Value::Intl(built) => Value::Native(Native::Intl(intl::Op::Prototype(built.service()))),
-        Value::Native(Native::Intl(intl::Op::Prototype(_) | intl::Op::Namespace)) => {
-            Value::Native(Native::PrototypeOf(PrototypeTable::Object))
+        Value::Intl(built) => {
+            Value::Native(Native::Intl(intl::Op::Prototype(built.service())), realm)
+        }
+        Value::Native(Native::Intl(intl::Op::Prototype(_) | intl::Op::Namespace), _) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm)
         }
         // The nine view constructors inherit from `%TypedArray%` rather than straight from
         // `Function.prototype`, which is the only way a program can name the abstract
         // constructor: `Object.getPrototypeOf(Int8Array)` is what every use of it starts from.
-        Value::Native(Native::TypedArrayConstructor(_)) => {
-            Value::Native(Native::TypedArrayIntrinsic)
+        Value::Native(Native::TypedArrayConstructor(_), _) => {
+            Value::Native(Native::TypedArrayIntrinsic, realm)
         }
         // NativeError constructors inherit static properties from Error, just as the built-in
         // constructors do in ECMAScript. This is also what makes `TypeError.isError` resolve as an
         // inherited method rather than an accidental own property.
-        Value::Native(Native::Error(kind)) if *kind != ErrorKind::Error => {
-            Value::Native(Native::Error(ErrorKind::Error))
+        Value::Native(Native::Error(kind), _) if *kind != ErrorKind::Error => {
+            Value::Native(Native::Error(ErrorKind::Error), realm)
         }
         // `Math`, `JSON`, `Reflect` and `Atomics` are ordinary objects, not functions: none of
         // them is callable, and `Object.getPrototypeOf(Math)` is `Object.prototype`. Spelled as
         // natives here, they were taking the callable arm below and claiming `Function.prototype`
         // -- which made `Math instanceof Function` true and put `call` and `apply` on a value
         // that has no call behaviour to bind.
-        Value::Native(native) if namespace_name(native).is_some() => {
-            Value::Native(Native::PrototypeOf(PrototypeTable::Object))
+        Value::Native(native, _) if namespace_name(native).is_some() => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm)
         }
         // Every callable inherits `Function.prototype`, and every ordinary object
         // `Object.prototype`. A primitive has no chain of its own to walk. The two the promise
         // machinery makes are callables too -- a program is handed `resolve` and `reject` and can
         // ask what they inherit from, and answering null said they were not functions at all.
-        Value::Native(_)
+        Value::Native(_, _)
         | Value::Bound(_)
-        | Value::Callback(_)
+        | Value::Callback(_, _)
         | Value::Function(_)
         | Value::Settler(..)
-        | Value::Capability(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Function)),
-        Value::Array(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Array)),
+        | Value::Capability(_) => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm)
+        }
+        Value::Array(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Array), realm),
         // A date is a value kind rather than an object here, and without this link
         // `Date.prototype.isPrototypeOf(new Date())` is false -- a chain a program can see is
         // missing, and the one every `instanceof Date` walks.
-        Value::Date(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Date)),
-        Value::Promise(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Promise)),
+        Value::Date(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Date), realm),
+        Value::Promise(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Promise), realm),
         // A regexp is a value kind here rather than an object, and without this link
         // `/x/ instanceof RegExp` is false and `RegExp.prototype.isPrototypeOf(/x/)` denies it --
         // a chain a program can see is missing, and the one every brand check walks.
-        Value::RegExp(_) => Value::Native(Native::PrototypeOf(PrototypeTable::RegExp)),
-        Value::Object(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
-        Value::ArrayBuffer(buffer) => Value::Native(Native::PrototypeOf(if buffer.shared {
-            PrototypeTable::SharedArrayBuffer
-        } else {
-            PrototypeTable::ArrayBuffer
-        })),
-        Value::DataView(_) => Value::Native(Native::PrototypeOf(PrototypeTable::DataView)),
-        Value::TypedArray(view) => Value::Native(Native::PrototypeOf(
-            PrototypeTable::TypedArrayFor(view.kind),
-        )),
+        Value::RegExp(_) => Value::Native(Native::PrototypeOf(PrototypeTable::RegExp), realm),
+        Value::Object(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Object), realm),
+        Value::ArrayBuffer(buffer) => Value::Native(
+            Native::PrototypeOf(if buffer.shared {
+                PrototypeTable::SharedArrayBuffer
+            } else {
+                PrototypeTable::ArrayBuffer
+            }),
+            realm,
+        ),
+        Value::DataView(_) => Value::Native(Native::PrototypeOf(PrototypeTable::DataView), realm),
+        Value::TypedArray(view) => Value::Native(
+            Native::PrototypeOf(PrototypeTable::TypedArrayFor(view.kind)),
+            realm,
+        ),
         _ => Value::Null,
     }
 }
@@ -36311,7 +37262,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         if items
             .borrow()
             .get(index)
-            .is_some_and(|value| !matches!(value, Value::Native(Native::Hole)))
+            .is_some_and(|value| !matches!(value, Value::Native(Native::Hole, _)))
         {
             return true;
         }
@@ -36353,12 +37304,12 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                     .is_some_and(|table| {
                         own_attributes(
                             intrinsics,
-                            &Value::Native(Native::PrototypeOf(table)),
+                            &Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY),
                             &name,
                         )
                         .is_some()
                     })
-                || !matches!(inherited_object_property(intrinsics, &name), Value::Undefined)
+                || !matches!(inherited_object_property(intrinsics, &name, value_realm(target)), Value::Undefined)
                 // A property the program *defined* on `Object.prototype` that reads as
                 // undefined is still there: an accessor given only a setter answers `undefined`
                 // to a read and `true` to `in`, and asking the read whether it found anything
@@ -36368,7 +37319,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 // prototype at all, and the table would hand one `__proto__` and `toString`.
                 || matches!(
                     intrinsics.overridden(
-                        &Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
+                        &Value::Native(Native::PrototypeOf(PrototypeTable::Object), RealmId::PRIMARY),
                         &name,
                     ),
                     Overridden::Held(..)
@@ -36391,12 +37342,12 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 // the question `ToPropertyDescriptor` asks of an array used as a descriptor.
                 || own_attributes(
                     intrinsics,
-                    &Value::Native(Native::PrototypeOf(PrototypeTable::Array)),
+                    &Value::Native(Native::PrototypeOf(PrototypeTable::Array), RealmId::PRIMARY),
                     &name,
                 )
                 .is_some()
                 || !matches!(
-                    inherited_object_property(intrinsics, &name),
+                    inherited_object_property(intrinsics, &name, value_realm(target)),
                     Value::Undefined
                 )
         }
@@ -36412,19 +37363,19 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 // a name a program put on either view prototype.
                 || own_attributes(
                     intrinsics,
-                    &Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(view.kind))),
+                    &Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(view.kind)), RealmId::PRIMARY),
                     &name,
                 )
                 .is_some()
                 || !matches!(typed_array_method(&name), Value::Undefined)
                 || own_attributes(
                     intrinsics,
-                    &Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray)),
+                    &Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray), RealmId::PRIMARY),
                     &name,
                 )
                 .is_some()
                 || !matches!(
-                    inherited_object_property(intrinsics, &name),
+                    inherited_object_property(intrinsics, &name, value_realm(target)),
                     Value::Undefined
                 )
         }
@@ -36437,14 +37388,14 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 || exotic_reserved_name(target, &name)
                 || own_attributes(intrinsics, &prototype_of(target), &name).is_some()
                 || !matches!(
-                    inherited_object_property(intrinsics, &name),
+                    inherited_object_property(intrinsics, &name, value_realm(target)),
                     Value::Undefined
                 )
         }
         // Mirrors the read: the realm's store first, then the table, then the `name` and
         // `length` every callable owns. A property a program deleted is absent here too, or
         // `delete` and the `in` after it would disagree.
-        Value::Native(native) => {
+        Value::Native(native, _) => {
             let own = match intrinsics.overridden(target, &name) {
                 Overridden::Held(..) => true,
                 Overridden::Removed => false,
@@ -36455,7 +37406,10 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                             && name == "isError"
                             && !matches!(
                                 intrinsics.overridden(
-                                    &Value::Native(Native::Error(ErrorKind::Error)),
+                                    &Value::Native(
+                                        Native::Error(ErrorKind::Error),
+                                        RealmId::PRIMARY
+                                    ),
                                     &name,
                                 ),
                                 Overridden::Removed
@@ -36468,7 +37422,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
             // program had put on `Object.prototype` and could read straight off it.
             own || (!matches!(native, Native::PrototypeOf(PrototypeTable::Object))
                 && !matches!(
-                    inherited_object_property(intrinsics, &name),
+                    inherited_object_property(intrinsics, &name, value_realm(target)),
                     Value::Undefined
                 ))
         }
@@ -36478,7 +37432,10 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         Value::Function(closure) => {
             closure.properties.borrow().lookup(&name).is_some()
                 || matches!(name.as_str(), "name" | "length" | "prototype")
-                || !matches!(function_property(intrinsics, &name), Value::Undefined)
+                || !matches!(
+                    function_property(intrinsics, &name, value_realm(target)),
+                    Value::Undefined
+                )
         }
         _ => false,
     }
@@ -36488,7 +37445,7 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
 /// The index of `key` among live entries, or `None`.
 fn find_entry(entries: &[Value], key: &Value, is_map: bool) -> Option<usize> {
     entries.iter().position(|entry| match entry {
-        Value::Native(Native::Tombstone) => false,
+        Value::Native(Native::Tombstone, _) => false,
         Value::Array(pair) if is_map => pair
             .borrow()
             .first()
@@ -36536,64 +37493,74 @@ fn bump_size(receiver: &Value, delta: f64) {
 /// monkey-patching both need -- this table is what moves onto it.
 fn string_property(name: &str) -> Value {
     match name {
-        "values" => Value::Native(Native::StringValues),
-        key if key == WellKnown::Iterator.property_key() => Value::Native(Native::StringValues),
-        "toUpperCase" => Value::Native(Native::StringToUpperCase),
-        "toLowerCase" => Value::Native(Native::StringToLowerCase),
-        "includes" => Value::Native(Native::StringIncludes),
-        "indexOf" => Value::Native(Native::StringIndexOf),
-        "slice" => Value::Native(Native::StringSlice),
-        "substring" => Value::Native(Native::StringSubstring),
+        "values" => Value::Native(Native::StringValues, RealmId::PRIMARY),
+        key if key == WellKnown::Iterator.property_key() => {
+            Value::Native(Native::StringValues, RealmId::PRIMARY)
+        }
+        "toUpperCase" => Value::Native(Native::StringToUpperCase, RealmId::PRIMARY),
+        "toLowerCase" => Value::Native(Native::StringToLowerCase, RealmId::PRIMARY),
+        "includes" => Value::Native(Native::StringIncludes, RealmId::PRIMARY),
+        "indexOf" => Value::Native(Native::StringIndexOf, RealmId::PRIMARY),
+        "slice" => Value::Native(Native::StringSlice, RealmId::PRIMARY),
+        "substring" => Value::Native(Native::StringSubstring, RealmId::PRIMARY),
         // Deprecated in the specification and still everywhere in the wild.
-        "substr" => Value::Native(Native::StringSubstr),
-        "split" => Value::Native(Native::StringSplit),
-        "trim" => Value::Native(Native::StringTrim),
+        "substr" => Value::Native(Native::StringSubstr, RealmId::PRIMARY),
+        "split" => Value::Native(Native::StringSplit, RealmId::PRIMARY),
+        "trim" => Value::Native(Native::StringTrim, RealmId::PRIMARY),
         // Annex B's aliases, and the *same* functions rather than copies:
         // `String.prototype.trimLeft === String.prototype.trimStart` is true.
-        "trimLeft" => Value::Native(Native::StringTrimStart),
-        "trimRight" => Value::Native(Native::StringTrimEnd),
-        html if HtmlWrapper::named(html).is_some() => Value::Native(Native::StringHtml(
-            HtmlWrapper::named(html).unwrap_or_else(|| unreachable!("the guard just found it")),
-        )),
-        "startsWith" => Value::Native(Native::StringStartsWith),
-        "endsWith" => Value::Native(Native::StringEndsWith),
-        "repeat" => Value::Native(Native::StringRepeat),
-        "at" => Value::Native(Native::StringAt),
-        "codePointAt" => Value::Native(Native::StringCodePointAt),
+        "trimLeft" => Value::Native(Native::StringTrimStart, RealmId::PRIMARY),
+        "trimRight" => Value::Native(Native::StringTrimEnd, RealmId::PRIMARY),
+        html if HtmlWrapper::named(html).is_some() => Value::Native(
+            Native::StringHtml(
+                HtmlWrapper::named(html).unwrap_or_else(|| unreachable!("the guard just found it")),
+            ),
+            RealmId::PRIMARY,
+        ),
+        "startsWith" => Value::Native(Native::StringStartsWith, RealmId::PRIMARY),
+        "endsWith" => Value::Native(Native::StringEndsWith, RealmId::PRIMARY),
+        "repeat" => Value::Native(Native::StringRepeat, RealmId::PRIMARY),
+        "at" => Value::Native(Native::StringAt, RealmId::PRIMARY),
+        "codePointAt" => Value::Native(Native::StringCodePointAt, RealmId::PRIMARY),
         // No locale data, so this is the ordinary code-unit order -- which is what a program
         // sorting ASCII gets from either.
         // ECMA-402 replaces this one outright: it is `Intl.Collator` built from the second and
         // third arguments, which is why a locale it rejects is rejected here too.
-        "localeCompare" => Value::Native(Native::Intl(intl::Op::Adapter(
-            intl::Adapter::StringLocaleCompare,
-        ))),
-        "toLocaleUpperCase" => Value::Native(Native::Intl(intl::Op::Adapter(
-            intl::Adapter::StringToLocaleUpperCase,
-        ))),
+        "localeCompare" => Value::Native(
+            Native::Intl(intl::Op::Adapter(intl::Adapter::StringLocaleCompare)),
+            RealmId::PRIMARY,
+        ),
+        "toLocaleUpperCase" => Value::Native(
+            Native::Intl(intl::Op::Adapter(intl::Adapter::StringToLocaleUpperCase)),
+            RealmId::PRIMARY,
+        ),
         // ECMA-402 gives these two their own definitions -- they validate the locale list and
         // may take a locale-specific mapping -- so they are separate functions rather than
         // aliases of `toLowerCase` and `toUpperCase`.
-        "toLocaleLowerCase" => Value::Native(Native::Intl(intl::Op::Adapter(
-            intl::Adapter::StringToLocaleLowerCase,
-        ))),
-        "normalize" => Value::Native(Native::StringNormalize),
-        "charAt" => Value::Native(Native::StringCharAt),
-        "charCodeAt" => Value::Native(Native::StringCharCodeAt),
-        "padStart" => Value::Native(Native::StringPadStart),
-        "padEnd" => Value::Native(Native::StringPadEnd),
-        "replace" => Value::Native(Native::StringReplace),
-        "replaceAll" => Value::Native(Native::StringReplaceAll),
-        "lastIndexOf" => Value::Native(Native::StringLastIndexOf),
-        "trimStart" => Value::Native(Native::StringTrimStart),
-        "trimEnd" => Value::Native(Native::StringTrimEnd),
-        "concat" => Value::Native(Native::StringConcat),
+        "toLocaleLowerCase" => Value::Native(
+            Native::Intl(intl::Op::Adapter(intl::Adapter::StringToLocaleLowerCase)),
+            RealmId::PRIMARY,
+        ),
+        "normalize" => Value::Native(Native::StringNormalize, RealmId::PRIMARY),
+        "charAt" => Value::Native(Native::StringCharAt, RealmId::PRIMARY),
+        "charCodeAt" => Value::Native(Native::StringCharCodeAt, RealmId::PRIMARY),
+        "padStart" => Value::Native(Native::StringPadStart, RealmId::PRIMARY),
+        "padEnd" => Value::Native(Native::StringPadEnd, RealmId::PRIMARY),
+        "replace" => Value::Native(Native::StringReplace, RealmId::PRIMARY),
+        "replaceAll" => Value::Native(Native::StringReplaceAll, RealmId::PRIMARY),
+        "lastIndexOf" => Value::Native(Native::StringLastIndexOf, RealmId::PRIMARY),
+        "trimStart" => Value::Native(Native::StringTrimStart, RealmId::PRIMARY),
+        "trimEnd" => Value::Native(Native::StringTrimEnd, RealmId::PRIMARY),
+        "concat" => Value::Native(Native::StringConcat, RealmId::PRIMARY),
         // A string's `toString` and `valueOf` both hand back the string itself. They are
         // rarely written by hand and constantly reached by library code that calls `toString`
         // on something it has already coerced.
-        "toString" | "toLocaleString" | "valueOf" => Value::Native(Native::PrimitiveValueOf),
-        "match" => Value::Native(Native::StringMatch),
-        "matchAll" => Value::Native(Native::StringMatchAll),
-        "search" => Value::Native(Native::StringSearch),
+        "toString" | "toLocaleString" | "valueOf" => {
+            Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY)
+        }
+        "match" => Value::Native(Native::StringMatch, RealmId::PRIMARY),
+        "matchAll" => Value::Native(Native::StringMatchAll, RealmId::PRIMARY),
+        "search" => Value::Native(Native::StringSearch, RealmId::PRIMARY),
         _ => Value::Undefined,
     }
 }
@@ -36612,55 +37579,65 @@ fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
         return Value::Undefined;
     }
     match (is_map, name) {
-        (false, "add") if weak => Value::Native(Native::WeakSetAdd),
-        (false, "has") if weak => Value::Native(Native::WeakSetHas),
-        (false, "delete") if weak => Value::Native(Native::WeakSetDelete),
-        (true, "set") if weak => Value::Native(Native::WeakMapSet),
-        (true, "get") if weak => Value::Native(Native::WeakMapGet),
-        (true, "has") if weak => Value::Native(Native::WeakMapHas),
-        (true, "delete") if weak => Value::Native(Native::WeakMapDelete),
-        (false, "add") => Value::Native(Native::SetAdd),
-        (false, "has") => Value::Native(Native::SetHas),
-        (false, "delete") => Value::Native(Native::SetDelete),
+        (false, "add") if weak => Value::Native(Native::WeakSetAdd, RealmId::PRIMARY),
+        (false, "has") if weak => Value::Native(Native::WeakSetHas, RealmId::PRIMARY),
+        (false, "delete") if weak => Value::Native(Native::WeakSetDelete, RealmId::PRIMARY),
+        (true, "set") if weak => Value::Native(Native::WeakMapSet, RealmId::PRIMARY),
+        (true, "get") if weak => Value::Native(Native::WeakMapGet, RealmId::PRIMARY),
+        (true, "has") if weak => Value::Native(Native::WeakMapHas, RealmId::PRIMARY),
+        (true, "delete") if weak => Value::Native(Native::WeakMapDelete, RealmId::PRIMARY),
+        (false, "add") => Value::Native(Native::SetAdd, RealmId::PRIMARY),
+        (false, "has") => Value::Native(Native::SetHas, RealmId::PRIMARY),
+        (false, "delete") => Value::Native(Native::SetDelete, RealmId::PRIMARY),
         // The seven operations, on `Set` alone: a Map has keys and values and no answer to what
         // its union with something would contain.
-        (false, name) if !weak && SetOperation::named(name).is_some() => {
-            Value::Native(Native::SetOperation(
+        (false, name) if !weak && SetOperation::named(name).is_some() => Value::Native(
+            Native::SetOperation(
                 SetOperation::named(name)
                     .unwrap_or_else(|| unreachable!("the guard just found it")),
-            ))
-        }
-        (true, "getOrInsert") => Value::Native(Native::CollectionGetOrInsert {
-            weak,
-            computed: false,
-        }),
-        (true, "getOrInsertComputed") => Value::Native(Native::CollectionGetOrInsert {
-            weak,
-            computed: true,
-        }),
-        (true, "set") => Value::Native(Native::MapSet),
-        (true, "get") => Value::Native(Native::MapGet),
-        (true, "has") => Value::Native(Native::MapHas),
-        (true, "delete") => Value::Native(Native::MapDelete),
+            ),
+            RealmId::PRIMARY,
+        ),
+        (true, "getOrInsert") => Value::Native(
+            Native::CollectionGetOrInsert {
+                weak,
+                computed: false,
+            },
+            RealmId::PRIMARY,
+        ),
+        (true, "getOrInsertComputed") => Value::Native(
+            Native::CollectionGetOrInsert {
+                weak,
+                computed: true,
+            },
+            RealmId::PRIMARY,
+        ),
+        (true, "set") => Value::Native(Native::MapSet, RealmId::PRIMARY),
+        (true, "get") => Value::Native(Native::MapGet, RealmId::PRIMARY),
+        (true, "has") => Value::Native(Native::MapHas, RealmId::PRIMARY),
+        (true, "delete") => Value::Native(Native::MapDelete, RealmId::PRIMARY),
         // A Map stores `[key, value]` pairs, so `keys` and `values` project out of them where
         // `entries` hands the pair over whole. A Set stores bare values, and its `entries` pairs
         // each one with itself -- which is the specification's way of giving the two collections
         // one iteration protocol.
-        (_, "clear") => Value::Native(Native::CollectionClear(is_map)),
-        (_, "forEach") => Value::Native(Native::CollectionForEach(is_map)),
-        (_, "values") => Value::Native(Native::CollectionValues(is_map)),
+        (_, "clear") => Value::Native(Native::CollectionClear(is_map), RealmId::PRIMARY),
+        (_, "forEach") => Value::Native(Native::CollectionForEach(is_map), RealmId::PRIMARY),
+        (_, "values") => Value::Native(Native::CollectionValues(is_map), RealmId::PRIMARY),
         // A Set's keys *are* its values, and the specification says so by giving the two names
         // one function: `Set.prototype.keys === Set.prototype.values` is true, and two markers
         // would make it false.
-        (false, "keys") => Value::Native(Native::CollectionValues(false)),
-        (_, "keys") => Value::Native(Native::CollectionKeys(is_map)),
-        (_, "entries") => Value::Native(Native::CollectionEntries(is_map)),
+        (false, "keys") => Value::Native(Native::CollectionValues(false), RealmId::PRIMARY),
+        (_, "keys") => Value::Native(Native::CollectionKeys(is_map), RealmId::PRIMARY),
+        (_, "entries") => Value::Native(Native::CollectionEntries(is_map), RealmId::PRIMARY),
         // The default iteration of a Map is its entries and of a Set is its values.
-        (is_map, key) if key == WellKnown::Iterator.property_key() => Value::Native(if is_map {
-            Native::CollectionEntries(true)
-        } else {
-            Native::CollectionValues(false)
-        }),
+        (is_map, key) if key == WellKnown::Iterator.property_key() => Value::Native(
+            if is_map {
+                Native::CollectionEntries(true)
+            } else {
+                Native::CollectionValues(false)
+            },
+            RealmId::PRIMARY,
+        ),
         // The tag `Object.prototype.toString` reads: it is what makes a `Map` print as
         // `[object Map]` rather than the bare `[object Object]` every object would give.
         (_, key) if key == WellKnown::ToStringTag.property_key() => Value::String(
@@ -36796,22 +37773,25 @@ fn new_disposable_stack(flavour: Disposal) -> Value {
         Value::Array(ArrayData::new(Vec::new())),
     );
     data.set_non_enumerable(flavour.done_key(), Value::Boolean(false));
-    data.set_prototype(Value::Native(Native::PrototypeOf(match flavour {
-        Disposal::Sync => PrototypeTable::DisposableStack,
-        Disposal::Async => PrototypeTable::AsyncDisposableStack,
-    })));
+    data.set_prototype(Value::Native(
+        Native::PrototypeOf(match flavour {
+            Disposal::Sync => PrototypeTable::DisposableStack,
+            Disposal::Async => PrototypeTable::AsyncDisposableStack,
+        }),
+        RealmId::PRIMARY,
+    ));
     Value::Object(Rc::new(RefCell::new(data)))
 }
 
 fn disposable_stack_method(name: &str) -> Value {
     match name {
-        "use" => Value::Native(Native::DisposableStackUse),
-        "adopt" => Value::Native(Native::DisposableStackAdopt),
-        "defer" => Value::Native(Native::DisposableStackDefer),
-        "move" => Value::Native(Native::DisposableStackMove),
-        "dispose" => Value::Native(Native::DisposableStackDispose),
+        "use" => Value::Native(Native::DisposableStackUse, RealmId::PRIMARY),
+        "adopt" => Value::Native(Native::DisposableStackAdopt, RealmId::PRIMARY),
+        "defer" => Value::Native(Native::DisposableStackDefer, RealmId::PRIMARY),
+        "move" => Value::Native(Native::DisposableStackMove, RealmId::PRIMARY),
+        "dispose" => Value::Native(Native::DisposableStackDispose, RealmId::PRIMARY),
         key if key == WellKnown::Dispose.property_key() => {
-            Value::Native(Native::DisposableStackDispose)
+            Value::Native(Native::DisposableStackDispose, RealmId::PRIMARY)
         }
         key if key == WellKnown::ToStringTag.property_key() => {
             Value::String("DisposableStack".to_owned())
@@ -36827,13 +37807,13 @@ fn disposable_stack_method(name: &str) -> Value {
 /// `await using` reaches a stack through the symbol.
 fn async_disposable_stack_method(name: &str) -> Value {
     match name {
-        "use" => Value::Native(Native::AsyncDisposableStackUse),
-        "adopt" => Value::Native(Native::AsyncDisposableStackAdopt),
-        "defer" => Value::Native(Native::AsyncDisposableStackDefer),
-        "move" => Value::Native(Native::AsyncDisposableStackMove),
-        "disposeAsync" => Value::Native(Native::AsyncDisposableStackDisposeAsync),
+        "use" => Value::Native(Native::AsyncDisposableStackUse, RealmId::PRIMARY),
+        "adopt" => Value::Native(Native::AsyncDisposableStackAdopt, RealmId::PRIMARY),
+        "defer" => Value::Native(Native::AsyncDisposableStackDefer, RealmId::PRIMARY),
+        "move" => Value::Native(Native::AsyncDisposableStackMove, RealmId::PRIMARY),
+        "disposeAsync" => Value::Native(Native::AsyncDisposableStackDisposeAsync, RealmId::PRIMARY),
         key if key == WellKnown::AsyncDispose.property_key() => {
-            Value::Native(Native::AsyncDisposableStackDisposeAsync)
+            Value::Native(Native::AsyncDisposableStackDisposeAsync, RealmId::PRIMARY)
         }
         key if key == WellKnown::ToStringTag.property_key() => {
             Value::String("AsyncDisposableStack".to_owned())
@@ -36844,7 +37824,7 @@ fn async_disposable_stack_method(name: &str) -> Value {
 
 fn weak_ref_method(name: &str) -> Value {
     match name {
-        "deref" => Value::Native(Native::WeakRefDeref),
+        "deref" => Value::Native(Native::WeakRefDeref, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("WeakRef".to_owned()),
         _ => Value::Undefined,
     }
@@ -36857,8 +37837,8 @@ fn weak_ref_method(name: &str) -> Value {
 /// could build on and be wrong about.
 fn finalization_registry_method(name: &str) -> Value {
     match name {
-        "register" => Value::Native(Native::FinalizationRegistryRegister),
-        "unregister" => Value::Native(Native::FinalizationRegistryUnregister),
+        "register" => Value::Native(Native::FinalizationRegistryRegister, RealmId::PRIMARY),
+        "unregister" => Value::Native(Native::FinalizationRegistryUnregister, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => {
             Value::String("FinalizationRegistry".to_owned())
         }
@@ -37138,7 +38118,7 @@ fn set_data_has(entries: &Rc<ArrayData>, value: &Value) -> bool {
 /// Where a set's backing entries hold this value, or `None`.
 fn set_data_index(entries: &Rc<ArrayData>, value: &Value) -> Option<usize> {
     entries.borrow().iter().position(|entry| {
-        !matches!(entry, Value::Native(Native::Tombstone)) && same_value_zero(entry, value)
+        !matches!(entry, Value::Native(Native::Tombstone, _)) && same_value_zero(entry, value)
     })
 }
 
@@ -37147,7 +38127,7 @@ fn set_data_values(entries: &Rc<ArrayData>) -> Vec<Value> {
     entries
         .borrow()
         .iter()
-        .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone)))
+        .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone, _)))
         .cloned()
         .collect()
 }
@@ -37161,7 +38141,10 @@ fn new_set(values: Vec<Value>) -> Value {
     let size = values.len() as f64;
     let mut data = ObjectData::default();
     data.set("@@entries", Value::Array(ArrayData::new(values)));
-    data.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Set)));
+    data.set_prototype(Value::Native(
+        Native::PrototypeOf(PrototypeTable::Set),
+        RealmId::PRIMARY,
+    ));
     data.set(COLLECTION_SIZE, Value::Number(size));
     Value::Object(Rc::new(RefCell::new(data)))
 }
@@ -37229,7 +38212,10 @@ fn array_iterator_over(native: Native, iterated: &Value) -> Value {
     // On `Iterator.prototype`, which is where the helper methods live: an array iterator is one
     // of the iterators `map` and `take` are for, and without the link `[...].values().map(f)`
     // finds nothing.
-    iterator.set_prototype(Value::Native(Native::PrototypeOf(PrototypeTable::Iterator)));
+    iterator.set_prototype(Value::Native(
+        Native::PrototypeOf(PrototypeTable::Iterator),
+        RealmId::PRIMARY,
+    ));
     iterator.set("@@iterated", iterated.clone());
     iterator.set("@@index", Value::Number(0.0));
     iterator.set(
@@ -37243,12 +38229,15 @@ fn array_iterator_over(native: Native, iterated: &Value) -> Value {
             .to_owned(),
         ),
     );
-    iterator.set("next", Value::Native(Native::ArrayIteratorNext));
+    iterator.set(
+        "next",
+        Value::Native(Native::ArrayIteratorNext, RealmId::PRIMARY),
+    );
     // An iterator is itself iterable, which is what lets one be passed straight to another
     // `for-of` or to `Array.from`.
     iterator.set(
         WellKnown::Iterator.property_key(),
-        Value::Native(Native::IteratorSelf),
+        Value::Native(Native::IteratorSelf, RealmId::PRIMARY),
     );
     Value::Object(Rc::new(RefCell::new(iterator)))
 }
@@ -37415,52 +38404,55 @@ pub enum CallbackMethod {
 /// like the string and array tables, so `CallMethod` supplies the receiver.
 fn number_property(name: &str) -> Value {
     match name {
-        "toString" => Value::Native(Native::NumberToString),
-        "toFixed" => Value::Native(Native::NumberToFixed),
-        "toExponential" => Value::Native(Native::NumberToExponential),
-        "toPrecision" => Value::Native(Native::NumberToPrecision),
-        "valueOf" => Value::Native(Native::NumberValueOf),
+        "toString" => Value::Native(Native::NumberToString, RealmId::PRIMARY),
+        "toFixed" => Value::Native(Native::NumberToFixed, RealmId::PRIMARY),
+        "toExponential" => Value::Native(Native::NumberToExponential, RealmId::PRIMARY),
+        "toPrecision" => Value::Native(Native::NumberToPrecision, RealmId::PRIMARY),
+        "valueOf" => Value::Native(Native::NumberValueOf, RealmId::PRIMARY),
         // ECMA-402 replaces this one outright: it is `Intl.NumberFormat` with the receiver as its
         // argument, exceptions and all, so it is dispatched there rather than reimplemented.
-        "toLocaleString" => Value::Native(Native::Intl(intl::Op::Adapter(
-            intl::Adapter::NumberToLocaleString,
-        ))),
+        "toLocaleString" => Value::Native(
+            Native::Intl(intl::Op::Adapter(intl::Adapter::NumberToLocaleString)),
+            RealmId::PRIMARY,
+        ),
         _ => Value::Undefined,
     }
 }
 
 fn array_property(name: &str) -> Value {
     if let Some(method) = array_callback_method(name) {
-        return Value::Callback(method);
+        return Value::Callback(method, RealmId::PRIMARY);
     }
     match name {
-        "join" => Value::Native(Native::ArrayJoin),
-        "push" => Value::Native(Native::ArrayPush),
-        "pop" => Value::Native(Native::ArrayPop),
-        "indexOf" => Value::Native(Native::ArrayIndexOf),
-        "includes" => Value::Native(Native::ArrayIncludes),
-        "slice" => Value::Native(Native::ArraySlice),
-        "at" => Value::Native(Native::ArrayAt),
-        "flat" => Value::Native(Native::ArrayFlat),
-        "entries" => Value::Native(Native::ArrayEntries),
-        "keys" => Value::Native(Native::ArrayKeys),
-        "concat" => Value::Native(Native::ArrayConcat),
-        "reverse" => Value::Native(Native::ArrayReverse),
-        "with" => Value::Native(Native::ArrayCopy(ArrayCopy::With)),
-        "toReversed" => Value::Native(Native::ArrayCopy(ArrayCopy::ToReversed)),
-        "toSorted" => Value::Native(Native::ArrayCopy(ArrayCopy::ToSorted)),
-        "toSpliced" => Value::Native(Native::ArrayCopy(ArrayCopy::ToSpliced)),
-        "shift" => Value::Native(Native::ArrayShift),
-        "unshift" => Value::Native(Native::ArrayUnshift),
-        "lastIndexOf" => Value::Native(Native::ArrayLastIndexOf),
-        "fill" => Value::Native(Native::ArrayFill),
-        "splice" => Value::Native(Native::ArraySplice),
-        "copyWithin" => Value::Native(Native::ArrayCopyWithin),
+        "join" => Value::Native(Native::ArrayJoin, RealmId::PRIMARY),
+        "push" => Value::Native(Native::ArrayPush, RealmId::PRIMARY),
+        "pop" => Value::Native(Native::ArrayPop, RealmId::PRIMARY),
+        "indexOf" => Value::Native(Native::ArrayIndexOf, RealmId::PRIMARY),
+        "includes" => Value::Native(Native::ArrayIncludes, RealmId::PRIMARY),
+        "slice" => Value::Native(Native::ArraySlice, RealmId::PRIMARY),
+        "at" => Value::Native(Native::ArrayAt, RealmId::PRIMARY),
+        "flat" => Value::Native(Native::ArrayFlat, RealmId::PRIMARY),
+        "entries" => Value::Native(Native::ArrayEntries, RealmId::PRIMARY),
+        "keys" => Value::Native(Native::ArrayKeys, RealmId::PRIMARY),
+        "concat" => Value::Native(Native::ArrayConcat, RealmId::PRIMARY),
+        "reverse" => Value::Native(Native::ArrayReverse, RealmId::PRIMARY),
+        "with" => Value::Native(Native::ArrayCopy(ArrayCopy::With), RealmId::PRIMARY),
+        "toReversed" => Value::Native(Native::ArrayCopy(ArrayCopy::ToReversed), RealmId::PRIMARY),
+        "toSorted" => Value::Native(Native::ArrayCopy(ArrayCopy::ToSorted), RealmId::PRIMARY),
+        "toSpliced" => Value::Native(Native::ArrayCopy(ArrayCopy::ToSpliced), RealmId::PRIMARY),
+        "shift" => Value::Native(Native::ArrayShift, RealmId::PRIMARY),
+        "unshift" => Value::Native(Native::ArrayUnshift, RealmId::PRIMARY),
+        "lastIndexOf" => Value::Native(Native::ArrayLastIndexOf, RealmId::PRIMARY),
+        "fill" => Value::Native(Native::ArrayFill, RealmId::PRIMARY),
+        "splice" => Value::Native(Native::ArraySplice, RealmId::PRIMARY),
+        "copyWithin" => Value::Native(Native::ArrayCopyWithin, RealmId::PRIMARY),
         // `Array.prototype.toString` is `join(",")`, which is why `String([1, 2])` is `"1,2"`.
-        "toString" => Value::Native(Native::ArrayJoinDefault),
-        "toLocaleString" => Value::Native(Native::ArrayToLocaleString),
-        "values" => Value::Native(Native::ArrayValues),
-        key if key == WellKnown::Iterator.property_key() => Value::Native(Native::ArrayValues),
+        "toString" => Value::Native(Native::ArrayJoinDefault, RealmId::PRIMARY),
+        "toLocaleString" => Value::Native(Native::ArrayToLocaleString, RealmId::PRIMARY),
+        "values" => Value::Native(Native::ArrayValues, RealmId::PRIMARY),
+        key if key == WellKnown::Iterator.property_key() => {
+            Value::Native(Native::ArrayValues, RealmId::PRIMARY)
+        }
         _ => Value::Undefined,
     }
 }
@@ -37659,7 +38651,7 @@ fn join(items: &[Value], separator: &str) -> Result<String, ExecutionError> {
             push_bounded(&mut out, separator)?;
         }
         match item {
-            Value::Undefined | Value::Null | Value::Native(Native::Hole) => {}
+            Value::Undefined | Value::Null | Value::Native(Native::Hole, _) => {}
             other => push_bounded(&mut out, &other.to_display_string())?,
         }
     }
@@ -37751,7 +38743,7 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
             }
             if let Some(slot) = items.borrow_mut().get_mut(index) {
                 items.sparse.set(true);
-                *slot = Value::Native(Native::Hole);
+                *slot = Value::Native(Native::Hole, RealmId::PRIMARY);
             }
             true
         }
@@ -37780,7 +38772,7 @@ fn delete_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool
         // A built-in's own properties are tabulated rather than stored, so removing one is
         // recording the removal in the realm's store -- which is what makes the specification's
         // `configurable: true` on almost all of them mean something.
-        Value::Native(_) | Value::Callback(_) => {
+        Value::Native(_, _) | Value::Callback(_, _) => {
             let key = key.property_key();
             match own_attributes(intrinsics, target, &key) {
                 // Never there, so it is gone: `delete Math.nonesuch` is true.
@@ -37810,7 +38802,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
         // exception, and it is the exception every bundler's output depends on. A Node builtin
         // module's exports *are* enumerable, which is what makes `{ ...require("path") }` and
         // `export * from "path"` copy anything at all.
-        Value::Native(native) => {
+        Value::Native(native, _) => {
             let mut entries = intrinsics.enumerable_entries(value);
             if node_builtin_specifier(*native).is_some() {
                 for name in intrinsic_static_property_names(value) {
@@ -37824,7 +38816,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             }
             entries
         }
-        Value::Callback(_) => intrinsics.enumerable_entries(value),
+        Value::Callback(_, _) => intrinsics.enumerable_entries(value),
         Value::Object(object) => string_wrapper_entries(value)
             .into_iter()
             .chain(
@@ -37839,7 +38831,7 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             .iter()
             .enumerate()
             // A hole has no key, so it is absent from `Object.keys`, `for-in` and a spread.
-            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+            .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
             .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
             .collect(),
         // The elements, and then whatever the program hung on the view: a spread copies both,
@@ -38477,11 +39469,11 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             Some(name) => format!("[Function: {name}]"),
             None => "[Function (anonymous)]".to_owned(),
         },
-        Value::Native(native) => match namespace_name(native) {
+        Value::Native(native, _) => match namespace_name(native) {
             Some(name) => format!("Object [{name}] {{}}"),
             None => format!("[Function: {}]", native_js_name(native)),
         },
-        Value::Callback(method) => {
+        Value::Callback(method, _) => {
             format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
         }
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
@@ -38572,7 +39564,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             let mut parts: Vec<String> = Vec::new();
             let mut holes = 0usize;
             for item in items.iter() {
-                if matches!(item, Value::Native(Native::Hole)) {
+                if matches!(item, Value::Native(Native::Hole, _)) {
                     holes += 1;
                     continue;
                 }
@@ -38609,7 +39601,7 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
         let live: Vec<_> = entries
             .borrow()
             .iter()
-            .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone)))
+            .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone, _)))
             .cloned()
             .collect();
         let label = if is_map { "Map" } else { "Set" };
@@ -38675,7 +39667,7 @@ fn constructor_label(object: &ObjectData) -> Option<String> {
     let constructor = object.get("constructor")?;
     let name = match &constructor {
         Value::Function(closure) => closure.name.as_deref()?.to_owned(),
-        Value::Native(native) => format!("{native:?}"),
+        Value::Native(native, _) => format!("{native:?}"),
         _ => return None,
     };
     (!name.is_empty() && name != "Object").then_some(name)
@@ -38871,7 +39863,8 @@ fn construct_array(arguments: &[Value]) -> Result<Value, ExecutionError> {
         }
         return Ok(Value::Array(ArrayData::new(vec![
             Value::Native(
-                Native::Hole
+                Native::Hole,
+                RealmId::PRIMARY
             );
             length
         ])));
@@ -39578,8 +40571,8 @@ fn is_iterator_object(value: &Value) -> bool {
             | Value::RegExp(_)
             | Value::Promise(_)
             | Value::Bound(_)
-            | Value::Native(_)
-            | Value::Callback(_)
+            | Value::Native(_, _)
+            | Value::Callback(_, _)
     )
 }
 
@@ -39605,8 +40598,8 @@ fn is_callable(value: &Value) -> bool {
     matches!(
         value,
         Value::Function(_)
-            | Value::Native(_)
-            | Value::Callback(_)
+            | Value::Native(_, _)
+            | Value::Callback(_, _)
             | Value::Settler(..)
             | Value::Capability(..)
             | Value::Bound(_)
@@ -39787,16 +40780,16 @@ fn utf16_slice(subject: &[u16], range: std::ops::Range<usize>) -> String {
 /// .test.call(re, s)` is how a library avoids a monkey-patched `test`.
 fn regexp_method(name: &str) -> Value {
     match name {
-        "test" => Value::Native(Native::RegExpTest),
-        "exec" => Value::Native(Native::RegExpExec),
-        "toString" => Value::Native(Native::RegExpToString),
+        "test" => Value::Native(Native::RegExpTest, RealmId::PRIMARY),
+        "exec" => Value::Native(Native::RegExpExec, RealmId::PRIMARY),
+        "toString" => Value::Native(Native::RegExpToString, RealmId::PRIMARY),
         // What the accessors answer *for the table itself*. `RegExp.prototype` has no pattern
         // and no flags, and the specification gives these two an answer anyway rather than
         // throwing: the empty flag set, and the pattern that matches the empty string.
         "source" => Value::String("(?:)".to_owned()),
         "flags" => Value::String(String::new()),
         key => match RegExpSymbol::named(key) {
-            Some(method) => Value::Native(Native::RegExpSymbol(method)),
+            Some(method) => Value::Native(Native::RegExpSymbol(method), RealmId::PRIMARY),
             None => Value::Undefined,
         },
     }
@@ -39863,24 +40856,27 @@ fn date_method(name: &str) -> Value {
         // ECMA-402 replaces these three with `Intl.DateTimeFormat`, each with its own
         // required/defaults pair, so they leave the `Date` dispatch table entirely.
         "toLocaleString" => {
-            return Value::Native(Native::Intl(intl::Op::Adapter(
-                intl::Adapter::DateToLocaleString,
-            )));
+            return Value::Native(
+                Native::Intl(intl::Op::Adapter(intl::Adapter::DateToLocaleString)),
+                RealmId::PRIMARY,
+            );
         }
         "toLocaleDateString" => {
-            return Value::Native(Native::Intl(intl::Op::Adapter(
-                intl::Adapter::DateToLocaleDateString,
-            )));
+            return Value::Native(
+                Native::Intl(intl::Op::Adapter(intl::Adapter::DateToLocaleDateString)),
+                RealmId::PRIMARY,
+            );
         }
         "toLocaleTimeString" => {
-            return Value::Native(Native::Intl(intl::Op::Adapter(
-                intl::Adapter::DateToLocaleTimeString,
-            )));
+            return Value::Native(
+                Native::Intl(intl::Op::Adapter(intl::Adapter::DateToLocaleTimeString)),
+                RealmId::PRIMARY,
+            );
         }
         key if key == WellKnown::ToPrimitive.property_key() => DateMethod::ToPrimitive,
         _ => return Value::Undefined,
     };
-    Value::Native(Native::Date(method))
+    Value::Native(Native::Date(method), RealmId::PRIMARY)
 }
 
 /// The methods on `%TypedArray%.prototype`.
@@ -39893,9 +40889,9 @@ fn date_method(name: &str) -> Value {
 /// answering with the array one would silently push into a copy.
 fn typed_array_method(name: &str) -> Value {
     match name {
-        "set" => Value::Native(Native::TypedArraySet),
-        "subarray" => Value::Native(Native::TypedArraySubarray),
-        "fill" => Value::Native(Native::TypedArrayFill),
+        "set" => Value::Native(Native::TypedArraySet, RealmId::PRIMARY),
+        "subarray" => Value::Native(Native::TypedArraySubarray, RealmId::PRIMARY),
+        "fill" => Value::Native(Native::TypedArrayFill, RealmId::PRIMARY),
         // The one member of the table the specification says *is* the `Array.prototype`
         // function rather than a distinct one: "the initial value of the
         // %TypedArray%.prototype.toString data property is the same built-in function object as
@@ -39906,10 +40902,10 @@ fn typed_array_method(name: &str) -> Value {
         // `%TypedArray%.prototype[@@iterator]` is not merely *like* `values`; it is the same
         // function object, so it resolves to the same marker rather than to one of its own.
         key if key == WellKnown::Iterator.property_key() => {
-            Value::Native(Native::TypedArrayGeneric("values"))
+            Value::Native(Native::TypedArrayGeneric("values"), RealmId::PRIMARY)
         }
         other => match typed_array_generic(other) {
-            Some(method) => Value::Native(Native::TypedArrayGeneric(method)),
+            Some(method) => Value::Native(Native::TypedArrayGeneric(method), RealmId::PRIMARY),
             None => Value::Undefined,
         },
     }
@@ -39975,22 +40971,32 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
         // share a table: a program feature-detects a growable shared buffer by reading
         // `SharedArrayBuffer.prototype.grow`, and finding `resize` there instead would tell it
         // the buffer shrinks.
-        "resize" if !shared => Value::Native(Native::ArrayBufferResize),
-        "grow" if shared => Value::Native(Native::ArrayBufferGrow),
-        "slice" => Value::Native(Native::ArrayBufferSlice),
+        "resize" if !shared => Value::Native(Native::ArrayBufferResize, RealmId::PRIMARY),
+        "grow" if shared => Value::Native(Native::ArrayBufferGrow, RealmId::PRIMARY),
+        "slice" => Value::Native(Native::ArrayBufferSlice, RealmId::PRIMARY),
         // Only the unshared type: transferring is *giving the bytes away*, which is precisely
         // what a shared buffer's other holders have no way to survive.
-        "transfer" if !shared => Value::Native(Native::ArrayBufferTransfer {
-            preserve_resizability: true,
-        }),
-        "transferToFixedLength" if !shared => Value::Native(Native::ArrayBufferTransfer {
-            preserve_resizability: false,
-        }),
+        "transfer" if !shared => Value::Native(
+            Native::ArrayBufferTransfer {
+                preserve_resizability: true,
+            },
+            RealmId::PRIMARY,
+        ),
+        "transferToFixedLength" if !shared => Value::Native(
+            Native::ArrayBufferTransfer {
+                preserve_resizability: false,
+            },
+            RealmId::PRIMARY,
+        ),
         // Giving the bytes away and freezing them in one step. Only the unshared type again,
         // and for the same reason: a shared buffer's other holders cannot survive the giving.
-        "transferToImmutable" if !shared => Value::Native(Native::ArrayBufferTransferToImmutable),
+        "transferToImmutable" if !shared => {
+            Value::Native(Native::ArrayBufferTransferToImmutable, RealmId::PRIMARY)
+        }
         // The copying half of the pair: the source keeps its bytes and the result cannot change.
-        "sliceToImmutable" if !shared => Value::Native(Native::ArrayBufferSliceToImmutable),
+        "sliceToImmutable" if !shared => {
+            Value::Native(Native::ArrayBufferSliceToImmutable, RealmId::PRIMARY)
+        }
         key if key == WellKnown::ToStringTag.property_key() => Value::String(
             if shared {
                 "SharedArrayBuffer"
@@ -40010,28 +41016,56 @@ fn array_buffer_method(shared: bool, name: &str) -> Value {
 /// table anyway: they are statics on the constructor rather than methods on the prototype.
 fn iterator_method(name: &str) -> Value {
     match name {
-        "map" => Value::Native(Native::IteratorLazy(HelperKind::Map)),
-        "filter" => Value::Native(Native::IteratorLazy(HelperKind::Filter)),
-        "take" => Value::Native(Native::IteratorLazy(HelperKind::Take)),
-        "drop" => Value::Native(Native::IteratorLazy(HelperKind::Drop)),
-        "flatMap" => Value::Native(Native::IteratorLazy(HelperKind::FlatMap)),
-        "reduce" => Value::Native(Native::IteratorTerminal(TerminalKind::Reduce)),
-        "toArray" => Value::Native(Native::IteratorTerminal(TerminalKind::ToArray)),
-        "forEach" => Value::Native(Native::IteratorTerminal(TerminalKind::ForEach)),
-        "some" => Value::Native(Native::IteratorTerminal(TerminalKind::Some)),
-        "every" => Value::Native(Native::IteratorTerminal(TerminalKind::Every)),
-        "find" => Value::Native(Native::IteratorTerminal(TerminalKind::Find)),
-        "chunks" => Value::Native(Native::IteratorLazy(HelperKind::Chunks)),
-        "windows" => Value::Native(Native::IteratorLazy(HelperKind::Windows)),
-        "includes" => Value::Native(Native::IteratorTerminal(TerminalKind::Includes)),
-        "join" => Value::Native(Native::IteratorTerminal(TerminalKind::Join)),
-        "constructor" => Value::Native(Native::IteratorConstructor),
+        "map" => Value::Native(Native::IteratorLazy(HelperKind::Map), RealmId::PRIMARY),
+        "filter" => Value::Native(Native::IteratorLazy(HelperKind::Filter), RealmId::PRIMARY),
+        "take" => Value::Native(Native::IteratorLazy(HelperKind::Take), RealmId::PRIMARY),
+        "drop" => Value::Native(Native::IteratorLazy(HelperKind::Drop), RealmId::PRIMARY),
+        "flatMap" => Value::Native(Native::IteratorLazy(HelperKind::FlatMap), RealmId::PRIMARY),
+        "reduce" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::Reduce),
+            RealmId::PRIMARY,
+        ),
+        "toArray" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::ToArray),
+            RealmId::PRIMARY,
+        ),
+        "forEach" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::ForEach),
+            RealmId::PRIMARY,
+        ),
+        "some" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::Some),
+            RealmId::PRIMARY,
+        ),
+        "every" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::Every),
+            RealmId::PRIMARY,
+        ),
+        "find" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::Find),
+            RealmId::PRIMARY,
+        ),
+        "chunks" => Value::Native(Native::IteratorLazy(HelperKind::Chunks), RealmId::PRIMARY),
+        "windows" => Value::Native(Native::IteratorLazy(HelperKind::Windows), RealmId::PRIMARY),
+        "includes" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::Includes),
+            RealmId::PRIMARY,
+        ),
+        "join" => Value::Native(
+            Native::IteratorTerminal(TerminalKind::Join),
+            RealmId::PRIMARY,
+        ),
+        "constructor" => Value::Native(Native::IteratorConstructor, RealmId::PRIMARY),
         // An iterator is its own iterable, which is what lets one be handed straight to a
         // `for-of` or to `Array.from`.
-        key if key == WellKnown::Iterator.property_key() => Value::Native(Native::IteratorSelf),
+        key if key == WellKnown::Iterator.property_key() => {
+            Value::Native(Native::IteratorSelf, RealmId::PRIMARY)
+        }
         // Closing an iterator is exactly what disposing of one means, so `using it = ...` ends
         // the iteration the same way an early `break` does.
-        key if key == WellKnown::Dispose.property_key() => Value::Native(Native::IteratorDispose),
+        key if key == WellKnown::Dispose.property_key() => {
+            Value::Native(Native::IteratorDispose, RealmId::PRIMARY)
+        }
         _ => Value::Undefined,
     }
 }
@@ -40043,27 +41077,27 @@ fn iterator_method(name: &str) -> Value {
 /// `Float32` decode of the same bytes would be a wrong answer no program could see coming.
 fn data_view_method(name: &str) -> Value {
     match name {
-        "getInt8" => Value::Native(Native::DataViewGet(TypedKind::Int8)),
-        "getUint8" => Value::Native(Native::DataViewGet(TypedKind::Uint8)),
-        "getInt16" => Value::Native(Native::DataViewGet(TypedKind::Int16)),
-        "getUint16" => Value::Native(Native::DataViewGet(TypedKind::Uint16)),
-        "getInt32" => Value::Native(Native::DataViewGet(TypedKind::Int32)),
-        "getUint32" => Value::Native(Native::DataViewGet(TypedKind::Uint32)),
-        "getFloat16" => Value::Native(Native::DataViewGet(TypedKind::Float16)),
-        "getFloat32" => Value::Native(Native::DataViewGet(TypedKind::Float32)),
-        "getFloat64" => Value::Native(Native::DataViewGet(TypedKind::Float64)),
-        "setInt8" => Value::Native(Native::DataViewSet(TypedKind::Int8)),
-        "setUint8" => Value::Native(Native::DataViewSet(TypedKind::Uint8)),
-        "setInt16" => Value::Native(Native::DataViewSet(TypedKind::Int16)),
-        "setUint16" => Value::Native(Native::DataViewSet(TypedKind::Uint16)),
-        "setInt32" => Value::Native(Native::DataViewSet(TypedKind::Int32)),
-        "setUint32" => Value::Native(Native::DataViewSet(TypedKind::Uint32)),
-        "setFloat16" => Value::Native(Native::DataViewSet(TypedKind::Float16)),
-        "setFloat32" => Value::Native(Native::DataViewSet(TypedKind::Float32)),
-        "setFloat64" => Value::Native(Native::DataViewSet(TypedKind::Float64)),
-        "getBigInt64" => Value::Native(Native::DataViewGetBig { signed: true }),
-        "getBigUint64" => Value::Native(Native::DataViewGetBig { signed: false }),
-        "setBigInt64" | "setBigUint64" => Value::Native(Native::DataViewSetBig),
+        "getInt8" => Value::Native(Native::DataViewGet(TypedKind::Int8), RealmId::PRIMARY),
+        "getUint8" => Value::Native(Native::DataViewGet(TypedKind::Uint8), RealmId::PRIMARY),
+        "getInt16" => Value::Native(Native::DataViewGet(TypedKind::Int16), RealmId::PRIMARY),
+        "getUint16" => Value::Native(Native::DataViewGet(TypedKind::Uint16), RealmId::PRIMARY),
+        "getInt32" => Value::Native(Native::DataViewGet(TypedKind::Int32), RealmId::PRIMARY),
+        "getUint32" => Value::Native(Native::DataViewGet(TypedKind::Uint32), RealmId::PRIMARY),
+        "getFloat16" => Value::Native(Native::DataViewGet(TypedKind::Float16), RealmId::PRIMARY),
+        "getFloat32" => Value::Native(Native::DataViewGet(TypedKind::Float32), RealmId::PRIMARY),
+        "getFloat64" => Value::Native(Native::DataViewGet(TypedKind::Float64), RealmId::PRIMARY),
+        "setInt8" => Value::Native(Native::DataViewSet(TypedKind::Int8), RealmId::PRIMARY),
+        "setUint8" => Value::Native(Native::DataViewSet(TypedKind::Uint8), RealmId::PRIMARY),
+        "setInt16" => Value::Native(Native::DataViewSet(TypedKind::Int16), RealmId::PRIMARY),
+        "setUint16" => Value::Native(Native::DataViewSet(TypedKind::Uint16), RealmId::PRIMARY),
+        "setInt32" => Value::Native(Native::DataViewSet(TypedKind::Int32), RealmId::PRIMARY),
+        "setUint32" => Value::Native(Native::DataViewSet(TypedKind::Uint32), RealmId::PRIMARY),
+        "setFloat16" => Value::Native(Native::DataViewSet(TypedKind::Float16), RealmId::PRIMARY),
+        "setFloat32" => Value::Native(Native::DataViewSet(TypedKind::Float32), RealmId::PRIMARY),
+        "setFloat64" => Value::Native(Native::DataViewSet(TypedKind::Float64), RealmId::PRIMARY),
+        "getBigInt64" => Value::Native(Native::DataViewGetBig { signed: true }, RealmId::PRIMARY),
+        "getBigUint64" => Value::Native(Native::DataViewGetBig { signed: false }, RealmId::PRIMARY),
+        "setBigInt64" | "setBigUint64" => Value::Native(Native::DataViewSetBig, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("DataView".to_owned()),
         _ => Value::Undefined,
     }
@@ -40077,30 +41111,44 @@ fn data_view_method(name: &str) -> Value {
 /// `Object.prototype.toString`, which is where programs actually use them.
 fn object_property(name: &str) -> Value {
     match name {
-        "hasOwnProperty" => Value::Native(Native::ObjectHasOwnProperty),
-        "isPrototypeOf" => Value::Native(Native::ObjectIsPrototypeOf),
-        "propertyIsEnumerable" => Value::Native(Native::ObjectPropertyIsEnumerable),
-        "toString" => Value::Native(Native::ObjectToStringTag),
-        "toLocaleString" => Value::Native(Native::ObjectToLocaleString),
-        "valueOf" => Value::Native(Native::ObjectValueOf),
+        "hasOwnProperty" => Value::Native(Native::ObjectHasOwnProperty, RealmId::PRIMARY),
+        "isPrototypeOf" => Value::Native(Native::ObjectIsPrototypeOf, RealmId::PRIMARY),
+        "propertyIsEnumerable" => {
+            Value::Native(Native::ObjectPropertyIsEnumerable, RealmId::PRIMARY)
+        }
+        "toString" => Value::Native(Native::ObjectToStringTag, RealmId::PRIMARY),
+        "toLocaleString" => Value::Native(Native::ObjectToLocaleString, RealmId::PRIMARY),
+        "valueOf" => Value::Native(Native::ObjectValueOf, RealmId::PRIMARY),
         // Annex B's four, which predate `Object.defineProperty` and are still how a great deal
         // of shipped code installs an accessor.
-        "__defineGetter__" => Value::Native(Native::LegacyAccessor {
-            defines: true,
-            setter: false,
-        }),
-        "__defineSetter__" => Value::Native(Native::LegacyAccessor {
-            defines: true,
-            setter: true,
-        }),
-        "__lookupGetter__" => Value::Native(Native::LegacyAccessor {
-            defines: false,
-            setter: false,
-        }),
-        "__lookupSetter__" => Value::Native(Native::LegacyAccessor {
-            defines: false,
-            setter: true,
-        }),
+        "__defineGetter__" => Value::Native(
+            Native::LegacyAccessor {
+                defines: true,
+                setter: false,
+            },
+            RealmId::PRIMARY,
+        ),
+        "__defineSetter__" => Value::Native(
+            Native::LegacyAccessor {
+                defines: true,
+                setter: true,
+            },
+            RealmId::PRIMARY,
+        ),
+        "__lookupGetter__" => Value::Native(
+            Native::LegacyAccessor {
+                defines: false,
+                setter: false,
+            },
+            RealmId::PRIMARY,
+        ),
+        "__lookupSetter__" => Value::Native(
+            Native::LegacyAccessor {
+                defines: false,
+                setter: true,
+            },
+            RealmId::PRIMARY,
+        ),
         _ => Value::Undefined,
     }
 }
@@ -40112,12 +41160,13 @@ fn object_property(name: &str) -> Value {
 /// `{} - 1` finds `valueOf`, gets the object back, and moves on to `toString`. While the
 /// reduction was a pure function these two could not be here, because it would have found them
 /// and had no way to call them.
-fn inherited_object_property(intrinsics: &Intrinsics, name: &str) -> Value {
+fn inherited_object_property(intrinsics: &Intrinsics, name: &str, realm: RealmId) -> Value {
     table_step(
         intrinsics,
         PrototypeTable::Object,
         name,
         tabulated_object_property(name),
+        realm,
     )
 }
 
@@ -40128,7 +41177,7 @@ fn inherited_object_property(intrinsics: &Intrinsics, name: &str) -> Value {
 /// with it twice.
 fn tabulated_object_property(name: &str) -> Value {
     match name {
-        "constructor" => Value::Native(Native::ObjectConstructor),
+        "constructor" => Value::Native(Native::ObjectConstructor, RealmId::PRIMARY),
         "hasOwnProperty"
         | "isPrototypeOf"
         | "propertyIsEnumerable"
@@ -40161,8 +41210,8 @@ fn inherit_from_object(table: PrototypeTable, found: Value, name: &str) -> Value
 /// What `Boolean.prototype` answers, and what a boolean primitive finds through it.
 fn boolean_method(name: &str) -> Value {
     match name {
-        "toString" | "toLocaleString" => Value::Native(Native::BooleanToString),
-        "valueOf" => Value::Native(Native::BooleanValueOf),
+        "toString" | "toLocaleString" => Value::Native(Native::BooleanToString, RealmId::PRIMARY),
+        "valueOf" => Value::Native(Native::BooleanValueOf, RealmId::PRIMARY),
         _ => Value::Undefined,
     }
 }
@@ -40174,8 +41223,8 @@ fn boolean_method(name: &str) -> Value {
 /// way past that refusal.
 fn symbol_method(name: &str) -> Value {
     match name {
-        "toString" | "toLocaleString" => Value::Native(Native::PrimitiveToString),
-        "valueOf" => Value::Native(Native::PrimitiveValueOf),
+        "toString" | "toLocaleString" => Value::Native(Native::PrimitiveToString, RealmId::PRIMARY),
+        "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("Symbol".to_owned()),
         _ => Value::Undefined,
     }
@@ -40184,10 +41233,10 @@ fn symbol_method(name: &str) -> Value {
 /// What `BigInt.prototype` answers.
 fn bigint_method(name: &str) -> Value {
     match name {
-        "toString" | "toLocaleString" => Value::Native(Native::BigIntToString),
+        "toString" | "toLocaleString" => Value::Native(Native::BigIntToString, RealmId::PRIMARY),
         // The receiver, not a number: narrowing to a double would make `(5n).valueOf() === 5n`
         // false, which is the one thing this type exists to prevent.
-        "valueOf" => Value::Native(Native::PrimitiveValueOf),
+        "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("BigInt".to_owned()),
         _ => Value::Undefined,
     }
@@ -40196,9 +41245,9 @@ fn bigint_method(name: &str) -> Value {
 /// What `Promise.prototype` answers, and what a promise finds through it.
 fn promise_method(name: &str) -> Value {
     match name {
-        "then" => Value::Native(Native::PromiseThen),
-        "catch" => Value::Native(Native::PromiseCatch),
-        "finally" => Value::Native(Native::PromiseFinally),
+        "then" => Value::Native(Native::PromiseThen, RealmId::PRIMARY),
+        "catch" => Value::Native(Native::PromiseCatch, RealmId::PRIMARY),
+        "finally" => Value::Native(Native::PromiseFinally, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("Promise".to_owned()),
         _ => Value::Undefined,
     }
@@ -40376,7 +41425,7 @@ fn is_constructor(value: &Value) -> bool {
         // runs `f` as a constructor and ignores the bound receiver.
         Value::Bound(bound) => is_constructor(&bound.target),
         Value::Proxy(proxy) => is_constructor(&proxy.target),
-        Value::Native(native) => native_is_constructor(*native),
+        Value::Native(native, _) => native_is_constructor(*native),
         _ => false,
     }
 }
@@ -40405,7 +41454,7 @@ fn native_is_constructor(native: Native) -> bool {
         // what its instances link to, and a built-in with nothing to link is not one. It is
         // also what separates `Symbol` -- a constructor that refuses `new` -- from `Math.max`,
         // which is not a constructor at all.
-        other => intrinsic_prototype(&Value::Native(other)).is_some(),
+        other => intrinsic_prototype(&Value::Native(other, RealmId::PRIMARY)).is_some(),
     }
 }
 
@@ -40524,14 +41573,14 @@ fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccesso
 /// before it falls through to them.
 fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
     match target {
-        Value::Native(Native::PrototypeOf(table)) => prototype_accessor(*table, key),
-        Value::Native(native) if defines_species(*native) => {
+        Value::Native(Native::PrototypeOf(table), _) => prototype_accessor(*table, key),
+        Value::Native(native, _) if defines_species(*native) => {
             (key == WellKnown::Species.property_key()).then_some(BuiltinAccessor::Species)
         }
         // Each concrete typed-array constructor inherits `%TypedArray%[@@species]`; unlike the
         // ordinary function case below, native constructors do not expose that inheritance via
         // a stored Function object, so answer the inherited accessor directly here.
-        Value::Native(Native::TypedArrayConstructor(_))
+        Value::Native(Native::TypedArrayConstructor(_), _)
             if key == WellKnown::Species.property_key() =>
         {
             Some(BuiltinAccessor::Species)
@@ -40545,7 +41594,7 @@ fn machine_accessor(target: &Value, key: &str) -> Option<BuiltinAccessor> {
             let mut current = prototype_of(target);
             for _ in 0..MAX_PROTOTYPE_DEPTH {
                 match current {
-                    Value::Native(native)
+                    Value::Native(native, _)
                         if defines_species(native)
                             || matches!(native, Native::TypedArrayConstructor(_)) =>
                     {
@@ -40743,6 +41792,7 @@ fn unwrap_proxy(value: &Value) -> &Value {
 /// compiled function both carry `constructor` as a property, and inventing one here would shadow
 /// what the program put there.
 fn intrinsic_constructor(value: &Value) -> Option<Value> {
+    let realm = value_realm(value);
     let native = match value {
         // A `Temporal` value's constructor is the one of the eight its kind names, which is what
         // `date.constructor === Temporal.PlainDate` asks and what a library reaches for to build
@@ -40759,30 +41809,31 @@ fn intrinsic_constructor(value: &Value) -> Option<Value> {
         Value::Symbol(_) => Native::SymbolConstructor,
         _ => return None,
     };
-    Some(Value::Native(native))
+    Some(Value::Native(native, realm))
 }
 
 /// `call`, `apply`, and `bind`, which every callable has and nothing else does.
 ///
 /// Returned unbound, like every other method here: the receiver is the function being called
 /// through, and `CallMethod` supplies it.
-fn function_property(intrinsics: &Intrinsics, name: &str) -> Value {
+fn function_property(intrinsics: &Intrinsics, name: &str, realm: RealmId) -> Value {
     // `Function.prototype` owns its constructor. A compiled or bound function reaches that
     // table before `Object.prototype`, so answering Object here is observably wrong even though
     // both values are constructors (`fn.constructor.name` is ecosystem feature detection).
     if name == "constructor" {
-        return Value::Native(Native::FunctionConstructor);
+        return Value::Native(Native::FunctionConstructor, realm);
     }
     match table_step(
         intrinsics,
         PrototypeTable::Function,
         name,
         tabulated_function_property(name),
+        realm,
     ) {
         // A function is an object, so it inherits `Object.prototype`'s methods too --
         // `Object.hasOwnProperty.call(x, k)` reads them off the *constructor*, which is how the
         // plain-object check every library ships is written.
-        Value::Undefined => inherited_object_property(intrinsics, name),
+        Value::Undefined => inherited_object_property(intrinsics, name, realm),
         found => found,
     }
 }
@@ -40793,10 +41844,10 @@ fn tabulated_function_property(name: &str) -> Value {
         // Not the source text, which the VM never sees -- the same reason an error carries no
         // `stack`. What it does promise is that two different functions give two different
         // strings, which is what the `isPlainObject` check every library ships depends on.
-        "toString" => Value::Native(Native::FunctionToString),
-        "call" => Value::Native(Native::FunctionCall),
-        "apply" => Value::Native(Native::FunctionApply),
-        "bind" => Value::Native(Native::FunctionBind),
+        "toString" => Value::Native(Native::FunctionToString, RealmId::PRIMARY),
+        "call" => Value::Native(Native::FunctionCall, RealmId::PRIMARY),
+        "apply" => Value::Native(Native::FunctionApply, RealmId::PRIMARY),
+        "bind" => Value::Native(Native::FunctionBind, RealmId::PRIMARY),
         _ => Value::Undefined,
     }
 }
@@ -40895,9 +41946,10 @@ fn array_inherited_index(
         return None;
     }
     for table in [PrototypeTable::Array, PrototypeTable::Object] {
-        if let Overridden::Held(property, _) =
-            intrinsics.overridden(&Value::Native(Native::PrototypeOf(table)), name)
-        {
+        if let Overridden::Held(property, _) = intrinsics.overridden(
+            &Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY),
+            name,
+        ) {
             return Some(property);
         }
     }
@@ -40934,7 +41986,10 @@ fn inherited_object_accessor(
         return None;
     }
     match intrinsics.overridden(
-        &Value::Native(Native::PrototypeOf(PrototypeTable::Object)),
+        &Value::Native(
+            Native::PrototypeOf(PrototypeTable::Object),
+            RealmId::PRIMARY,
+        ),
         name,
     ) {
         Overridden::Held(property @ Property::Accessor { .. }, _) => Some(property),
@@ -40952,7 +42007,7 @@ fn array_own_property(items: &ArrayData, key: &str) -> Option<Property> {
     items
         .borrow()
         .get(index)
-        .filter(|value| !matches!(value, Value::Native(Native::Hole)))
+        .filter(|value| !matches!(value, Value::Native(Native::Hole, _)))
         .cloned()
         .map(Property::Value)
 }
@@ -40995,11 +42050,13 @@ impl Default for CapabilityRecord {
 fn wrapped_primitive(value: &Value) -> Option<Value> {
     match value {
         Value::Object(object) => object.borrow().primitive().cloned(),
-        Value::Native(Native::PrototypeOf(PrototypeTable::Number)) => Some(Value::Number(0.0)),
-        Value::Native(Native::PrototypeOf(PrototypeTable::String)) => {
+        Value::Native(Native::PrototypeOf(PrototypeTable::Number), _) => Some(Value::Number(0.0)),
+        Value::Native(Native::PrototypeOf(PrototypeTable::String), _) => {
             Some(Value::String(String::new()))
         }
-        Value::Native(Native::PrototypeOf(PrototypeTable::Boolean)) => Some(Value::Boolean(false)),
+        Value::Native(Native::PrototypeOf(PrototypeTable::Boolean), _) => {
+            Some(Value::Boolean(false))
+        }
         _ => None,
     }
 }
@@ -41062,7 +42119,7 @@ fn wrap_primitive(primitive: Value) -> Value {
         _ => PrototypeTable::Object,
     };
     let mut data = ObjectData::default();
-    data.set_prototype(Value::Native(Native::PrototypeOf(table)));
+    data.set_prototype(Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY));
     data.primitive = Some(primitive);
     Value::Object(Rc::new(RefCell::new(data)))
 }
@@ -41209,10 +42266,10 @@ fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
         // shaped one: `%TypedArray%.prototype.map.name` is `"map"` and its `length` is 1, the
         // same two answers the array method gives. Delegating keeps them one fact rather than a
         // second tabulation that can drift from the first.
-        Value::Native(Native::TypedArrayGeneric(method)) => {
+        Value::Native(Native::TypedArrayGeneric(method), _) => {
             intrinsic_identity(&array_property(method))
         }
-        Value::Native(native) => {
+        Value::Native(native, _) => {
             // A namespace is an object, not a function: `Math` has no call behaviour, so it has
             // no arity and no name of its own either. A Node builtin module is a namespace for
             // the same reason -- `require("path")` is an object, and node's has neither a
@@ -41234,7 +42291,7 @@ fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
         // An array method the machine drives rather than a free function, or a generator's own
         // `next`. Every one of them declares exactly one argument -- the callback, or the value
         // resumed with -- so there is nothing to tabulate.
-        Value::Callback(method) => Some((builtin_js_name(&format!("{method:?}")), 1.0)),
+        Value::Callback(method, _) => Some((builtin_js_name(&format!("{method:?}")), 1.0)),
         // `bind` reports the arity still to be supplied and prefixes the name it wraps, which is
         // what makes a stack trace through one readable.
         Value::Bound(bound) => {
@@ -41300,6 +42357,8 @@ const fn native_length(native: Native) -> Option<f64> {
         N::PrototypeOf(PrototypeTable::Function) => 0.0,
         N::PrototypeOf(_) => return None,
         N::Math | N::Json | N::Reflect | N::Performance => return None,
+        N::HostCreateRealm => 0.0,
+        N::HostEvalScript => 1.0,
         // `Intl`'s arities come from its own table: the namespace and the six prototypes are
         // not callable, and the constructors do not all take the same number of arguments.
         N::Intl(op) => match intl::length(op) {
@@ -41487,8 +42546,8 @@ const fn native_length(native: Native) -> Option<f64> {
 /// identity, and comparing two of them compares the built-ins they name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IntrinsicKey {
-    Native(Native),
-    Callback(CallbackMethod),
+    Native(Native, RealmId),
+    Callback(CallbackMethod, RealmId),
 }
 
 /// The key a built-in is stored under, or `None` for a value that is not one.
@@ -41499,8 +42558,8 @@ enum IntrinsicKey {
 /// their own.
 fn intrinsic_key(target: &Value) -> Option<IntrinsicKey> {
     match target {
-        Value::Native(native) => Some(IntrinsicKey::Native(*native)),
-        Value::Callback(method) => Some(IntrinsicKey::Callback(*method)),
+        Value::Native(native, realm) => Some(IntrinsicKey::Native(*native, *realm)),
+        Value::Callback(method, realm) => Some(IntrinsicKey::Callback(*method, *realm)),
         _ => None,
     }
 }
@@ -41708,42 +42767,43 @@ impl Intrinsics {
 /// after a deletion -- a program that removed `Function.prototype.call` must not find it again
 /// one link up -- which is why a table goes straight to the object methods.
 fn native_inherited_property(intrinsics: &Intrinsics, target: &Value, name: &str) -> Value {
+    let realm = value_realm(target);
     match target {
         // NativeError constructors inherit static properties from Error. Keep this separate from
         // the own-property table: `TypeError.isError` is inherited, so it must not appear in
         // TypeError's own property names or descriptor.
-        Value::Native(Native::Error(kind)) if *kind != ErrorKind::Error => {
+        Value::Native(Native::Error(kind), _) if *kind != ErrorKind::Error => {
             match intrinsics.overridden(
-                &Value::Native(Native::Error(ErrorKind::Error)),
+                &Value::Native(Native::Error(ErrorKind::Error), realm),
                 name,
             ) {
                 Overridden::Held(Property::Value(value), _) => value,
                 Overridden::Held(Property::Accessor { .. }, _) | Overridden::Removed => {
-                    function_property(intrinsics, name)
+                    function_property(intrinsics, name, realm)
                 }
                 Overridden::Untouched => Native::Error(ErrorKind::Error)
                     .property(name)
-                    .unwrap_or_else(|| function_property(intrinsics, name)),
+                    .unwrap_or_else(|| function_property(intrinsics, name, realm)),
             }
         }
-        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(_))) => match table_step(
+        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArrayFor(_)), _) => match table_step(
             intrinsics,
             PrototypeTable::TypedArray,
             name,
             Native::PrototypeOf(PrototypeTable::TypedArray)
                 .property(name)
                 .unwrap_or(Value::Undefined),
-        ) {
-            Value::Undefined => inherited_object_property(intrinsics, name),
+        realm) {
+            Value::Undefined => inherited_object_property(intrinsics, name, realm),
             found => found,
         },
-        Value::Native(Native::PrototypeOf(_) | Native::Math | Native::Json | Native::Reflect)
+        Value::Native(Native::PrototypeOf(_) | Native::Math | Native::Json | Native::Reflect, _)
         // The `Intl` namespace and the six prototypes are ordinary objects, so they inherit
         // from `Object.prototype` rather than from `Function.prototype`. An `Intl` instance
         // does too: its own methods are found first, and everything else comes from there.
-        | Value::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)))
-        | Value::Intl(_) => inherited_object_property(intrinsics, name),
-        _ => function_property(intrinsics, name),
+        | Value::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)), _)
+        | Value::Intl(_) => inherited_object_property(intrinsics, name, realm),
+        _ => function_property(intrinsics, name, realm),
     }
 }
 
@@ -41759,10 +42819,11 @@ fn table_step(
     table: PrototypeTable,
     name: &str,
     tabulated: Value,
+    realm: RealmId,
 ) -> Value {
     intrinsics
-        .read(&Value::Native(Native::PrototypeOf(table)), name)
-        .unwrap_or(tabulated)
+        .read(&Value::Native(Native::PrototypeOf(table), realm), name)
+        .unwrap_or(in_realm(tabulated, realm))
 }
 
 /// The names physically owned by each virtual intrinsic prototype table.
@@ -42062,7 +43123,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
 }
 
 fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)> {
-    let target = Value::Native(Native::PrototypeOf(table));
+    let target = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
     std::iter::once("constructor")
         .chain(intrinsic_prototype_method_names(table).iter().copied())
         .chain(prototype_accessor_names(table).iter().copied())
@@ -42083,10 +43144,11 @@ fn intrinsic_prototype_entries(table: PrototypeTable) -> Vec<(String, Property)>
 /// One place, so that reading the property, describing it and listing it cannot disagree about
 /// which of the two shapes it is -- a disagreement `verifyProperty` sees immediately.
 fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
+    let realm = value_realm(target);
     match target {
-        Value::Native(Native::PrototypeOf(PrototypeTable::RegExp)) => {
+        Value::Native(Native::PrototypeOf(PrototypeTable::RegExp), _) => {
             RegExpAccessor::named(key).map(|accessor| Property::Accessor {
-                get: Some(Value::Native(Native::RegExpAccessor(accessor))),
+                get: Some(Value::Native(Native::RegExpAccessor(accessor), realm)),
                 // No setter half at all, which is what makes `re.global = true` silently do
                 // nothing rather than store a shadowing property.
                 set: None,
@@ -42095,48 +43157,51 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
         // Everything a built-in prototype publishes about its instances: `byteLength`, `size`,
         // and their eleven siblings. One table, so that reading the property, describing it and
         // listing it cannot disagree.
-        Value::Native(Native::PrototypeOf(table)) if prototype_accessor(*table, key).is_some() => {
+        Value::Native(Native::PrototypeOf(table), _)
+            if prototype_accessor(*table, key).is_some() =>
+        {
             prototype_accessor(*table, key).map(|accessor| Property::Accessor {
-                get: Some(Value::Native(Native::BuiltinAccessor(accessor))),
+                get: Some(Value::Native(Native::BuiltinAccessor(accessor), realm)),
                 set: None,
             })
         }
         // `Symbol.species` is one accessor defined eight times over, always the same: it
         // answers its own receiver.
-        Value::Native(native)
+        Value::Native(native, _)
             if defines_species(*native) && key == WellKnown::Species.property_key() =>
         {
             Some(Property::Accessor {
-                get: Some(Value::Native(Native::BuiltinAccessor(
-                    BuiltinAccessor::Species,
-                ))),
+                get: Some(Value::Native(
+                    Native::BuiltinAccessor(BuiltinAccessor::Species),
+                    realm,
+                )),
                 set: None,
             })
         }
         // The restricted pair. Both halves are the *same* function, and a program can compare
         // them, so both spell it the same way.
-        Value::Native(Native::PrototypeOf(PrototypeTable::Function))
+        Value::Native(Native::PrototypeOf(PrototypeTable::Function), _)
             if matches!(key, "caller" | "arguments") =>
         {
             Some(Property::Accessor {
-                get: Some(Value::Native(Native::ThrowTypeError)),
-                set: Some(Value::Native(Native::ThrowTypeError)),
+                get: Some(Value::Native(Native::ThrowTypeError, realm)),
+                set: Some(Value::Native(Native::ThrowTypeError, realm)),
             })
         }
-        Value::Native(Native::PrototypeOf(PrototypeTable::Object)) if key == "__proto__" => {
+        Value::Native(Native::PrototypeOf(PrototypeTable::Object), _) if key == "__proto__" => {
             Some(Property::Accessor {
-                get: Some(Value::Native(Native::ProtoGetter)),
-                set: Some(Value::Native(Native::ProtoSetter)),
+                get: Some(Value::Native(Native::ProtoGetter, realm)),
+                set: Some(Value::Native(Native::ProtoSetter, realm)),
             })
         }
         // `%TypedArray%.prototype[Symbol.toStringTag]` is an accessor: it reports the concrete
         // view name from its receiver and returns undefined for an incompatible receiver. Real
         // serializers capture this getter once and call it as their typed-array brand check.
-        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray))
+        Value::Native(Native::PrototypeOf(PrototypeTable::TypedArray), _)
             if key == WellKnown::ToStringTag.property_key() =>
         {
             Some(Property::Accessor {
-                get: Some(Value::Native(Native::ObjectToStringTag)),
+                get: Some(Value::Native(Native::ObjectToStringTag, realm)),
                 set: None,
             })
         }
@@ -42184,7 +43249,7 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             }
             keys
         }
-        Value::Native(Native::PrototypeOf(table)) => {
+        Value::Native(Native::PrototypeOf(table), _) => {
             let mut keys = intrinsic_prototype_entries(*table)
                 .into_iter()
                 .map(|(key, _)| key)
@@ -42192,7 +43257,10 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             intrinsics.reshape(target, &mut keys);
             keys
         }
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
+        Value::Native(_, _)
+        | Value::Callback(_, _)
+        | Value::Settler(..)
+        | Value::Capability(..) => {
             let mut keys = Vec::new();
             if intrinsic_identity(target).is_some() {
                 keys.push("length".to_owned());
@@ -42226,7 +43294,7 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
                 .borrow()
                 .iter()
                 .enumerate()
-                .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole)))
+                .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
                 .map(|(index, _)| index)
                 .collect();
             let defined: Vec<usize> = items
@@ -42283,7 +43351,7 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
     // Consulted only where the tables above say nothing, because `node:buffer` is *both* the
     // module and the `Buffer` constructor here, and the constructor's statics are the answer
     // that arm was written to give.
-    if let Value::Native(native) = target
+    if let Value::Native(native, _) = target
         && let Some(specifier) = node_builtin_specifier(*native)
         && let Some(abi) = kiln_node_abi::builtin_abi(specifier)
     {
@@ -42294,10 +43362,10 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
 
 fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str] {
     match target {
-        Value::Native(Native::ArrayConstructor) => {
+        Value::Native(Native::ArrayConstructor, _) => {
             &["isArray", "from", "fromAsync", "of", "@@species"]
         }
-        Value::Native(Native::ObjectConstructor) => &[
+        Value::Native(Native::ObjectConstructor, _) => &[
             "keys",
             "getOwnPropertyNames",
             "assign",
@@ -42322,8 +43390,8 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "seal",
             "isSealed",
         ],
-        Value::Native(Native::StringConstructor) => &["raw", "fromCharCode", "fromCodePoint"],
-        Value::Native(Native::NumberConstructor) => &[
+        Value::Native(Native::StringConstructor, _) => &["raw", "fromCharCode", "fromCodePoint"],
+        Value::Native(Native::NumberConstructor, _) => &[
             "isInteger",
             "isSafeInteger",
             "isNaN",
@@ -42339,8 +43407,8 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "NEGATIVE_INFINITY",
             "NaN",
         ],
-        Value::Native(Native::DateConstructor) => &["now", "UTC", "parse"],
-        Value::Native(Native::PromiseConstructor) => &[
+        Value::Native(Native::DateConstructor, _) => &["now", "UTC", "parse"],
+        Value::Native(Native::PromiseConstructor, _) => &[
             "resolve",
             "reject",
             "all",
@@ -42350,14 +43418,14 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "withResolvers",
             "try",
         ],
-        Value::Native(Native::Json) => &[
+        Value::Native(Native::Json, _) => &[
             "parse",
             "rawJSON",
             "isRawJSON",
             "stringify",
             "@@toStringTag",
         ],
-        Value::Native(Native::Reflect) => &[
+        Value::Native(Native::Reflect, _) => &[
             "defineProperty",
             "deleteProperty",
             "apply",
@@ -42373,18 +43441,18 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "setPrototypeOf",
             "@@toStringTag",
         ],
-        Value::Native(Native::ProxyConstructor) => &["revocable"],
-        Value::Native(Native::ArrayBufferConstructor) => &["isView"],
-        Value::Native(Native::RegExpConstructor) => &["escape"],
-        Value::Native(Native::Error(ErrorKind::Error)) => &["isError", "captureStackTrace"],
-        Value::Native(Native::BigIntConstructor) => &["asIntN", "asUintN"],
-        Value::Native(Native::MapConstructor) => &["groupBy"],
-        Value::Native(Native::TypedArrayIntrinsic) => &["@@species"],
-        Value::Native(Native::TypedArrayConstructor(kind)) => match kind {
+        Value::Native(Native::ProxyConstructor, _) => &["revocable"],
+        Value::Native(Native::ArrayBufferConstructor, _) => &["isView"],
+        Value::Native(Native::RegExpConstructor, _) => &["escape"],
+        Value::Native(Native::Error(ErrorKind::Error), _) => &["isError", "captureStackTrace"],
+        Value::Native(Native::BigIntConstructor, _) => &["asIntN", "asUintN"],
+        Value::Native(Native::MapConstructor, _) => &["groupBy"],
+        Value::Native(Native::TypedArrayIntrinsic, _) => &["@@species"],
+        Value::Native(Native::TypedArrayConstructor(kind), _) => match kind {
             TypedKind::Uint8 => &["of", "from", "BYTES_PER_ELEMENT", "fromBase64", "fromHex"],
             _ => &["of", "from", "BYTES_PER_ELEMENT"],
         },
-        Value::Native(Native::SymbolConstructor) => &[
+        Value::Native(Native::SymbolConstructor, _) => &[
             "for",
             "keyFor",
             "asyncIterator",
@@ -42401,8 +43469,8 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "toStringTag",
             "unscopables",
         ],
-        Value::Native(Native::IteratorConstructor) => &["from", "concat", "zip", "zipKeyed"],
-        Value::Native(Native::NodeBuffer) => &[
+        Value::Native(Native::IteratorConstructor, _) => &["from", "concat", "zip", "zipKeyed"],
+        Value::Native(Native::NodeBuffer, _) => &[
             "from",
             "alloc",
             "allocUnsafe",
@@ -42412,7 +43480,7 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "concat",
             "constants",
         ],
-        Value::Native(Native::Atomics) => &[
+        Value::Native(Native::Atomics, _) => &[
             "add",
             "and",
             "compareExchange",
@@ -42429,7 +43497,7 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "xor",
             "@@toStringTag",
         ],
-        Value::Native(Native::Math) => &[
+        Value::Native(Native::Math, _) => &[
             "abs",
             "floor",
             "ceil",
@@ -42535,20 +43603,20 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         other if exotic_properties(other).is_some() => exotic_properties(target)
             .map(|store| store.borrow().keys().map(str::to_owned).collect())
             .unwrap_or_default(),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
-            intrinsic_key(target)
-                .and_then(|identity| {
-                    intrinsics
-                        .entries
-                        .borrow()
-                        .iter()
-                        .find_map(|(held, slots)| {
-                            (*held == identity)
-                                .then(|| slots.held.keys().map(str::to_owned).collect())
-                        })
-                })
-                .unwrap_or_default()
-        }
+        Value::Native(_, _)
+        | Value::Callback(_, _)
+        | Value::Settler(..)
+        | Value::Capability(..) => intrinsic_key(target)
+            .and_then(|identity| {
+                intrinsics
+                    .entries
+                    .borrow()
+                    .iter()
+                    .find_map(|(held, slots)| {
+                        (*held == identity).then(|| slots.held.keys().map(str::to_owned).collect())
+                    })
+            })
+            .unwrap_or_default(),
         _ => Vec::new(),
     };
     keys.extend(stored);
@@ -42629,7 +43697,7 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
                 }
                 let present = matches!(
                     items.borrow().get(index),
-                    Some(item) if !matches!(item, Value::Native(Native::Hole))
+                    Some(item) if !matches!(item, Value::Native(Native::Hole, _))
                 );
                 if !present {
                     return None;
@@ -42660,13 +43728,14 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
         // per value -- two reads of `Array.prototype.push` produce the same `Copy` marker, so
         // there is no per-value store to put it in -- so the realm's store answers first, and
         // the tables answer for everything it has nothing to say about.
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
-            match intrinsics.overridden(target, key) {
-                Overridden::Held(_, attributes) => Some(attributes),
-                Overridden::Removed => None,
-                Overridden::Untouched => tabulated_attributes(target, key),
-            }
-        }
+        Value::Native(_, _)
+        | Value::Callback(_, _)
+        | Value::Settler(..)
+        | Value::Capability(..) => match intrinsics.overridden(target, key) {
+            Overridden::Held(_, attributes) => Some(attributes),
+            Overridden::Removed => None,
+            Overridden::Untouched => tabulated_attributes(target, key),
+        },
         _ => None,
     }
 }
@@ -42690,7 +43759,7 @@ fn tabulated_attributes(target: &Value, key: &str) -> Option<Attributes> {
 /// a method is replaceable and removable, while a *value* an intrinsic publishes -- a limit, a
 /// well-known symbol, an element width -- is a constant, and locked on every axis.
 fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
-    let Value::Native(native) = target else {
+    let Value::Native(native, _) = target else {
         return None;
     };
     // A Node builtin module's exports are *enumerable*, which is how `{ ...require("path") }`
@@ -42751,7 +43820,7 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
 
 /// The `prototype` a built-in constructor owns, or `None` for a built-in that is not one.
 fn intrinsic_prototype(target: &Value) -> Option<Value> {
-    let Value::Native(native) = target else {
+    let Value::Native(native, _) = target else {
         return None;
     };
     // `Function.prototype` is itself callable, and it is the one intrinsic function that has no
@@ -42809,7 +43878,7 @@ fn flatten(items: &[Value], depth: usize) -> Vec<Value> {
         match item {
             // A hole vanishes rather than becoming undefined, which is the one place `flat`
             // differs from copying.
-            Value::Native(Native::Hole) => {}
+            Value::Native(Native::Hole, _) => {}
             Value::Array(nested) if depth > 0 => {
                 out.extend(flatten(&nested.borrow(), depth - 1));
             }
@@ -42828,7 +43897,7 @@ fn dense_items(items: &[Value]) -> Vec<Value> {
     items
         .iter()
         .map(|item| {
-            if matches!(item, Value::Native(Native::Hole)) {
+            if matches!(item, Value::Native(Native::Hole, _)) {
                 Value::Undefined
             } else {
                 item.clone()
@@ -43156,8 +44225,15 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         // still the least surprising answer if malformed bytecode lets one reach this boundary.
         Value::Cell(a) => matches!(right, Value::Cell(b) if Rc::ptr_eq(a, b)),
         // One instance of each runtime-provided callable exists per realm.
-        Value::Native(a) => matches!(right, Value::Native(b) if a == b),
-        Value::Callback(a) => matches!(right, Value::Callback(b) if a == b),
+        // The realm is part of the identity, not decoration on it. `other.Array` and `Array`
+        // name the same built-in and are two different functions, which is the single fact every
+        // cross-realm test in the suite turns on.
+        Value::Native(a, left_realm) => {
+            matches!(right, Value::Native(b, right_realm) if a == b && left_realm == right_realm)
+        }
+        Value::Callback(a, left_realm) => {
+            matches!(right, Value::Callback(b, right_realm) if a == b && left_realm == right_realm)
+        }
         // Every object/function representation compares by identity: `===` asks whether two
         // references name the same object, not whether their payloads happen to be equal.
         Value::Generator(a) => matches!(right, Value::Generator(b) if Rc::ptr_eq(a, b)),
@@ -43400,7 +44476,7 @@ mod tests {
             vec!["0", "1", "length"]
         );
 
-        let constructor = Value::Native(Native::ArrayConstructor);
+        let constructor = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
         let keys = own_property_keys_including_symbols(&intrinsics, &constructor);
         assert!(keys.starts_with(&[
             "length".to_owned(),
@@ -43453,7 +44529,7 @@ mod tests {
         assert_eq!(state.borrow().high_water_mark, 2);
         assert!(matches!(
             Native::PrototypeOf(PrototypeTable::Readable).property("on"),
-            Some(Value::Native(Native::NodeEventOn))
+            Some(Value::Native(Native::NodeEventOn, _))
         ));
 
         let mut host = TestHost {
@@ -43528,7 +44604,7 @@ mod tests {
         object.borrow_mut().node_events = Some(vec![NodeEventBucket {
             name: "readable".into(),
             listeners: vec![NodeEventListener {
-                callback: Value::Native(Native::NodeUtilDebugNoop),
+                callback: Value::Native(Native::NodeUtilDebugNoop, RealmId::PRIMARY),
                 once: false,
             }],
         }]);
@@ -44042,7 +45118,7 @@ mod tests {
         let target = ordinary_object(Vec::<(String, Value)>::new());
         let handler = ordinary_object([(
             "defineProperty".to_owned(),
-            Value::Native(Native::ObjectDefineProperty),
+            Value::Native(Native::ObjectDefineProperty, RealmId::PRIMARY),
         )]);
         let proxy = Value::Proxy(Rc::new(ProxyData {
             target: target.clone(),
@@ -44077,7 +45153,10 @@ mod tests {
         if let Value::Array(items) = &original {
             items.properties.borrow_mut().set(
                 "constructor",
-                Value::Native(Native::TypedArrayConstructor(TypedKind::Uint8)),
+                Value::Native(
+                    Native::TypedArrayConstructor(TypedKind::Uint8),
+                    RealmId::PRIMARY,
+                ),
             );
         }
         let typed = vm
@@ -44119,11 +45198,11 @@ mod tests {
                 &[Value::String("node:events".to_owned())],
                 0,
             ),
-            Ok(Value::Native(Native::NodeEvents))
+            Ok(Value::Native(Native::NodeEvents, RealmId::PRIMARY))
         );
         assert_eq!(
             Native::NodeEvents.property("EventEmitter"),
-            Some(Value::Native(Native::NodeEventEmitter))
+            Some(Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY))
         );
         assert_eq!(
             node_builtin_export_names("events"),
@@ -44134,11 +45213,11 @@ mod tests {
             Some(vec![
                 (
                     "EventEmitter".to_owned(),
-                    Value::Native(Native::NodeEventEmitter),
+                    Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY),
                 ),
                 (
                     "default".to_owned(),
-                    Value::Native(Native::NodeEventEmitter),
+                    Value::Native(Native::NodeEventEmitter, RealmId::PRIMARY),
                 ),
             ])
         );
@@ -44196,7 +45275,7 @@ mod tests {
 
         assert_eq!(
             Native::NodeHttp.property("Server"),
-            Some(Value::Native(Native::NodeHttpServer))
+            Some(Value::Native(Native::NodeHttpServer, RealmId::PRIMARY))
         );
         assert!(
             node_builtin_export_names("node:http")
@@ -44243,7 +45322,7 @@ mod tests {
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
-        let listener = Value::Native(Native::ArrayConstructor);
+        let listener = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
 
         assert!(strict_equal(
             &vm.dispatch_node_event(
@@ -44297,7 +45376,7 @@ mod tests {
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
-        let listener = Value::Native(Native::ArrayConstructor);
+        let listener = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
         vm.dispatch_node_event(
             Native::NodeEventOnce,
             &emitter,
@@ -44345,8 +45424,8 @@ mod tests {
         };
         let mut vm = test_vm(&program, &mut host);
         let emitter = node_event_emitter();
-        let observer = Value::Native(Native::ArrayConstructor);
-        let listener = Value::Native(Native::ObjectConstructor);
+        let observer = Value::Native(Native::ArrayConstructor, RealmId::PRIMARY);
+        let listener = Value::Native(Native::ObjectConstructor, RealmId::PRIMARY);
         vm.dispatch_node_event(
             Native::NodeEventOn,
             &emitter,
@@ -44709,21 +45788,21 @@ mod tests {
     #[test]
     fn error_is_error_inherits_through_native_error_constructors() {
         let intrinsics = Intrinsics::default();
-        let type_error = Value::Native(Native::Error(ErrorKind::Type));
+        let type_error = Value::Native(Native::Error(ErrorKind::Type), RealmId::PRIMARY);
         assert!(matches!(
             native_inherited_property(&intrinsics, &type_error, "isError"),
-            Value::Native(Native::ErrorIsError)
+            Value::Native(Native::ErrorIsError, _)
         ));
         assert!(matches!(
             prototype_of(&type_error),
-            Value::Native(Native::Error(ErrorKind::Error))
+            Value::Native(Native::Error(ErrorKind::Error), _)
         ));
     }
 
     #[test]
     fn regexp_escape_appears_in_constructor_own_property_names() {
         let intrinsics = Intrinsics::default();
-        let constructor = Value::Native(Native::RegExpConstructor);
+        let constructor = Value::Native(Native::RegExpConstructor, RealmId::PRIMARY);
         assert!(own_property_keys(&intrinsics, &constructor).contains(&"escape".to_owned()));
     }
 
@@ -44829,7 +45908,7 @@ mod tests {
         assert_eq!(Value::Undefined.type_of(), "undefined");
         assert_eq!(Value::Number(1.0).type_of(), "number");
         assert_eq!(
-            Value::Native(Native::Error(ErrorKind::Error)).type_of(),
+            Value::Native(Native::Error(ErrorKind::Error), RealmId::PRIMARY).type_of(),
             "function"
         );
         assert_eq!(object(&[]).type_of(), "object");
@@ -44864,6 +45943,7 @@ mod tests {
     fn instanceof_walks_the_chain_by_identity() {
         let parent_prototype = Value::Object(Rc::new(RefCell::new(ObjectData::default())));
         let parent = Rc::new(Closure {
+            realm: RealmId::PRIMARY,
             name: None,
             program: no_program(),
             strictness: Rc::new(Strictness::default()),
@@ -44880,6 +45960,7 @@ mod tests {
         child_prototype_data.set_prototype(parent_prototype);
         let child_prototype = Value::Object(Rc::new(RefCell::new(child_prototype_data)));
         let child = Rc::new(Closure {
+            realm: RealmId::PRIMARY,
             name: None,
             program: no_program(),
             strictness: Rc::new(Strictness::default()),
@@ -44908,6 +45989,7 @@ mod tests {
 
         // A separate constructor with its own prototype must not match, however alike.
         let unrelated = Rc::new(Closure {
+            realm: RealmId::PRIMARY,
             name: None,
             program: no_program(),
             strictness: Rc::new(Strictness::default()),
@@ -44942,7 +46024,10 @@ mod tests {
         let erroneous = object(&[
             ("name", Value::String("E".to_owned())),
             ("message", Value::String("boom".to_owned())),
-            ("toString", Value::Native(Native::ErrorToString)),
+            (
+                "toString",
+                Value::Native(Native::ErrorToString, RealmId::PRIMARY),
+            ),
         ]);
         assert!(has_error_to_string(&erroneous));
         assert_eq!(error_to_string(&erroneous), "E: boom");
@@ -44967,7 +46052,7 @@ mod tests {
 
         let with_hole = vec![
             Value::Number(1.0),
-            Value::Native(Native::Tombstone),
+            Value::Native(Native::Tombstone, RealmId::PRIMARY),
             Value::Number(3.0),
         ];
         assert_eq!(
@@ -45069,7 +46154,10 @@ mod tests {
         let error = object(&[
             ("name", Value::String("E".to_owned())),
             ("message", Value::String("boom".to_owned())),
-            ("toString", Value::Native(Native::ErrorToString)),
+            (
+                "toString",
+                Value::Native(Native::ErrorToString, RealmId::PRIMARY),
+            ),
         ]);
         assert_eq!(describe_thrown(&error), "E: boom");
         assert_eq!(describe_thrown(&Value::Number(42.0)), "42");
@@ -46001,7 +47089,10 @@ mod tests {
             json(&Value::Symbol(Symbol::WellKnown(WellKnown::Iterator))),
             None
         );
-        assert_eq!(json(&Value::Native(Native::ArrayIsArray)), None);
+        assert_eq!(
+            json(&Value::Native(Native::ArrayIsArray, RealmId::PRIMARY)),
+            None
+        );
     }
 
     #[test]
@@ -47076,7 +48167,7 @@ mod tests {
     #[test]
     fn node_buffer_statics_are_enumerable_own_properties() {
         let intrinsics = Intrinsics::default();
-        let buffer = Value::Native(Native::NodeBuffer);
+        let buffer = Value::Native(Native::NodeBuffer, RealmId::PRIMARY);
         let keys = own_property_keys(&intrinsics, &buffer);
         assert!(keys.contains(&"from".to_owned()));
         assert!(keys.contains(&"isBuffer".to_owned()));
