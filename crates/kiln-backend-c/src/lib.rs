@@ -1050,6 +1050,7 @@ method_ids! {
     (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR, 158, Generic),
     (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS, 159, Generic),
     (KILN_C99_METHOD_OBJECT_IS, 185, Generic),
+    (KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING, 196, Generic),
     (KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE, 186, Generic),
     (KILN_C99_METHOD_REFLECT_OWN_KEYS, 187, Generic),
     (KILN_C99_METHOD_REFLECT_GET, 188, Generic),
@@ -1662,6 +1663,7 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_HAS_OWN_PROPERTY),
     emit_method_define!(KILN_C99_METHOD_OBJECT_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING),
     emit_method_define!(KILN_C99_METHOD_OBJECT_VALUE_OF),
     r#"
 /* Map and Set. `size` is a property rather than a method, so it is answered by the read. */
@@ -5123,6 +5125,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_DATE_PARSE: return "parse";
     case KILN_C99_METHOD_HAS_OWN_PROPERTY: return "hasOwnProperty";
     case KILN_C99_METHOD_OBJECT_TO_STRING: return "toString";
+    case KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING: return "toLocaleString";
     case KILN_C99_METHOD_OBJECT_VALUE_OF: return "valueOf";
     case KILN_C99_METHOD_COLLECTION_GET: return "get";
     case KILN_C99_METHOD_COLLECTION_SET: return "set";
@@ -7037,6 +7040,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
     case KILN_C99_BUILTIN_OBJECT_PROTOTYPE:
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             return 0;
+        }
+        if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
+            return KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING;
         }
         if (kiln_c99_same_name(key, key_len, "isPrototypeOf")) {
             return KILN_C99_METHOD_IS_PROTOTYPE_OF;
@@ -9246,6 +9252,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                      ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                                  : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
                                      ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                                 : kiln_c99_same_name(key, key_len, "toLocaleString")
+                                     ? KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING
                                      : kiln_c99_lookup_method(key, key_len,
                                                               KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                                               KILN_C99_METHOD_OBJECT_VALUE_OF);
@@ -16964,10 +16972,36 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING: {
+            /* `Invoke(ToObject(this), "toString")`, not the tag itself: a class that overrides
+             * `toString` for display is the whole reason the method exists. It was not in this
+             * table at all, so `({}).toLocaleString()` was a TypeError about `undefined` -- a
+             * missing name reported as a missing function. */
+            kiln_value method;
+            if (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert undefined or null to object");
+            }
+            status = kiln_c99_get(host, receiver, "toString", 8, &method, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            return kiln_c99_call(host, result, method, receiver, NULL, 0, depth, thrown);
+        }
         case KILN_C99_METHOD_OBJECT_VALUE_OF:
-            /* Returns the receiver unchanged, which is the identity that makes ToPrimitive fall
-             * through to `toString` for a plain object -- and the right answer for a primitive,
-             * which is already what it converts to. */
+            /* The receiver unchanged, which is the identity that makes ToPrimitive fall through
+             * to `toString` for a plain object.
+             *
+             * `ToObject(this)` says a primitive receiver answers with its *box*, and there is no
+             * wrapper object in this backend to hand back. It cannot be refused here either: a
+             * primitive's own `valueOf` -- `"abc".valueOf()` -- is routed to this code rather
+             * than to the string one, so refusing would refuse that too. The only way to reach
+             * `Object.prototype.valueOf` with a primitive is through `.call`, which this backend
+             * refuses on a method receiver already, so the difference is not reachable here. */
+            if (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert undefined or null to object");
+            }
             *result = receiver;
             return KILN_C99_OK;
         case KILN_C99_METHOD_PRIMITIVE_TO_STRING:
