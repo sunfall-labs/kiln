@@ -16860,6 +16860,14 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             if (subject.tag == KILN_VALUE_BUILTIN) {
                 kiln_typed_kind typed_kind;
+                kiln_value store;
+                int stored = kiln_c99_callable_store(subject, &store, 0);
+                if (stored != KILN_C99_OK) return stored;
+                if (store.tag == KILN_VALUE_OBJECT &&
+                    kiln_c99_object_of(store)->prototype.tag != KILN_VALUE_UNDEFINED) {
+                    *result = kiln_c99_object_of(store)->prototype;
+                    return KILN_C99_OK;
+                }
                 if (kiln_c99_typed_prototype_kind(subject.bits, &typed_kind)) {
                     *result = kiln_c99_builtin(KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE);
                     return KILN_C99_OK;
@@ -16883,7 +16891,8 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
             if (subject.tag != KILN_VALUE_OBJECT && subject.tag != KILN_VALUE_FUNCTION &&
-                kiln_c99_exotic_store(subject) == NULL) {
+                kiln_c99_exotic_store(subject) == NULL &&
+                !(subject.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(subject.bits))) {
                 return KILN_C99_CONTROL_ERROR;
             }
             {
@@ -22408,6 +22417,16 @@ static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
         kiln_c99_object_of(store)->prototype = prototype;
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(target.bits)) {
+        /* Prototype tables are real objects in the language even though this backend represents
+         * their immutable method surface by an interned builtin id. A relink is observable and
+         * therefore needs an ordinary mutable store, just like a function's static chain. */
+        kiln_value store;
+        int status = kiln_c99_callable_store(target, &store, 1);
+        if (status != KILN_C99_OK) return status;
+        kiln_c99_object_of(store)->prototype = prototype;
+        return KILN_C99_OK;
+    }
     return KILN_C99_CONTROL_ERROR;
 }
 
@@ -25111,7 +25130,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; int status = kiln_c99_get(host, stack[sp - 1], {symbol}_constant_{name}, {}, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get(host, target, {symbol}_constant_{name}, {}, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len()
             )
             .unwrap();
@@ -26664,6 +26683,41 @@ int main(void) {
     }
 
     #[test]
+    fn executable_intrinsic_prototype_tables_can_be_relinked() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value intrinsic = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+    kiln_value parent;
+    kiln_value observed;
+    kiln_value result;
+    kiln_value arguments[2];
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_new_object(&parent) != KILN_C99_OK) return 1;
+    arguments[0] = intrinsic;
+    arguments[1] = parent;
+    if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF,
+                               kiln_c99_undefined(), arguments, 2, 0, &thrown) != KILN_C99_OK)
+        return 2;
+    if (result.tag != KILN_VALUE_BUILTIN || result.bits != intrinsic.bits) return 3;
+    if (kiln_c99_invoke_method(NULL, &observed, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                               kiln_c99_undefined(), &intrinsic, 1, 0, &thrown) != KILN_C99_OK)
+        return 4;
+    if (observed.tag != KILN_VALUE_OBJECT || observed.bits != parent.bits) return 5;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "intrinsic-prototype-relink");
+        assert!(
+            run.status.success(),
+            "intrinsic prototype relink failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
     fn executable_numeric_operand_order_matches_symbol_conversion_rules() {
         for (operator, expected_value_of_calls) in [
             (BinaryOp::Multiply, 0),
@@ -26936,8 +26990,9 @@ int main(void) {{
     if (kiln_c99_diagnostic_site == NULL || kiln_c99_diagnostic_operation == NULL) return 2;
     if (kiln_c99_diagnostic_instruction != (size_t)1) return 3;
     if (strcmp(kiln_c99_diagnostic_operation, "GetProperty(missing)") != 0) return 4;
-    if (kiln_c99_diagnostic_detail != NULL) return 5;
-    if (kiln_c99_diagnostic_receiver_tag != 0) return 6;
+    if (kiln_c99_diagnostic_detail == NULL ||
+        strcmp(kiln_c99_diagnostic_detail, "GetProperty lookup refused") != 0) return 5;
+    if (kiln_c99_diagnostic_receiver_tag != KILN_VALUE_BUILTIN) return 6;
     return 0;
 }}
 "#,
