@@ -1280,6 +1280,18 @@ impl<H: RealmHostProvider> RealmState<H> {
             // transition but not the transport error. Busy connections still surface every error.
             actions.retain(|action| !matches!(action, HttpStreamAction::Error(_)));
         }
+        // The Close event is the transport's last word for this resource: Hyper's task is done,
+        // every body driver has finished or been abandoned, and nothing will poll the entry
+        // again. Retiring it here keeps the table proportional to open connections rather than
+        // to connections ever accepted, which is what a server measures over a long run.
+        if actions.iter().any(|action| {
+            matches!(
+                action,
+                HttpStreamAction::Event(node_stream::StreamEvent::Close)
+            )
+        }) {
+            self.http_connections.remove(&resource);
+        }
         Some(actions)
     }
 
@@ -4067,11 +4079,19 @@ mod tests {
         let close_request = runtime
             .start_http_connection_close(close_action)
             .expect("authorized HTTP close starts");
-        assert_eq!(
-            next_host_completion(&mut runtime)
-                .expect("close follows the response write")
-                .request,
-            close_request
+        let close_completion =
+            next_host_completion(&mut runtime).expect("close follows the response write");
+        assert_eq!(close_completion.request, close_request);
+        let retired = runtime
+            .complete_http_connection(resource, close_completion)
+            .expect("the close completion belongs to the connection");
+        assert!(retired.iter().any(|action| matches!(
+            action,
+            HttpStreamAction::Event(node_stream::StreamEvent::Close)
+        )));
+        assert!(
+            runtime.poll_http_connection(resource).is_none(),
+            "a connection that reported Close is retired from the table"
         );
         assert!(runtime.host_mut().is_exhausted());
     }
