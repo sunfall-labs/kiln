@@ -16,7 +16,9 @@ use kiln_ir::{EvalOptions, Program, Strictness};
 /// Idempotent, and called at the top of every run rather than once at startup: a conformance run
 /// creates a VM per case and this crate has no other moment that happens exactly once.
 pub(crate) fn capabilities() -> ExecutionCapabilities {
-    ExecutionCapabilities::default().with_source_compiler(compile_source)
+    ExecutionCapabilities::default()
+        .with_source_compiler(compile_source)
+        .with_module_loader(crate::module_loader::load)
 }
 
 fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError> {
