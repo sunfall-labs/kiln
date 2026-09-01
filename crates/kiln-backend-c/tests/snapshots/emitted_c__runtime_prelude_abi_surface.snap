@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 479
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -22,10 +23,14 @@ expression: abi_surface(prelude)
 static const char *kiln_c99_diagnostic_site = NULL;
 static const char *kiln_c99_diagnostic_operation = NULL;
 static size_t kiln_c99_diagnostic_instruction = 0;
+static size_t kiln_c99_diagnostic_depth = 0;
 static uint64_t kiln_c99_diagnostic_method = 0;
 static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
 static int kiln_c99_diagnostic_has_method = 0;
 static const char *kiln_c99_diagnostic_detail = NULL;
+static const char *kiln_c99_diagnostic_function = NULL;
+static size_t kiln_c99_diagnostic_function_len = 0;
+static int kiln_c99_diagnostic_active_depth = 0;
 #define KILN_C99_MAX_CALL_DEPTH 256
 enum kiln_value_tag {
 KILN_VALUE_UNDEFINED = 0,
@@ -148,6 +153,7 @@ KILN_VALUE_COMMONJS_REQUIRE = 26
 #define KILN_C99_BUILTIN_WEAK_SET 67
 #define KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE 68
 #define KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE 69
+#define KILN_C99_BUILTIN_PROMISE_PROTOTYPE 70
 #define KILN_C99_BUILTIN_AGGREGATE_ERROR 70
 #define KILN_C99_BUILTIN_ABORT_CONTROLLER 71
 #define KILN_C99_BUILTIN_ABORT_SIGNAL 72
