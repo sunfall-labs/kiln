@@ -63,8 +63,14 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
     }
 
     Module {
-        // The text these spans index into, which this fixture frontend already has in hand.
-        source: text.into(),
+        // No source, deliberately. This frontend synthesizes a fixed shape and never reads
+        // `text`, so its spans index into nothing and its bytecode is the same whatever the file
+        // says. Handing it the text would imply a relationship that does not exist -- and would
+        // break the early-cutoff tests below, which edit a file expecting the *same* program
+        // back. That expectation is real for this stub and false for a real frontend, where a
+        // comment-only edit now does produce a different `Program`: the bytecode is unchanged but
+        // the text `Function.prototype.toString` answers with is not.
+        source: "".into(),
         source_kind: SourceKind::JavaScript,
         source_goal: SourceGoal::Module,
         strict: false,
