@@ -4014,15 +4014,7 @@ impl TypedKind {
             Self::Uint16 => slot.copy_from_slice(&(to_uint32(value) as u16).to_le_bytes()),
             Self::Int32 => slot.copy_from_slice(&to_int32(value).to_le_bytes()),
             Self::Uint32 => slot.copy_from_slice(&to_uint32(value).to_le_bytes()),
-            Self::Float16 => slot.copy_from_slice(
-                &f32_to_half(
-                    #[expect(clippy::cast_possible_truncation)]
-                    {
-                        value as f32
-                    },
-                )
-                .to_le_bytes(),
-            ),
+            Self::Float16 => slot.copy_from_slice(&f64_to_half(value).to_le_bytes()),
             #[allow(clippy::cast_possible_truncation)]
             Self::Float32 => slot.copy_from_slice(&(value as f32).to_le_bytes()),
             Self::Float64 => slot.copy_from_slice(&value.to_le_bytes()),
@@ -4060,38 +4052,51 @@ fn half_to_f32(bits: u16) -> f32 {
 
 /// A number as the nearest binary16 bit pattern, rounding halves to even.
 ///
-/// Not a truncation of the binary32 pattern: half's subnormals begin where nothing else's do, so
-/// a value too small for a normal half still has bits to keep, and a value too large becomes an
-/// *infinity* rather than the largest finite half. Rounding to even is the mode every other
-/// conversion in the language uses, and the one that does not drift when applied repeatedly.
+/// `ToFloat16`, in one rounding step from the number the language actually holds.
+///
+/// One step, and that is the whole point of not going through `f32`. Two roundings are not one:
+/// `2.980232238769532e-8` is a hair above half of the smallest subnormal half and rounds *up* to
+/// it, but rounding it to binary32 first lands exactly on the halfway point, where round-to-even
+/// then takes it down to zero. Every value between two adjacent binary32 neighbours of a half
+/// boundary has the same problem.
+///
+/// Not a truncation of the binary64 pattern either: half's subnormals begin where nothing else's
+/// do, so a value too small for a normal half still has bits to keep, and a value too large
+/// becomes an *infinity* rather than the largest finite half.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn f32_to_half(value: f32) -> u16 {
+fn f64_to_half(value: f64) -> u16 {
     let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exponent = ((bits >> 23) & 0xff) as i32;
-    let mantissa = bits & 0x7f_ffff;
+    let sign = ((bits >> 48) & 0x8000) as u16;
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
     // NaN keeps a non-empty mantissa so it does not come back as an infinity; which NaN it is
     // is not observable.
-    if exponent == 0xff {
+    if exponent == 0x7ff {
         return sign | 0x7c00 | u16::from(mantissa != 0) << 9;
     }
     // The unbiased exponent, rebiased for half. Above half's range is an infinity, which is what
     // the specification's `ToFloat16` produces rather than the largest finite value.
-    let unbiased = exponent - 127 + 15;
+    let unbiased = exponent - 1023 + 15;
     if unbiased >= 0x1f {
         return sign | 0x7c00;
     }
     if unbiased <= 0 {
-        // Subnormal. The implicit leading one comes back for the shift, and the whole thing is
-        // zero once the shift would take every bit.
-        if unbiased < -10 {
+        // Subnormal, and zero with it. The implicit leading one comes back for the shift; below
+        // this the shift would be wider than the word and the answer is a signed zero anyway.
+        if unbiased < -20 {
             return sign;
         }
-        let with_leading = mantissa | 0x80_0000;
-        let shift = (14 - unbiased) as u32;
+        let with_leading = if exponent == 0 {
+            // A binary64 subnormal is far below half's smallest, so it is already zero above --
+            // but a zero itself arrives here and has no implicit one.
+            mantissa
+        } else {
+            mantissa | 0x0010_0000_0000_0000
+        };
+        let shift = (43 - unbiased) as u32;
         let kept = with_leading >> shift;
-        let remainder = with_leading & ((1 << shift) - 1);
-        let half = 1_u32 << (shift - 1);
+        let remainder = with_leading & ((1_u64 << shift) - 1);
+        let half = 1_u64 << (shift - 1);
         let rounded = if remainder > half || (remainder == half && kept & 1 == 1) {
             kept + 1
         } else {
@@ -4099,10 +4104,10 @@ fn f32_to_half(value: f32) -> u16 {
         };
         return sign | rounded as u16;
     }
-    let kept = mantissa >> 13;
-    let remainder = mantissa & 0x1fff;
-    let mut raw = ((unbiased as u32) << 10) | kept;
-    if remainder > 0x1000 || (remainder == 0x1000 && kept & 1 == 1) {
+    let kept = mantissa >> 42;
+    let remainder = mantissa & 0x3ff_ffff_ffff;
+    let mut raw = ((unbiased as u64) << 10) | kept;
+    if remainder > 0x200_0000_0000 || (remainder == 0x200_0000_0000 && kept & 1 == 1) {
         // A carry out of the mantissa lands in the exponent, which is what makes 65520 round up
         // to an infinity rather than to the largest finite half.
         raw += 1;
@@ -6194,6 +6199,9 @@ pub struct EvalSource<'a> {
     pub source: &'a str,
     pub outer: &'a [kiln_ir::EvalOuter],
     pub strict: bool,
+    /// Whether this eval's `var` and function declarations belong to the global environment
+    /// record, and so become properties of the global object rather than slots of its own frame.
+    pub global_var_scope: bool,
 }
 
 /// Why a run-time compilation produced no program.
@@ -13414,6 +13422,92 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         current,
                     )?;
                     continue;
+                }
+                Instruction::DeclareGlobalBinding { name, configurable } => {
+                    // `CreateGlobalVarBinding`: the property is created only when the global
+                    // object does not already have it, so `var x;` over an existing `x` keeps the
+                    // value it had rather than resetting it to `undefined`.
+                    let name = self.string_constant(*name, current)?;
+                    if let Value::Object(globals) = self.global_object() {
+                        let mut globals = globals.borrow_mut();
+                        if globals.get_own(&name).is_none() {
+                            globals.define_value(
+                                &name,
+                                Value::Undefined,
+                                Attributes {
+                                    writable: true,
+                                    enumerable: true,
+                                    configurable: *configurable,
+                                },
+                            );
+                        }
+                    }
+                }
+                Instruction::DeleteGlobalBinding(name) => {
+                    // The global object environment record's `DeleteBinding`: an ordinary
+                    // `[[Delete]]` on the global object. Absent or removed is `true`, which is
+                    // why `delete neverDeclared` and `x = 1; delete x` both answer `true` and
+                    // the second really does take the property away -- the `ThrowReference`
+                    // fallback above then finds nothing, and a later read of `x` throws.
+                    // Non-configurable is `false`, which is what `delete NaN` is.
+                    let name = self.string_constant(*name, current)?;
+                    let globals = self.global_object();
+                    let key = Value::String(name);
+                    let removed = self.delete(&globals, &key, current)?;
+                    self.stack.push(Value::Boolean(removed));
+                }
+                Instruction::LoadGlobalBindingOrUndefined(name) => {
+                    // What `typeof` reads for a name no scope bound: the global object's property
+                    // if it has one, and `undefined` if it does not -- which is the answer that
+                    // makes `typeof maybeMissing === "undefined"` the feature test it is.
+                    let name = self.string_constant(*name, current)?;
+                    let bound = match self.global_object() {
+                        Value::Object(globals) => globals.borrow().get_own(&name).cloned(),
+                        _ => None,
+                    };
+                    self.stack.push(bound.unwrap_or(Value::Undefined));
+                }
+                Instruction::RequireGlobalBinding(name) => {
+                    // `ResolveBinding` in strict code: an assignment target no scope bound is an
+                    // unresolvable reference unless the global object has it, and an
+                    // unresolvable one is a `ReferenceError` rather than a new global.
+                    let name = self.string_constant(*name, current)?;
+                    let present = match self.global_object() {
+                        Value::Object(globals) => globals.borrow().get_own(&name).is_some(),
+                        _ => false,
+                    };
+                    if !present {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            format!("{name} is not defined"),
+                            current,
+                        )?;
+                        continue;
+                    }
+                }
+                Instruction::StoreGlobalBindingStrict(name) => {
+                    // `SetMutableBinding` with `S` true on the global object environment record:
+                    // an existing property is written, and a name the realm does not have is the
+                    // unresolvable reference strict mode refuses -- decided here rather than at
+                    // compile time, because a global installed a line earlier is resolvable and
+                    // the compiler cannot see it.
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    let globals = self.global_object();
+                    let present = match &globals {
+                        Value::Object(globals) => globals.borrow().get_own(&name).is_some(),
+                        _ => false,
+                    };
+                    if !present {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            format!("{name} is not defined"),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let key = Value::String(name);
+                    self.set_or_throw(&globals, &key, value, current)?;
                 }
                 Instruction::StoreGlobalBinding(name) => {
                     let name = self.string_constant(*name, current)?;
@@ -24697,8 +24791,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         console.set_non_enumerable("warn", Value::Native(Native::ConsoleError));
         console.set_non_enumerable("info", Value::Native(Native::ConsoleLog));
         globals.set_non_enumerable("console", Value::Object(Rc::new(RefCell::new(console))));
-        globals.set_non_enumerable("NaN", Value::Number(f64::NAN));
-        globals.set_non_enumerable("Infinity", Value::Number(f64::INFINITY));
+        // The three value properties of the global object are the only ones the specification
+        // locks on every axis: `{ writable: false, enumerable: false, configurable: false }`.
+        // That is not decoration -- it is what makes `delete NaN` answer `false` and
+        // `globalThis.undefined = 1` a silent no-op in sloppy code and a TypeError in strict.
+        globals.define_value("NaN", Value::Number(f64::NAN), Attributes::NONE);
+        globals.define_value("Infinity", Value::Number(f64::INFINITY), Attributes::NONE);
+        globals.define_value("undefined", Value::Undefined, Attributes::NONE);
         let object = Rc::new(RefCell::new(globals));
         let value = Value::Object(Rc::clone(&object));
         // The global object holds itself under both of its names, which is how a program reaches
@@ -29798,9 +29897,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let allowed = if op.waitable() {
             matches!(view.kind, TypedKind::Int32 | TypedKind::BigInt64)
         } else {
+            // `ValidateIntegerTypedArray` names the types atomics accept, and every float is
+            // outside it -- half included. `Float16Array` was missing here only because the
+            // conformance harness's `typeof Float16Array` guard could not see the constructor
+            // this realm registers, so no test ever reached the check.
             !matches!(
                 view.kind,
-                TypedKind::Uint8Clamped | TypedKind::Float32 | TypedKind::Float64
+                TypedKind::Uint8Clamped
+                    | TypedKind::Float16
+                    | TypedKind::Float32
+                    | TypedKind::Float64
             )
         };
         if !allowed {
@@ -30799,10 +30905,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .collect()
             })
             .unwrap_or_default();
+        // An indirect eval *is* global code, so its declarations always go on the global object.
+        // A direct one goes there only when the call was written at the top level of a script,
+        // which the compiler recorded on the site.
+        let global_var_scope = site.is_none_or(|site| site.global_var_scope);
         let (program, program_strictness) = compile(&EvalSource {
             source,
             outer: &outer,
             strict,
+            global_var_scope,
         })
         .map_err(|error| match error {
             EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
@@ -34698,12 +34809,9 @@ fn call_native(
         // Through the bit pattern rather than through `as f32`: rounding to half and rounding to
         // single are different roundings, and doing the second one twice would answer with a
         // value half cannot hold.
-        Native::MathF16Round => Value::Number(f64::from(half_to_f32(f32_to_half(
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                argument_number(arguments) as f32
-            },
-        )))),
+        Native::MathF16Round => {
+            Value::Number(f64::from(half_to_f32(f64_to_half(argument_number(arguments)))))
+        }
         Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)).leading_zeros())),
         // Both operands are truncated to 32-bit *first*, which is what makes this different from
         // `a * b`: the product is exact in 32 bits and wraps rather than rounding.
@@ -44335,6 +44443,7 @@ mod tests {
                         declaration: kiln_ir::EvalDeclaration::Var,
                     }],
                     strict: false,
+                    global_var_scope: false,
                     argc: Some(1),
                 })),
                 // The eval's completion value is discarded; the caller's binding is the answer.
