@@ -61,11 +61,16 @@ future on paused Tokio time without binding a port or installing a mock executor
 The bridge represents an attached connection as `HttpResourceId` and publishes
 `HttpStreamAction`, not the generic Node stream action. HTTP may select typed read, write, and
 shutdown operations directly, but the action type has no raw `CloseResource` operation. A
-graceful or abort transition instead selects a typed close marker; one runtime-owned adapter is
-the only place that can lower that marker to the unchanged HostOps close operation and register
-its completion. This nominal boundary makes bypassing Hyper's drain/abort lifecycle a Rust type
-error while preserving the provider and C ABIs. The runtime state-machine tests still prove the
-temporal property that queued and in-flight writes complete before a graceful close.
+graceful or abort transition instead mints a non-cloneable `HttpCloseCapability` whose
+constructor is private to the transport module; one runtime-owned adapter consumes that
+capability when it lowers the transition to the unchanged HostOps close operation and registers
+its completion.
+Language adapters can inspect the resource for correlation, but cannot fabricate or duplicate
+authority to close an HTTP-owned resource. This nominal boundary makes bypassing Hyper's
+drain/abort lifecycle a Rust type error while preserving the provider and C ABIs. Compile-fail
+tests pin both the missing raw-close operation and the opaque close capability. Runtime
+state-machine tests still prove the temporal property that queued and in-flight writes complete
+before a graceful close.
 
 ### Migration is event-shaped, not API-shaped
 
