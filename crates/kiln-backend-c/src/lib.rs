@@ -24152,6 +24152,7 @@ fn validate_code(
             | Instruction::DeleteGlobalBinding(name)
             | Instruction::StoreGlobalBindingStrict(name)
             | Instruction::RequireGlobalBinding(name)
+            | Instruction::LoadGlobalBindingOrUndefined(name)
             | Instruction::DeclareGlobalBinding { name, .. }
             | Instruction::CallMethod { name, .. } => match program.constants.get(*name as usize) {
                 Some(Constant::String(_)) => {}
@@ -24421,6 +24422,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::StoreGlobalBinding(_)
         | Instruction::StoreGlobalBindingStrict(_)
         | Instruction::RequireGlobalBinding(_)
+        | Instruction::LoadGlobalBindingOrUndefined(_)
         | Instruction::DeleteGlobalBinding(_)
         | Instruction::DeclareGlobalBinding { .. }
         | Instruction::GetPrivate(_)
@@ -24798,6 +24800,8 @@ fn stack_effect(
         Instruction::DeclareGlobalBinding { .. } => Ok((height, false)),
         // A check, not a value: it either throws or leaves the stack alone.
         Instruction::RequireGlobalBinding(_) => Ok((height, false)),
+        // A read that cannot fail: the value, or `undefined` when the realm has no such name.
+        Instruction::LoadGlobalBindingOrUndefined(_) => Ok((height + 1, false)),
         // A literal produces a fresh object, so it only ever grows the stack.
         Instruction::NewRegExp { .. } => Ok((height + 1, false)),
         Instruction::LoadNewTarget => Ok((height + 1, false)),
@@ -26221,6 +26225,17 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::LoadGlobalBindingOrUndefined(name) => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {}, &found); if (status != KILN_C99_OK) return status; stack[sp++] = found ? existing : kiln_c99_undefined(); }}",
+                text.len()
+            )
+            .unwrap();
+        }
         Instruction::RequireGlobalBinding(name) => {
             let unwind = unwind_or_return(handlers, site);
             let Constant::String(text) = &constants[*name as usize] else {
@@ -27396,6 +27411,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::RequireGlobalBinding(value) => {
                 byte(&mut hash, 78);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::LoadGlobalBindingOrUndefined(value) => {
+                byte(&mut hash, 79);
                 word(&mut hash, u64::from(*value));
             }
             Instruction::DeleteGlobalBinding(value) => {

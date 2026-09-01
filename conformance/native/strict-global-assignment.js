@@ -37,3 +37,10 @@ function refuseUpdate() {
   }
 }
 console.log('refuse update:', refuseUpdate());
+
+// `typeof` of a name no scope bound is asked of the realm rather than folded, because the realm
+// may have gained it since the code was compiled -- which is exactly what the line above did.
+function probe() {
+  return [typeof planted, typeof neverInstalled];
+}
+console.log('typeof:', probe().join(' '));

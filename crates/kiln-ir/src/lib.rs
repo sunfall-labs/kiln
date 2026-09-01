@@ -358,6 +358,16 @@ pub enum Instruction {
     ///
     /// The operand is the name constant. Stack: `[] -> []`.
     RequireGlobalBinding(u32),
+    /// The global object's property `name`, or `undefined` when it has none.
+    ///
+    /// `typeof neverDeclared` is `"undefined"` rather than a throw -- the one place a name may be
+    /// read without existing, and the whole reason feature detection works. That answer cannot be
+    /// folded at compile time, though: `globalThis.x = 1` a line above, a `var` in global code,
+    /// or an `eval` anywhere makes the same name a perfectly ordinary global, and folding said
+    /// `"undefined"` for one that was plainly there.
+    ///
+    /// The operand is the name constant. Stack: `[] -> [value]`.
+    LoadGlobalBindingOrUndefined(u32),
     /// `delete name` in sloppy code, where no scope declared `name`.
     ///
     /// The last environment record an unqualified reference reaches is the global object's, so
@@ -4655,10 +4665,15 @@ impl Compiler {
                     && name != "undefined"
                     && !(name == "arguments" && self.compiling_function());
                 self.with_scoped_load(name, |compiler| {
-                    // The *value* `undefined`, not the string: the `typeof` below is what turns
-                    // it into one, and pushing the answer here would report `"string"`.
+                    // The *value*, not the string: the `typeof` below is what turns it into one,
+                    // and pushing an answer here would report `"string"`. A name no scope bound
+                    // is asked of the global object at run time rather than answered now,
+                    // because the realm may have gained it since this was compiled.
                     if unbound {
-                        compiler.push_constant(Constant::Undefined);
+                        let name = compiler.constant_index(Constant::String(name.to_owned()));
+                        compiler
+                            .code
+                            .push(Instruction::LoadGlobalBindingOrUndefined(name));
                     } else {
                         compiler.load_lexically(name);
                     }
@@ -4680,7 +4695,16 @@ impl Compiler {
                         && !(name == "arguments" && self.compiling_function())
             ) =>
             {
-                self.push_constant(Constant::String("undefined".to_owned()));
+                let ExpressionKind::Identifier(name) = &argument.kind else {
+                    unreachable!("the guard above matched an identifier")
+                };
+                // Asked of the global object rather than folded: `typeof x` where a `var` in
+                // global code, an `eval`, or a plain `globalThis.x = 1` created `x` is not
+                // `"undefined"`, and only the running realm knows.
+                let name = self.constant_index(Constant::String(name.to_owned()));
+                self.code
+                    .push(Instruction::LoadGlobalBindingOrUndefined(name));
+                self.code.push(Instruction::Unary(UnaryOp::TypeOf));
             }
             ExpressionKind::Unary { operator, argument } => {
                 self.expression(argument);
