@@ -15756,9 +15756,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 high = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 1]) : -1;
                 low = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 2]) : -1;
                 if (high < 0 || low < 0) {
-                    /* A `%` not followed by two hex digits is malformed, not a literal percent. */
+                    /* A `%` not followed by two hex digits is malformed, not a literal percent.
+                     * `URIError` rather than `TypeError`: that kind exists for exactly this, and
+                     * it is what a program guarding `decodeURI` on user input catches. */
                     free(built.bytes);
-                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR,
                                                 "URI malformed");
                 }
                 byte = (char)(high * 16 + low);
@@ -15781,7 +15783,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (!kiln_c99_valid_utf8(built.bytes, built.len)) {
                 /* The escapes named bytes that are not a string. */
                 free(built.bytes);
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "URI malformed");
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR, "URI malformed");
             }
             *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
             return KILN_C99_OK;

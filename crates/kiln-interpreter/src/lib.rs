@@ -7750,9 +7750,11 @@ impl ExecutionError {
                 ErrorKind::Range,
                 "Maximum call stack size exceeded".to_owned(),
             ),
-            // The specification has a `URIError` for this; this realm's nearest kind is used
-            // rather than adding one nothing else would ever raise.
-            Self::MalformedUri => (ErrorKind::Type, "URI malformed".to_owned()),
+            // `URIError` is the whole reason that kind exists, and it is the one a program
+            // catches: `decodeURI` on user input is a routine thing to guard, and the guard is
+            // written as `catch (e) { if (e instanceof URIError) ... }`. Reported as a TypeError,
+            // every one of those guards fell through to a rethrow.
+            Self::MalformedUri => (ErrorKind::Uri, "URI malformed".to_owned()),
             Self::FrozenArray => (
                 ErrorKind::Type,
                 "Cannot add property, object is not extensible".to_owned(),
