@@ -1,1 +1,0 @@
-import Fastify from 'fastify'; const app = Fastify(); console.log(typeof app.get);
