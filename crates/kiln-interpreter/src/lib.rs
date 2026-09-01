@@ -835,6 +835,16 @@ pub enum Native {
     /// tell it apart from one that has simply not collected yet.
     WeakRefConstructor,
     WeakRefDeref,
+    /// `ShadowRealm`, and the two methods that are its entire surface.
+    ///
+    /// A `ShadowRealm` is a realm a program can evaluate in but cannot otherwise reach: no object
+    /// crosses the boundary in either direction. What makes that true is not the constructor --
+    /// which only allocates a realm the machine already knows how to make -- but
+    /// [`Value::Wrapped`], the membrane every callable is handed through. The constructor is the
+    /// easy half; the wrapping is the specification's entire point.
+    ShadowRealmConstructor,
+    ShadowRealmEvaluate,
+    ShadowRealmImportValue,
     /// `DisposableStack` and everything it can do.
     ///
     /// A stack is an ordinary object carrying two reserved slots: the disposers it has been
@@ -2107,6 +2117,10 @@ impl Native {
                 Self::PrototypeOf(PrototypeTable::WeakRef),
                 RealmId::PRIMARY,
             )),
+            (Self::ShadowRealmConstructor, "prototype") => Some(Value::Native(
+                Self::PrototypeOf(PrototypeTable::ShadowRealm),
+                RealmId::PRIMARY,
+            )),
             (Self::DisposableStackConstructor, "prototype") => Some(Value::Native(
                 Self::PrototypeOf(PrototypeTable::DisposableStack),
                 RealmId::PRIMARY,
@@ -2178,6 +2192,7 @@ impl Native {
                     PrototypeTable::WeakMap => Self::WeakMapConstructor,
                     PrototypeTable::WeakSet => Self::WeakSetConstructor,
                     PrototypeTable::WeakRef => Self::WeakRefConstructor,
+                    PrototypeTable::ShadowRealm => Self::ShadowRealmConstructor,
                     PrototypeTable::DisposableStack => Self::DisposableStackConstructor,
                     PrototypeTable::AsyncDisposableStack => Self::AsyncDisposableStackConstructor,
                     PrototypeTable::FinalizationRegistry => Self::FinalizationRegistryConstructor,
@@ -2218,6 +2233,7 @@ impl Native {
                     PrototypeTable::WeakMap => collection_property(true, true, name),
                     PrototypeTable::WeakSet => collection_property(false, true, name),
                     PrototypeTable::WeakRef => weak_ref_method(name),
+                    PrototypeTable::ShadowRealm => shadow_realm_method(name),
                     PrototypeTable::DisposableStack => disposable_stack_method(name),
                     PrototypeTable::AsyncDisposableStack => async_disposable_stack_method(name),
                     PrototypeTable::FinalizationRegistry => finalization_registry_method(name),
@@ -2542,6 +2558,18 @@ pub struct ObjectData {
     /// Interpreter-owned Node server/socket/request/response state. Runtime drivers remain
     /// executor- and JavaScript-independent; this slot only ties one JS object to its adapter.
     node_object: Option<NodeObject>,
+    /// `[[ShadowRealm]]`: the realm a `ShadowRealm` instance evaluates in.
+    ///
+    /// An internal slot rather than a property, because a program must not be able to read the
+    /// realm off the instance, write a different one onto it, or see it in
+    /// `Object.getOwnPropertyNames`. It is what `ValidateShadowRealmObject` checks, and its
+    /// absence is what makes `evaluate.call({}, src)` a `TypeError` rather than an evaluation in
+    /// somebody's realm.
+    ///
+    /// On the ordinary object rather than a `Value` variant of its own because a `ShadowRealm`
+    /// instance *is* an ordinary object everywhere else: it takes properties, it is extensible,
+    /// and its `[[Prototype]]` is `ShadowRealm.prototype` like any other instance's.
+    shadow_realm: Option<RealmId>,
 }
 
 #[derive(Clone, Debug)]
@@ -2719,6 +2747,7 @@ impl Default for ObjectData {
             extensible: true,
             frozen: false,
             module_namespace: false,
+            shadow_realm: None,
             prototype: None,
             primitive: None,
             node_events: None,
@@ -3226,6 +3255,12 @@ fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> {
         Value::RegExp(regexp) => &regexp.properties,
         Value::Date(date) => &date.properties,
         Value::Promise(promise) => &promise.properties,
+        // A wrapped function is exotic in exactly one respect -- what calling it does -- and an
+        // ordinary object in every other: it starts out holding the `name` and `length` copied
+        // off its target, and a holder may add to it. Its store is its own and is never the
+        // target's, which is what "wrapped functions share no properties" means: a write here
+        // must not reach across the boundary, and a property the target has must not appear.
+        Value::Wrapped(wrapped) => &wrapped.properties,
         _ => return None,
     })
 }
@@ -3895,6 +3930,12 @@ pub enum PrototypeTable {
     /// deliberately cannot, and a registry holds a value it is *not* weak about at all.
     WeakRef,
     FinalizationRegistry,
+    /// `ShadowRealm.prototype`, holding `evaluate`, `importValue` and a `Symbol.toStringTag`.
+    ///
+    /// It is *not* where the realm lives: the realm is an internal slot on the instance, so a
+    /// method reached off this table with a foreign receiver finds no slot and throws, which is
+    /// what stops `evaluate.call({}, src)` from evaluating anything.
+    ShadowRealm,
     DisposableStack,
     AsyncDisposableStack,
     EventEmitter,
@@ -5283,6 +5324,39 @@ pub struct BoundFunction {
     properties: RefCell<ObjectData>,
 }
 
+/// A wrapped function exotic object: the only thing a `ShadowRealm` ever hands across the
+/// boundary that is not a primitive.
+///
+/// The whole point of the type is that it is *not* `target`. `target` is a callable belonging to
+/// another realm, and handing it out directly would be the silently wrong answer this exists to
+/// prevent: the caller would hold a function whose `[[Prototype]]`, whose properties and whose
+/// identity all came from a realm it is not supposed to be able to reach. So the wrapper lives in
+/// `realm` -- the *caller's* -- carries only the `name` and `length` copied off the target, and
+/// forwards a call by wrapping every argument on the way in and the result on the way out.
+///
+/// `realm` is stored rather than derived from `target` for the same reason: `GetFunctionRealm` of
+/// a wrapped function is the realm that *made the wrapper*, so a `TypeError` it throws is the
+/// caller's `TypeError` and not the target realm's. Deriving it from the target would answer that
+/// question with the one realm the caller must not see.
+#[derive(Debug)]
+pub struct WrappedFunction {
+    /// The callable in the other realm that this forwards to.
+    ///
+    /// Never handed out, never compared against, and never reachable from JavaScript: the only
+    /// thing that reads it is the call path, which enters `target`'s realm to run it.
+    target: Value,
+    /// The realm this wrapper belongs to, which is the caller realm at the moment it was made.
+    realm: RealmId,
+    /// `name` and `length`, copied off the target when the wrapper was made, plus whatever the
+    /// holder puts on it afterwards.
+    ///
+    /// Copied rather than forwarded because the specification copies: `CopyNameAndLength` reads
+    /// both once, at wrap time, so a later write to the target's `name` is not visible here --
+    /// and a property the *holder* adds must not be visible to the target realm either. That is
+    /// what "share no properties" means, and forwarding either direction would break it.
+    properties: RefCell<ObjectData>,
+}
+
 /// A generator's saved execution state.
 ///
 /// A generator is the first thing in this VM whose frame does not run to completion, so its
@@ -5904,6 +5978,14 @@ pub enum Value {
     /// function fixes more arguments and leaves the first receiver in place, which falls out of
     /// nesting these and is awkward any other way.
     Bound(Rc<BoundFunction>),
+    /// A callable that a `ShadowRealm` handed out: see [`WrappedFunction`].
+    ///
+    /// Its own variant rather than a `Bound` with a clever target, because the two differ in the
+    /// one place that matters: a bound function *is* its target with arguments fixed, and passes
+    /// values through untouched, while this one is a membrane -- it re-wraps in both directions
+    /// and refuses anything that is neither a primitive nor callable. Collapsing them would
+    /// silently leak a cross-realm object, which is the whole thing the wrapper exists to stop.
+    Wrapped(Rc<WrappedFunction>),
     /// A module-scoped CommonJS loader bound to already-resolved graph edges.
     CommonJsRequire(Rc<CommonJsRequire>),
     CommonJsResolve(Rc<CommonJsRequire>),
@@ -6142,7 +6224,9 @@ impl Value {
                 | Native::NodeZlib,
                 _,
             ) => "object",
-            Self::Native(_, _) | Self::Callback(_, _) | Self::Bound(_) => "function",
+            Self::Native(_, _) | Self::Callback(_, _) | Self::Bound(_) | Self::Wrapped(_) => {
+                "function"
+            }
             Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             // `typeof` has no trap: a proxy reports whatever its target is, which is what makes
             // a proxied function still read as a function.
@@ -6213,7 +6297,9 @@ impl Value {
                 | Native::NodeZlib,
                 _,
             ) => "object",
-            Self::Native(_, _) | Self::Callback(_, _) | Self::Bound(_) => "function",
+            Self::Native(_, _) | Self::Callback(_, _) | Self::Bound(_) | Self::Wrapped(_) => {
+                "function"
+            }
             Self::CommonJsRequire(_) | Self::CommonJsResolve(_) => "function",
             Self::Proxy(proxy) => proxy.target.type_name(),
             Self::TypedArray(view) => view.kind.name(),
@@ -6262,6 +6348,7 @@ impl Value {
             | Self::Settler(..)
             | Self::Capability(_)
             | Self::Bound(_)
+            | Self::Wrapped(_)
             | Self::CommonJsRequire(_)
             | Self::CommonJsResolve(_) => f64::NAN,
             // Coercion is defined on the target: the traps that could change it are `get` on
@@ -6319,6 +6406,7 @@ impl Value {
             | Self::Settler(..)
             | Self::Capability(_)
             | Self::Bound(_)
+            | Self::Wrapped(_)
             | Self::CommonJsRequire(_)
             | Self::CommonJsResolve(_)
             | Self::Proxy(_)
@@ -6391,7 +6479,7 @@ impl Value {
             },
             // No `n` suffix: that is the literal's spelling, not the value's.
             Self::BigInt(value) => value.to_string(),
-            Self::Settler(..) | Self::Capability(_) | Self::Bound(_) => {
+            Self::Settler(..) | Self::Capability(_) | Self::Bound(_) | Self::Wrapped(_) => {
                 "function () { [native code] }".to_owned()
             }
             Self::CommonJsRequire(_) => "function require() { [native code] }".to_owned(),
@@ -8851,6 +8939,18 @@ enum Job {
     /// on its own -- but the module's *side effects* would then happen before the statement
     /// after the `import()`, and that is.
     Import(Rc<PromiseData>, String),
+    /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
+    ///
+    /// A job for the same reason `Import` is one, and carries the two realms because both
+    /// matter: the module is loaded and evaluated in `evaluated`, and the export it names is
+    /// wrapped into `caller` on the way back.
+    ShadowImport {
+        promise: Rc<PromiseData>,
+        specifier: String,
+        export: String,
+        evaluated: RealmId,
+        caller: RealmId,
+    },
 }
 
 /// A queued job together with the async context it was queued in.
@@ -9147,12 +9247,18 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// It is realm state rather than the loader's, because it holds *values* -- a second
     /// evaluation would produce a second set of objects, and a program that compared the two
     /// namespaces would see them differ.
-    dynamic_modules: std::collections::HashMap<String, Rc<Vec<Value>>>,
+    ///
+    /// Keyed by realm as well as by specifier, because each realm has its own module map. Two
+    /// realms importing one specifier get two independent instances, which is what stops a
+    /// `ShadowRealm` from sharing module state with the realm that made it: a shared map would
+    /// let a write to an export in one realm be read in the other, and no amount of wrapping
+    /// values at the boundary would close that.
+    dynamic_modules: std::collections::HashMap<(RealmId, String), Rc<Vec<Value>>>,
     /// The namespace object handed back for each module, so two imports of one module hand back
     /// the same object rather than two equal ones. A namespace has identity in the
     /// specification, and `import(s).then(a => import(s).then(b => a === b))` is how a program
     /// sees it.
-    dynamic_namespaces: std::collections::HashMap<String, Value>,
+    dynamic_namespaces: std::collections::HashMap<(RealmId, String), Value>,
     limits: ExecutionLimits,
 }
 
@@ -14457,6 +14563,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // happen.
                         Value::Bound(_)
                         | Value::Proxy(_)
+                        // A wrapped function defers for the strongest reason of the four: the
+                        // call has to cross a realm boundary in both directions, and
+                        // `call_value` is where entering the callee's realm happens.
+                        | Value::Wrapped(_)
                         | Value::CommonJsRequire(_)
                         | Value::CommonJsResolve(_) => {
                             let callee = callee.clone();
@@ -15365,6 +15475,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if native == Native::HostCreateRealm {
             return self.create_realm();
         }
+        if native == Native::ShadowRealmEvaluate {
+            return self.shadow_realm_evaluate(receiver, arguments);
+        }
+        if native == Native::ShadowRealmImportValue {
+            return self.shadow_realm_import_value(receiver, arguments, instruction);
+        }
         if native == Native::HostEvalScript {
             let source = match arguments.first() {
                 Some(Value::String(source)) => source.clone(),
@@ -15546,6 +15662,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // the scheduling built-ins are dispatched by the machine -- so the *process aborted*
             // where the language wanted a catchable TypeError.
             Native::WeakRefConstructor
+            | Native::ShadowRealmConstructor
             | Native::FinalizationRegistryConstructor
             | Native::MapConstructor
             | Native::SetConstructor
@@ -21986,6 +22103,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let this_value = bound.this_value.clone();
                 self.call_value(&target, this_value, all, instruction)
             }
+            // Wrapping is the opposite of transparent: the receiver is dropped, every argument
+            // is re-wrapped into the target's realm and the result is re-wrapped back out.
+            Value::Wrapped(wrapped) => {
+                let wrapped = Rc::clone(wrapped);
+                self.call_wrapped(&wrapped, arguments, instruction)
+            }
             Value::CommonJsRequire(require) => {
                 let specifier = arguments
                     .first()
@@ -23422,6 +23545,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Ok(namespace) => self.settle(&promise, &Settled::Fulfilled(namespace)),
                         Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                     }
+                    Ok(())
+                }
+                Job::ShadowImport {
+                    promise,
+                    specifier,
+                    export,
+                    evaluated,
+                    caller,
+                } => {
+                    let settled = self.shadow_import(&specifier, &export, evaluated, caller)?;
+                    self.settle(&promise, &settled);
                     Ok(())
                 }
                 Job::Thenable(promise, resolution, then) => {
@@ -25240,6 +25374,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// which is what ADR 0015 asks for -- one clock, not the host's, and not a second one that
     /// could disagree with it.
     fn create_realm(&mut self) -> Result<Value, ExecutionError> {
+        let realm = self.allocate_realm()?;
+        Ok(self.global_object_in(realm))
+    }
+
+    /// Extend the machine's realm tables by one and answer the new realm's id.
+    ///
+    /// Split out from [`Vm::create_realm`] because a `ShadowRealm` wants exactly this and
+    /// deliberately not the rest of it: `$262.createRealm` hands the *global object* back, which
+    /// is the whole capability it grants, and a shadow realm must hand back nothing at all. The
+    /// realm's global is still built on first use, by the code running inside it.
+    fn allocate_realm(&mut self) -> Result<RealmId, ExecutionError> {
         let realm = RealmId(u32::try_from(self.global_objects.len()).map_err(|_| {
             ExecutionError::TypeErrorMessage {
                 message: "too many realms".to_owned(),
@@ -25248,7 +25393,391 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.global_objects.push(None);
         self.error_prototypes
             .push([const { None }; ErrorKind::ALL.len()]);
-        Ok(self.global_object_in(realm))
+        Ok(realm)
+    }
+
+    /// `new ShadowRealm()`.
+    ///
+    /// The realm it allocates takes the execution's clock, entropy and locale exactly as
+    /// `$262.createRealm`'s does, for the reason ADR 0031 gives: those are capabilities of the
+    /// *execution*, and a realm that quietly reached past them for the host's would undo ADR
+    /// 0015's virtual, epoch-start, UTC clock in the one place nobody would look. A shadow realm
+    /// is a fresh set of intrinsics, not a fresh set of powers.
+    fn construct_shadow_realm(&mut self) -> Result<Value, ExecutionError> {
+        let realm = self.allocate_realm()?;
+        let mut instance = ObjectData::default();
+        instance.shadow_realm = Some(realm);
+        // `ShadowRealm.prototype` *of the realm doing the constructing*, which is what makes
+        // `Reflect.construct(other.ShadowRealm, [])` produce an instance of `other`'s.
+        instance.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::ShadowRealm),
+            self.current_realm,
+        ));
+        Ok(Value::Object(Rc::new(RefCell::new(instance))))
+    }
+
+    /// `ValidateShadowRealmObject`: the realm `receiver` evaluates in, or a `TypeError`.
+    ///
+    /// The check is for the internal slot and nothing else -- not the prototype, not a brand
+    /// property -- which is why `evaluate.call({}, src)` throws instead of evaluating: a plain
+    /// object has no slot, and there is no realm to reach for. A program cannot forge one,
+    /// because nothing it can write puts a slot on an object.
+    fn shadow_realm_of(&self, receiver: &Value) -> Result<RealmId, ExecutionError> {
+        match receiver {
+            Value::Object(object) => object.borrow().shadow_realm,
+            _ => None,
+        }
+        .ok_or_else(|| ExecutionError::TypeErrorMessage {
+            message: "ShadowRealm.prototype method called on an object that is not a ShadowRealm"
+                .to_owned(),
+        })
+    }
+
+    /// `GetWrappedValue(realm, value)`: what may cross the boundary into `realm`, and how.
+    ///
+    /// Three outcomes, and the specification allows no fourth: a primitive crosses as itself, a
+    /// callable crosses as a *new* [`Value::Wrapped`] belonging to `realm`, and anything else
+    /// does not cross at all. That last clause is the entire membrane. An object that got
+    /// through would carry its own realm's prototype chain with it, and every identity question
+    /// the receiving side then asked -- `instanceof`, `getPrototypeOf`, `constructor` -- would
+    /// be answered about a realm it was never meant to reach. Refusing is not a limitation here;
+    /// it is the feature.
+    fn wrap_for_realm(&mut self, value: &Value, realm: RealmId) -> Result<Value, ExecutionError> {
+        if !is_an_object(value) {
+            return Ok(value.clone());
+        }
+        if !is_callable(value) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "cannot pass a non-callable object ({}) across a ShadowRealm boundary",
+                    value.type_name()
+                ),
+            });
+        }
+        self.wrap_callable(value, realm)
+    }
+
+    /// `WrappedFunctionCreate` and `CopyNameAndLength`, which the specification runs together.
+    ///
+    /// `name` and `length` are read off the target *now*, once, and stored on the wrapper as
+    /// ordinary data properties. Copied rather than forwarded for two reasons that pull the same
+    /// way: a later write to the target's `name` must not be visible here, and a read must not
+    /// re-enter the target realm to run a getter. Both reads are the program's own code -- either
+    /// may be an accessor -- so each runs inside the target's realm and a throw from either
+    /// becomes a `TypeError` belonging to `realm`, which is the caller's.
+    fn wrap_callable(&mut self, target: &Value, realm: RealmId) -> Result<Value, ExecutionError> {
+        let target_realm = value_realm(target);
+        let copied = self.entering(target_realm, |vm| {
+            let length = vm.catching(|vm| vm.wrapped_length(target));
+            let name = vm.catching(|vm| vm.wrapped_name(target));
+            Ok((length, name))
+        })?;
+        let (Ok(length), Ok(name)) = copied else {
+            // Deliberately discarding what was thrown: it is an object from the target realm,
+            // and handing it out is exactly the leak this boundary exists to stop. The caller
+            // learns that the copy failed, which is all the specification says it learns.
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "reading name or length of a ShadowRealm function threw".to_owned(),
+            });
+        };
+        let mut properties = ObjectData::default();
+        // `Function.prototype` of the realm the wrapper belongs to -- the caller's -- so a
+        // wrapped function is one of *its* functions in every way a program can check.
+        properties.set_prototype(Value::Native(
+            Native::PrototypeOf(PrototypeTable::Function),
+            realm,
+        ));
+        // `{ writable: false, enumerable: false, configurable: true }` on both, which is the
+        // shape every function's own `name` and `length` have.
+        let own = Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        };
+        properties.define_value("length", Value::Number(length), own);
+        properties.define_value("name", Value::String(name), own);
+        Ok(Value::Wrapped(Rc::new(WrappedFunction {
+            target: target.clone(),
+            realm,
+            properties: RefCell::new(properties),
+        })))
+    }
+
+    /// The `length` a wrapper copies: the target's, when it has a numeric one, and 0 otherwise.
+    ///
+    /// `-Infinity` and every negative value clamp to 0 while `+Infinity` is kept, which is
+    /// `ToIntegerOrInfinity` followed by the specification's own `max(_, 0)`. A target with no
+    /// own `length` at all contributes 0 rather than inheriting `Function.prototype.length`,
+    /// because the specification asks `HasOwnProperty` first.
+    fn wrapped_length(&mut self, target: &Value) -> Result<f64, ExecutionError> {
+        let present = match target {
+            // A proxy answers its own-property questions through a trap, and the trap is the
+            // program's code: reading a store here would say "no `length`" about every proxy
+            // and copy 0 onto the wrapper.
+            Value::Proxy(_) => {
+                let described =
+                    self.proxy_descriptor(target, &Value::String("length".to_owned()), 0)?;
+                !matches!(described, Value::Undefined | Value::Null)
+            }
+            _ => own_attributes(&self.intrinsics, target, "length").is_some(),
+        };
+        if !present {
+            return Ok(0.0);
+        }
+        let length = self.read_property(target, "length", 0)?;
+        let Value::Number(number) = length else {
+            return Ok(0.0);
+        };
+        if number.is_nan() {
+            return Ok(0.0);
+        }
+        Ok(number.trunc().max(0.0))
+    }
+
+    /// `ShadowRealm.prototype.evaluate(sourceText)`.
+    ///
+    /// The caller realm is the running one: `call_value_inner` entered the realm of the
+    /// `evaluate` function itself before this was reached, which is what makes
+    /// `Other.prototype.evaluate.call(realm, src)` report `Other`'s errors and hand back a
+    /// wrapper belonging to `Other` -- the specification's "current Realm Record", arrived at
+    /// without this having to know anything about how it was called.
+    fn shadow_realm_evaluate(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+    ) -> Result<Value, ExecutionError> {
+        let caller = self.current_realm;
+        let evaluated = self.shadow_realm_of(receiver)?;
+        // A string, and not something that *converts* to one: `evaluate(1)` is a TypeError, and
+        // an object with a `toString` is never called. The order matters too -- the receiver is
+        // validated first, so `evaluate.call({}, 1)` reports the receiver.
+        let Some(Value::String(source)) = arguments.first() else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "ShadowRealm.prototype.evaluate expects a string".to_owned(),
+            });
+        };
+        let source = source.clone();
+        let produced = self.shadow_realm_run(&source, evaluated)?;
+        match produced {
+            Ok(value) => self.wrap_for_realm(&value, caller),
+            // Every abrupt completion becomes *this* realm's TypeError, whatever it was: a
+            // thrown primitive, a thrown Error, a ReferenceError from the shadow realm's own
+            // code. The specification collapses them on purpose -- the alternative hands the
+            // caller an object belonging to a realm it must not be able to reach -- so the
+            // information genuinely is discarded rather than merely unreported.
+            Err(()) => Err(ExecutionError::TypeErrorMessage {
+                message: "ShadowRealm evaluation threw".to_owned(),
+            }),
+        }
+    }
+
+    /// `ShadowRealm.prototype.importValue(specifier, exportName)`.
+    ///
+    /// Both arguments are checked *before* the promise exists, and in the specification's order,
+    /// which is observable: the specifier is coerced with `ToString` -- so a `toString` that
+    /// throws throws here -- and `exportName` is then required to already be a string rather
+    /// than coerced at all. A test that hands a throwing `toString` as the export name and
+    /// asserts it was never called is asserting exactly this order.
+    fn shadow_realm_import_value(
+        &mut self,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let caller = self.current_realm;
+        let evaluated = self.shadow_realm_of(receiver)?;
+        let specifier = arguments.first().cloned().unwrap_or(Value::Undefined);
+        let specifier = self.as_string(&specifier, instruction)?;
+        let Some(Value::String(export)) = arguments.get(1) else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "ShadowRealm.prototype.importValue expects a string export name"
+                    .to_owned(),
+            });
+        };
+        let export = export.clone();
+        // Queued rather than run, for the reason `import()` is queued: the specification loads
+        // asynchronously even when the module is already in memory, and running it inline would
+        // move the module's side effects ahead of the statement after the call.
+        let promise = PromiseState::pending();
+        let scheduled = self.scheduled(Job::ShadowImport {
+            promise: Rc::clone(&promise),
+            specifier,
+            export,
+            evaluated,
+            caller,
+        });
+        self.realm.queue_microtask(scheduled);
+        Ok(Value::Promise(promise))
+    }
+
+    /// Load `specifier` in `evaluated`, and answer with its `export` wrapped into `caller`.
+    ///
+    /// Every failure is the same rejection: a specifier that names nothing, a module that will
+    /// not parse, a module that throws while evaluating, an export that is not there, and a
+    /// value that may not cross the boundary. They are collapsed for the reason `evaluate`
+    /// collapses its failures -- the alternative rejects with an object belonging to a realm the
+    /// caller must not reach -- so the rejection is always a `TypeError` built in `caller`.
+    fn shadow_import(
+        &mut self,
+        specifier: &str,
+        export: &str,
+        evaluated: RealmId,
+        caller: RealmId,
+    ) -> Result<Settled, ExecutionError> {
+        let imported = self.entering(evaluated, |vm| vm.import_module(specifier));
+        let namespace = match imported {
+            Ok(Ok(namespace)) => namespace,
+            // Both the module's own failure and any error `entering` turned into a thrown value.
+            Ok(Err(_)) | Err(ExecutionError::ThrownAcrossNative) => {
+                self.caught = None;
+                return Ok(self.shadow_import_rejection(caller));
+            }
+            Err(error) => return Err(error),
+        };
+        // The export is read in the realm the module belongs to, and a missing one is not
+        // `undefined` here: the specification checks `HasProperty` on the namespace and rejects
+        // when it is absent, which is what keeps a typo from resolving with nothing.
+        // A namespace is an ordinary property store with no chain to walk, so this is a plain
+        // lookup rather than a trapped operation: nothing here can run the program's code.
+        if !has_property(
+            &self.intrinsics,
+            &namespace,
+            &Value::String(export.to_owned()),
+        ) {
+            return Ok(self.shadow_import_rejection(caller));
+        }
+        let value = match self.entering(evaluated, |vm| vm.read_property(&namespace, export, 0)) {
+            Ok(value) => value,
+            Err(ExecutionError::ThrownAcrossNative) => {
+                self.caught = None;
+                return Ok(self.shadow_import_rejection(caller));
+            }
+            Err(error) => return Err(error),
+        };
+        match self.entering(caller, |vm| vm.wrap_for_realm(&value, caller)) {
+            Ok(wrapped) => Ok(Settled::Fulfilled(wrapped)),
+            Err(ExecutionError::ThrownAcrossNative) => {
+                self.caught = None;
+                Ok(self.shadow_import_rejection(caller))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The one rejection `importValue` has: a `TypeError` belonging to the caller's realm.
+    fn shadow_import_rejection(&mut self, caller: RealmId) -> Settled {
+        let thrown = self.entering(caller, |vm| {
+            Ok(vm.construct_error(
+                ErrorKind::Type,
+                &[Value::String("ShadowRealm import failed".to_owned())],
+            ))
+        });
+        // `entering` cannot fail here: the body is infallible.
+        Settled::Rejected(thrown.unwrap_or(Value::Undefined))
+    }
+
+    /// Compile and run `source` as a Script in `realm`, keeping the two failures apart.
+    ///
+    /// `Err(ExecutionError)` is a compile failure or the machine giving up; `Ok(Err(()))` is the
+    /// program's own abrupt completion. They are separated because `ShadowRealm` reports them
+    /// differently and the difference is observable: source that does not parse throws a
+    /// `SyntaxError`, while source that parses and then throws -- including source whose *own*
+    /// nested `eval` fails to parse -- throws a `TypeError`. Splitting the compile from the run,
+    /// rather than inspecting the error afterwards, is what draws that line in the right place:
+    /// a nested `eval`'s `SyntaxError` has already become a thrown value by the time it reaches
+    /// the handler installed here, and so cannot be mistaken for this compile's.
+    fn shadow_realm_run(
+        &mut self,
+        source: &str,
+        realm: RealmId,
+    ) -> Result<Result<Value, ()>, ExecutionError> {
+        if self.native_depth >= self.limits.max_native_depth {
+            return Err(ExecutionError::CallDepthExceeded {
+                limit: self.limits.max_native_depth,
+            });
+        }
+        let caller = std::mem::replace(&mut self.current_realm, realm);
+        self.native_depth += 1;
+        let depth = self.frames.len();
+        // Installed before the compile so that its `frame_depth` is the depth to unwind *to*,
+        // which is this one and not the eval frame's. Nothing can throw into it until the
+        // compile has succeeded and a frame exists.
+        let installed = self.handlers.len();
+        self.handlers.push(Handler {
+            target: HOST_HANDLER,
+            frame_depth: depth,
+            stack_height: self.stack.len(),
+            native_depth: self.native_depth,
+        });
+        let outcome = match self.enter_eval(source, None, true) {
+            Ok(()) => match self.run_frames(depth) {
+                Ok(result) => Ok(Ok(result.value)),
+                Err(ExecutionError::CaughtByHost | ExecutionError::ThrownAcrossNative) => {
+                    // Dropped rather than returned: it is the shadow realm's object.
+                    self.caught = None;
+                    Ok(Err(()))
+                }
+                // Anything the language can throw is the program's own outcome; a limit this
+                // realm imposes is not, and stays a refusal rather than becoming a TypeError
+                // that would read as the program's fault.
+                Err(error) if error.as_javascript_error().is_some() => {
+                    self.caught = None;
+                    Ok(Err(()))
+                }
+                Err(error) => Err(error),
+            },
+            Err(error) => Err(error),
+        };
+        self.handlers.truncate(installed);
+        self.native_depth -= 1;
+        self.current_realm = caller;
+        outcome
+    }
+
+    /// Call a [`Value::Wrapped`], which is the boundary crossing in both directions at once.
+    ///
+    /// Arguments are wrapped *into* the target's realm and the result back *out* into the
+    /// wrapper's, each by the same [`Vm::wrap_for_realm`] rule, so a non-callable object is
+    /// refused whichever way it was travelling. The receiver is dropped: a wrapped function is
+    /// always called with `undefined` as `this`, because a `this` would be one more object
+    /// crossing the boundary and the specification does not let it.
+    fn call_wrapped(
+        &mut self,
+        wrapped: &Rc<WrappedFunction>,
+        arguments: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let target_realm = value_realm(&wrapped.target);
+        let mut crossed = Vec::with_capacity(arguments.len());
+        for argument in &arguments {
+            crossed.push(self.wrap_for_realm(argument, target_realm)?);
+        }
+        let target = wrapped.target.clone();
+        let produced =
+            self.catching(|vm| vm.call_value(&target, Value::Undefined, crossed, instruction));
+        match produced {
+            // Wrapped on the way out, in the wrapper's own realm, so a callable result comes
+            // back as one more wrapper the caller may hold and a plain object does not come
+            // back at all.
+            Ok(value) => self.wrap_for_realm(&value, wrapped.realm),
+            // The target realm's thrown value, discarded for the reason `evaluate` discards
+            // one: it is an object the caller must not reach.
+            Err(_) => Err(ExecutionError::TypeErrorMessage {
+                message: "a ShadowRealm wrapped function threw".to_owned(),
+            }),
+        }
+    }
+
+    /// The `name` a wrapper copies: the target's when it is a string, and `""` otherwise.
+    ///
+    /// Unlike `length` this one is a plain `Get`, prototype chain included -- the specification
+    /// asks `HasOwnProperty` for `length` and not for `name` -- and a non-string of any kind,
+    /// including a symbol, becomes the empty string rather than being coerced.
+    fn wrapped_name(&mut self, target: &Value) -> Result<String, ExecutionError> {
+        match self.read_property(target, "name", 0)? {
+            Value::String(text) => Ok(text),
+            _ => Ok(String::new()),
+        }
     }
 
     /// `realm`'s global object, built on first use and shared from then on.
@@ -25286,6 +25815,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         globals.set_non_enumerable("WeakMap", Value::Native(Native::WeakMapConstructor, realm));
         globals.set_non_enumerable("WeakSet", Value::Native(Native::WeakSetConstructor, realm));
         globals.set_non_enumerable("WeakRef", Value::Native(Native::WeakRefConstructor, realm));
+        globals.set_non_enumerable(
+            "ShadowRealm",
+            Value::Native(Native::ShadowRealmConstructor, realm),
+        );
         globals.set_non_enumerable(
             "DisposableStack",
             Value::Native(Native::DisposableStackConstructor, realm),
@@ -25814,6 +26347,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.construct_collection(parent, arguments, current)?
             }
             Native::WeakRefConstructor => self.construct_weak_ref(arguments, current)?,
+            Native::ShadowRealmConstructor => self.construct_shadow_realm()?,
             Native::DisposableStackConstructor => new_disposable_stack(Disposal::Sync),
             Native::AsyncDisposableStackConstructor => new_disposable_stack(Disposal::Async),
             Native::FinalizationRegistryConstructor => {
@@ -26222,6 +26756,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Value::Native(Native::WeakRefConstructor, _) => {
                 let built = self.construct_weak_ref(&arguments, current)?;
+                self.stack.push(built);
+            }
+            Value::Native(Native::ShadowRealmConstructor, _) => {
+                let built = self.construct_shadow_realm()?;
                 self.stack.push(built);
             }
             Value::Native(Native::FinalizationRegistryConstructor, _) => {
@@ -29208,6 +29746,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .get(name)
                 .or_else(|| identity_property(target, name))
                 .unwrap_or_else(|| function_property(&self.intrinsics, name, value_realm(target))),
+            // A wrapped function answers from its own store first -- which is where the `name`
+            // and `length` copied off the target live -- and from `Function.prototype`
+            // otherwise, so `call`, `apply`, `bind` and `toString` all work on one. No
+            // `identity_property`: unlike every other callable here, this one's `name` and
+            // `length` are real stored properties rather than derived ones, and deriving them
+            // would answer about the wrapper instead of about what it wraps.
+            Value::Wrapped(wrapped) => {
+                wrapped.properties.borrow().get(name).unwrap_or_else(|| {
+                    function_property(&self.intrinsics, name, value_realm(target))
+                })
+            }
             Value::CommonJsRequire(require) if name == "resolve" => {
                 Value::CommonJsResolve(Rc::clone(require))
             }
@@ -29821,9 +30370,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             // A bound function ignores the receiver the call site offers, whichever way it is
             // reached, so both go through one path.
-            Value::Settler(..) | Value::Capability(..) | Value::Bound(_) => self
-                .call_value(&method, receiver, arguments, instruction)
-                .map(Some),
+            // A wrapped function ignores it too, and for a stronger reason: a receiver would be
+            // one more object crossing the boundary, which the wrapping does not permit.
+            Value::Settler(..) | Value::Capability(..) | Value::Bound(_) | Value::Wrapped(_) => {
+                self.call_value(&method, receiver, arguments, instruction)
+                    .map(Some)
+            }
             Value::Function(closure) => {
                 // The receiver becomes `this`. Pushing a placeholder plus the arguments is how
                 // the shared call path receives them; it pops the placeholder as the callee.
@@ -31881,13 +32433,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         };
 
-        if let Some(namespace) = self.dynamic_namespaces.get(&plan.key) {
+        let realm = self.current_realm;
+        if let Some(namespace) = self.dynamic_namespaces.get(&(realm, plan.key.clone())) {
             return Ok(Ok(namespace.clone()));
         }
 
         let mut evaluated: Vec<Rc<Vec<Value>>> = Vec::with_capacity(plan.modules.len());
         for planned in &plan.modules {
-            if let Some(cached) = self.dynamic_modules.get(&planned.key) {
+            if let Some(cached) = self.dynamic_modules.get(&(realm, planned.key.clone())) {
                 evaluated.push(Rc::clone(cached));
                 continue;
             }
@@ -31919,7 +32472,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     let exported = Rc::new(exported.items.borrow().clone());
                     self.dynamic_modules
-                        .insert(planned.key.clone(), Rc::clone(&exported));
+                        .insert((realm, planned.key.clone()), Rc::clone(&exported));
                     evaluated.push(exported);
                 }
                 // A module that throws while evaluating rejects the import. It is deliberately
@@ -31935,7 +32488,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             entries.push((name.clone(), Self::planned_value(reference, &evaluated)?));
         }
         let namespace = namespace_object(entries);
-        self.dynamic_namespaces.insert(plan.key, namespace.clone());
+        self.dynamic_namespaces
+            .insert((realm, plan.key), namespace.clone());
         Ok(Ok(namespace))
     }
 
@@ -34042,7 +34596,7 @@ fn json_stringify(
             None => "null".to_owned(),
         }),
         // A function has no JSON spelling, and a settler is one.
-        Value::Settler(..) | Value::Capability(..) | Value::Bound(_) => None,
+        Value::Settler(..) | Value::Capability(..) | Value::Bound(_) | Value::Wrapped(_) => None,
         // Serialising a proxy means reading its properties, which means running its traps, which
         // this pure walk cannot do. Refused rather than silently serialising the target.
         Value::Proxy(_) => return Err(ExecutionError::ProxyNotSerialisable),
@@ -34166,6 +34720,17 @@ fn call_native(
                 message: "a $262 host facility reached the machine-free dispatch path".to_owned(),
             });
         }
+        // Every one of the three needs the machine for the same reason `$262.createRealm` does:
+        // making a realm extends the machine's realm tables, and `evaluate` compiles and runs
+        // source in one. Routed through `Vm::native_dispatch` before they can reach here;
+        // arriving here would mean the two dispatch paths disagree.
+        Native::ShadowRealmConstructor
+        | Native::ShadowRealmEvaluate
+        | Native::ShadowRealmImportValue => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "ShadowRealm reached the machine-free dispatch path".to_owned(),
+            });
+        }
         Native::Temporal(_) => {
             return Err(ExecutionError::TemporalFailure {
                 kind: ErrorKind::Type,
@@ -34261,6 +34826,7 @@ fn call_native(
             | Value::Native(_, _)
             | Value::Callback(_, _)
             | Value::Bound(_)
+            | Value::Wrapped(_)
             // An array's elements, its `length` and its property store are all own properties,
             // and `has_property` is the wrong question for any of them: it follows the chain,
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
@@ -34347,7 +34913,8 @@ fn call_native(
                 | Value::Native(_, _)
                 | Value::Callback(_, _)
                 | Value::Settler(..) | Value::Capability(..)
-                | Value::Bound(_) => "Function",
+                | Value::Bound(_)
+                | Value::Wrapped(_) => "Function",
                 _ => "Object",
             }
         )),
@@ -36633,6 +37200,7 @@ fn call_native(
                 | Value::Native(_, _)
                 | Value::Callback(_, _)
                 | Value::Bound(_)
+                | Value::Wrapped(_)
                 | Value::Promise(_)
                 | Value::Date(_)
                 | Value::RegExp(_)
@@ -37114,6 +37682,11 @@ fn value_realm(value: &Value) -> RealmId {
         // A bound function and a proxy both answer for what they wrap, which is what
         // `GetFunctionRealm` says: neither has a realm of its own to report.
         Value::Bound(bound) => value_realm(&bound.target),
+        // A wrapped function does *not*, and this is the line that keeps the boundary honest.
+        // It has a realm of its own -- the caller's -- and answering with its target's would
+        // send every `TypeError` it raises back into the realm the caller must not see, and
+        // hand it that realm's `Error.prototype` to inspect.
+        Value::Wrapped(wrapped) => wrapped.realm,
         Value::Proxy(proxy) => value_realm(&proxy.target),
         _ => RealmId::PRIMARY,
     }
@@ -37194,6 +37767,10 @@ fn prototype_of(value: &Value) -> Value {
         // ask what they inherit from, and answering null said they were not functions at all.
         Value::Native(_, _)
         | Value::Bound(_)
+        // A wrapped function's `realm` is its own -- the caller's -- so this reads
+        // `Function.prototype` *of the realm that made the wrapper*, which is precisely what
+        // `WrappedFunctionCreate` sets and what a program checks with `getPrototypeOf`.
+        | Value::Wrapped(_)
         | Value::Callback(_, _)
         | Value::Function(_)
         | Value::Settler(..)
@@ -37826,6 +38403,22 @@ fn weak_ref_method(name: &str) -> Value {
     match name {
         "deref" => Value::Native(Native::WeakRefDeref, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("WeakRef".to_owned()),
+        _ => Value::Undefined,
+    }
+}
+
+/// `ShadowRealm.prototype`'s two methods, which are the whole of what a shadow realm can do.
+///
+/// Deliberately two and no more: there is no way to reach the realm's global, no way to hand it
+/// an object, and no way to get one back. Every addition here would be a new hole in the
+/// membrane, so the shortness of this list is a property worth keeping.
+fn shadow_realm_method(name: &str) -> Value {
+    match name {
+        "evaluate" => Value::Native(Native::ShadowRealmEvaluate, RealmId::PRIMARY),
+        "importValue" => Value::Native(Native::ShadowRealmImportValue, RealmId::PRIMARY),
+        key if key == WellKnown::ToStringTag.property_key() => {
+            Value::String("ShadowRealm".to_owned())
+        }
         _ => Value::Undefined,
     }
 }
@@ -39482,6 +40075,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         // Node prints the target's name with a "bound " prefix; without a name to prefix, the
         // fact that it is bound is the whole of what there is to say.
         Value::Bound(_) => "[Function: bound]".to_owned(),
+        Value::Wrapped(_) => "[Function: wrapped]".to_owned(),
         Value::CommonJsRequire(_) => "[Function: require]".to_owned(),
         Value::CommonJsResolve(_) => "[Function: resolve]".to_owned(),
         // Node shows what the traps produce; this shows the target, and says so, rather than
@@ -40603,6 +41197,7 @@ fn is_callable(value: &Value) -> bool {
             | Value::Settler(..)
             | Value::Capability(..)
             | Value::Bound(_)
+            | Value::Wrapped(_)
             | Value::CommonJsRequire(_)
             | Value::CommonJsResolve(_)
             | Value::Proxy(_)
@@ -42359,6 +42954,9 @@ const fn native_length(native: Native) -> Option<f64> {
         N::Math | N::Json | N::Reflect | N::Performance => return None,
         N::HostCreateRealm => 0.0,
         N::HostEvalScript => 1.0,
+        N::ShadowRealmConstructor => 0.0,
+        N::ShadowRealmEvaluate => 1.0,
+        N::ShadowRealmImportValue => 2.0,
         // `Intl`'s arities come from its own table: the namespace and the six prototypes are
         // not callable, and the constructors do not all take the same number of arguments.
         N::Intl(op) => match intl::length(op) {
@@ -43104,6 +43702,7 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         ],
         PrototypeTable::WeakSet => &["add", "has", "delete"],
         PrototypeTable::WeakRef => &["deref"],
+        PrototypeTable::ShadowRealm => &["evaluate", "importValue"],
         PrototypeTable::DisposableStack => &["use", "adopt", "defer", "move", "dispose"],
         PrototypeTable::AsyncDisposableStack => &["use", "adopt", "defer", "move", "disposeAsync"],
         PrototypeTable::FinalizationRegistry => &["register", "unregister"],
@@ -44005,6 +44604,9 @@ fn native_js_name(native: &Native) -> String {
         // The payload is the whole of the name; the derivation would spell this
         // `typedArrayGeneric`.
         Native::TypedArrayGeneric(method) => (*method).to_owned(),
+        Native::ShadowRealmConstructor => "ShadowRealm".to_owned(),
+        Native::ShadowRealmEvaluate => "evaluate".to_owned(),
+        Native::ShadowRealmImportValue => "importValue".to_owned(),
         Native::ThrowTypeError => String::new(),
         Native::ProtoGetter => "get __proto__".to_owned(),
         Native::ProtoSetter => "set __proto__".to_owned(),
@@ -44261,6 +44863,7 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         Value::DataView(a) => matches!(right, Value::DataView(b) if Rc::ptr_eq(a, b)),
         Value::Proxy(a) => matches!(right, Value::Proxy(b) if Rc::ptr_eq(a, b)),
         Value::Bound(a) => matches!(right, Value::Bound(b) if Rc::ptr_eq(a, b)),
+        Value::Wrapped(a) => matches!(right, Value::Wrapped(b) if Rc::ptr_eq(a, b)),
         // `require` and `require.resolve` share lookup state but are distinct function objects.
         Value::CommonJsRequire(a) => {
             matches!(right, Value::CommonJsRequire(b) if Rc::ptr_eq(a, b))
