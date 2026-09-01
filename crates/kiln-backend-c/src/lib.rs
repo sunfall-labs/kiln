@@ -2140,6 +2140,7 @@ typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
 extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
+extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
 
 /* A closure is its body plus the boxes it captured.
  *
@@ -3595,6 +3596,13 @@ static kiln_object *kiln_c99_object_of(kiln_value value) {
     return (kiln_object *)(uintptr_t)value.bits;
 }
 
+static void kiln_c99_drop_object(void *pointer) {
+    kiln_object *object = (kiln_object *)pointer;
+    if (object == NULL) return;
+    free(object->properties);
+    free(object);
+}
+
 static kiln_array *kiln_c99_array_of(kiln_value value) {
     return (kiln_array *)(uintptr_t)value.bits;
 }
@@ -3618,6 +3626,13 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->prototype = kiln_c99_undefined();
     object->frozen = 0;
     object->module_namespace = 0;
+    {
+        int owned = kiln_realm_own_object(object, kiln_c99_drop_object);
+        if (owned != KILN_C99_OK) {
+            kiln_c99_drop_object(object);
+            return owned;
+        }
+    }
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -8444,13 +8459,10 @@ static kiln_method_store *kiln_c99_fixture_method_stores;
 
 static void kiln_c99_drop_callable_store(void *pointer) {
     kiln_method_store *entry = (kiln_method_store *)pointer;
-    kiln_object *properties;
     if (entry == NULL) return;
-    properties = kiln_c99_object_of(entry->properties);
-    if (properties != NULL) {
-        free(properties->properties);
-        free(properties);
-    }
+    /* `entry->properties` is independently registered in the realm object arena. The store owns
+     * only this routing record; freeing the object here as well would make teardown order part of
+     * correctness and double-free it when the object arena runs. */
     free(entry);
 }
 
@@ -28384,6 +28396,15 @@ static size_t kiln_test_callable_store_count = 0;
 static void *kiln_test_owned_pointers[4096];
 static kiln_drop_opaque_fn kiln_test_owned_drops[4096];
 static size_t kiln_test_owned_count = 0;
+static int kiln_test_implicit_realm = 0;
+
+static void kiln_test_drop_owned(void) {
+    size_t index;
+    for (index = kiln_test_owned_count; index != 0; --index) {
+        kiln_test_owned_drops[index - 1](kiln_test_owned_pointers[index - 1]);
+    }
+    kiln_test_owned_count = 0;
+}
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -28406,12 +28427,8 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
     return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
 }
 int kiln_realm_destroy(uint64_t realm) {
-    size_t index;
     if (realm != 1 || kiln_test_realm_active) return KILN_C99_INVALID_ARGUMENT;
-    for (index = kiln_test_owned_count; index != 0; --index) {
-        kiln_test_owned_drops[index - 1](kiln_test_owned_pointers[index - 1]);
-    }
-    kiln_test_owned_count = 0;
+    kiln_test_drop_owned();
     return KILN_C99_OK;
 }
 /* Here rather than beside the other provider stubs, because its argument is a struct the runtime
@@ -28486,14 +28503,21 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     return KILN_C99_OK;
 }
 int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer) {
-    if (!kiln_test_realm_active || pointer == NULL || drop_pointer == NULL) {
+    if (pointer == NULL || drop_pointer == NULL) {
         return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (!kiln_test_realm_active && !kiln_test_implicit_realm) {
+        if (atexit(kiln_test_drop_owned) != 0) return KILN_C99_OUT_OF_MEMORY;
+        kiln_test_implicit_realm = 1;
     }
     if (kiln_test_owned_count == 4096) return KILN_C99_OUT_OF_MEMORY;
     kiln_test_owned_pointers[kiln_test_owned_count] = pointer;
     kiln_test_owned_drops[kiln_test_owned_count] = drop_pointer;
     ++kiln_test_owned_count;
     return KILN_C99_OK;
+}
+int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer) {
+    return kiln_realm_own_closure(pointer, drop_pointer);
 }
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
