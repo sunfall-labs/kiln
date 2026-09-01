@@ -941,7 +941,17 @@ mod realm {
                     // SAFETY: this is the current realm runtime; this poll never nests block_on.
                     unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
                 } else {
-                    realm.runtime.borrow_mut().poll_http_connection(resource)
+                    // Pump this connection's already-selected bytes without re-driving the
+                    // scheduler. `checkpoint_http` drives it once before this loop, and
+                    // `poll_http_tasks_after_wake` drives it again after every iteration that
+                    // did anything, so a drive here only repeats one of those -- once per open
+                    // connection, after every microtask. That is where the server's cost went
+                    // quadratic: idle connections each paid a full scheduler drive to report
+                    // that they had nothing to say.
+                    realm
+                        .runtime
+                        .borrow_mut()
+                        .poll_http_connection_in_context(resource)
                 };
                 let Some(actions) = actions else { break };
                 let had_actions = !actions.is_empty();
@@ -2673,7 +2683,8 @@ mod realm {
             assert_eq!(attempt.request, 0);
             assert_eq!(attempt.observation.drops, 1);
             assert!(
-                realm(handle).is_some_and(|registered| registered.continuations.borrow().is_empty()),
+                realm(handle)
+                    .is_some_and(|registered| registered.continuations.borrow().is_empty()),
                 "realm remains registered through the test, with no continuations left"
             );
             assert_eq!(kiln_realm_destroy(handle), 0);
