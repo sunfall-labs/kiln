@@ -1281,6 +1281,8 @@ static uint64_t kiln_c99_diagnostic_method = 0;
 static uint64_t kiln_c99_diagnostic_receiver_tag = 0;
 static int kiln_c99_diagnostic_has_method = 0;
 static const char *kiln_c99_diagnostic_detail = NULL;
+static const char *kiln_c99_diagnostic_function = NULL;
+static size_t kiln_c99_diagnostic_function_len = 0;
 static int kiln_c99_diagnostic_active_depth = 0;
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
@@ -2171,6 +2173,10 @@ typedef struct kiln_closure {
      * prints `[Function (anonymous)]` -- a distinct answer, not a missing one. */
     const char *name;
     size_t name_len;
+    /* Immutable source ownership, emitted beside the body pointer. Borrowed from generated
+     * static storage just like `name`, so diagnostics and future stack traces need no map,
+     * allocation, or ambient current-module state. */
+    const char *source;
     /* Declared parameters, which is what `f.length` answers and what `bind` subtracts from.
      * Counted where the body was compiled, because that is the only place it is known. */
     uint32_t arity;
@@ -6992,7 +6998,8 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-                                 size_t name_len, uint32_t proto, uint32_t arity, int generator,
+                                 size_t name_len, const char *source, uint32_t proto,
+                                 uint32_t arity, int generator,
                                  int asynchronous,
                                  int async_generator, int arrow, kiln_value receiver,
                                  kiln_value new_target, uint32_t local_count,
@@ -7042,6 +7049,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->properties = kiln_c99_undefined();
     closure->name = name;
     closure->name_len = name_len;
+    closure->source = source;
     closure->arity = arity;
     closure->prologue_resume = prologue_resume;
     closure->proto = proto;
@@ -7403,6 +7411,16 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
         status = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
                                thrown, NULL);
+        if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
+            kiln_c99_diagnostic_site = closure->source;
+            kiln_c99_diagnostic_operation = "FunctionBody";
+            kiln_c99_diagnostic_function = closure->name;
+            kiln_c99_diagnostic_function_len = closure->name_len;
+            kiln_c99_diagnostic_depth = (size_t)(depth + 1);
+            kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+            kiln_c99_diagnostic_detail =
+                "generated function body refused before an instruction owned the failure";
+        }
         kiln_c99_new_target = saved;
         kiln_c99_frame_args = saved_args;
         kiln_c99_frame_argc = saved_argc;
@@ -7569,6 +7587,11 @@ static kiln_value kiln_c99_control_diagnostic(void) {
     if (kiln_c99_diagnostic_detail != NULL) {
         (void)kiln_c99_text_append_c(&text, " detail=");
         (void)kiln_c99_text_append_c(&text, kiln_c99_diagnostic_detail);
+    }
+    if (kiln_c99_diagnostic_function != NULL) {
+        (void)kiln_c99_text_append_c(&text, " function=");
+        (void)kiln_c99_text_append(&text, kiln_c99_diagnostic_function,
+                                   kiln_c99_diagnostic_function_len);
     }
     if (kiln_c99_diagnostic_has_method) {
         KILN_DIAGNOSTIC_DECIMAL(kiln_c99_diagnostic_method);
@@ -24541,6 +24564,8 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     kiln_c99_diagnostic_receiver_tag = 0;
     kiln_c99_diagnostic_has_method = 0;
     kiln_c99_diagnostic_detail = NULL;
+    kiln_c99_diagnostic_function = NULL;
+    kiln_c99_diagnostic_function_len = 0;
     context.host = host;
     context.result = result;
     context.imports = imports;
@@ -25080,7 +25105,7 @@ fn emit_instruction(
     // provenance and every caller preserves it while unwinding.
     if matches!(site, ReturnSite::Entry { exports: None, .. }) {
         output.push_str(
-            "    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL;\n",
+            "    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;\n",
         );
     }
     let before = output.len();
@@ -25309,11 +25334,12 @@ fn emit_instruction(
             } else {
                 "kiln_c99_undefined()"
             };
+            let source = c_string(diagnostic_site);
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -25333,7 +25359,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -25345,7 +25371,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_THROWN) {{ kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -26932,7 +26958,7 @@ int main(void) {{
     kiln_value inherited;
     kiln_value args[2];
     kiln_value thrown = kiln_c99_undefined();
-    if (kiln_c99_make_closure(&callback, listener, "listener", 8, 0, 1, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callback, listener, "listener", 8, "<test>", 0, 1, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
@@ -26943,7 +26969,7 @@ int main(void) {{
        if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
-    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
@@ -27020,7 +27046,7 @@ int main(void) {
         method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 4;
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
-    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
@@ -27439,6 +27465,47 @@ int main(void) {{
         assert!(
             run.status.success(),
             "nested refusal provenance failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn unowned_function_refusal_names_its_generated_source_and_function() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("diagnostic source probe emits");
+        let wrapper = r#"
+static int refuses_before_instruction(kiln_host *host, kiln_value *result,
+                                      kiln_value *upvalues, kiln_value receiver,
+                                      const kiln_value *args, size_t argc, int depth,
+                                      kiln_value *thrown, kiln_generator *frame) {
+    (void)host; (void)result; (void)upvalues; (void)receiver; (void)args;
+    (void)argc; (void)depth; (void)thrown; (void)frame;
+    return KILN_C99_CONTROL_ERROR;
+}
+int main(void) {
+    kiln_value function;
+    kiln_value result = kiln_c99_undefined();
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value diagnostic;
+    if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
+                              "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
+                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK) return 1;
+    if (kiln_c99_call(NULL, &result, function, kiln_c99_undefined(), NULL, 0, 0,
+                      &thrown) != KILN_C99_CONTROL_ERROR) return 2;
+    diagnostic = kiln_c99_control_diagnostic();
+    if (diagnostic.tag != KILN_VALUE_STRING) return 3;
+    if (strstr(diagnostic.ptr, "module=node_modules/example/index.js") == NULL) return 4;
+    if (strstr(diagnostic.ptr, "operation=FunctionBody") == NULL) return 5;
+    if (strstr(diagnostic.ptr, "function=initialize") == NULL) return 6;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "function-refusal-source");
+        assert!(
+            run.status.success(),
+            "function refusal source failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
         );
@@ -29997,7 +30064,7 @@ int main(void) {
     kiln_value result;
     kiln_value args[4];
     kiln_value callable;
-    if (kiln_c99_make_closure(&callable, callback, "callback", 8, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callable, callback, "callback", 8, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;
