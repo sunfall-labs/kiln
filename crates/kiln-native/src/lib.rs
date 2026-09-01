@@ -8089,6 +8089,56 @@ int main(void) {{
     }
 
     #[test]
+    #[ignore = "diagnostic probe for the native Fastify constructor"]
+    fn native_fastify_constructor_probe() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        let package_root = workspace.join("conformance/server/packages");
+        if !package_root.join("node_modules/fastify/fastify.js").is_file() {
+            return;
+        }
+        let entry = package_root.join(format!(
+            ".kiln-native-fastify-constructor-{}.mjs",
+            std::process::id()
+        ));
+        fs::write(
+            &entry,
+            "import Fastify from 'fastify'; const app = Fastify(); console.log(typeof app.get);",
+        )
+        .expect("write Fastify constructor probe");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&package_root).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build Fastify constructor graph");
+        let result = Toolchain::discover().ok().map(|toolchain| {
+            NativeBuilder::new(
+                ArtifactCache::new(std::env::temp_dir().join("kiln-native-fastify-probe-cache")),
+                toolchain,
+            )
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: std::env::temp_dir().join("kiln-native-fastify-probe"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+        });
+        fs::remove_file(&entry).expect("remove Fastify constructor probe");
+        let Some(report) = result else { return };
+        let report = report.expect("Fastify constructor runs natively");
+        assert_eq!(report.exit_code, Some(0), "stderr={}", String::from_utf8_lossy(&report.stderr));
+        assert_eq!(report.stdout, b"function\n");
+    }
+
+    #[test]
     fn native_commonjs_builtin_namespace_is_not_its_default_export() {
         use kiln_module_resolver::NodeRuntimeResolver;
 
