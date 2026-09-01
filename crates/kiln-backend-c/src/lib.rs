@@ -5,12 +5,12 @@
 //! using the numeric [`kiln_host_abi::HostOp`] value.  In particular, it never writes stdout (or
 //! otherwise bakes CLI policy into an object file).
 
-use std::{collections::HashSet, fmt::Write as _};
+use std::{collections::HashSet, fmt::Write as _, sync::Arc};
 
-use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
+use kiln_host_abi::{HostOp, HOST_ABI_VERSION};
 use kiln_ir::{
-    BYTECODE_VERSION, BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program,
-    UnaryOp, Upvalue,
+    BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
+    BYTECODE_VERSION,
 };
 use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 
@@ -2173,10 +2173,18 @@ typedef struct kiln_closure {
      * prints `[Function (anonymous)]` -- a distinct answer, not a missing one. */
     const char *name;
     size_t name_len;
-    /* Immutable source ownership, emitted beside the body pointer. Borrowed from generated
-     * static storage just like `name`, so diagnostics and future stack traces need no map,
+    /* Immutable source ownership and what `Function.prototype.toString` answers: this function's
+     * own text, pointing into the
+     * emitting unit's one copy of its source rather than owning a copy.  A closure outlives the
+     * frame that made it and crosses unit boundaries, but the unit's static text outlives both.
+     * NULL for a closure the runtime made for itself, which has no source and says so. Keeping
+     * this beside the body pointer means diagnostics and future stack traces need no map,
      * allocation, or ambient current-module state. */
     const char *source;
+    size_t source_len;
+    /* Immutable module ownership for diagnostics. This is deliberately distinct from `source`:
+     * the latter is the function's exact source slice, not the module identifier. */
+    const char *diagnostic_source;
     /* Declared parameters, which is what `f.length` answers and what `bind` subtracts from.
      * Counted where the body was compiled, because that is the only place it is known. */
     uint32_t arity;
@@ -6998,8 +7006,9 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-                                 size_t name_len, const char *source, uint32_t proto,
-                                 uint32_t arity, int generator,
+                                 size_t name_len, const char *source, size_t source_len,
+                                 const char *diagnostic_source,
+                                 uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
                                  int async_generator, int arrow, kiln_value receiver,
                                  kiln_value new_target, uint32_t local_count,
@@ -7050,6 +7059,8 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->name = name;
     closure->name_len = name_len;
     closure->source = source;
+    closure->source_len = source_len;
+    closure->diagnostic_source = diagnostic_source;
     closure->arity = arity;
     closure->prologue_resume = prologue_resume;
     closure->proto = proto;
@@ -7412,7 +7423,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         status = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
                                thrown, NULL);
         if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
-            kiln_c99_diagnostic_site = closure->source;
+            kiln_c99_diagnostic_site = closure->diagnostic_source;
             kiln_c99_diagnostic_operation = "FunctionBody";
             kiln_c99_diagnostic_function = closure->name;
             kiln_c99_diagnostic_function_len = closure->name_len;
@@ -7845,32 +7856,37 @@ static kiln_value kiln_c99_text(kiln_value value) {
         if (name == NULL) {
             return kiln_c99_undefined();
         }
-        if (kiln_c99_text_append_c(&built, value.tag == KILN_VALUE_BUILTIN &&
-                                                   kiln_c99_is_namespace(value.bits)
-                                               ? "[object "
-                                               : "[Function: ") != KILN_C99_OK ||
+        /* A namespace is an object and stringifies as its tag.  Everything else here is a
+         * built-in function, and the specification requires the NativeFunction form for one --
+         * which is also what `/\\[native code\\]/` feature detection reads. */
+        if (value.tag == KILN_VALUE_BUILTIN && kiln_c99_is_namespace(value.bits)) {
+            if (kiln_c99_text_append_c(&built, "[object ") != KILN_C99_OK ||
+                kiln_c99_text_append_c(&built, name) != KILN_C99_OK ||
+                kiln_c99_text_append_c(&built, "]") != KILN_C99_OK) {
+                free(built.bytes);
+                return kiln_c99_undefined();
+            }
+            return kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+        }
+        if (kiln_c99_text_append_c(&built, "function ") != KILN_C99_OK ||
             kiln_c99_text_append_c(&built, name) != KILN_C99_OK ||
-            kiln_c99_text_append_c(&built, "]") != KILN_C99_OK) {
+            kiln_c99_text_append_c(&built, "() { [native code] }") != KILN_C99_OK) {
             free(built.bytes);
             return kiln_c99_undefined();
         }
         return kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
     }
     case KILN_VALUE_FUNCTION: {
-        /* `Function.prototype.toString` returns the source text, which needs the span and the
-         * original source -- neither of which reaches a backend.  Naming the body by its index
-         * is what the interpreter does, and the index is the same on both sides. */
-        static const char prefix[] = "[Function ";
-        char buffer[80];
-        int len = kiln_number_to_js_string((double)kiln_c99_closure_of(value)->proto,
-                                           buffer + sizeof(prefix) - 1,
-                                           sizeof(buffer) - sizeof(prefix));
-        if (len < 0) {
-            return kiln_c99_undefined();
+        /* `Function.prototype.toString`: the text the program wrote, carried on the closure as a
+         * pointer into the unit's static source.  The interpreter slices the same span out of
+         * the same text, so the two engines answer with identical bytes. */
+        kiln_closure *closure = kiln_c99_closure_of(value);
+        if (closure->source == NULL) {
+            /* A closure the runtime built for itself has no text.  It is a built-in in every
+             * sense that matters here, so it answers as one. */
+            return kiln_c99_copy_text("function () { [native code] }", 29);
         }
-        memcpy(buffer, prefix, sizeof(prefix) - 1);
-        buffer[sizeof(prefix) - 1 + (size_t)len] = ']';
-        return kiln_c99_copy_text(buffer, sizeof(prefix) + (size_t)len);
+        return kiln_c99_copy_text(closure->source, closure->source_len);
     }
     default:
         return kiln_c99_undefined();
@@ -24234,6 +24250,18 @@ fn render_functions(
             .unwrap();
         }
     }
+    // One copy of the unit's source text, which every closure's `toString` span points into.
+    // Emitted whole rather than per function for the reason `Program::source` gives: spans nest,
+    // so a copy per function would store an outer body once for every function written inside
+    // it. A unit with no function bodies needs none of it.
+    if !program.functions.is_empty() && !program.source.is_empty() {
+        writeln!(
+            output,
+            "static const char {symbol}_source[] = {};",
+            c_string_chunked(&program.source)
+        )
+        .unwrap();
+    }
     for (index, proto) in program.functions.iter().enumerate() {
         render_function(
             output,
@@ -24431,6 +24459,7 @@ fn render_function(
         constants: &program.constants,
         frame_stacks,
         functions: &program.functions,
+        source: &program.source,
         symbol,
         diagnostic_site,
         callables: produces_references(program),
@@ -24825,6 +24854,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         constants: &program.constants,
         frame_stacks: &plan.functions,
         functions: &program.functions,
+        source: &program.source,
         symbol,
         diagnostic_site: symbol,
         callables,
@@ -24964,6 +24994,7 @@ fn render_module(
         constants: &program.constants,
         frame_stacks: &plan.functions,
         functions: &program.functions,
+        source: &program.source,
         symbol,
         diagnostic_site,
         callables,
@@ -25064,6 +25095,8 @@ struct Emitter<'a> {
     /// catches nothing propagates a throw by returning it, which needs no machinery at all.
     handlers: Vec<u32>,
     functions: &'a [FunctionProto],
+    /// The unit's source text, which each proto's span slices to give a function its `toString`.
+    source: &'a str,
     symbol: &'a str,
     diagnostic_site: &'a str,
     /// Whether a value reaching the embedding boundary could be a callable and so has to be
@@ -25093,6 +25126,7 @@ fn emit_instruction(
         constants,
         frame_stacks,
         functions,
+        source,
         symbol,
         diagnostic_site,
         callables,
@@ -25306,6 +25340,21 @@ fn emit_instruction(
                 Some(text) => (format!("{symbol}_name_{proto}"), text.len()),
                 None => ("NULL".to_owned(), 0),
             };
+            // `Function.prototype.toString` answers with this slice of the unit's source. A span
+            // the text cannot hold is not narrowed to fit -- it is dropped, and the closure says
+            // it has no source, which is the same fallback the interpreter takes.
+            let span = target.span;
+            let (source, source_len) = if source.is_empty()
+                || span.end as usize > source.len()
+                || span.start > span.end
+            {
+                ("NULL".to_owned(), 0usize)
+            } else {
+                (
+                    format!("{symbol}_source + {}", span.start),
+                    (span.end - span.start) as usize,
+                )
+            };
             // A generator's frame is sized here rather than at the call, because this is where
             // the body's own counts are in scope.
             let generator = i32::from(target.generator || target.asynchronous);
@@ -25337,12 +25386,12 @@ fn emit_instruction(
             } else {
                 "kiln_c99_undefined()"
             };
-            let source = c_string(diagnostic_site);
+            let diagnostic_source = c_string(diagnostic_site);
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -25362,7 +25411,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -26061,20 +26110,48 @@ fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> 
         .collect()
 }
 
+/// [`c_string`], broken into adjacent literals so no single one grows unbounded.
+///
+/// C99 only requires a compiler to accept a 4095-character string literal, and a unit's whole
+/// source is routinely far past that -- a bundle is megabytes. Adjacent string literals are
+/// concatenated by the translation phase that runs before the limit applies, so splitting costs
+/// nothing at run time and keeps the emitted C inside what the standard guarantees.
+fn c_string_chunked(value: &str) -> String {
+    const CHUNK: usize = 2048;
+    let mut output = String::from("\"");
+    let mut since = 0usize;
+    for byte in value.bytes() {
+        let before = output.len();
+        push_c_byte(&mut output, byte);
+        since += output.len() - before;
+        if since >= CHUNK {
+            output.push_str("\"\n\"");
+            since = 0;
+        }
+    }
+    output.push('"');
+    output
+}
+
+/// One source byte as it is spelled inside a C string literal.
+fn push_c_byte(output: &mut String, byte: u8) {
+    match byte {
+        b'"' => output.push_str("\\\""),
+        b'\\' => output.push_str("\\\\"),
+        b'\n' => output.push_str("\\n"),
+        b'\r' => output.push_str("\\r"),
+        b'\t' => output.push_str("\\t"),
+        0x20..=0x7e => output.push(char::from(byte)),
+        // The empty literal that follows ends the hex escape, which would otherwise swallow any
+        // hex digit written next to it.
+        _ => write!(output, "\\x{byte:02X}\"\"").unwrap(),
+    }
+}
+
 fn c_string(value: &str) -> String {
     let mut output = String::from("\"");
     for byte in value.bytes() {
-        match byte {
-            b'"' => output.push_str("\\\""),
-            b'\\' => output.push_str("\\\\"),
-            b'\n' => output.push_str("\\n"),
-            b'\r' => output.push_str("\\r"),
-            b'\t' => output.push_str("\\t"),
-            0x20..=0x7e => output.push(char::from(byte)),
-            _ => {
-                write!(output, "\\x{byte:02X}\"\"").unwrap();
-            }
-        }
+        push_c_byte(&mut output, byte);
     }
     output.push('"');
     output
@@ -26467,6 +26544,15 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
     for function in &program.functions {
         hash_function_proto(&mut hash, function);
     }
+    // Appended last, after every byte that was already a persisted cache key. The source is part
+    // of the program's identity now that `Function.prototype.toString` answers with it: two units
+    // with identical bytecode and different text are not interchangeable, and a cached artifact
+    // keyed without this would answer with whichever text was compiled first.
+    byte(&mut hash, 0x63);
+    word(&mut hash, program.source.len() as u64);
+    for value in program.source.bytes() {
+        byte(&mut hash, value);
+    }
     hash
 }
 
@@ -26506,6 +26592,12 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
     // function body to an independently seeded 64-bit digest here would introduce an avoidable
     // collision boundary inside the program identity. The synthetic program's empty function
     // table is also what makes numeric MakeFunction cycles terminate without recursive hashing.
+    // Which bytes of the source this body is, appended after the flags that were already
+    // persisted so the prefix does not move.
+    byte(hash, 0x64);
+    word(hash, u64::from(function.span.start));
+    word(hash, u64::from(function.span.end));
+
     byte(hash, 0x62);
     *hash = hash_program_with_seed(
         &Program {
@@ -26514,6 +26606,9 @@ fn hash_function_proto(hash: &mut u64, function: &FunctionProto) {
             code: function.code.clone(),
             local_count: 0,
             functions: Vec::new(),
+            // The body's own bytes are hashed by the caller; this synthetic program exists only
+            // to reach the canonical instruction encoder.
+            source: Arc::from(""),
         },
         *hash,
     );
@@ -26651,6 +26746,7 @@ mod tests {
     #[test]
     fn default_emission_policy_is_inert_and_host_clock_changes_identity() {
         let program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![Instruction::Return],
@@ -26721,24 +26817,18 @@ mod tests {
         assert_ne!(legacy.symbol, host_clock.symbol);
         assert_ne!(legacy.program_hash, host_clock.program_hash);
         assert!(!legacy.source.contains("#define KILN_REALM_HOST_CLOCK"));
-        assert!(
-            host_clock
-                .source
-                .contains("#define KILN_REALM_HOST_CLOCK 1")
-        );
+        assert!(host_clock
+            .source
+            .contains("#define KILN_REALM_HOST_CLOCK 1"));
         assert!(host_clock.source.contains("UINT16_C(2)"));
         assert_ne!(legacy.symbol, seeded.symbol);
         assert_ne!(seeded.symbol, host_entropy.symbol);
-        assert!(
-            seeded
-                .source
-                .contains("#define KILN_REALM_ENTROPY_SEED UINT64_C(7)")
-        );
-        assert!(
-            host_entropy
-                .source
-                .contains("#define KILN_REALM_HOST_ENTROPY 1")
-        );
+        assert!(seeded
+            .source
+            .contains("#define KILN_REALM_ENTROPY_SEED UINT64_C(7)"));
+        assert!(host_entropy
+            .source
+            .contains("#define KILN_REALM_HOST_ENTROPY 1"));
         assert!(host_entropy.source.contains("UINT16_C(3)"));
         assert_ne!(legacy.symbol, named_timezone.symbol);
         assert_ne!(named_timezone.symbol, host_timezone.symbol);
@@ -26751,6 +26841,7 @@ mod tests {
     fn runtime_module_materializer_stays_inside_the_backend_value_abi() {
         let module = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
@@ -26771,11 +26862,9 @@ mod tests {
         )
         .expect("runtime module emits");
 
-        assert!(
-            emitted
-                .source
-                .contains("exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);")
-        );
+        assert!(emitted
+            .source
+            .contains("exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);"));
         assert!(emitted.source.contains("static int kiln_module_path_"));
         assert!(emitted.source.contains("kiln_realm_enter"));
         assert!(!emitted.source.contains("extern kiln_value"));
@@ -26786,6 +26875,7 @@ mod tests {
         let module = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
+                source: String::new().into(),
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
                 local_count: 0,
@@ -26913,6 +27003,7 @@ int main(void) {{
     fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
         let module = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
@@ -26963,7 +27054,7 @@ int main(void) {{
     kiln_value inherited;
     kiln_value args[2];
     kiln_value thrown = kiln_c99_undefined();
-    if (kiln_c99_make_closure(&callback, listener, "listener", 8, "<test>", 0, 1, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
@@ -26974,7 +27065,7 @@ int main(void) {{
        if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
-    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, "<test>", 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
@@ -27051,7 +27142,7 @@ int main(void) {
         method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 4;
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
-    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
@@ -27193,6 +27284,7 @@ int main(void) {
             (BinaryOp::LessThan, 1),
         ] {
             let generated = emit(&Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![
                     Constant::String("valueOf".to_owned()),
@@ -27210,6 +27302,7 @@ int main(void) {
                 local_count: 0,
                 functions: vec![
                     FunctionProto {
+                        span: kiln_ir::Span::default(),
                         prologue_end: 0,
                         asynchronous: false,
                         name: Some("right".to_owned()),
@@ -27228,6 +27321,7 @@ int main(void) {
                         upvalues: Vec::new(),
                     },
                     FunctionProto {
+                        span: kiln_ir::Span::default(),
                         prologue_end: 0,
                         asynchronous: false,
                         name: Some("valueOf".to_owned()),
@@ -27407,16 +27501,12 @@ int main(void) {
                 .contains("kiln_c99_diagnostic_site = kiln_c99_diagnostic_site"),
             "diagnostic reset must not be substituted into the site expression"
         );
-        assert!(
-            generated
-                .source
-                .contains("kiln_c99_diagnostic_detail = NULL;")
-        );
-        assert!(
-            generated
-                .source
-                .contains("Object.defineProperty invalid key or arity")
-        );
+        assert!(generated
+            .source
+            .contains("kiln_c99_diagnostic_detail = NULL;"));
+        assert!(generated
+            .source
+            .contains("Object.defineProperty invalid key or arity"));
     }
 
     #[test]
@@ -27451,6 +27541,7 @@ int main(void) {
     #[test]
     fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_callee() {
         let generated = emit(&Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::String("missing".into())],
             code: vec![
@@ -27460,6 +27551,7 @@ int main(void) {
             ],
             local_count: 0,
             functions: vec![FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: Some("read_missing_math_property".into()),
@@ -27523,7 +27615,7 @@ int main(void) {
     kiln_value thrown = kiln_c99_undefined();
     kiln_value diagnostic;
     if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
-                              "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
+                              NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if (kiln_c99_call(NULL, &result, function, kiln_c99_undefined(), NULL, 0, 0,
@@ -27547,6 +27639,7 @@ int main(void) {
 
     fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
         Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants,
             code,
@@ -27926,6 +28019,7 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
 
     fn function(code: Vec<Instruction>) -> FunctionProto {
         FunctionProto {
+            span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
             name: None,
@@ -28040,11 +28134,9 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
         assert_eq!(first, second);
         assert!(first.symbol.starts_with("kiln_module_"));
         assert_eq!(first.symbol.len(), "kiln_module_".len() + 32);
-        assert!(
-            first.symbol["kiln_module_".len()..]
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit())
-        );
+        assert!(first.symbol["kiln_module_".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit()));
         assert!(!first.source.contains("/Users/"));
         assert!(first.source.contains(&format!(
             "int {}(kiln_host *host, kiln_value *result)",
@@ -28117,11 +28209,10 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
         assert_ne!(one.source, two.source);
         assert_ne!(one.symbol, other.symbol);
         assert!(!one.symbol.contains("/"));
-        assert!(
-            one.symbol
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        );
+        assert!(one
+            .symbol
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
     }
 
     #[test]
@@ -28326,22 +28417,18 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
             0,
         );
         let generated = emit(&program).expect("locale probe emits");
-        assert!(
-            generated
-                .source
-                .contains("kiln_string_to_number(value.ptr, value.len)")
-        );
+        assert!(generated
+            .source
+            .contains("kiln_string_to_number(value.ptr, value.len)"));
         // A *call*, matching the printf check below. Both names still appear in the runtime's
         // prose, where they are naming the things that must not be reached for.
         assert!(!generated.source.contains("strtod("));
         assert!(!generated.source.contains("kiln_c99_strtod_c"));
         assert!(generated.source.contains("KILN_NUMBER_FORMAT_VERSION 1"));
         assert!(generated.source.contains("KILN_NUMBER_PARSE_VERSION 1"));
-        assert!(
-            generated
-                .source
-                .contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))")
-        );
+        assert!(generated
+            .source
+            .contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))"));
         assert!(!generated.source.contains("snprintf("));
         assert!(!generated.source.contains("setlocale("));
         let wrapper = format!(
@@ -29153,6 +29240,7 @@ int main(void) {{
         }
 
         let generated = emit(&Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants,
             code,
@@ -29192,6 +29280,7 @@ int main(void) {{
             ..function(Vec::new())
         };
         let generated = emit(&Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![
                 Constant::Number(0f64.to_bits()),
@@ -29245,6 +29334,7 @@ int main(void) {{
             ..function(Vec::new())
         };
         let generated = emit(&Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::String("make".into())],
             code: vec![
@@ -29299,6 +29389,7 @@ int main(void) {{
             ..function(Vec::new())
         };
         let generated = emit(&Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
@@ -29689,6 +29780,7 @@ int main(void) {{
             Constant::Boolean(false),
         ];
         let generated = emit(&Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants,
             code: vec![
@@ -30098,7 +30190,7 @@ int main(void) {
     kiln_value result;
     kiln_value args[4];
     kiln_value callable;
-    if (kiln_c99_make_closure(&callable, callback, "callback", 8, "<test>", 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;

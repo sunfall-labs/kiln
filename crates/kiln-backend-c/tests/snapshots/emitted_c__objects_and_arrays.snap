@@ -1,12 +1,11 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 945
 expression: body(&unit)
 ---
-/* Program hash: 9ec8fa4b2c574706; bytecode version: 2. */
-static const char kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_constant_0[] = "a";
-static const char kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_constant_2[] = "b";
-static int kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_body(kiln_host *host, kiln_value *result) {
+/* Program hash: 95856aa87fd75a7f; bytecode version: 2. */
+static const char kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_constant_0[] = "a";
+static const char kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_constant_2[] = "b";
+static int kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_body(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
@@ -18,13 +17,13 @@ static int kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_body(kiln_host *host, ki
     locals[1] = kiln_c99_undefined();
 kiln_label_0:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_constant_0, 1);
+    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_constant_0, 1);
 kiln_label_1:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4607182418800017408));
 kiln_label_2:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_constant_2, 1);
+    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_constant_2, 1);
 kiln_label_3:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
@@ -33,8 +32,8 @@ kiln_label_4:;
     {
         kiln_value built; size_t pair; int status;
         status = kiln_c99_new_object(&built);
-        if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)4, "NewObject", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status;
-        for (pair = 0; pair < (size_t)2; ++pair) { kiln_value key = stack[sp - (size_t)2 * 2 + pair * 2]; kiln_value member = stack[sp - (size_t)2 * 2 + pair * 2 + 1]; status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)4, "NewObject", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
+        if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)4, "NewObject", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status;
+        for (pair = 0; pair < (size_t)2; ++pair) { kiln_value key = stack[sp - (size_t)2 * 2 + pair * 2]; kiln_value member = stack[sp - (size_t)2 * 2 + pair * 2 + 1]; status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)4, "NewObject", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
         sp -= (size_t)2 * 2;
         stack[sp++] = built;
     }
@@ -52,8 +51,8 @@ kiln_label_8:;
     {
         kiln_value built; size_t element; int status;
         status = kiln_c99_new_array(&built);
-        if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)8, "NewArray", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status;
-        for (element = 0; element < (size_t)2; ++element) { status = kiln_c99_array_push(built, stack[sp - (size_t)2 + element]); if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)8, "NewArray", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
+        if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)8, "NewArray", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status;
+        for (element = 0; element < (size_t)2; ++element) { status = kiln_c99_array_push(built, stack[sp - (size_t)2 + element]); if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)8, "NewArray", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; }
         sp -= (size_t)2;
         stack[sp++] = built;
     }
@@ -65,7 +64,7 @@ kiln_label_10:;
     stack[sp++] = locals[0];
 kiln_label_11:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    { kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get(host, target, kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_constant_0, 1, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) { kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = "GetProperty lookup refused"; } if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)11, "GetProperty(a)", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }
+    { kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get(host, target, kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_constant_0, 1, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) { kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = "GetProperty lookup refused"; } if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)11, "GetProperty(a)", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }
 kiln_label_12:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     --sp;
@@ -77,7 +76,7 @@ kiln_label_14:;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4607182418800017408));
 kiln_label_15:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    { kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)15, "GetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }
+    { kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)15, "GetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }
 kiln_label_16:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     --sp;
@@ -92,7 +91,7 @@ kiln_label_19:;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_20:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    { kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(host, stack[sp - 1], key, member, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)20, "SetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }
+    { kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(host, stack[sp - 1], key, member, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)20, "SetComputed", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }
 kiln_label_21:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     --sp;
@@ -104,7 +103,7 @@ kiln_label_23:;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
 kiln_label_24:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    { kiln_value member = stack[--sp]; int status = kiln_c99_put(host, stack[sp - 1], kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_constant_2, 1, member, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_9ec8fa4b2c5747062ace7851e14d2c49", (size_t)24, "SetProperty(b)", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }
+    { kiln_value member = stack[--sp]; int status = kiln_c99_put(host, stack[sp - 1], kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_constant_2, 1, member, depth, thrown); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e", (size_t)24, "SetProperty(b)", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }
 kiln_label_25:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
@@ -119,29 +118,29 @@ kiln_refusal:;
     return KILN_C99_CONTROL_ERROR;
 }
 
-typedef struct kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_realm_context {
+typedef struct kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_realm_context {
     kiln_host *host;
     kiln_value *result;
-} kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_realm_context;
+} kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_realm_context;
 
-static int kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_realm_entry(void *opaque) {
-    kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_realm_context *context = (kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_realm_context *)opaque;
+static int kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_realm_entry(void *opaque) {
+    kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_realm_context *context = (kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_realm_context *)opaque;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    return kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_body(context->host, context->result);
+    return kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_body(context->host, context->result);
 }
 
-int kiln_module_9ec8fa4b2c5747062ace7851e14d2c49(kiln_host *host, kiln_value *result) {
-    kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_realm_context context;
+int kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e(kiln_host *host, kiln_value *result) {
+    kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_realm_context context;
     uint64_t realm = 0;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_realm_is_active()) return kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_body(host, result);
+    if (kiln_realm_is_active()) return kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_body(host, result);
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, kiln_module_9ec8fa4b2c5747062ace7851e14d2c49_realm_entry, &context);
+        status = kiln_realm_enter(realm, kiln_module_95856aa87fd75a7f2c8abfcaba6ea31e_realm_entry, &context);
     if (status == KILN_C99_OK)
         status = kiln_realm_drive(realm, host, result);
     if (realm != 0) {
