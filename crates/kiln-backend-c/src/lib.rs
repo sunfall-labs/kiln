@@ -1197,7 +1197,8 @@ method_ids! {
     (KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW, 424, Generic),
     (KILN_C99_METHOD_TEXT_ENCODER_ENCODE, 425, Generic),
     (KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE, 426, Direct, NodeHttp),
-    (KILN_C99_METHOD_FUNCTION_TO_STRING, 427, Generic),
+    (KILN_C99_METHOD_NODE_QUERYSTRING_PARSE, 427, Direct),
+    (KILN_C99_METHOD_FUNCTION_TO_STRING, 428, Generic),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1527,14 +1528,13 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE 68
 #define KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE 69
 #define KILN_C99_BUILTIN_PROMISE_PROTOTYPE 70
-/* The error kind that reports several failures as one. Reachable only through `Promise.any` for
- * now -- the emitter still refuses the `AggregateError` global, because constructing one iterates
- * its first argument and this runtime has no `IterableToList` to do it with. A refusal is the
- * honest state; naming the global without the iteration would make the two engines disagree. */
-#define KILN_C99_BUILTIN_AGGREGATE_ERROR 70
+/* The error kind that reports several failures as one. It has its own value (rather than sharing
+ * the promise prototype's marker) because the kind is stored in every error instance. */
+#define KILN_C99_BUILTIN_AGGREGATE_ERROR 74
 #define KILN_C99_BUILTIN_ABORT_CONTROLLER 71
 #define KILN_C99_BUILTIN_ABORT_SIGNAL 72
 #define KILN_C99_BUILTIN_TEXT_ENCODER 73
+#define KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE 75
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -1818,6 +1818,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
     emit_method_define!(KILN_C99_METHOD_TEXT_ENCODER_ENCODE),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
+    emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
@@ -2175,22 +2176,18 @@ typedef struct kiln_closure {
      * prints `[Function (anonymous)]` -- a distinct answer, not a missing one. */
     const char *name;
     size_t name_len;
-    /* Which module this body was written in, for a refusal that no instruction claimed.
-     * Borrowed from generated static storage just like `name`, so diagnostics and future stack
-     * traces need no map, allocation, or ambient current-module state.
-     *
-     * Spelled `module` rather than `source` because that is what it holds -- a path, reported as
-     * `module=`.  It arrived under the other name at the same time as the field below, and the
-     * two are unrelated: this one names *where* a function was written and that one *is* what
-     * was written.  One field could not have served both -- a NUL-terminated path cannot
-     * describe a span, and a span of program text is not a module name. */
-    const char *module;
-    /* What `Function.prototype.toString` answers: this function's own text, pointing into the
+    /* Immutable source ownership and what `Function.prototype.toString` answers: this function's
+     * own text, pointing into the
      * emitting unit's one copy of its source rather than owning a copy.  A closure outlives the
      * frame that made it and crosses unit boundaries, but the unit's static text outlives both.
-     * NULL for a closure the runtime made for itself, which has no source and says so. */
+     * NULL for a closure the runtime made for itself, which has no source and says so. Keeping
+     * this beside the body pointer means diagnostics and future stack traces need no map,
+     * allocation, or ambient current-module state. */
     const char *source;
     size_t source_len;
+    /* Immutable module ownership for diagnostics. This is deliberately distinct from `source`:
+     * the latter is the function's exact source slice, not the module identifier. */
+    const char *diagnostic_source;
     /* Declared parameters, which is what `f.length` answers and what `bind` subtracts from.
      * Counted where the body was compiled, because that is the only place it is known. */
     uint32_t arity;
@@ -3162,6 +3159,8 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                                           const kiln_value *args, size_t argc,
                                           kiln_value *thrown);
+static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out);
+static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc);
 static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t count);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                     kiln_value source, size_t byte_offset, size_t length,
@@ -3203,6 +3202,9 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
                                     int depth, kiln_value *thrown);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
+static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
+                                               const kiln_value *args, size_t argc, int depth,
+                                               kiln_value *thrown);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
                                   int mode);
@@ -4921,6 +4923,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     switch (code) {
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
+    case KILN_C99_METHOD_NODE_QUERYSTRING_PARSE: return "parse";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_MILLISECONDS:
         return "fromEpochMilliseconds";
@@ -5406,6 +5409,113 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
     return KILN_C99_OK;
 }
 
+/* Decode one application/x-www-form-urlencoded component. Unlike decodeURIComponent, malformed
+ * percent escapes remain literal and `+` names a space. Query strings are deliberately forgiving:
+ * one bad escape must not make the whole request unreadable. */
+static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) {
+    kiln_text decoded = {NULL, 0, 0};
+    size_t index = 0;
+    int status;
+    while (index < len) {
+        char byte = bytes[index];
+        if (byte == '+') {
+            byte = ' ';
+        } else if (byte == '%' && index + 2 < len) {
+            int high = kiln_c99_hex_digit(bytes[index + 1]);
+            int low = kiln_c99_hex_digit(bytes[index + 2]);
+            if (high >= 0 && low >= 0) {
+                byte = (char)((high << 4) | low);
+                index += 2;
+            }
+        }
+        status = kiln_c99_text_append(&decoded, &byte, 1);
+        if (status != KILN_C99_OK) {
+            free(decoded.bytes);
+            return status;
+        }
+        index += 1;
+    }
+    if (kiln_c99_valid_utf8(decoded.bytes, decoded.len)) {
+        *out = kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+        return KILN_C99_OK;
+    }
+    {
+        kiln_value raw = kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+        uint16_t *units = NULL;
+        size_t count = 0;
+        status = kiln_c99_to_units(raw, &units, &count);
+        if (status == KILN_C99_OK) {
+            *out = kiln_c99_from_units(units, count);
+            if (out->tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+        }
+        free(units);
+        free(decoded.bytes);
+        return status;
+    }
+}
+
+/* The interpreter-first querystring surface: parse/decode form data into an own-property object,
+ * preserving the first `=` and collecting repeated names in encounter order. Definition-style
+ * insertion is intentional: a decoded `__proto__` is data, not a request to relink the result. */
+static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *args, size_t argc) {
+    kiln_value input = argc > 0 ? kiln_c99_text(args[0]) : kiln_c99_copy_text("", 0);
+    size_t at = 0;
+    int status;
+    if (input.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
+    status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) return status;
+    while (at < input.len) {
+        size_t pair_end = at;
+        size_t equal;
+        kiln_value name;
+        kiln_value value;
+        kiln_object *object;
+        kiln_property *property = NULL;
+        size_t index;
+        while (pair_end < input.len && input.ptr[pair_end] != '&') pair_end += 1;
+        if (pair_end == at) {
+            at = pair_end + 1;
+            continue;
+        }
+        equal = at;
+        while (equal < pair_end && input.ptr[equal] != '=') equal += 1;
+        status = kiln_c99_form_decode(input.ptr + at, equal - at, &name);
+        if (status != KILN_C99_OK) return status;
+        status = kiln_c99_form_decode(equal < pair_end ? input.ptr + equal + 1 : "",
+                                      equal < pair_end ? pair_end - equal - 1 : 0, &value);
+        if (status != KILN_C99_OK) {
+            free((void *)name.ptr);
+            return status;
+        }
+        object = kiln_c99_object_of(*out);
+        for (index = 0; index < object->count; ++index) {
+            if (kiln_c99_same_key(&object->properties[index], name.ptr, name.len)) {
+                property = &object->properties[index];
+                break;
+            }
+        }
+        if (property == NULL) {
+            status = kiln_c99_own_slot(*out, name.ptr, name.len, &property);
+            if (status == KILN_C99_OK) property->value = value;
+        } else {
+            kiln_value previous = property->value;
+            free((void *)name.ptr);
+            if (previous.tag == KILN_VALUE_ARRAY) {
+                status = kiln_c99_array_push(previous, value);
+            } else {
+                kiln_value values;
+                status = kiln_c99_new_array(&values);
+                if (status == KILN_C99_OK) status = kiln_c99_array_push(values, previous);
+                if (status == KILN_C99_OK) status = kiln_c99_array_push(values, value);
+                if (status == KILN_C99_OK) property->value = values;
+            }
+        }
+        if (status != KILN_C99_OK) return status;
+        at = pair_end + 1;
+    }
+    return KILN_C99_OK;
+}
+
 /* `Number.prototype.toFixed`, rounded on the value's *exact* decimal expansion.
  *
  * Not the printf `%.*f` conversion: it reads the process locale's decimal point, and an embedded
@@ -5644,6 +5754,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_OBJECT_PROTOTYPE: return "Object";
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE: return "Array";
     case KILN_C99_BUILTIN_ERROR_PROTOTYPE: return "Error";
+    case KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE: return "AggregateError";
     case KILN_C99_BUILTIN_MAP_PROTOTYPE: return "Map";
     case KILN_C99_BUILTIN_SET_PROTOTYPE: return "Set";
     case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE: return "WeakMap";
@@ -5956,6 +6067,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"ReferenceError", KILN_C99_BUILTIN_REFERENCE_ERROR},
                         {"SyntaxError", KILN_C99_BUILTIN_SYNTAX_ERROR},
                         {"URIError", KILN_C99_BUILTIN_URI_ERROR},
+                        {"AggregateError", KILN_C99_BUILTIN_AGGREGATE_ERROR},
                         {"AbortController", KILN_C99_BUILTIN_ABORT_CONTROLLER},
                         {"AbortSignal", KILN_C99_BUILTIN_ABORT_SIGNAL},
                         {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER}};
@@ -6532,10 +6644,10 @@ static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
  * `toString` here is `Function.prototype.toString`, which is why it belongs beside the other
  * three rather than in the `Object.prototype` fallback below -- that one would answer
  * `[object Function]` for `String(Object)`, and refusing was rightly preferred to saying that.
- * This answers `function Object() { [native code] }`, which is what the interpreter says and
- * what node says. Without it a program reading `f.toString()` found no property at all and got
- * `undefined is not a function`: a wrong answer where `String(f)` on the very same value had
- * been right all along, because that path goes through `kiln_c99_text` instead. */
+ * This answers `function Object() { [native code] }`, which is what the interpreter says and what
+ * node says. Without it a program reading `f.toString()` found no property at all and got
+ * `undefined is not a function`: a wrong answer where `String(f)` on the very same value had been
+ * right all along, because that path goes through `kiln_c99_text` instead. */
 static uint64_t kiln_c99_callable_method(const char *key, size_t key_len) {
     if (kiln_c99_same_name(key, key_len, "call")) {
         return KILN_C99_METHOD_FUNCTION_CALL;
@@ -6565,6 +6677,7 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_OBJECT_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_ERROR_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_SET_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
@@ -7025,8 +7138,9 @@ static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 /* The captured values are boxes, copied by pointer rather than by contents: two closures over one
  * variable have to see each other's writes, which is the whole reason a cell exists. */
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-                                 size_t name_len, const char *module, const char *source,
-                                 size_t source_len, uint32_t proto, uint32_t arity, int generator,
+                                 size_t name_len, const char *source, size_t source_len,
+                                 const char *diagnostic_source,
+                                 uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
                                  int async_generator, int arrow, kiln_value receiver,
                                  kiln_value new_target, uint32_t local_count,
@@ -7076,9 +7190,9 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->properties = kiln_c99_undefined();
     closure->name = name;
     closure->name_len = name_len;
-    closure->module = module;
     closure->source = source;
     closure->source_len = source_len;
+    closure->diagnostic_source = diagnostic_source;
     closure->arity = arity;
     closure->prologue_resume = prologue_resume;
     closure->proto = proto;
@@ -7359,6 +7473,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             *result = kiln_c99_boolean(
                 argc == 0 ? 0 : kiln_c99_truthy(args[0]));
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_AGGREGATE_ERROR:
+            return kiln_c99_aggregate_error_from_args(host, result, args, argc, depth, thrown);
         /* The two constructors that do the same thing called as they do constructed. Everything
          * else in this enum either has no call behaviour at all (`Map()` without `new` is a
          * TypeError) or is a namespace, and both keep saying so. */
@@ -7441,7 +7557,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         status = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
                                thrown, NULL);
         if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
-            kiln_c99_diagnostic_site = closure->module;
+            kiln_c99_diagnostic_site = closure->diagnostic_source;
             kiln_c99_diagnostic_operation = "FunctionBody";
             kiln_c99_diagnostic_function = closure->name;
             kiln_c99_diagnostic_function_len = closure->name_len;
@@ -8995,17 +9111,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
             return KILN_C99_OK;
         }
-        /* ...and the `Object.prototype` members a program borrows, which the builtin path above
+        /* ...and the `Object.prototype` members a program borrows, which the builtin path below
          * already answers and this one never did.
          *
-         * `valueOf` is here and `toString` is not, which is the whole of the distinction that was
-         * once written as "toString and valueOf would shadow what a constructor answers". Only
+         * `valueOf` is here and `toString` is not, which is the whole of the distinction once
+         * written as "toString and valueOf would shadow what a constructor answers". Only
          * `toString` would: `Object.prototype.toString` gives `[object Function]`, which is worse
          * than refusing, and a callable answers that name for itself through
          * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
          * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
-         * `toString` exactly as it does for a plain object. Withholding it was answering
-         * `undefined` for a name every callable has. */
+         * `toString` exactly as it does for a plain object. */
         {
             uint64_t borrowed =
                 kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
@@ -9487,17 +9602,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(callable);
             return KILN_C99_OK;
         }
-        /* ...and the `Object.prototype` members a program borrows, which the builtin path above
+        /* ...and the `Object.prototype` members a program borrows, which the builtin path below
          * already answers and this one never did.
          *
-         * `valueOf` is here and `toString` is not, which is the whole of the distinction that was
-         * once written as "toString and valueOf would shadow what a constructor answers". Only
+         * `valueOf` is here and `toString` is not, which is the whole of the distinction once
+         * written as "toString and valueOf would shadow what a constructor answers". Only
          * `toString` would: `Object.prototype.toString` gives `[object Function]`, which is worse
          * than refusing, and a callable answers that name for itself through
          * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
          * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
-         * `toString` exactly as it does for a plain object. Withholding it was answering
-         * `undefined` for a name every callable has. */
+         * `toString` exactly as it does for a plain object. */
         {
             uint64_t borrowed =
                 kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
@@ -9765,6 +9879,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             } owners[] = {{KILN_C99_BUILTIN_OBJECT_PROTOTYPE, KILN_C99_BUILTIN_OBJECT},
                           {KILN_C99_BUILTIN_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_ARRAY},
                           {KILN_C99_BUILTIN_ERROR_PROTOTYPE, KILN_C99_BUILTIN_ERROR},
+                          {KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE,
+                           KILN_C99_BUILTIN_AGGREGATE_ERROR},
                           {KILN_C99_BUILTIN_MAP_PROTOTYPE, KILN_C99_BUILTIN_MAP},
                           {KILN_C99_BUILTIN_SET_PROTOTYPE, KILN_C99_BUILTIN_SET},
                           {KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE, KILN_C99_BUILTIN_WEAK_MAP},
@@ -9782,8 +9898,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OK;
                 }
             }
-            /* Anything else answers for what it *is*, which the table above could not say
-             * because it maps prototypes rather than values. A callable is a function, so
+            /* Anything else answers for what it *is*, which the table above could not say because
+             * it maps prototypes rather than values. A callable is a function, so
              * `Object.constructor` is `Function` exactly as `f.constructor` is for a function a
              * program wrote; a namespace is an ordinary object holding functions, so
              * `Math.constructor` is `Object`. Refusing had been the answer to both. */
@@ -9848,7 +9964,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 return KILN_C99_OK;
             }
             if (kiln_c99_error_name(target.bits) != NULL) {
-                *out = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+                *out = kiln_c99_builtin(target.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR
+                                            ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
+                                            : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (target.bits == KILN_C99_BUILTIN_MAP) {
@@ -14436,6 +14554,9 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     }
     if (code == KILN_C99_METHOD_NODE_URL_PARSE) {
         return kiln_c99_url_construct(result, args, argc, thrown);
+    }
+    if (code == KILN_C99_METHOD_NODE_QUERYSTRING_PARSE) {
+        return kiln_c99_node_querystring_parse(result, args, argc);
     }
     if (code == KILN_C99_METHOD_NODE_ASYNC_RESOURCE) {
         kiln_value resource = receiver;
@@ -21342,6 +21463,24 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
+                                              const kiln_value *args, size_t argc, int depth,
+                                              kiln_value *thrown) {
+    kiln_value errors;
+    int status = kiln_c99_new_array(&errors);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_iterate(host, errors, argc > 0 ? args[0] : kiln_c99_undefined(), depth,
+                              thrown);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_error(out, KILN_C99_BUILTIN_AGGREGATE_ERROR,
+                                argc > 1 ? args[1] : kiln_c99_undefined());
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, *out, "errors", 6, errors, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_object_of(*out)->properties[kiln_c99_object_of(*out)->count - 1].enumerable = 0;
+    return KILN_C99_OK;
+}
+
 /* The own slot a private name occupies, or NULL.
  *
  * Own-only, and that own-only rule *is* the brand check: an object of another class does not carry
@@ -22328,6 +22467,10 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_call(host, result, callee, kiln_c99_undefined(), args, argc, depth,
                              thrown);
     }
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        callee.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR) {
+        return kiln_c99_aggregate_error_from_args(host, result, args, argc, depth, thrown);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_PROMISE) {
         kiln_value promise;
         kiln_value settlers[2];
@@ -22753,7 +22896,8 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_RANGE_ERROR:
         case KILN_C99_BUILTIN_REFERENCE_ERROR:
         case KILN_C99_BUILTIN_SYNTAX_ERROR:
-        case KILN_C99_BUILTIN_URI_ERROR: {
+        case KILN_C99_BUILTIN_URI_ERROR:
+        case KILN_C99_BUILTIN_AGGREGATE_ERROR: {
             /* `Error` is the base of all of them, so it accepts any kind; the others accept only
              * their own. There is no prototype chain here to walk, and this is the same answer
              * one would give. */
@@ -23586,6 +23730,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::ReferenceError
             | kiln_ir::Builtin::SyntaxError
             | kiln_ir::Builtin::UriError
+            | kiln_ir::Builtin::AggregateError
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity
             | kiln_ir::Builtin::Boolean
@@ -24373,7 +24518,6 @@ fn render_functions(
             program,
             proto,
             &plan.functions,
-            plan.functions[index],
             index,
             symbol,
             diagnostic_site,
@@ -24450,11 +24594,11 @@ fn render_function(
     program: &Program,
     proto: &FunctionProto,
     frame_stacks: &[usize],
-    max_stack: usize,
     index: usize,
     symbol: &str,
     diagnostic_site: &str,
 ) {
+    let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
     // Only when the name is already a C identifier: it goes into a comment, and a name is
     // program text that could otherwise close one.
@@ -25491,14 +25635,12 @@ fn emit_instruction(
             } else {
                 "kiln_c99_undefined()"
             };
-            // The module this body was written in, for a refusal no instruction claimed.
-            // Distinct from the span above: that one is the text, this one is where it came from.
-            let module = c_string(diagnostic_site);
+            let diagnostic_source = c_string(diagnostic_site);
             output.push_str("    {\n        int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {module}, {source}, {source_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -25518,7 +25660,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {module}, {source}, {source_len}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -26022,6 +26164,9 @@ fn emit_instruction(
                 }
                 kiln_ir::Builtin::SyntaxError => "kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)",
                 kiln_ir::Builtin::UriError => "kiln_c99_builtin(KILN_C99_BUILTIN_URI_ERROR)",
+                kiln_ir::Builtin::AggregateError => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)"
+                }
                 kiln_ir::Builtin::Boolean => "kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN)",
                 // A global function is a namespace method with no namespace: nothing is reached
                 // through to get at it, so the method value is what the name resolves to.
@@ -26990,12 +27135,11 @@ mod tests {
         let module = ModuleProgram {
             program: Program {
                 version: BYTECODE_VERSION,
+                source: String::new().into(),
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
                 local_count: 0,
                 functions: Vec::new(),
-                // Built as bytecode rather than parsed, so there is no text to point into.
-                source: "".into(),
             },
             dependencies: Vec::new(),
             imports: Vec::new(),
@@ -27170,7 +27314,7 @@ int main(void) {{
     kiln_value inherited;
     kiln_value args[2];
     kiln_value thrown = kiln_c99_undefined();
-    if (kiln_c99_make_closure(&callback, listener, "listener", 8, "<test>", NULL, 0, 0, 1, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
@@ -27181,7 +27325,7 @@ int main(void) {{
        if (kiln_c99_own_keys(NULL, emitter, &keys, 0, &thrown) != KILN_C99_OK) return 32;
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
-    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, "<test>", NULL, 0, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
@@ -27258,7 +27402,7 @@ int main(void) {
         method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 4;
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
-    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", NULL, 0, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
@@ -27503,9 +27647,8 @@ int main(void) {{
             0,
         ))
         .expect("symbol registry probe emits");
-        let wrapper = format!(
-            r#"
-int main(void) {{
+        let wrapper = r#"
+int main(void) {
     uint64_t realm;
     kiln_value key = kiln_c99_copy_text("fastify-error-generic", 21);
     kiln_value first;
@@ -27529,9 +27672,9 @@ int main(void) {{
         memcmp(kiln_c99_text(first).ptr, "Symbol(fastify-error-generic)", 29) != 0) return 9;
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
-}}
+}
 "#
-        );
+        .to_string();
         let run = run_with_main(&generated, &wrapper, "symbol-registry");
         assert!(
             run.status.success(),
@@ -27803,7 +27946,7 @@ int main(void) {
     kiln_value thrown = kiln_c99_undefined();
     kiln_value diagnostic;
     if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
-                              "node_modules/example/index.js", NULL, 0, 0, 0, 0, 0, 0, 0,
+                              NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if (kiln_c99_call(NULL, &result, function, kiln_c99_undefined(), NULL, 0, 0,
@@ -30385,7 +30528,7 @@ int main(void) {
     kiln_value result;
     kiln_value args[4];
     kiln_value callable;
-    if (kiln_c99_make_closure(&callable, callback, "callback", 8, "<test>", NULL, 0, 0, 0, 0, 0, 0, 0,
+    if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;

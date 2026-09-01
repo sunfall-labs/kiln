@@ -491,6 +491,8 @@ fn fixture_frontend(_path: &str, text: &str) -> Module {
     }
 
     Module {
+        // The text these spans index into, which this fixture frontend already has in hand.
+        source: text.into(),
         source_kind: SourceKind::JavaScript,
         source_goal: kiln_hir::SourceGoal::Module,
         strict: false,
