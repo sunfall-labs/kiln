@@ -504,6 +504,12 @@ pub enum Native {
     NodeAsyncResource,
     NodeAsyncResourceBind,
     NodeAsyncResourceEmitDestroy,
+    NodeAsyncLocalStorage,
+    NodeAsyncLocalStorageRun,
+    NodeAsyncLocalStorageGetStore,
+    NodeAsyncLocalStorageEnterWith,
+    NodeAsyncLocalStorageExit,
+    NodeAsyncLocalStorageDisable,
     NodeCrypto,
     NodeCryptoRandomUuid,
     NodeCryptoCreateHash,
@@ -1488,6 +1494,12 @@ impl Native {
                 WellKnown::NodeInspectCustom,
             ))),
             (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
+            // The same two constructors the global scope already has. `node:util` is where they
+            // were before they were global and where library code still reaches for them:
+            // `react-dom/server` opens with `new (require("util").TextEncoder)()`, and finding
+            // `undefined` there stopped the module while it was still loading.
+            (Self::NodeUtil, "TextEncoder") => Some(Value::Native(Self::TextEncoderConstructor)),
+            (Self::NodeUtil, "TextDecoder") => Some(Value::Native(Self::TextDecoderConstructor)),
             // `default` binds to the module namespace unless an arm below overrides it, and an
             // override is only correct where node's own default is callable. Measured against
             // node v25.9.0, exactly four are: `assert`, `events`, `module` and `stream`.
@@ -1498,6 +1510,9 @@ impl Native {
                 Some(Value::Native(Self::NodeAssertOk))
             }
             (Self::NodeAsyncHooks, "AsyncResource") => Some(Value::Native(Self::NodeAsyncResource)),
+            (Self::NodeAsyncHooks, "AsyncLocalStorage") => {
+                Some(Value::Native(Self::NodeAsyncLocalStorage))
+            }
             (Self::NodeCrypto, "randomUUID") => Some(Value::Native(Self::NodeCryptoRandomUuid)),
             (Self::NodeCrypto, "createHash") => Some(Value::Native(Self::NodeCryptoCreateHash)),
             (Self::NodeStringDecoder, "StringDecoder") => {
@@ -2226,6 +2241,7 @@ enum NodeObject {
     UrlSearchParams(Rc<UrlState>),
     Hash(Rc<RefCell<HashState>>),
     StringDecoder(Rc<RefCell<StringDecoderState>>),
+    AsyncLocalStorage(Rc<AsyncStorage>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -6391,7 +6407,7 @@ pub struct ModuleRealmSession {
 }
 
 struct ModuleRealmShared {
-    realm: Realm<Job, Timer>,
+    realm: Realm<Scheduled, Timer>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
@@ -8057,7 +8073,42 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
 struct Timer {
     callback: Value,
     arguments: Vec<Value>,
+    /// The async context in force when the timer was *set*, restored while its callback runs.
+    ///
+    /// Captured at scheduling rather than read at firing, which is the whole of what makes an
+    /// `AsyncLocalStorage` work: `als.run(store, () => setTimeout(f))` has long returned by the
+    /// time `f` runs, and `f` must still see the store.
+    context: AsyncContext,
 }
+
+/// One `AsyncLocalStorage`, whose identity is the whole of it.
+///
+/// Two storages are different because they are different allocations -- there is no name, index
+/// or serial to compare, and `Rc::ptr_eq` is the question the language actually asks. `disabled`
+/// is the one piece of state a storage carries: `disable()` is permanent in Node, and a disabled
+/// storage reads as empty everywhere rather than being removed from contexts already captured.
+#[derive(Debug)]
+struct AsyncStorage {
+    disabled: std::cell::Cell<bool>,
+}
+
+/// Two storages are equal only when they are the same one.
+///
+/// Written out rather than derived for the reason [`Closure`]'s is: `disabled` is state, not
+/// identity, and a derive over it would make any two untouched storages compare equal.
+impl PartialEq for AsyncStorage {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+/// Every `AsyncLocalStorage` that currently holds a store, and what it holds.
+///
+/// Shared rather than copied: this is captured every time a job is queued -- once per promise
+/// reaction, which is the hottest scheduling path there is -- and is empty in every program that
+/// never asks for a storage, which is nearly all of them. A `Vec` rather than a map because it
+/// is searched by pointer identity and is almost always empty or a single entry.
+type AsyncContext = Rc<Vec<(Rc<AsyncStorage>, Value)>>;
 
 /// A promise: a value that is not there yet, and the reactions waiting for it.
 ///
@@ -8090,6 +8141,15 @@ struct Reaction {
     /// the handler's result. That is the whole difference from `then(f, f)`, which would replace
     /// a rejection with a fulfilment.
     passthrough: bool,
+    /// The async context in force where this reaction was *attached*.
+    ///
+    /// Attached, not settled, and the difference is the whole of what makes an
+    /// `AsyncLocalStorage` usable. A promise is very often settled by code with a context of its
+    /// own -- `Promise.all` resolves inside whichever input finished last -- and a handler that
+    /// inherited *that* would see a store belonging to some unrelated task. `p.then(f)` captures
+    /// where `then` was written, and an `await` captures where it suspended, which is the same
+    /// rule stated twice.
+    context: AsyncContext,
 }
 
 /// Where a settled outcome goes.
@@ -8289,6 +8349,18 @@ enum Job {
     Import(Rc<PromiseData>, String),
 }
 
+/// A queued job together with the async context it was queued in.
+///
+/// The context travels *with* the work rather than being read when the work runs, because by
+/// then whatever scheduled it has returned: `als.run(store, () => p.then(f))` is finished long
+/// before `f` is called, and `f` must still see the store. Capturing at the queue and restoring
+/// at the drain is the whole of how a store crosses an `await`.
+#[derive(Debug)]
+struct Scheduled {
+    context: AsyncContext,
+    job: Job,
+}
+
 /// How a suspended generator is resumed.
 ///
 /// One enum rather than a pair of flags, because the three are mutually exclusive and each is a
@@ -8442,7 +8514,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     global_base: usize,
     instruction: usize,
     /// The explicit language queues and virtual clock owned by the shared Realm Runtime seam.
-    realm: Realm<Job, Timer>,
+    realm: Realm<Scheduled, Timer>,
     /// Policy for APIs that expose civil time. The scheduler clock remains `realm`'s virtual
     /// clock regardless of this setting.
     clock_capability: ClockCapability,
@@ -8473,6 +8545,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     http_runtime: Option<*mut dyn ActiveHttpRuntime>,
     /// Graph-owned lazy CommonJS loader, installed only while evaluating a module graph.
     commonjs_loader: Option<*mut (dyn CommonJsModuleLoader + 'host)>,
+    /// Which `AsyncLocalStorage`s hold a store right here.
+    ///
+    /// Realm state that follows *control*, not the frame: it is captured whenever work is queued
+    /// and restored whenever that work runs, which is what carries a store across an `await`.
+    async_context: AsyncContext,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
@@ -8607,6 +8684,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             handlers: Vec::new(),
             arguments: Vec::new(),
             error_prototypes: [const { None }; ErrorKind::ALL.len()],
+            async_context: AsyncContext::default(),
             this_value: Value::Undefined,
             new_target: Value::Undefined,
             suspended_awaiting: false,
@@ -8752,14 +8830,25 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
-    fn with_realm<R>(&self, operation: impl FnOnce(&Realm<Job, Timer>) -> R) -> R {
+    /// Stamp a job with the context it is being queued in.
+    fn scheduled(&self, job: Job) -> Scheduled {
+        Scheduled {
+            context: Rc::clone(&self.async_context),
+            job,
+        }
+    }
+
+    fn with_realm<R>(&self, operation: impl FnOnce(&Realm<Scheduled, Timer>) -> R) -> R {
         match &self.module_realm {
             Some(shared) => operation(&shared.borrow().realm),
             None => operation(&self.realm),
         }
     }
 
-    fn with_realm_mut<R>(&mut self, operation: impl FnOnce(&mut Realm<Job, Timer>) -> R) -> R {
+    fn with_realm_mut<R>(
+        &mut self,
+        operation: impl FnOnce(&mut Realm<Scheduled, Timer>) -> R,
+    ) -> R {
         match &self.module_realm {
             Some(shared) => operation(&mut shared.borrow_mut().realm),
             None => operation(&mut self.realm),
@@ -11923,6 +12012,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 RuntimeTurn::Timer(WorkItem::Timer { work: timer, .. }) => {
+                    // As for a microtask: the context is the one the timer was *set* in.
+                    self.async_context = timer.context;
                     runtime.enter(|| {
                         self.call_value(
                             &timer.callback,
@@ -12654,9 +12745,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
                     match self.import_specifier(&specifier, current)? {
-                        Ok(text) => self
-                            .realm
-                            .queue_microtask(Job::Import(Rc::clone(&promise), text)),
+                        Ok(text) => {
+                            let scheduled = self.scheduled(Job::Import(Rc::clone(&promise), text));
+                            self.realm.queue_microtask(scheduled);
+                        }
                         Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                     }
                     self.stack.push(Value::Promise(promise));
@@ -15066,6 +15158,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         properties: RefCell::new(ObjectData::default()),
                     })),
                     arguments: Vec::new(),
+                    context: Rc::clone(&self.async_context),
                 };
                 let delay = duration_from_milliseconds(milliseconds.max(0.0));
                 self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
@@ -15836,6 +15929,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Everything after the delay is handed to the callback, which is how a
                     // timer carries state without a closure.
                     arguments: arguments.get(2..).unwrap_or_default().to_vec(),
+                    // Captured where the timer was set, not where it fires.
+                    context: Rc::clone(&self.async_context),
                 };
                 let delay = duration_from_milliseconds(delay);
                 let id = self.with_realm_mut(|realm| {
@@ -17025,12 +17120,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Array(ArrayData::new(results)))
             }
             Native::QueueMicrotask => {
-                self.with_realm_mut(|realm| {
-                    realm.queue_microtask(Job::Callback(
-                        arguments.first().cloned().unwrap_or(Value::Undefined),
-                        Vec::new(),
-                    ))
-                });
+                let scheduled = self.scheduled(Job::Callback(
+                    arguments.first().cloned().unwrap_or(Value::Undefined),
+                    Vec::new(),
+                ));
+                self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                 Ok(Value::Undefined)
             }
             Native::ProcessNextTick => {
@@ -17041,12 +17135,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: callback.type_name(),
                     });
                 }
-                self.with_realm_mut(|realm| {
-                    realm.queue_next_tick(Job::NextTick(
-                        callback,
-                        arguments.get(1..).unwrap_or_default().to_vec(),
-                    ))
-                });
+                let scheduled = self.scheduled(Job::NextTick(
+                    callback,
+                    arguments.get(1..).unwrap_or_default().to_vec(),
+                ));
+                self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
                 Ok(Value::Undefined)
             }
             // Every call has to produce a symbol distinct from every other, so this needs the
@@ -17063,6 +17156,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // free function with no VM to enter one on.
             Native::Eval => self.indirect_eval(arguments),
             Native::FunctionConstructor => self.function_from_source(arguments, instruction),
+            // `run` and `exit` call the program's own function, so they need the machine for the
+            // same reason those two do. The other three are here to keep one storage's five
+            // methods in one place rather than splitting them across two dispatchers.
+            Native::NodeAsyncLocalStorage
+            | Native::NodeAsyncLocalStorageRun
+            | Native::NodeAsyncLocalStorageGetStore
+            | Native::NodeAsyncLocalStorageEnterWith
+            | Native::NodeAsyncLocalStorageExit
+            | Native::NodeAsyncLocalStorageDisable => {
+                self.async_local_storage(native, receiver, arguments, instruction)
+            }
             _ => call_native(&self.intrinsics, native, receiver, arguments),
         }
     }
@@ -21600,9 +21704,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.unhandled = Some(reason.clone());
         }
         for reaction in reactions {
-            self.with_realm_mut(|realm| {
-                realm.queue_microtask(Job::React(outcome.clone(), reaction))
-            });
+            // The reaction's own context, not this one: whatever settled the promise may be an
+            // unrelated task, and the handler belongs to wherever it was attached.
+            let scheduled = Scheduled {
+                context: Rc::clone(&reaction.context),
+                job: Job::React(outcome.clone(), reaction),
+            };
+            self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
         }
     }
 
@@ -21625,9 +21733,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // resolution has already been decided by the time anyone could catch it.
                     Err(reason) => self.settle(promise, &Settled::Rejected(reason)),
                     Ok(then) if is_callable(&then) => {
-                        self.with_realm_mut(|realm| {
-                            realm.queue_microtask(Job::Thenable(Rc::clone(promise), value, then))
-                        });
+                        let scheduled =
+                            self.scheduled(Job::Thenable(Rc::clone(promise), value, then));
+                        self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     }
                     Ok(_) => self.settle(promise, &Settled::Fulfilled(value)),
                 }
@@ -21647,9 +21755,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.settle(promise, &Settled::Rejected(error));
             return;
         }
-        self.with_realm_mut(|realm| {
-            realm.queue_microtask(Job::Adopt(Rc::clone(promise), Rc::clone(inner)))
-        });
+        let scheduled = self.scheduled(Job::Adopt(Rc::clone(promise), Rc::clone(inner)));
+        self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
     }
 
     /// Attach a reaction to a promise, queueing it immediately if the promise has already settled.
@@ -21670,6 +21777,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             on_rejected,
             sink,
             passthrough,
+            context: Rc::clone(&self.async_context),
         };
         let settled = {
             let mut state = promise.state.borrow_mut();
@@ -21683,7 +21791,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         match settled {
             Some(outcome) => {
-                self.with_realm_mut(|realm| realm.queue_microtask(Job::React(outcome, reaction)))
+                let scheduled = Scheduled {
+                    context: Rc::clone(&reaction.context),
+                    job: Job::React(outcome, reaction),
+                };
+                self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
             }
             None => promise.state.borrow_mut().reactions.push(reaction),
         }
@@ -22097,9 +22209,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The ECMAScript microtask checkpoint, independent of which infrastructure turn reached it.
     /// Tokio owns polling; this queue owns language ordering.
     fn drain_microtask_jobs(&mut self) -> Result<(), ExecutionError> {
-        while let Some(job) =
+        while let Some(Scheduled { context, job }) =
             self.with_realm_mut(|realm| realm.pop_next_tick().or_else(|| realm.pop_microtask()))
         {
+            // The context this job was queued in, in force for exactly as long as it runs. A
+            // drain is a flat loop rather than a stack, so the previous one is whatever the last
+            // job left and is replaced rather than restored.
+            self.async_context = context;
             match job {
                 Job::NextTick(callback, arguments) => self
                     .call_value(&callback, Value::Undefined, arguments, self.instruction)
@@ -24539,6 +24655,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     current,
                 )?;
                 self.stack.push(built);
+            }
+            Value::Native(Native::NodeAsyncLocalStorage) => {
+                self.stack.push(node_async_local_storage());
             }
             Value::Native(Native::NodeAsyncResource) => {
                 self.stack.push(ordinary_object([
@@ -29265,6 +29384,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // timer carries its state in its arguments rather than in a closure.
                     callback: Value::Settler(Rc::clone(&promise), false),
                     arguments: vec![Value::String("timed-out".to_owned())],
+                    context: Rc::clone(&self.async_context),
                 };
                 let delay = duration_from_milliseconds(if timeout.is_finite() {
                     timeout
@@ -30438,6 +30558,107 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(primitive.to_display_string())
     }
 
+    /// The five `AsyncLocalStorage` methods, which share a receiver and a context.
+    ///
+    /// The store is not held on the storage. It is held in the *context*, which is realm state
+    /// that follows control rather than the frame -- captured when work is queued and restored
+    /// when that work runs. That is the whole mechanism, and it is why `als.run(store, f)` where
+    /// `f` awaits still sees the store on the far side of the await: the reaction that resumes
+    /// `f` was queued while the store was in force and carries a copy of the context that had it.
+    fn async_local_storage(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        // The constructor reaches here when it is called without `new`, which Node refuses.
+        if matches!(native, Native::NodeAsyncLocalStorage) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Class constructor AsyncLocalStorage cannot be invoked without 'new'"
+                    .into(),
+            });
+        }
+        let storage = node_async_storage(receiver)?;
+        match native {
+            Native::NodeAsyncLocalStorageGetStore => Ok(self.current_store(&storage)),
+            Native::NodeAsyncLocalStorageDisable => {
+                // Permanent, as Node's is. A disabled storage reads as empty even from a context
+                // captured while it still held a store, which is why this is a flag on the
+                // storage and not a removal from a context nothing can reach any more.
+                storage.disabled.set(true);
+                Ok(Value::Undefined)
+            }
+            Native::NodeAsyncLocalStorageEnterWith => {
+                // No matching exit: the store stays in force for the rest of *this* job, and
+                // every job queued from here carries it. That is what distinguishes it from
+                // `run`, which restores what it displaced.
+                let store = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.async_context = bind_store(&self.async_context, &storage, Some(store));
+                Ok(Value::Undefined)
+            }
+            // Both run a callback under a modified context and put back exactly what was there,
+            // whether the callback returned or threw. `run` binds a store; `exit` removes one.
+            Native::NodeAsyncLocalStorageRun | Native::NodeAsyncLocalStorageExit => {
+                let exiting = matches!(native, Native::NodeAsyncLocalStorageExit);
+                let (callback, rest) = if exiting {
+                    (arguments.first(), arguments.get(1..))
+                } else {
+                    (arguments.get(1), arguments.get(2..))
+                };
+                let callback = callback.cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "AsyncLocalStorage callback is not a function".into(),
+                    });
+                }
+                let store = if exiting {
+                    None
+                } else {
+                    Some(arguments.first().cloned().unwrap_or(Value::Undefined))
+                };
+                // Only *this* storage's binding is saved and put back. Restoring the whole
+                // context would undo an `enterWith` the callback did on some *other* storage,
+                // which node keeps: each storage's stack is its own, and one storage's `run`
+                // has no opinion about another's.
+                let displaced = self.held_store(&storage);
+                self.async_context = bind_store(&self.async_context, &storage, store);
+                let outcome = self.call_value(
+                    &callback,
+                    Value::Undefined,
+                    rest.unwrap_or_default().to_vec(),
+                    instruction,
+                );
+                // On both paths: a callback that throws must not leave its store in force for
+                // whatever catches it.
+                self.async_context = bind_store(&self.async_context, &storage, displaced);
+                outcome
+            }
+            _ => unreachable!("every AsyncLocalStorage method is answered above"),
+        }
+    }
+
+    /// What `getStore` answers: the held store, or `undefined` when there is none or the storage
+    /// has been disabled.
+    fn current_store(&self, storage: &Rc<AsyncStorage>) -> Value {
+        if storage.disabled.get() {
+            return Value::Undefined;
+        }
+        self.held_store(storage).unwrap_or(Value::Undefined)
+    }
+
+    /// The binding itself, which is not the same question as `getStore`.
+    ///
+    /// A disabled storage still *has* whatever binding it had -- `disable` stops it being read,
+    /// not being restored -- and `run` has to put back the binding it displaced rather than the
+    /// answer a read would have given.
+    fn held_store(&self, storage: &Rc<AsyncStorage>) -> Option<Value> {
+        self.async_context
+            .iter()
+            .find(|(held, _)| Rc::ptr_eq(held, storage))
+            .map(|(_, store)| store.clone())
+    }
+
     fn pop(&mut self, instruction: usize) -> Result<Value, ExecutionError> {
         self.stack
             .pop()
@@ -30983,6 +31204,66 @@ fn node_hash_digest(algorithm: HashAlgorithm, bytes: &[u8]) -> Vec<u8> {
         HashAlgorithm::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
         HashAlgorithm::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
     }
+}
+
+/// `new AsyncLocalStorage()`.
+///
+/// The instance is an ordinary object carrying its own identity in `node_object`; the methods are
+/// shared natives that read that identity off their receiver, exactly as `StringDecoder`'s do.
+fn node_async_local_storage() -> Value {
+    let mut data = ObjectData {
+        node_object: Some(NodeObject::AsyncLocalStorage(Rc::new(AsyncStorage {
+            disabled: std::cell::Cell::new(false),
+        }))),
+        ..Default::default()
+    };
+    data.set("run", Value::Native(Native::NodeAsyncLocalStorageRun));
+    data.set(
+        "getStore",
+        Value::Native(Native::NodeAsyncLocalStorageGetStore),
+    );
+    data.set(
+        "enterWith",
+        Value::Native(Native::NodeAsyncLocalStorageEnterWith),
+    );
+    data.set("exit", Value::Native(Native::NodeAsyncLocalStorageExit));
+    data.set(
+        "disable",
+        Value::Native(Native::NodeAsyncLocalStorageDisable),
+    );
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// A context with one storage's binding replaced, or removed when `store` is `None`.
+///
+/// A fresh context rather than a mutation, because contexts already captured by queued work must
+/// not change underneath it: that captured copy *is* the store those jobs will see.
+fn bind_store(
+    context: &AsyncContext,
+    storage: &Rc<AsyncStorage>,
+    store: Option<Value>,
+) -> AsyncContext {
+    let mut bindings: Vec<(Rc<AsyncStorage>, Value)> = context
+        .iter()
+        .filter(|(held, _)| !Rc::ptr_eq(held, storage))
+        .cloned()
+        .collect();
+    if let Some(store) = store {
+        bindings.push((Rc::clone(storage), store));
+    }
+    Rc::new(bindings)
+}
+
+/// The storage a method was called on, or a `TypeError` naming the mistake.
+fn node_async_storage(receiver: &Value) -> Result<Rc<AsyncStorage>, ExecutionError> {
+    if let Value::Object(object) = receiver
+        && let Some(NodeObject::AsyncLocalStorage(storage)) = &object.borrow().node_object
+    {
+        return Ok(Rc::clone(storage));
+    }
+    Err(ExecutionError::TypeErrorMessage {
+        message: "AsyncLocalStorage method called on an incompatible receiver".into(),
+    })
 }
 
 fn node_string_decoder() -> Value {
@@ -32698,6 +32979,14 @@ fn call_native(
         // under needs the realm's registry, which a free function has no way to reach.
         Native::ObjectGetOwnPropertySymbols => {
             unreachable!("`Object.getOwnPropertySymbols` is dispatched by the interpreter")
+        }
+        Native::NodeAsyncLocalStorage
+        | Native::NodeAsyncLocalStorageRun
+        | Native::NodeAsyncLocalStorageGetStore
+        | Native::NodeAsyncLocalStorageEnterWith
+        | Native::NodeAsyncLocalStorageExit
+        | Native::NodeAsyncLocalStorageDisable => {
+            unreachable!("`AsyncLocalStorage` is dispatched by the interpreter")
         }
         Native::ObjectGetOwnPropertyDescriptor => {
             let target = arguments.first().unwrap_or(&Value::Undefined);

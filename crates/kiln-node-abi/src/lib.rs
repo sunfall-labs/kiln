@@ -44,7 +44,7 @@ const BUILTINS: &[BuiltinAbi] = &[
     },
     BuiltinAbi {
         specifier: "node:async_hooks",
-        exports: &["AsyncResource", "default"],
+        exports: &["AsyncLocalStorage", "AsyncResource", "default"],
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {
@@ -241,6 +241,8 @@ const BUILTINS: &[BuiltinAbi] = &[
     BuiltinAbi {
         specifier: "node:util",
         exports: &[
+            "TextDecoder",
+            "TextEncoder",
             "debuglog",
             "default",
             "deprecate",
