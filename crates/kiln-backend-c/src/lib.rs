@@ -383,7 +383,7 @@ fn render_native_constructor_table() -> String {
         use std::fmt::Write as _;
         writeln!(
             table,
-            "    {{ UINT64_C({}), UINT64_C({parent}), {surface}, {{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}} }},",
+            "    {{ UINT64_C({}), UINT64_C({parent}), {surface}, {{KILN_VALUE_UNDEFINED, 0, {{0}}}} }},",
             constructor.method
         )
         .expect("writing to String cannot fail");
@@ -2088,10 +2088,8 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
     uint32_t tag;
-    uint32_t reserved;
-    uint64_t bits;
-    const char *ptr;
-    size_t len;
+    uint32_t len;
+    union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
 typedef enum kiln_typed_kind {
@@ -2485,6 +2483,10 @@ typedef struct kiln_symbol {
     size_t key_len;
     const char *description;
     size_t description_len;
+    /* Non-zero only for a symbol from the cross-realm registry. It lived in the value's payload
+     * word until that word was shared with the pointer; a registered symbol is the one value that
+     * wanted both, and the id belongs with the symbol rather than beside it. */
+    uint64_t registry_id;
 } kiln_symbol;
 
 typedef struct kiln_bound {
@@ -3341,10 +3343,9 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
     value.tag = tag;
-    value.reserved = 0;
-    value.bits = bits;
-    value.ptr = ptr;
-    value.len = len;
+    value.len = (uint32_t)len;
+    /* `bits` and `ptr` share one word: a value is a payload or a pointer, never both. */
+    if (ptr != NULL) { value.ptr = ptr; } else { value.bits = bits; }
     return value;
 }
 
@@ -6589,8 +6590,8 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         symbol->description = text.ptr;
         symbol->description_len = text.len;
     }
-    *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)symbol,
-                          (const char *)(uintptr_t)symbol, 0);
+    symbol->registry_id = 0;
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
     return kiln_c99_remember_symbol(*out);
 }
 
@@ -6621,7 +6622,8 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
     symbol->description = (const char *)registered_key;
     symbol->description_len = (size_t)registered_key_len;
-    *out = kiln_c99_value(KILN_VALUE_SYMBOL, id, (const char *)(uintptr_t)symbol, 0);
+    symbol->registry_id = id;
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
     return kiln_c99_remember_symbol(*out);
 }
 
@@ -6629,7 +6631,8 @@ static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
     const uint8_t *key;
     uint64_t key_len;
     if (value.tag != KILN_VALUE_SYMBOL) return kiln_c99_undefined();
-    if (kiln_realm_symbol_key_for(value.bits, &key, &key_len) != KILN_C99_OK)
+    if (kiln_realm_symbol_key_for(kiln_c99_symbol_of(value)->registry_id, &key, &key_len) !=
+        KILN_C99_OK)
         return kiln_c99_undefined();
     return kiln_c99_copy_text((const char *)key, (size_t)key_len);
 }
@@ -8087,6 +8090,18 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
         return left.len == right.len &&
                (left.len == 0 || (left.ptr != NULL && right.ptr != NULL &&
                                   memcmp(left.ptr, right.ptr, left.len) == 0));
+    }
+    if (left.tag == KILN_VALUE_SYMBOL) {
+        /* A registry symbol is identified by its id, not by the object that carries it: two
+         * `Symbol.for(k)` calls are the same symbol. The id used to be the value's payload word,
+         * which made this comparison free; now it lives on the symbol, so ask for it. A unique
+         * symbol has id zero and falls through to object identity, which is what distinguishes it
+         * from a registered one and from every other unique symbol. */
+        const kiln_symbol *left_symbol = kiln_c99_symbol_of(left);
+        const kiln_symbol *right_symbol = kiln_c99_symbol_of(right);
+        if (left_symbol != NULL && right_symbol != NULL && left_symbol->registry_id != 0) {
+            return left_symbol->registry_id == right_symbol->registry_id;
+        }
     }
     return left.bits == right.bits;
 }
@@ -11872,7 +11887,12 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
     kiln_property *slot;
     int status = kiln_c99_own_slot(object, key, key_len, &slot);
     if (status != KILN_C99_OK) return status;
-    slot->value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer, NULL, 0);
+    /* A raw host pointer smuggled through a private slot. It used to be told apart from a real
+     * object value by `ptr == NULL` while the pointer itself sat in `bits` -- a scheme that
+     * needed the two to be separate fields. They now share one word, so the marker moves to
+     * `len`, which no object value uses. */
+    slot->value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer, NULL,
+                                 0xFFFFFFFFu);
     slot->enumerable = 0;
     slot->writable = 0;
     slot->configurable = 0;
@@ -11897,7 +11917,8 @@ static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
 
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
     kiln_property *slot = kiln_c99_own_private(object, key, key_len);
-    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT || slot->value.ptr != NULL)
+    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT ||
+        slot->value.len != 0xFFFFFFFFu)
         return NULL;
     return (void *)(uintptr_t)slot->value.bits;
 }
