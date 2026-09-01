@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 481
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>

@@ -4758,8 +4758,30 @@ impl WorkDirectory {
     }
 }
 
+/// Set to keep a native build's scratch directory instead of deleting it.
+///
+/// The generated C is the only artifact that can explain a native performance result, and until
+/// now nothing could read it: it is written into a temporary directory this `Drop` removes, and
+/// the copy in the artifact cache is stored compressed. Measuring the emitted shape therefore
+/// meant reconstructing it by hand from `kiln-backend-c`'s snapshots — which is how ADR 0016's
+/// own table was produced, and why that table describes an emission *shape* rather than the
+/// pipeline that ships. Keeping the directory is the difference between the two.
+///
+/// An environment variable rather than a flag because this crate is below the CLI and the
+/// protocol, and a diagnostic that has to be plumbed through both is a diagnostic nobody reaches
+/// for. The path is announced on stderr because a directory kept silently is a directory left
+/// behind: this one is not cleaned up, by design, and the operator has to know where it went.
+const KEEP_WORK_ENV: &str = "KILN_NATIVE_KEEP_WORK";
+
 impl Drop for WorkDirectory {
     fn drop(&mut self) {
+        if std::env::var_os(KEEP_WORK_ENV).is_some() {
+            eprintln!(
+                "kiln: kept native build directory {} ({KEEP_WORK_ENV} is set)",
+                self.path.display()
+            );
+            return;
+        }
         let _ = fs::remove_dir_all(&self.path);
     }
 }

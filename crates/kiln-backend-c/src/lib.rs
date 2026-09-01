@@ -23192,6 +23192,7 @@ static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double 
  * The same reduction the binary operators do, for the same reason: all three want a number, and
  * a number is what `valueOf` is for. `!`, `typeof` and `void` do not coerce -- they answer about
  * the value they were given. */
+
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
                                   kiln_value *out, int depth, kiln_value *thrown) {
     int numeric = operation == 1 || operation == 2 || operation == 5 || operation == 7 ||
@@ -23226,6 +23227,7 @@ static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_valu
  * The provider owns the arithmetic (ADR 0025) -- writing arbitrary-precision division twice is
  * exactly the duplication that pattern exists to prevent -- so this is the type dispatch and the
  * error surface around it, nothing more. */
+
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
                                    kiln_value right, kiln_value *out, int depth,
                                    kiln_value *thrown) {
@@ -26139,19 +26141,28 @@ fn emit_instruction(
         }
         Instruction::Unary(operator) => {
             let unwind = unwind_or_return(handlers, site);
-            writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap()
+            match numeric_fast_unary_body(*operator) {
+                Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (operand.tag == KILN_VALUE_NUMBER) {{ double a; memcpy(&a, &operand.bits, sizeof(a)); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+            }
         }
         Instruction::Binary(operator) if !*callables => {
             // A scalar program has no BigInt in it and so no operator in it can throw. It also
             // has nowhere to put a thrown value -- the entry point declares that slot only when
             // something can reach it -- so this is the form that program has to keep.
-            writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap()
+            match numeric_fast_body(*operator) {
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap(),
+            }
         }
         Instruction::Binary(operator) => {
             // An operator throws only when a BigInt is involved, and `kiln_c99_binary_checked`
             // hands every other case straight back to `kiln_c99_binary`.
             let unwind = unwind_or_return(handlers, site);
-            writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap()
+            match numeric_fast_body(*operator) {
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+            }
         }
         Instruction::Jump(target) => writeln!(output, "    goto kiln_label_{target};").unwrap(),
         Instruction::JumpIfFalse(target) => {
@@ -26323,6 +26334,64 @@ fn unary_code(operator: UnaryOp) -> u16 {
         UnaryOp::Increment => 8,
         UnaryOp::Decrement => 9,
     }
+}
+
+/// The C statement that answers a binary operator when both operands are already numbers.
+///
+/// The operator is known here, at emission time. The first version of this fast path passed it to
+/// a shared runtime helper as a `uint16_t` and let that helper switch on it — which took static
+/// information and made it dynamic, the same mistake ADR 0016 diagnoses in the generic dispatcher,
+/// one layer down. The disassembly was unambiguous: `mov w0, #0x9` followed by `bl
+/// kiln_c99_binary_fast`, with both operands passed by address and the result read back through
+/// memory, because a function holding a 22-way switch and a fallback call is not inlinable however
+/// it is annotated.
+///
+/// Emitting the operation itself removes three costs at once: the call, the switch, and — the one
+/// that matters most — the opacity. With no out-of-line call left in a numeric loop body, nothing
+/// forces `stack[]` and `locals[]` to memory, so SROA can promote them. That is the promotion
+/// ADR 0016 predicted would happen "if the operations were visible"; this is what makes them
+/// visible.
+///
+/// `None` means there is no cheap numeric answer and the site keeps the generic call: `**` needs
+/// `pow`, and the bitwise operators and shifts need ToInt32, which is a separate decision.
+fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
+    Some(match operator {
+        BinaryOp::Add => "answer = kiln_c99_number(a + b);",
+        BinaryOp::Subtract => "answer = kiln_c99_number(a - b);",
+        BinaryOp::Multiply => "answer = kiln_c99_number(a * b);",
+        BinaryOp::Divide => "answer = kiln_c99_number(a / b);",
+        // `%` is `fmod` by specification, and `fmod` is a call into libm that measured at 41% of a
+        // Collatz benchmark's entire runtime. Two integral operands take the machine instruction
+        // instead, which agrees exactly: C truncates toward zero and takes the sign of the
+        // dividend, as ECMAScript specifies. The guard stays conservative — outside +/-2^53 a
+        // double is not exactly an integer, a zero divisor must reach `fmod` for NaN, and a zero
+        // dividend must too, because `-0 % 3` is `-0` and integer division would answer `+0`.
+        BinaryOp::Remainder => {
+            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_number(fmod(a, b)); }"
+        }
+        BinaryOp::StrictEqual => "answer = kiln_c99_boolean(a == b);",
+        BinaryOp::StrictNotEqual => "answer = kiln_c99_boolean(a != b);",
+        BinaryOp::LessThan => "answer = kiln_c99_boolean(a < b);",
+        BinaryOp::LessThanOrEqual => "answer = kiln_c99_boolean(a <= b);",
+        BinaryOp::GreaterThan => "answer = kiln_c99_boolean(a > b);",
+        BinaryOp::GreaterThanOrEqual => "answer = kiln_c99_boolean(a >= b);",
+        _ => return None,
+    })
+}
+
+/// The unary counterpart of [`numeric_fast_body`], answering in terms of `a`.
+///
+/// `typeof` and `void` do not touch the value and `~` needs ToInt32, so they keep the generic call.
+fn numeric_fast_unary_body(operator: UnaryOp) -> Option<&'static str> {
+    Some(match operator {
+        UnaryOp::Plus | UnaryOp::ToNumeric => "answer = kiln_c99_number(a);",
+        UnaryOp::Negate => "answer = kiln_c99_number(-a);",
+        // `!x` on a number is false unless the number is zero or NaN.
+        UnaryOp::Not => "answer = kiln_c99_boolean(a == 0.0 || a != a);",
+        UnaryOp::Increment => "answer = kiln_c99_number(a + 1.0);",
+        UnaryOp::Decrement => "answer = kiln_c99_number(a - 1.0);",
+        _ => return None,
+    })
 }
 
 fn binary_code(operator: BinaryOp) -> u16 {
