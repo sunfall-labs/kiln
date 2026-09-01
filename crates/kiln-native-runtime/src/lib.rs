@@ -347,30 +347,33 @@ enum kiln_value_tag {
     KILN_VALUE_STRING = 4
 };
 
-/* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
- * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
+/* This layout is the complete boundary value.  `bits` and `ptr` share one word because a value
+ * is a payload or a pointer and never both: `bits` stores booleans and IEEE-754 numbers, `ptr`
+ * with `len` stores UTF-8 string bytes and is not required to be NUL terminated.
+ *
+ * Sixteen bytes is a threshold rather than a size. AAPCS64 passes a composite of sixteen bytes or
+ * fewer in registers and anything larger indirectly, by reference to a copy -- so at the previous
+ * thirty-two bytes every argument and every return travelled through memory. Measured at 1.37x on
+ * a call-bound benchmark, and at nothing on benchmarks whose values already stayed in registers,
+ * which is the shape that says the threshold is what moved rather than the byte count. */
 typedef struct kiln_value {
     uint32_t tag;
-    uint32_t reserved;
-    uint64_t bits;
-    const char *ptr;
-    size_t len;
+    uint32_t len;
+    union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
 #if defined(__cplusplus)
 static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
-static_assert(offsetof(kiln_value, reserved) == 4, "kiln_value.reserved ABI offset");
+static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
 static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
-static_assert(offsetof(kiln_value, ptr) == 16, "kiln_value.ptr ABI offset");
-static_assert(offsetof(kiln_value, len) == 16 + sizeof(void *), "kiln_value.len ABI offset");
-static_assert(sizeof(kiln_value) == 16 + 2 * sizeof(void *), "kiln_value ABI size");
+static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
+static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
 #elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
 _Static_assert(offsetof(kiln_value, tag) == 0, "kiln_value.tag ABI offset");
-_Static_assert(offsetof(kiln_value, reserved) == 4, "kiln_value.reserved ABI offset");
+_Static_assert(offsetof(kiln_value, len) == 4, "kiln_value.len ABI offset");
 _Static_assert(offsetof(kiln_value, bits) == 8, "kiln_value.bits ABI offset");
-_Static_assert(offsetof(kiln_value, ptr) == 16, "kiln_value.ptr ABI offset");
-_Static_assert(offsetof(kiln_value, len) == 16 + sizeof(void *), "kiln_value.len ABI offset");
-_Static_assert(sizeof(kiln_value) == 16 + 2 * sizeof(void *), "kiln_value ABI size");
+_Static_assert(offsetof(kiln_value, ptr) == 8, "kiln_value.ptr shares the payload word");
+_Static_assert(sizeof(kiln_value) == 16, "kiln_value fits the AAPCS64 register threshold");
 #endif
 
 /* Argument ptr/len values are borrowed for the callback invocation.  A string stored in *result
@@ -673,10 +676,8 @@ static int kiln_cli_write_value(kiln_value value) {
 static kiln_value kiln_cli_undefined(void) {
     kiln_value value;
     value.tag = KILN_VALUE_UNDEFINED;
-    value.reserved = 0;
-    value.bits = 0;
-    value.ptr = NULL;
     value.len = 0;
+    value.bits = 0;
     return value;
 }
 
@@ -799,7 +800,7 @@ int main(void) {
     }
     host.call = kiln_cli_host_call;
     host.context = NULL;
-    result = (kiln_value){ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
+    result = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
     context.host = &host;
     context.result = &result;
     status = kiln_realm_create(&realm);
@@ -966,10 +967,10 @@ mod tests {
         assert!(embedding_header().contains("#define KILN_C99_UNINITIALIZED_ERROR (-6)"));
         assert!(embedding_header().contains("#define KILN_HOST_OP_WRITE_STDOUT 1"));
         assert!(embedding_header().contains("uint32_t tag;"));
-        assert!(embedding_header().contains("uint32_t reserved;"));
+        assert!(embedding_header().contains("union { uint64_t bits; const char *ptr; };"));
         assert!(embedding_header().contains("uint64_t bits;"));
         assert!(embedding_header().contains("const char *ptr;"));
-        assert!(embedding_header().contains("size_t len;"));
+        assert!(embedding_header().contains("uint32_t len;"));
         assert!(embedding_header().contains("typedef int (*kiln_host_call_fn)"));
         assert!(embedding_header().contains("typedef struct kiln_host"));
         assert!(embedding_header().contains("typedef struct kiln_result_v2 kiln_result_v2;"));
@@ -982,7 +983,7 @@ mod tests {
                 .contains("int (*read)(const kiln_result_v2 *result, kiln_value *value);")
         );
         assert!(embedding_header().contains("void (*dispose)(kiln_result_v2 **result);"));
-        assert!(embedding_header().contains("sizeof(kiln_value) == 16 + 2 * sizeof(void *)"));
+        assert!(embedding_header().contains("sizeof(kiln_value) == 16"));
         assert!(embedding_header().contains("#endif /* KILN_NATIVE_EMBEDDING_H */"));
     }
 
@@ -1017,10 +1018,8 @@ int main(void) {
     host.call = call;
     host.context = 0;
     value.tag = KILN_VALUE_UNDEFINED;
-    value.reserved = 0;
-    value.bits = 0;
-    value.ptr = 0;
     value.len = 0;
+    value.bits = 0;
     return host.call(host.context, KILN_HOST_OP_WRITE_STDOUT, 0, 0, &value);
 }
 "#;
@@ -1111,7 +1110,7 @@ int main(void) {
 
 int main(void) {
     kiln_host host = {0, 0};
-    kiln_value result = {0, 0, 0, 0, 0};
+    kiln_value result = {0, 0, {0}};
     const kiln_module_api_v2 *(*api)(void) = kiln_module_probe_api_v2;
     (void)api;
     return kiln_module_probe(&host, &result);
@@ -1515,13 +1514,13 @@ int main(int argc, char **argv) {
 extern void kiln_cli_report_failure(int status, kiln_value value);
 
 int main(void) {
-    kiln_value value = { KILN_VALUE_UNDEFINED, 0, 0, 0, 0 };
+    kiln_value value = { KILN_VALUE_UNDEFINED, 0, {0} };
     kiln_cli_report_failure(KILN_C99_CONTROL_ERROR, value);
     value.tag = KILN_VALUE_STRING;
     value.ptr = "module=node:http instruction=7 method=240 receiver_tag=18";
     value.len = sizeof("module=node:http instruction=7 method=240 receiver_tag=18") - 1;
     kiln_cli_report_failure(KILN_C99_CONTROL_ERROR, value);
-    value = (kiln_value){ KILN_VALUE_UNDEFINED, 0, 0, 0, 0 };
+    value = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
     kiln_cli_report_failure(KILN_C99_OUT_OF_MEMORY, value);
     kiln_cli_report_failure(KILN_C99_CALL_DEPTH_ERROR, value);
     kiln_cli_report_failure(KILN_C99_UNINITIALIZED_ERROR, value);

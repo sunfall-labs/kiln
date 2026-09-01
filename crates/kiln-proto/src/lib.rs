@@ -47,6 +47,16 @@ impl SourceDigest {
     pub fn to_hex(self) -> String {
         self.0.to_hex()
     }
+
+    /// Rebuild a digest from its wire spelling.
+    ///
+    /// For readers that persist a digest and hand it back rather than recomputing it -- the CLI's
+    /// stat-keyed source index is the one that exists. It is the inverse of [`Self::to_hex`] and
+    /// nothing else: an unparseable spelling is an error, never a guess, so a corrupt cache
+    /// degrades into re-reading the file.
+    pub fn from_hex(value: &str) -> Result<Self, kiln_digest::DigestParseError> {
+        Digest::from_hex(value).map(Self)
+    }
 }
 
 /// Hash one source snapshot for [`Request::Sync`].

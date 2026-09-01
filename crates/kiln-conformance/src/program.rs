@@ -64,6 +64,10 @@ pub fn run_node_against_expected_stdout(
 /// becoming a second, easier-to-pass Node runtime that real programs never use.
 fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     let started = Instant::now();
+    if let Some(reason) = uninstalled_packages_requirement(path) {
+        return skipped(&reason, started);
+    }
+
     let project_root = path.parent().unwrap_or_else(|| Path::new("."));
     let resolver = match NodeRuntimeResolver::new(project_root) {
         Ok(resolver) => resolver,
@@ -162,6 +166,9 @@ fn run_with_executor(
     let started = Instant::now();
     if let Some(reason) = out_of_process_build_requirement(path) {
         return skipped(reason, started);
+    }
+    if let Some(reason) = uninstalled_packages_requirement(path) {
+        return skipped(&reason, started);
     }
 
     let source = match fs::read_to_string(path) {
@@ -340,6 +347,52 @@ fn out_of_process_build_requirement(path: &Path) -> Option<&'static str> {
     )
 }
 
+/// The reason a program's packages are missing, if they are.
+///
+/// `conformance/server/packages/` holds probes that import a framework by bare specifier on
+/// purpose, to exercise ADR 0027's resolution policy against a real dependency tree. Its
+/// `node_modules` is produced by `npm ci` and gitignored for the same reason `effect/bundle/` is,
+/// so a fresh clone has the probes and not their dependencies. Without this the resolver gives its
+/// honest answer -- `could not find package `fastify`` -- and the runner records it as a
+/// *failure*, which asserts that Kiln was asked something and got it wrong. Kiln was not asked
+/// anything: the input is absent. Two probes then fail on every clean checkout, which is the
+/// "green tick on an empty measurement" this corpus refuses, pointing the other way.
+///
+/// Like the bundle check above, this reads the working tree and not the manifest. Whether
+/// `node_modules` is there is a fact; `status = "needs-packages"` is an expectation, and letting
+/// the file that records an expectation decide whether that expectation is checked is the one
+/// thing `manifest.toml` says it must never do.
+///
+/// Deliberately narrow, in two ways, because both were wrong on the first attempt:
+///
+/// It fires only when the whole `node_modules` is missing, so a directory that has one and lacks
+/// the package the probe imports still fails, and still says so.
+///
+/// And it fires only when the manifest *declares* dependencies. A `package.json` is not evidence
+/// of any: node-mode tests use `{"type":"module"}` purely to classify a `.js` file's format, and
+/// treating that as "packages expected" skipped three of them — turning a passing test green in
+/// the one way this corpus most dislikes, by not running it.
+fn uninstalled_packages_requirement(path: &Path) -> Option<String> {
+    let directory = path.parent()?;
+    if directory.join("node_modules").is_dir() {
+        return None;
+    }
+    let manifest = fs::read_to_string(directory.join("package.json")).ok()?;
+    let declares_dependencies = manifest
+        .split_once("\"dependencies\"")
+        .and_then(|(_, rest)| rest.split_once('{'))
+        .and_then(|(_, body)| body.split_once('}'))
+        .is_some_and(|(entries, _)| entries.contains('"'));
+    if !declares_dependencies {
+        return None;
+    }
+    Some(format!(
+        "packages are not installed: this program imports by bare specifier and runs only where \
+         `npm ci` has been run in {}",
+        directory.display()
+    ))
+}
+
 fn skipped(reason: &str, started: Instant) -> CaseResult {
     CaseResult::new(
         Outcome::Skipped,
@@ -395,6 +448,51 @@ mod tests {
             Some(reason),
             "every skipped program shares one reason, so a report groups them into one line"
         );
+    }
+
+    /// A probe whose dependencies were never installed was not asked anything, so it skips.
+    ///
+    /// The corpus's rule is that a failure asserts Kiln got something wrong, and two probes in
+    /// `server/packages/` failed on every fresh clone for want of a gitignored `node_modules`.
+    /// The check reads the working tree rather than `status = "needs-packages"`, so this exercises
+    /// it the same way -- by building the two trees and asking, not by declaring an expectation.
+    #[test]
+    fn a_probe_without_its_packages_skips_rather_than_failing() {
+        let root = std::env::temp_dir().join(format!(
+            "kiln-conformance-packages-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let probe = root.join("s04.mjs");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).expect("create the probe directory");
+        fs::write(&probe, "import x from \"fastify\";\n").expect("write the probe");
+
+        // No package.json at all: an ordinary probe, and nothing to say about it.
+        assert!(uninstalled_packages_requirement(&probe).is_none());
+
+        // A manifest that declares no dependencies is not evidence of any. Node-mode tests write
+        // exactly this to classify a `.js` file's format, and skipping them would hide three
+        // passing tests behind a "skipped" that nobody asked for. This is a regression pin.
+        fs::write(root.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write a manifest with no dependencies");
+        assert!(uninstalled_packages_requirement(&probe).is_none());
+
+        // Declared dependencies, none installed: the input is missing, so this is a skip.
+        fs::write(
+            root.join("package.json"),
+            r#"{"dependencies":{"fastify":"5.12.1"}}"#,
+        )
+        .expect("write the package manifest");
+        let reason =
+            uninstalled_packages_requirement(&probe).expect("uninstalled packages are a skip");
+        assert!(reason.contains("npm ci"), "{reason}");
+
+        // Installed: the runner must proceed, so that a genuinely missing package still fails.
+        fs::create_dir_all(root.join("node_modules")).expect("create node_modules");
+        assert!(uninstalled_packages_requirement(&probe).is_none());
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

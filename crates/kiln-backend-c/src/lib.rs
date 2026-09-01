@@ -383,7 +383,7 @@ fn render_native_constructor_table() -> String {
         use std::fmt::Write as _;
         writeln!(
             table,
-            "    {{ UINT64_C({}), UINT64_C({parent}), {surface}, {{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}} }},",
+            "    {{ UINT64_C({}), UINT64_C({parent}), {surface}, {{KILN_VALUE_UNDEFINED, 0, {{0}}}} }},",
             constructor.method
         )
         .expect("writing to String cannot fail");
@@ -2150,10 +2150,8 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
     uint32_t tag;
-    uint32_t reserved;
-    uint64_t bits;
-    const char *ptr;
-    size_t len;
+    uint32_t len;
+    union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
 typedef enum kiln_typed_kind {
@@ -2224,6 +2222,7 @@ typedef struct kiln_closure {
      * with no receiver runs with the global object as `this`, which is how `var root = this ||
      * global` finds the realm; a strict one runs with the `undefined` it was passed. */
     int strict;
+    int publishes_frame;
     kiln_value captured_this;
     kiln_value captured_new_target;
     /* ...and its `arguments`, which is the enclosing function's list rather than its own. */
@@ -2563,6 +2562,10 @@ typedef struct kiln_symbol {
     size_t key_len;
     const char *description;
     size_t description_len;
+    /* Non-zero only for a symbol from the cross-realm registry. It lived in the value's payload
+     * word until that word was shared with the pointer; a registered symbol is the one value that
+     * wanted both, and the id belongs with the symbol rather than beside it. */
+    uint64_t registry_id;
 } kiln_symbol;
 
 typedef struct kiln_bound {
@@ -3446,10 +3449,9 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
     value.tag = tag;
-    value.reserved = 0;
-    value.bits = bits;
-    value.ptr = ptr;
-    value.len = len;
+    value.len = (uint32_t)len;
+    /* `bits` and `ptr` share one word: a value is a payload or a pointer, never both. */
+    if (ptr != NULL) { value.ptr = ptr; } else { value.bits = bits; }
     return value;
 }
 
@@ -7118,8 +7120,8 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         symbol->description = text.ptr;
         symbol->description_len = text.len;
     }
-    *out = kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)symbol,
-                          (const char *)(uintptr_t)symbol, 0);
+    symbol->registry_id = 0;
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
     return kiln_c99_remember_symbol(*out);
 }
 
@@ -7150,7 +7152,8 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
     symbol->description = (const char *)registered_key;
     symbol->description_len = (size_t)registered_key_len;
-    *out = kiln_c99_value(KILN_VALUE_SYMBOL, id, (const char *)(uintptr_t)symbol, 0);
+    symbol->registry_id = id;
+    *out = kiln_c99_value(KILN_VALUE_SYMBOL, 0, (const char *)(uintptr_t)symbol, 0);
     return kiln_c99_remember_symbol(*out);
 }
 
@@ -7158,7 +7161,8 @@ static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
     const uint8_t *key;
     uint64_t key_len;
     if (value.tag != KILN_VALUE_SYMBOL) return kiln_c99_undefined();
-    if (kiln_realm_symbol_key_for(value.bits, &key, &key_len) != KILN_C99_OK)
+    if (kiln_realm_symbol_key_for(kiln_c99_symbol_of(value)->registry_id, &key, &key_len) !=
+        KILN_C99_OK)
         return kiln_c99_undefined();
     return kiln_c99_copy_text((const char *)key, (size_t)key_len);
 }
@@ -7709,6 +7713,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->handler_depth = handler_depth;
     closure->arrow = arrow;
     closure->strict = strict;
+    closure->publishes_frame = 1;
     closure->captured_this = arrow ? receiver : kiln_c99_undefined();
     closure->async_generator = async_generator;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
@@ -7826,6 +7831,56 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     kiln_c99_frame_callee = saved_callee;
     kiln_c99_diagnostic_active_depth = saved_diagnostic_depth;
     return status;
+}
+
+/* Attribute a refusal that reached the caller without an instruction claiming it. Out of line
+ * because it runs only on the refusal path, which is what keeps `kiln_c99_invoke_closure` small
+ * enough for the compiler to inline. */
+static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int depth) {
+    kiln_c99_diagnostic_site = closure->diagnostic_source;
+    kiln_c99_diagnostic_operation = "FunctionBody";
+    kiln_c99_diagnostic_function = closure->name;
+    kiln_c99_diagnostic_function_len = closure->name_len;
+    kiln_c99_diagnostic_depth = (size_t)(depth + 1);
+    kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+    kiln_c99_diagnostic_detail =
+        "generated function body refused before an instruction owned the failure";
+}
+
+/* The call entry every emitted call site uses.
+ *
+ * A callee that cannot observe the frame context needs nothing published around it, so its whole
+ * call is the body call plus a depth save -- small enough to inline, which removes a frame per
+ * JavaScript call. Worth 1.25x on a recursive benchmark now that values are sixteen bytes,
+ * against 1.11x when they were thirty-two and the frame moved more; the saving grew because what
+ * the frame costs is mostly what it moves. Everything else tail-calls
+ * `kiln_c99_invoke_closure_body`, which stays out of line because it covers `arguments`,
+ * `new.target`, arrows and generators, and is far past the inliner's threshold. */
+/* `static inline` is a hint and the compiler declined it: measured 1.06x, against 1.25x when the
+ * frame was forced away. The wrapper is a dozen instructions on the path that matters, so the
+ * hint is made a requirement where the compiler supports saying so. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_value *result,
+                                          kiln_closure *closure, kiln_value receiver,
+                                          const kiln_value *args, size_t argc, int depth,
+                                          kiln_value *thrown, kiln_generator *frame,
+                                          int inherit_new_target) {
+    if (!closure->publishes_frame && !inherit_new_target) {
+        int saved_depth = kiln_c99_diagnostic_active_depth;
+        int quick;
+        kiln_c99_diagnostic_active_depth = depth + 1;
+        quick = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
+                              thrown, frame);
+        if (quick == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
+            kiln_c99_attribute_body_refusal(closure, depth);
+        }
+        kiln_c99_diagnostic_active_depth = saved_depth;
+        return quick;
+    }
+    return kiln_c99_invoke_closure_body(host, result, closure, receiver, args, argc, depth,
+                                        thrown, frame, inherit_new_target);
 }
 
 /* Bind a generator's parameters, before the generator object reaches the program.
@@ -8693,6 +8748,18 @@ static int kiln_c99_strict_equal(kiln_value left, kiln_value right) {
         return left.len == right.len &&
                (left.len == 0 || (left.ptr != NULL && right.ptr != NULL &&
                                   memcmp(left.ptr, right.ptr, left.len) == 0));
+    }
+    if (left.tag == KILN_VALUE_SYMBOL) {
+        /* A registry symbol is identified by its id, not by the object that carries it: two
+         * `Symbol.for(k)` calls are the same symbol. The id used to be the value's payload word,
+         * which made this comparison free; now it lives on the symbol, so ask for it. A unique
+         * symbol has id zero and falls through to object identity, which is what distinguishes it
+         * from a registered one and from every other unique symbol. */
+        const kiln_symbol *left_symbol = kiln_c99_symbol_of(left);
+        const kiln_symbol *right_symbol = kiln_c99_symbol_of(right);
+        if (left_symbol != NULL && right_symbol != NULL && left_symbol->registry_id != 0) {
+            return left_symbol->registry_id == right_symbol->registry_id;
+        }
     }
     return left.bits == right.bits;
 }
@@ -12671,7 +12738,12 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
     kiln_property *slot;
     int status = kiln_c99_own_slot(object, key, key_len, &slot);
     if (status != KILN_C99_OK) return status;
-    slot->value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer, NULL, 0);
+    /* A raw host pointer smuggled through a private slot. It used to be told apart from a real
+     * object value by `ptr == NULL` while the pointer itself sat in `bits` -- a scheme that
+     * needed the two to be separate fields. They now share one word, so the marker moves to
+     * `len`, which no object value uses. */
+    slot->value = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)pointer, NULL,
+                                 0xFFFFFFFFu);
     slot->enumerable = 0;
     slot->writable = 0;
     slot->configurable = 0;
@@ -12696,7 +12768,8 @@ static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
 
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
     kiln_property *slot = kiln_c99_own_private(object, key, key_len);
-    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT || slot->value.ptr != NULL)
+    if (slot == NULL || slot->value.tag != KILN_VALUE_OBJECT ||
+        slot->value.len != 0xFFFFFFFFu)
         return NULL;
     return (void *)(uintptr_t)slot->value.bits;
 }
@@ -24520,6 +24593,7 @@ static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double 
  * The same reduction the binary operators do, for the same reason: all three want a number, and
  * a number is what `valueOf` is for. `!`, `typeof` and `void` do not coerce -- they answer about
  * the value they were given. */
+
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
                                   kiln_value *out, int depth, kiln_value *thrown) {
     int numeric = operation == 1 || operation == 2 || operation == 5 || operation == 7 ||
@@ -24554,6 +24628,7 @@ static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_valu
  * The provider owns the arithmetic (ADR 0025) -- writing arbitrary-precision division twice is
  * exactly the duplication that pattern exists to prevent -- so this is the type dispatch and the
  * error surface around it, nothing more. */
+
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
                                    kiln_value right, kiln_value *out, int depth,
                                    kiln_value *thrown) {
@@ -26854,7 +26929,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = stack[sp - {argc} - 1]; kiln_value self_value = stack[sp - {argc} - 2]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = stack[sp - {argc} - 1]; kiln_value self_value = stack[sp - {argc} - 2]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 2
             )
             .unwrap();
@@ -27052,7 +27127,12 @@ fn emit_instruction(
         // are ever tested -- the check would otherwise be a branch on every local read for a
         // state almost no program reaches.
         Instruction::MarkUninitialized(local) => {
-            writeln!(output, "    kiln_c99_mark_uninitialized(&locals[{local}]);").unwrap();
+            // Inlined rather than `kiln_c99_mark_uninitialized(&locals[N])`. Taking the address
+            // of a slot and passing it to an opaque function makes the whole `locals[]` array
+            // address-escaped, and an escaped array cannot be promoted to registers *anywhere in
+            // the function* -- so one TDZ mark in the prologue costs every loop in the body. The
+            // body it replaces is two lines and is kept verbatim.
+            writeln!(output, "    if (locals[{local}].tag == KILN_VALUE_CELL) {{ *kiln_c99_cell_of(locals[{local}]) = kiln_c99_uninitialized(); }} else {{ locals[{local}] = kiln_c99_uninitialized(); }}").unwrap();
         }
         // An upvalue slot always holds a cell -- that is what capturing means -- but the cell can
         // still be in its owner's temporal dead zone. The owner may be a module or an enclosing
@@ -27164,14 +27244,18 @@ fn emit_instruction(
                 )
                 .unwrap();
             }
-            output.push_str("        if (status != KILN_C99_OK) return status;\n        ++sp;\n    }\n");
+            if proto_publishes_frame(target) {
+                output.push_str("        if (status != KILN_C99_OK) return status;\n        ++sp;\n    }\n");
+            } else {
+                output.push_str("        if (status != KILN_C99_OK) return status;\n        kiln_c99_closure_of(stack[sp])->publishes_frame = 0;\n        ++sp;\n    }\n");
+            }
         }
         Instruction::Call { argc } => {
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -27319,7 +27403,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_super_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                "    {{ kiln_value produced; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_super_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
                 argc + 1
             )
             .unwrap();
@@ -27340,7 +27424,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
+                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
                 argc + 1
             )
             .unwrap();
@@ -27606,7 +27690,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
@@ -27738,19 +27822,28 @@ fn emit_instruction(
         }
         Instruction::Unary(operator) => {
             let unwind = unwind_or_return(handlers, site);
-            writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap()
+            match numeric_fast_unary_body(*operator) {
+                Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (operand.tag == KILN_VALUE_NUMBER) {{ double a; memcpy(&a, &operand.bits, sizeof(a)); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+            }
         }
         Instruction::Binary(operator) if !*callables => {
             // A scalar program has no BigInt in it and so no operator in it can throw. It also
             // has nowhere to put a thrown value -- the entry point declares that slot only when
             // something can reach it -- so this is the form that program has to keep.
-            writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap()
+            match numeric_fast_body(*operator) {
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap(),
+            }
         }
         Instruction::Binary(operator) => {
             // An operator throws only when a BigInt is involved, and `kiln_c99_binary_checked`
             // hands every other case straight back to `kiln_c99_binary`.
             let unwind = unwind_or_return(handlers, site);
-            writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap()
+            match numeric_fast_body(*operator) {
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+            }
         }
         Instruction::Jump(target) => writeln!(output, "    goto kiln_label_{target};").unwrap(),
         Instruction::JumpIfFalse(target) => {
@@ -27769,7 +27862,17 @@ fn emit_instruction(
             if *argc > 0 && *callables {
                 writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_crosses_boundary(stack[arg])) stack[arg] = kiln_c99_inspect(stack[arg]); }}").unwrap();
             }
-            writeln!(output, "    {{ kiln_value host_result; const kiln_value *args = {argc} == 0 ? NULL : &stack[sp - {argc}]; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+            // The arguments are copied into a fresh buffer rather than passed as `&stack[sp - n]`.
+            // Pointing into `stack[]` and handing that pointer to the host makes the stack array
+            // address-escaped for the entire function, which defeats the promotion the numeric
+            // fast paths exist to enable: a single `console.log` at the end of a program was
+            // enough to keep a fifty-million-iteration loop's values in memory. The buffer is a
+            // local whose address escaping costs nothing, because nothing else reads it.
+            if *argc == 0 {
+                writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+            } else {
+                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = stack[sp - {argc} + i]; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+            }
         }
         Instruction::Return => match site {
             ReturnSite::Body => output.push_str(
@@ -27922,6 +28025,100 @@ fn unary_code(operator: UnaryOp) -> u16 {
         UnaryOp::Increment => 8,
         UnaryOp::Decrement => 9,
     }
+}
+
+/// The C statement that answers a binary operator when both operands are already numbers.
+///
+/// The operator is known here, at emission time. The first version of this fast path passed it to
+/// a shared runtime helper as a `uint16_t` and let that helper switch on it — which took static
+/// information and made it dynamic, the same mistake ADR 0016 diagnoses in the generic dispatcher,
+/// one layer down. The disassembly was unambiguous: `mov w0, #0x9` followed by `bl
+/// kiln_c99_binary_fast`, with both operands passed by address and the result read back through
+/// memory, because a function holding a 22-way switch and a fallback call is not inlinable however
+/// it is annotated.
+///
+/// Emitting the operation itself removes three costs at once: the call, the switch, and — the one
+/// that matters most — the opacity. With no out-of-line call left in a numeric loop body, nothing
+/// forces `stack[]` and `locals[]` to memory, so SROA can promote them. That is the promotion
+/// ADR 0016 predicted would happen "if the operations were visible"; this is what makes them
+/// visible.
+///
+/// `None` means there is no cheap numeric answer and the site keeps the generic call: `**` needs
+/// `pow`, and the bitwise operators and shifts need ToInt32, which is a separate decision.
+fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
+    Some(match operator {
+        BinaryOp::Add => "answer = kiln_c99_number(a + b);",
+        BinaryOp::Subtract => "answer = kiln_c99_number(a - b);",
+        BinaryOp::Multiply => "answer = kiln_c99_number(a * b);",
+        BinaryOp::Divide => "answer = kiln_c99_number(a / b);",
+        // `%` is `fmod` by specification, and `fmod` is a call into libm that measured at 41% of a
+        // Collatz benchmark's entire runtime. Two integral operands take the machine instruction
+        // instead, which agrees exactly: C truncates toward zero and takes the sign of the
+        // dividend, as ECMAScript specifies. The guard stays conservative — outside +/-2^53 a
+        // double is not exactly an integer, a zero divisor must reach `fmod` for NaN, and a zero
+        // dividend must too, because `-0 % 3` is `-0` and integer division would answer `+0`.
+        BinaryOp::Remainder => {
+            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_number(fmod(a, b)); }"
+        }
+        BinaryOp::StrictEqual => "answer = kiln_c99_boolean(a == b);",
+        BinaryOp::StrictNotEqual => "answer = kiln_c99_boolean(a != b);",
+        BinaryOp::LessThan => "answer = kiln_c99_boolean(a < b);",
+        BinaryOp::LessThanOrEqual => "answer = kiln_c99_boolean(a <= b);",
+        BinaryOp::GreaterThan => "answer = kiln_c99_boolean(a > b);",
+        BinaryOp::GreaterThanOrEqual => "answer = kiln_c99_boolean(a >= b);",
+        _ => return None,
+    })
+}
+
+/// The unary counterpart of [`numeric_fast_body`], answering in terms of `a`.
+///
+/// `typeof` and `void` do not touch the value and `~` needs ToInt32, so they keep the generic call.
+fn numeric_fast_unary_body(operator: UnaryOp) -> Option<&'static str> {
+    Some(match operator {
+        UnaryOp::Plus | UnaryOp::ToNumeric => "answer = kiln_c99_number(a);",
+        UnaryOp::Negate => "answer = kiln_c99_number(-a);",
+        // `!x` on a number is false unless the number is zero or NaN.
+        UnaryOp::Not => "answer = kiln_c99_boolean(a == 0.0 || a != a);",
+        UnaryOp::Increment => "answer = kiln_c99_number(a + 1.0);",
+        UnaryOp::Decrement => "answer = kiln_c99_number(a - 1.0);",
+        _ => return None,
+    })
+}
+
+/// Whether a call into this function must publish the per-frame context.
+///
+/// `kiln_c99_invoke_closure_body` saves and restores `new_target`, `frame_args`, `frame_argc`,
+/// `captured_arguments` and the arrow flag around every call. Only three instructions can read
+/// them -- `LoadArguments`, `LoadNewTarget`, `RestArguments` -- so a function containing none of
+/// them cannot tell whether the publication happened. Skipping it measured 1.48x on a recursive
+/// `fib`, which is call-bound and reads neither.
+///
+/// Conservative in four directions beyond that, because a wrong answer here is a silently wrong
+/// `arguments` rather than a slow program:
+///
+///   - A function that creates any closure needs it: an arrow captures the enclosing frame's
+///     `arguments` at `MakeFunction` time, so the context must be live then even though this
+///     function never reads it.
+///   - An arrow needs it, because its own `arguments` resolves to the captured value.
+///   - A generator or async function needs it, because its body is entered and re-entered
+///     through paths that do not all pass through this predicate.
+///
+/// The diagnostic depth and refusal attribution are performed either way, so provenance is
+/// unaffected: this decides only the fields the language can observe.
+fn proto_publishes_frame(proto: &FunctionProto) -> bool {
+    proto.arrow
+        || proto.generator
+        || proto.asynchronous
+        || proto.async_generator
+        || proto.code.iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::LoadArguments
+                    | Instruction::LoadNewTarget
+                    | Instruction::RestArguments(_)
+                    | Instruction::MakeFunction(_)
+            )
+        })
 }
 
 fn binary_code(operator: BinaryOp) -> u16 {

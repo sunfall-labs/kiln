@@ -15,6 +15,8 @@ use serde::Deserialize;
 
 pub(crate) const PROVIDER_SCHEMA_VERSION: u16 = 1;
 const PROVIDER_NAME: &str = "kiln-native-number-ffi";
+/// Release plus whole-archive LTO; see the profile's own note in `Cargo.toml`.
+const PROVIDER_PROFILE: &str = "provider";
 /// `debuginfo=0` because the workspace's release profile keeps line tables and this archive is a
 /// link input to *every* artifact: with the regexp engine in it, the difference is 11.7 MiB versus
 /// 8.4 MiB, multiplied by every cached build. Nobody debugs through a private ABI adapter.
@@ -287,8 +289,10 @@ fn validate_manifest(
         Some("the provider archive must be position-independent".to_owned())
     } else if manifest.cpu_features != "generic" {
         Some("the first provider package must use the `generic` CPU policy".to_owned())
-    } else if manifest.profile != "release" {
-        Some("the provider archive must use the `release` profile".to_owned())
+    } else if manifest.profile != PROVIDER_PROFILE {
+        Some(format!(
+            "the provider archive must use the `{PROVIDER_PROFILE}` profile"
+        ))
     } else if manifest.exports
         != PROVIDER_EXPORTS
             .iter()
@@ -361,7 +365,8 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         // runtime that now owns native entry as well as interpreted entry.
         OsString::from("--features"),
         OsString::from("regexp,bigint,temporal"),
-        OsString::from("--release"),
+        OsString::from("--profile"),
+        OsString::from(PROVIDER_PROFILE),
         OsString::from("--target"),
         OsString::from(&rust_target),
         OsString::from("--crate-type"),
@@ -403,7 +408,7 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
     }
     let archive_path = build_root
         .join(&rust_target)
-        .join("release")
+        .join(PROVIDER_PROFILE)
         .join("libkiln_native_number_ffi.a");
     let archive = read(&archive_path, "read source-built number-provider archive")?;
     let archive_digest = Digest::hash(&archive);
@@ -810,7 +815,7 @@ mod tests {
             "archive": "provider.a",
             "linkage": "static",
             "pic": true,
-            "profile": "release",
+            "profile": "provider",
             "cpu_features": "generic",
             "deployment": "",
             "libc_baseline": "",
@@ -868,7 +873,7 @@ mod tests {
             "archive": "../provider.a",
             "linkage": "static",
             "pic": true,
-            "profile": "release",
+            "profile": "provider",
             "cpu_features": "generic",
             "deployment": "",
             "libc_baseline": "",
