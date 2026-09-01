@@ -6273,17 +6273,38 @@ static int kiln_c99_global_object(kiln_value *out) {
                               strlen(functions[index].name),
                               kiln_c99_method(functions[index].code), 0, NULL);
     }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, *globals, "NaN", 3, kiln_c99_number(0.0 / 0.0), 0,
-                              NULL);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, *globals, "Infinity", 8, kiln_c99_number(1.0 / 0.0), 0,
-                              NULL);
-    }
-    if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, *globals, "undefined", 9, kiln_c99_undefined(), 0,
-                              NULL);
+    /* The three value properties of the global object are the only ones the specification locks
+     * on every axis: `{ writable: false, enumerable: false, configurable: false }`. An ordinary
+     * put would leave them configurable, and `delete NaN` would then answer `true` here and
+     * `false` in the interpreter -- the same bytecode, two answers. */
+    {
+        static const struct {
+            const char *name;
+            size_t length;
+            double value;
+            int is_undefined;
+        } locked[] = {
+            {"NaN", 3, 0.0, 0},
+            {"Infinity", 8, 0.0, 0},
+            {"undefined", 9, 0.0, 1},
+        };
+        double values[3];
+        values[0] = 0.0 / 0.0;
+        values[1] = 1.0 / 0.0;
+        values[2] = 0.0;
+        for (index = 0; index < sizeof locked / sizeof *locked && status == KILN_C99_OK; ++index) {
+            kiln_property *slot;
+            status = kiln_c99_own_slot(*globals, locked[index].name, locked[index].length, &slot);
+            if (status != KILN_C99_OK) {
+                break;
+            }
+            slot->accessor = 0;
+            slot->value = locked[index].is_undefined ? kiln_c99_undefined()
+                                                     : kiln_c99_number(values[index]);
+            slot->enumerable = 0;
+            slot->writable = 0;
+            slot->configurable = 0;
+        }
     }
     /* It holds itself under both of its names, which is how a program reaches it without a
      * keyword: `global.Object === Object` is the standard test for "am I in a realm that has
@@ -24096,6 +24117,7 @@ fn validate_code(
             | Instruction::DeleteProperty(name)
             | Instruction::SetPropertyStrict { name, .. }
             | Instruction::DeletePropertyStrict { name, .. }
+            | Instruction::DeleteGlobalBinding(name)
             | Instruction::CallMethod { name, .. } => match program.constants.get(*name as usize) {
                 Some(Constant::String(_)) => {}
                 Some(_) => {
@@ -24362,6 +24384,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::Throw
         | Instruction::ThrowReference(_)
         | Instruction::StoreGlobalBinding(_)
+        | Instruction::DeleteGlobalBinding(_)
         | Instruction::GetPrivate(_)
         | Instruction::SetPrivate(_)
         | Instruction::Dup2
@@ -24730,6 +24753,9 @@ fn stack_effect(
                 Ok((height - 1, false))
             }
         }
+        // `delete unboundName` takes nothing and leaves the boolean the global object's
+        // `[[Delete]]` answered.
+        Instruction::DeleteGlobalBinding(_) => Ok((height + 1, false)),
         // A literal produces a fresh object, so it only ever grows the stack.
         Instruction::NewRegExp { .. } => Ok((height + 1, false)),
         Instruction::LoadNewTarget => Ok((height + 1, false)),
@@ -26125,6 +26151,22 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::DeleteGlobalBinding(name) => {
+            // The mirror of `StoreGlobalBinding`: an unqualified `delete` in sloppy code is the
+            // global object environment record's `DeleteBinding`, which is that object's
+            // `[[Delete]]`. Both engines have to answer it the same way, because
+            // `x = 1; delete x; x` throws in one and reads `1` in the other otherwise.
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; int answer; status = kiln_c99_delete(host, globals, {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_c99_boolean(answer); }}",
+                text.len()
+            )
+            .unwrap();
+        }
         Instruction::StoreGlobalBinding(name) => {
             // Sloppy code settles an unresolvable assignment against the global object, which
             // creates the property. The interpreter does the same thing through its own global
@@ -27263,6 +27305,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::StoreGlobalBinding(value) => {
                 byte(&mut hash, 74);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::DeleteGlobalBinding(value) => {
+                byte(&mut hash, 75);
                 word(&mut hash, u64::from(*value));
             }
             Instruction::NewRegExp { pattern, flags } => {

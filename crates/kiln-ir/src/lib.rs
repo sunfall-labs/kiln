@@ -337,6 +337,19 @@ pub enum Instruction {
     ///
     /// The operand is the name constant. Stack: `[value] -> []`.
     StoreGlobalBinding(u32),
+    /// `delete name` in sloppy code, where no scope declared `name`.
+    ///
+    /// The last environment record an unqualified reference reaches is the global object's, so
+    /// this is that object's `[[Delete]]`: `true` when the property is gone or was never there,
+    /// `false` when it is non-configurable.  `x = 1; delete x` is therefore `true` and really
+    /// removes the property, while `delete NaN` is `false`.
+    ///
+    /// Only emitted for a name the compiler could not place.  A binding some scope *did* declare
+    /// is `false` without asking anything at run time, and strict code never reaches here at all
+    /// -- an unqualified `delete` is an early SyntaxError.
+    ///
+    /// The operand is the name constant. Stack: `[] -> [boolean]`.
+    DeleteGlobalBinding(u32),
     /// Push the marker that fills a hole in an array literal.
     ///
     /// Not `undefined`: a hole is *absent*, and `in`, `Object.keys` and every array method that
@@ -2992,6 +3005,61 @@ impl Compiler {
     ///
     /// `fallback` emits the read for the case no object has it -- the ordinary lexical one, or
     /// the `"undefined"` that a `typeof` of an unbound name produces.
+    /// `delete name` where `name` is an unqualified identifier, which sloppy code alone can
+    /// write.
+    ///
+    /// A `with` object is asked first, exactly as a *read* of the same name asks it: the name may
+    /// be absent from every binding around the statement and still be a property of the object,
+    /// and it is that property `delete` removes.
+    fn delete_binding(&mut self, name: &str) {
+        let scopes = self.with_scopes_for(name);
+        if scopes.is_empty() {
+            self.delete_binding_lexically(name);
+            return;
+        }
+        let key = self.constant_index(Constant::String(name.to_owned()));
+        let mut found = Vec::with_capacity(scopes.len());
+        for with in &scopes {
+            self.load_with_object(with);
+            self.code.push(Instruction::WithHas(key));
+            let miss = self.emit_jump(Instruction::JumpIfFalse(0));
+            self.load_with_object(with);
+            self.code.push(Instruction::DeleteProperty(key));
+            found.push(self.emit_jump(Instruction::Jump(0)));
+            self.patch_jump(miss);
+        }
+        self.delete_binding_lexically(name);
+        for jump in found {
+            self.patch_jump(jump);
+        }
+    }
+
+    fn delete_binding_lexically(&mut self, name: &str) {
+        match self.resolve(name) {
+            // Anything a scope declared is undeletable -- `var`, `let`, a parameter, a
+            // function declaration, an import -- so the answer is known here and nothing
+            // needs to run.
+            Resolution::Local(_) | Resolution::Upvalue(_) | Resolution::Global(_) => {
+                self.push_constant(Constant::Boolean(false));
+            }
+            // Nothing placed it, so the global object's environment record is the last one
+            // an unqualified reference reaches and its `[[Delete]]` is the answer.  That is
+            // also right for the names the compiler otherwise short-circuits -- `undefined`
+            // and the intrinsics -- because the realm registers those as properties whose
+            // attributes are exactly what decides `delete`.
+            // `arguments` inside a function is a binding the call created, not a global: it is
+            // undeletable like any other, and asking the global object would answer `true` for a
+            // name that is right there.
+            Resolution::Unresolved if name == "arguments" && self.compiling_function() => {
+                self.push_constant(Constant::Boolean(false));
+            }
+            Resolution::Unresolved => {
+                let name = self.constant_index(Constant::String(name.to_owned()));
+                self.code.push(Instruction::DeleteGlobalBinding(name));
+            }
+        }
+    }
+
     fn with_scoped_load(&mut self, name: &str, fallback: impl FnOnce(&mut Self)) {
         let scopes = self.with_scopes_for(name);
         if scopes.is_empty() {
@@ -4740,6 +4808,14 @@ impl Compiler {
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.code.push(Instruction::GetPrivate(name));
             }
+            ExpressionKind::DeleteValue { argument } => {
+                // The operand is evaluated and discarded: `delete f()` calls `f`, and the
+                // answer is `true` whatever it returned.
+                self.expression(argument);
+                self.code.push(Instruction::Pop);
+                self.push_constant(Constant::Boolean(true));
+            }
+            ExpressionKind::DeleteBinding { name } => self.delete_binding(name),
             ExpressionKind::Delete { object, property } => {
                 self.expression(object);
                 match property.as_ref() {
@@ -7470,6 +7546,8 @@ fn expression_contains_direct_eval(expression: &Expression) -> bool {
             expression_contains_direct_eval(object)
                 || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_contains_direct_eval(key))
         }
+        ExpressionKind::DeleteValue { argument } => expression_contains_direct_eval(argument),
+        ExpressionKind::DeleteBinding { .. } => false,
         ExpressionKind::Template { expressions, .. } => {
             expressions.iter().any(expression_contains_direct_eval)
         }
@@ -8088,6 +8166,16 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
             collect_identifiers(object, names, collecting);
             if let ObjectKey::Computed(key) = property.as_ref() {
                 collect_identifiers(key, names, collecting);
+            }
+        }
+        ExpressionKind::DeleteValue { argument } => {
+            collect_identifiers(argument, names, collecting);
+        }
+        // The name is a reference like any other: an eval that writes `delete x` needs the outer
+        // `x` bound, or it would ask the global object about a binding a caller's scope holds.
+        ExpressionKind::DeleteBinding { name } => {
+            if collecting {
+                names.insert(name.clone());
             }
         }
         ExpressionKind::Object { members } => {
