@@ -12,6 +12,16 @@ use kiln_proto::{
 
 use crate::error::{Error, Result};
 
+pub(crate) struct NativeBuildAtRevisionParams {
+    pub path: String,
+    pub project_root: String,
+    pub output: Option<String>,
+    pub profile: NativeProfile,
+    pub node: bool,
+    pub source_view: SourceView,
+    pub expected_revision: u64,
+}
+
 pub trait Backend: Send {
     /// Send one request and return its response. Implementations must already have turned
     /// [`Response::Error`] into [`Error::Daemon`] via [`interpret`].
@@ -27,21 +37,16 @@ pub trait Backend: Send {
 
     fn native_build_at_revision_at_view(
         &mut self,
-        path: String,
-        project_root: String,
-        output: Option<String>,
-        profile: NativeProfile,
-        source_view: SourceView,
-        expected_revision: u64,
+        params: NativeBuildAtRevisionParams,
     ) -> Result<NativeBuildAtRevision> {
         match self.request(Request::NativeBuildAtRevision {
-            path,
-            project_root,
-            node: false,
-            output,
-            profile,
-            source_view,
-            expected_revision,
+            path: params.path,
+            project_root: params.project_root,
+            node: params.node,
+            output: params.output,
+            profile: params.profile,
+            source_view: params.source_view,
+            expected_revision: params.expected_revision,
         })? {
             Response::NativeBuilt(summary) => Ok(NativeBuildAtRevision::Built(summary)),
             Response::Stale { current_revision } => {

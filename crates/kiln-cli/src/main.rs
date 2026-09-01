@@ -176,7 +176,11 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             let mut backend = open(one_shot, &socket)?;
             report(commands::stats(backend.as_mut())?)
         }
-        Command::Watch { path, interval } => {
+        Command::Watch {
+            path,
+            interval,
+            node,
+        } => {
             let mut backend = open(one_shot, &socket)?;
             let mut out = std::io::stdout().lock();
             let mut notes = std::io::stderr().lock();
@@ -185,6 +189,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
                 &path,
                 &root,
                 interval,
+                node,
                 &mut out,
                 &mut notes,
             )?;

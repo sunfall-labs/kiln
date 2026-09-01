@@ -149,6 +149,7 @@ pub(crate) fn run_watched_source_at_view(
     project_root: &Path,
     canonical: &str,
     text: String,
+    node: bool,
     source_view: SourceView,
 ) -> std::result::Result<(Output, SourceView), ViewError> {
     let source_view = match backend
@@ -162,7 +163,7 @@ pub(crate) fn run_watched_source_at_view(
         .run_at_view(
             canonical.to_owned(),
             project_root_string(project_root)?,
-            false,
+            node,
             // `watch` re-runs the same program the user is editing, so it is bounded by nothing
             // but the user's patience, exactly as `kiln run` is.
             StepBudget::Unmetered,
@@ -2351,6 +2352,7 @@ mod tests {
             Path::new("/tmp/project"),
             canonical,
             "export const answer = 43;\n".to_owned(),
+            false,
             SourceView(0),
         )
         .expect("warm watch snapshot runs");
