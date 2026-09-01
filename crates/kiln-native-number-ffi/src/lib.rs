@@ -2672,8 +2672,10 @@ mod realm {
             assert_eq!(attempt.status, INVALID_ARGUMENT);
             assert_eq!(attempt.request, 0);
             assert_eq!(attempt.observation.drops, 1);
-            let registered = realm(handle).expect("realm remains registered through the test");
-            assert!(registered.continuations.borrow().is_empty());
+            assert!(
+                realm(handle).is_some_and(|registered| registered.continuations.borrow().is_empty()),
+                "realm remains registered through the test, with no continuations left"
+            );
             assert_eq!(kiln_realm_destroy(handle), 0);
         }
 
