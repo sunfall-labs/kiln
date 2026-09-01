@@ -2729,6 +2729,30 @@ static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
     return 0;
 }
 
+/* A response head the script already framed. Node leaves a script-supplied Content-Length or
+ * Transfer-Encoding alone; header names arrive from setHeader lowercased and from writeHead as
+ * written, so the comparison is case-insensitive. */
+static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
+    static const char *const framing[2] = {"content-length", "transfer-encoding"};
+    size_t index;
+    size_t which;
+    if (headers == NULL) return 0;
+    for (index = 0; index < headers->count; ++index) {
+        const kiln_property *property = &headers->properties[index];
+        for (which = 0; which < 2; ++which) {
+            size_t len = strlen(framing[which]);
+            size_t byte;
+            if (property->key_len != len) continue;
+            for (byte = 0; byte < len; ++byte) {
+                if ((char)tolower((unsigned char)property->key[byte]) != framing[which][byte])
+                    break;
+            }
+            if (byte == len) return 1;
+        }
+    }
+    return 0;
+}
+
 typedef struct kiln_node_completion {
     uint32_t kind;
     kiln_node_server *server;
@@ -13938,6 +13962,17 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                     if (status != KILN_C99_OK) return status;
                 }
             }
+        }
+        /* Node's writeHead commits the header block, so a later end(body) can no longer declare a
+         * length and Node writes Transfer-Encoding: chunked into the block instead. Recording it
+         * keeps the committed head identical to Node's; Hyper still owns the encoding and drops
+         * the header where no body is allowed. */
+        if (response->status != 204 && response->status != 304 &&
+            !(response->status >= 100 && response->status < 200) &&
+            !kiln_c99_node_response_is_framed(kiln_c99_object_of(response->headers))) {
+            status = kiln_c99_put(NULL, response->headers, "transfer-encoding", 17,
+                                  kiln_c99_copy_text("chunked", 7), 0, NULL);
+            if (status != KILN_C99_OK) return status;
         }
         *result = receiver;
         return KILN_C99_OK;

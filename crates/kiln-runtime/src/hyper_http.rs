@@ -251,6 +251,8 @@ where
                 let (parts, mut body) = request.into_parts();
                 let request = kiln_request_parts(&parts);
                 let keep_alive = request.keep_alive;
+                let http_10 = request.version == HttpVersion::Http10;
+                let head_request = request.method.eq_ignore_ascii_case("HEAD");
                 let _ = events.send(EngineEvent::RequestHead { id, request });
                 while let Some(frame) = body.frame().await {
                     match frame {
@@ -297,15 +299,27 @@ where
                         }
                     }
                 };
-                if !keep_alive
-                    && !response
-                        .headers
-                        .iter()
-                        .any(|(name, _)| name.eq_ignore_ascii_case("connection"))
-                {
+                // An HTTP/1.0 response that declares no framing and may carry a body is
+                // delimited by the close itself, so the socket cannot be reused whatever the
+                // request asked for. Saying `keep-alive` there is what makes a client's next
+                // request on the socket fail, and `fix_keep_alive` writes exactly that unless the
+                // response is stamped HTTP/1.0 as well: pushing `connection: close` alone is
+                // overwritten, because it is judged against the response's own version.
+                // Only a declared length frames an HTTP/1.0 response. `Transfer-Encoding` does
+                // not: hyper drops it for HTTP/1.0 and delimits the body with the close, so a
+                // chunked-looking head is close-delimited all the same.
+                let close_delimited = http_10
+                    && !head_request
+                    && response_status_allows_body(response.status)
+                    && !declares_content_length(&response.headers);
+                let announces_connection = response
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("connection"));
+                if !announces_connection && (!keep_alive || close_delimited) {
                     response.headers.push(("connection".into(), "close".into()));
                 }
-                Ok::<_, std::convert::Infallible>(hyper_response(response))
+                Ok::<_, std::convert::Infallible>(hyper_response(response, close_delimited))
             }
         })
         .await;
@@ -325,11 +339,24 @@ fn kiln_request_parts(parts: &hyper::http::request::Parts) -> HttpRequest {
         hyper::Version::HTTP_10 => HttpVersion::Http10,
         _ => HttpVersion::Http11,
     };
-    let keep_alive = !parts
+    let connection = parts
         .headers
         .get(hyper::header::CONNECTION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("close"));
+        .and_then(|value| value.to_str().ok());
+    // HTTP/1.1 keeps the connection open unless the request closes it; HTTP/1.0 closes it unless
+    // the request explicitly asks to keep it, which is the opposite default.
+    let keep_alive = match version {
+        HttpVersion::Http10 => connection.is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("keep-alive"))
+        }),
+        HttpVersion::Http11 => !connection.is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("close"))
+        }),
+    };
     HttpRequest {
         method: parts.method.as_str().to_owned(),
         target: parts.uri.to_string(),
@@ -349,14 +376,31 @@ fn kiln_request_parts(parts: &hyper::http::request::Parts) -> HttpRequest {
     }
 }
 
-fn hyper_response(response: ResponseCommand) -> Response<ResponseBody> {
+fn hyper_response(response: ResponseCommand, http_10: bool) -> Response<ResponseBody> {
     let mut builder = Response::builder().status(response.status);
+    if http_10 {
+        // Hyper decides keep-alive against the response's version, so a close-delimited body has
+        // to say HTTP/1.0 for `connection: close` to survive.
+        builder = builder.version(hyper::Version::HTTP_10);
+    }
     for (name, value) in response.headers {
         builder = builder.header(name, value);
     }
     builder
         .body(response.body)
         .expect("Kiln validated the HTTP response")
+}
+
+/// The only framing an HTTP/1.0 response can carry other than the close itself.
+fn declares_content_length(headers: &[(String, String)]) -> bool {
+    headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+}
+
+/// Statuses that carry no body, and so are never close-delimited.
+fn response_status_allows_body(status: u16) -> bool {
+    !matches!(status, 204 | 304) && !(100..200).contains(&status)
 }
 
 #[cfg(test)]
@@ -871,6 +915,163 @@ mod tests {
                 .await
                 .expect("server task joins")
                 .expect("server connection succeeds");
+        });
+    }
+
+    #[test]
+    fn http_10_close_delimited_response_says_close_and_never_keep_alive() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("Tokio runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (mut client_io, server_io) = duplex(4096);
+            let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::task::spawn_local(event_connection(
+                server_io,
+                false,
+                event_sender,
+                response_receiver,
+            ));
+            client_io
+                .write_all(b"GET /stream HTTP/1.0\r\nHost: kiln\r\nConnection: Keep-Alive\r\n\r\n")
+                .await
+                .expect("request writes");
+
+            let id = match events.recv().await.expect("request event arrives") {
+                EngineEvent::RequestHead { id, request } => {
+                    assert_eq!(request.version, HttpVersion::Http10);
+                    assert!(request.keep_alive, "the request asked to keep the socket");
+                    id
+                }
+                event => panic!("unexpected event before request head: {event:?}"),
+            };
+            let mut body = crate::http_body::ResponseBodyDriver::default();
+            body.end(b"streamed".to_vec());
+            let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
+            // No content-length and no transfer-encoding: the body is delimited by the close.
+            response_sender
+                .send(ResponseCommand {
+                    id,
+                    status: 200,
+                    headers: Vec::new(),
+                    body: body.body(body_events),
+                })
+                .expect("response sends");
+
+            let mut response = Vec::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                client_io.read_to_end(&mut response),
+            )
+            .await
+            .expect("close-delimited response completes")
+            .expect("response reads");
+            let response = String::from_utf8(response).expect("HTTP is ASCII");
+            let head = response
+                .split("\r\n\r\n")
+                .next()
+                .expect("a response has a head")
+                .to_ascii_lowercase();
+            assert!(
+                head.contains("connection: close"),
+                "close-delimited response must announce close: {response:?}"
+            );
+            assert!(
+                !head.contains("keep-alive"),
+                "a socket that is about to close cannot promise keep-alive: {response:?}"
+            );
+            assert!(response.ends_with("streamed"), "response was {response:?}");
+            server.await.expect("server task joins").expect("serves");
+        });
+    }
+
+    #[test]
+    fn http_10_keep_alive_serves_a_second_request_when_the_length_is_declared() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("Tokio runtime builds");
+        let local = tokio::task::LocalSet::new();
+        local.block_on(&runtime, async {
+            let (mut client_io, server_io) = duplex(4096);
+            let (event_sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+            let (response_sender, response_receiver) = tokio::sync::mpsc::unbounded_channel();
+            let server = tokio::task::spawn_local(event_connection(
+                server_io,
+                false,
+                event_sender,
+                response_receiver,
+            ));
+
+            for expected in ["/one", "/two"] {
+                client_io
+                    .write_all(
+                        format!(
+                            "GET {expected} HTTP/1.0\r\nHost: kiln\r\nConnection: Keep-Alive\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("request writes");
+                let id = loop {
+                    match events.recv().await.expect("request event arrives") {
+                        EngineEvent::RequestHead { id, request } => {
+                            assert_eq!(request.target, expected);
+                            break id;
+                        }
+                        EngineEvent::RequestEnd { .. } => continue,
+                        event => panic!("unexpected event: {event:?}"),
+                    }
+                };
+                let mut body = crate::http_body::ResponseBodyDriver::default();
+                body.end(b"kiln".to_vec());
+                let (body_events, _) = tokio::sync::mpsc::unbounded_channel();
+                response_sender
+                    .send(ResponseCommand {
+                        id,
+                        status: 200,
+                        headers: vec![("content-length".into(), "4".into())],
+                        body: body.body(body_events),
+                    })
+                    .expect("response sends");
+
+                // A declared length ends the message without closing the socket, so read exactly
+                // one message: the head, then the four body bytes it promised.
+                let mut message = Vec::new();
+                loop {
+                    if let Some(end) = message
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        && message.len() >= end + 4 + 4
+                    {
+                        break;
+                    }
+                    let mut byte = [0_u8; 1];
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        client_io.read_exact(&mut byte),
+                    )
+                    .await
+                    .expect("the response arrives on the same socket")
+                    .expect("response reads");
+                    message.push(byte[0]);
+                }
+                let message = String::from_utf8(message).expect("HTTP is ASCII");
+                assert!(
+                    message.to_ascii_lowercase().contains("content-length: 4"),
+                    "declared length survives: {message:?}"
+                );
+                assert!(
+                    !message.to_ascii_lowercase().contains("connection: close"),
+                    "a reusable HTTP/1.0 socket must not be closed: {message:?}"
+                );
+                assert!(message.ends_with("kiln"), "response was {message:?}");
+            }
+            drop(client_io);
+            server.abort();
         });
     }
 
