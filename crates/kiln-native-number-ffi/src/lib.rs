@@ -41,11 +41,10 @@ mod realm {
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
     use kiln_runtime::{
-        ActiveHttpRuntime, HttpCloseMode, Realm, RealmRuntime, RuntimeHttpClientEvent,
-        RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimerId, WorkItem,
-        duration_from_milliseconds,
+        ActiveHttpRuntime, HttpCloseMode, HttpStreamAction, Realm, RealmRuntime,
+        RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimerId,
+        WorkItem, duration_from_milliseconds,
         node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
-        node_stream::StreamAction,
     };
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
@@ -821,16 +820,17 @@ mod realm {
     fn apply_http_actions(
         realm: &NativeRealm,
         resource: kiln_host_abi::ResourceId,
-        actions: Vec<StreamAction>,
+        actions: Vec<HttpStreamAction>,
         in_context: bool,
     ) -> i32 {
         for action in actions {
             match action {
-                StreamAction::Start(operation) => {
+                HttpStreamAction::Start(http_operation) => {
                     // An attached HTTP connection owns its accepted socket until Node explicitly
                     // closes or unreferences it. Reads are therefore referenced just like writes;
                     // otherwise the native drive can declare quiescence between pipelined
                     // requests and destroy a still-live keep-alive connection.
+                    let operation = http_operation.clone().into_host_op();
                     let request = if in_context {
                         let Some(runtime) = active_runtime() else {
                             return INVALID_ARGUMENT;
@@ -848,28 +848,54 @@ mod realm {
                             return INVALID_ARGUMENT;
                         };
                         // SAFETY: the same active runtime exclusively owns the HTTP connection.
-                        unsafe { &mut *runtime }
-                            .http_connection_started(resource, &operation, request)
+                        unsafe { &mut *runtime }.http_connection_started(
+                            resource,
+                            &http_operation,
+                            request,
+                        )
                     } else {
-                        realm
-                            .runtime
-                            .borrow_mut()
-                            .http_connection_started(resource, &operation, request)
+                        realm.runtime.borrow_mut().http_connection_started(
+                            resource,
+                            &http_operation,
+                            request,
+                        )
                     };
                     if !started {
                         return RUNTIME_ERROR;
                     }
                     realm.http_requests.borrow_mut().insert(request, resource);
                 }
-                StreamAction::Cancel(request) => {
+                HttpStreamAction::Close(close_resource) => {
+                    if close_resource.resource() != resource {
+                        return RUNTIME_ERROR;
+                    }
+                    let request = if in_context {
+                        let Some(runtime) = active_runtime() else {
+                            return INVALID_ARGUMENT;
+                        };
+                        // SAFETY: callbacks execute synchronously inside this realm's runtime.
+                        unsafe { &mut *runtime }
+                            .start_http_connection_close_in_context(close_resource)
+                    } else {
+                        realm
+                            .runtime
+                            .borrow_mut()
+                            .start_http_connection_close(close_resource)
+                    };
+                    let Some(request) = request else {
+                        return RUNTIME_ERROR;
+                    };
+                    realm.http_requests.borrow_mut().insert(request, resource);
+                }
+                HttpStreamAction::Cancel(request) => {
                     realm.runtime.borrow_mut().cancel_host_op(request);
                     realm.http_requests.borrow_mut().remove(&request);
                 }
-                StreamAction::Event(kiln_runtime::node_stream::StreamEvent::Close) => {
+                HttpStreamAction::Event(kiln_runtime::node_stream::StreamEvent::Close) => {
                     realm.http_connections.borrow_mut().remove(&resource);
                 }
-                StreamAction::Event(_) => {}
-                StreamAction::Error(error) => {
+                HttpStreamAction::Event(_) => {}
+                HttpStreamAction::Error(error) => {
                     eprintln!(
                         "native HTTP transport error on resource {}: {} ({} {})",
                         resource.get(),
@@ -879,7 +905,7 @@ mod realm {
                     );
                     return RUNTIME_ERROR;
                 }
-                StreamAction::Data(_) => {
+                HttpStreamAction::Data(_) => {
                     return RUNTIME_ERROR;
                 }
             }
@@ -2646,8 +2672,11 @@ mod realm {
             assert_eq!(attempt.status, INVALID_ARGUMENT);
             assert_eq!(attempt.request, 0);
             assert_eq!(attempt.observation.drops, 1);
-            let registered = realm(handle).expect("realm remains registered through the test");
-            assert!(registered.continuations.borrow().is_empty());
+            assert!(
+                realm(handle)
+                    .is_some_and(|registered| registered.continuations.borrow().is_empty()),
+                "realm remains registered through the test, with no continuations left"
+            );
             assert_eq!(kiln_realm_destroy(handle), 0);
         }
 
