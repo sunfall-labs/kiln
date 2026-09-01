@@ -342,6 +342,14 @@ Each worker:
 - Executes many tests.
 - Resets state between tests.
 
+The first implemented worker slice reuses only the deterministic current-thread scheduler on each
+resident Rayon thread. Every interpreter case still constructs and reclaims a fresh VM, language
+realm, global object, host capture, timer queue, and value graph. A panic retires that scheduler
+before the thread accepts another case. Parse-only work needs no runtime, and Node workers remain a
+separate slice until their sockets, HTTP Agent, module session, and provider resources have an
+explicit reset contract; treating terminal realm shutdown as a per-test reset would be incorrect.
+The shared Test262 harness is already discovered once and retained with the resident corpus.
+
 Tests requiring process isolation still receive separate processes.
 
 Native conformance tests can be compiled into shards rather than one executable per test:

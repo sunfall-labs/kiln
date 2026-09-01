@@ -7408,8 +7408,29 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
 ) -> Result<u64, ExecutionError> {
-    let locals = vec![Value::Undefined; program.local_count as usize];
     let mut runtime = realm_runtime()?;
+    execute_reclaiming_in_runtime_with_strictness(program, strictness, host, limits, &mut runtime)
+}
+
+/// Execute and reclaim one independent script on a caller-owned runtime.
+///
+/// The runtime owns the expensive current-thread Tokio scheduler, not JavaScript globals. Every
+/// call still creates a fresh VM, language realm, global object, locals, and entropy stream. This
+/// is the persistent-worker seam for embedders such as the conformance coordinator: they can load
+/// scheduler infrastructure once while preserving the same per-case isolation as
+/// [`execute_reclaiming_with_strictness`].
+///
+/// Callers must not reuse a runtime after [`RealmRuntime::shutdown`]. Node execution is excluded
+/// deliberately: a Node realm can retain provider resources whose reset policy is a separate
+/// lifecycle contract.
+pub fn execute_reclaiming_in_runtime_with_strictness<H: HostOps + ?Sized>(
+    program: Rc<Program>,
+    strictness: Rc<Strictness>,
+    host: &mut H,
+    limits: ExecutionLimits,
+    runtime: &mut RealmRuntime,
+) -> Result<u64, ExecutionError> {
+    let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
         program,
         strictness,
@@ -7427,7 +7448,7 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
     vm.this_value = vm.global_object();
     let outcome = runtime
         .enter(|| vm.run())
-        .and_then(|_| vm.run_event_loop(&mut runtime));
+        .and_then(|_| vm.run_event_loop(runtime));
     // Unconditionally, and before the `?`: a program that threw still defined every function it
     // evaluated on the way to throwing, and those cycles are no less permanent.
     vm.release_cycles();

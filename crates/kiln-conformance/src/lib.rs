@@ -35,6 +35,7 @@ mod reasons;
 mod source_compiler;
 mod test262;
 mod toml_lite;
+mod worker;
 
 pub use case::{
     CaseResult, Diagnostic, DiagnosticPhase, Outcome, RunMode, RunResult, Timing, Variant,
@@ -52,6 +53,7 @@ pub use test262::{
     run_case, run_case_variants, run_case_variants_with_harness, run_case_with_harness,
     run_variant, run_variant_with_harness,
 };
+pub use worker::InterpreterWorker;
 
 /// Install the frontend service used by runtime `eval` and `Function` compilation.
 ///

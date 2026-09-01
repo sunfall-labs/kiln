@@ -12,6 +12,7 @@ use std::time::Instant;
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
 use kiln_interpreter::{ExecutionLimits, execute, execute_node};
+use kiln_ir::Strictness;
 use kiln_module_graph::ModuleGraph;
 use kiln_module_resolver::{
     NodeModuleFormat, NodeRuntimeResolver, ResolutionKind, ResolutionPolicy, ResolvedModule,
@@ -21,6 +22,7 @@ use kiln_runtime::CaptureHost;
 use crate::case::{
     CaseResult, Diagnostic, DiagnosticPhase, Outcome, RunMode, Variant, VariantResult,
 };
+use crate::worker::InterpreterWorker;
 
 /// How much of either side of a stdout diff a one-line report shows before it elides.
 const DIFF_EXCERPT_BYTES: usize = 160;
@@ -30,19 +32,16 @@ const DIFF_EXCERPT_BYTES: usize = 160;
 /// The single reported variant is [`Variant::Sloppy`]: a recorded stdout is an observation of one
 /// ordinary script run, and Test262's strict-directive expansion would be judging a program the
 /// corpus never observed.
-pub(crate) fn run_against_expected_stdout(
+pub(crate) fn run_against_expected_stdout_with_worker(
     path: &Path,
     expected: &str,
     mode: RunMode,
+    worker: Option<&mut InterpreterWorker>,
 ) -> VariantResult {
     VariantResult {
         variant: Variant::Sloppy,
-        result: run(path, expected, mode),
+        result: run_with_executor(path, expected, mode, false, worker),
     }
-}
-
-fn run(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
-    run_with_executor(path, expected, mode, false)
 }
 
 /// Run a source file through the same compiler but with the Tokio-owned Node Adapter installed.
@@ -56,7 +55,7 @@ pub fn run_node_against_expected_stdout(
         result: if is_javascript_source(path) {
             run_node_module(path, expected, mode)
         } else {
-            run_with_executor(path, expected, mode, true)
+            run_with_executor(path, expected, mode, true, None)
         },
     }
 }
@@ -152,7 +151,13 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     judge_stdout(host.into_stdout(), expected, started)
 }
 
-fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> CaseResult {
+fn run_with_executor(
+    path: &Path,
+    expected: &str,
+    mode: RunMode,
+    node: bool,
+    worker: Option<&mut InterpreterWorker>,
+) -> CaseResult {
     let started = Instant::now();
     crate::source_compiler::install();
 
@@ -235,12 +240,24 @@ fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> 
             &mut host,
             ExecutionLimits::default(),
         )
+        .map(|_| ())
+    } else if let Some(worker) = worker {
+        let strictness = std::rc::Rc::new(Strictness::sloppy(&program));
+        worker
+            .execute_reclaiming(
+                std::rc::Rc::new(program),
+                strictness,
+                &mut host,
+                ExecutionLimits::default(),
+            )
+            .map(|_| ())
     } else {
         execute(
             std::rc::Rc::new(program),
             &mut host,
             ExecutionLimits::default(),
         )
+        .map(|_| ())
     };
     if let Err(error) = result {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);

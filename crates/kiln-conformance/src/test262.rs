@@ -28,6 +28,7 @@ use crate::harness::{
     ASYNC_COMPLETE, ASYNC_FAILURE, ASYNC_INCLUDE, HOST_CAPABILITY_MARKER, HOST_OBJECT_PRELUDE,
     Harness,
 };
+use crate::worker::InterpreterWorker;
 
 /// Execute one Test262 case in the requested mode, without an assertion harness.
 pub fn run_case(case: &TestCase, mode: RunMode) -> CaseResult {
@@ -58,13 +59,47 @@ pub fn run_case_variants_with_harness(
     mode: RunMode,
     harness: Option<&Harness>,
 ) -> Vec<VariantResult> {
-    variants(case)
-        .into_iter()
-        .map(|variant| VariantResult {
+    run_case_variants_with_harness_and_worker(case, mode, harness, None)
+}
+
+pub(crate) fn run_case_variants_with_harness_and_worker(
+    case: &TestCase,
+    mode: RunMode,
+    harness: Option<&Harness>,
+    mut worker: Option<&mut InterpreterWorker>,
+) -> Vec<VariantResult> {
+    let mut results = Vec::new();
+    for variant in variants(case) {
+        if let Some(worker) = worker.as_deref_mut()
+            && let Err(error) = worker.recover()
+        {
+            results.push(VariantResult {
+                variant,
+                result: CaseResult::new(
+                    Outcome::Fail,
+                    vec![Diagnostic::new(
+                        DiagnosticPhase::Runtime,
+                        format!("rebuilding conformance worker after a panic: {error}"),
+                        None,
+                    )],
+                    String::new(),
+                    Instant::now(),
+                ),
+            });
+            continue;
+        }
+        results.push(VariantResult {
             variant,
-            result: run_variant_with_harness(case, mode, variant, harness),
-        })
-        .collect()
+            result: run_variant_with_harness_and_worker(
+                case,
+                mode,
+                variant,
+                harness,
+                worker.as_deref_mut(),
+            ),
+        });
+    }
+    results
 }
 
 /// Run one explicit Test262 realm variant without an assertion harness.
@@ -79,6 +114,16 @@ pub fn run_variant_with_harness(
     mode: RunMode,
     variant: Variant,
     harness: Option<&Harness>,
+) -> CaseResult {
+    run_variant_with_harness_and_worker(case, mode, variant, harness, None)
+}
+
+fn run_variant_with_harness_and_worker(
+    case: &TestCase,
+    mode: RunMode,
+    variant: Variant,
+    harness: Option<&Harness>,
+    worker: Option<&mut InterpreterWorker>,
 ) -> CaseResult {
     let started = Instant::now();
     // `eval` and `Function` compile source while a program is running, and the interpreter has no
@@ -97,7 +142,7 @@ pub fn run_variant_with_harness(
     // corpus -- the one result a conformance run must never produce, because it looks like the
     // area was measured. A panic is a failure of that test, recorded like any other.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_variant_uncaught(case, mode, variant, harness, started)
+        run_variant_uncaught(case, mode, variant, harness, worker, started)
     }));
     match outcome {
         Ok(result) => result,
@@ -126,6 +171,7 @@ fn run_variant_uncaught(
     mode: RunMode,
     variant: Variant,
     harness: Option<&Harness>,
+    worker: Option<&mut InterpreterWorker>,
     started: Instant,
 ) -> CaseResult {
     let mut diagnostics = Vec::new();
@@ -273,6 +319,7 @@ fn run_variant_uncaught(
             conformance_limits(case),
             diagnostics,
             prefix_len,
+            worker,
             started,
         );
     };
@@ -323,12 +370,21 @@ fn run_variant_uncaught(
         };
 
     let mut host = CaptureHost::new();
-    match execute_reclaiming_with_strictness(
-        std::rc::Rc::new(program),
-        std::rc::Rc::new(strictness),
-        &mut host,
-        conformance_limits(case),
-    ) {
+    let outcome = match worker {
+        Some(worker) => worker.execute_reclaiming(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            conformance_limits(case),
+        ),
+        None => execute_reclaiming_with_strictness(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            conformance_limits(case),
+        ),
+    };
+    match outcome {
         Ok(_) => {
             diagnostics.push(Diagnostic::new(
                 DiagnosticPhase::Runtime,
@@ -365,6 +421,7 @@ fn execute_positive(
     limits: ExecutionLimits,
     diagnostics: Vec<Diagnostic>,
     prefix_len: usize,
+    worker: Option<&mut InterpreterWorker>,
     started: Instant,
 ) -> CaseResult {
     let (program, strictness) =
@@ -376,12 +433,20 @@ fn execute_positive(
         };
 
     let mut host = CaptureHost::new();
-    let outcome = execute_reclaiming_with_strictness(
-        std::rc::Rc::new(program),
-        std::rc::Rc::new(strictness),
-        &mut host,
-        limits,
-    )
+    let outcome = match worker {
+        Some(worker) => worker.execute_reclaiming(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            limits,
+        ),
+        None => execute_reclaiming_with_strictness(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            limits,
+        ),
+    }
     .map(|_| ());
     finish_run(outcome, host, is_async, diagnostics, started)
 }
@@ -1516,6 +1581,45 @@ mod tests {
         assert_eq!(second.outcome, Outcome::Pass);
         assert_eq!(first.stdout, "one\n");
         assert_eq!(second.stdout, "two\n");
+    }
+
+    #[test]
+    fn a_resident_worker_reuses_its_scheduler_without_reusing_realm_state() {
+        let mut worker = InterpreterWorker::new().expect("build resident interpreter worker");
+        let mut first_case = case(
+            "globalThis.workerLeak = 1;\n\
+             Array.prototype.workerLeak = 2;\n\
+             console.log(Date.now());\n\
+             setTimeout(() => console.log('first timer'), 5);",
+        );
+        first_case.metadata.flags.push("raw".to_owned());
+        let first = run_case_variants_with_harness_and_worker(
+            &first_case,
+            RunMode::Interpreter,
+            None,
+            Some(&mut worker),
+        );
+        assert_eq!(first[0].result.outcome, Outcome::Pass);
+        assert_eq!(first[0].result.stdout, "0\nfirst timer\n");
+        assert_eq!(worker.completed_executions(), 1);
+
+        let mut second_case = case(
+            "if (globalThis.workerLeak !== undefined) throw new Error('global leaked');\n\
+             if ([].workerLeak !== undefined) throw new Error('prototype leaked');\n\
+             console.log(Date.now());\n\
+             setTimeout(() => console.log('second timer'), 0);",
+        );
+        second_case.metadata.flags.push("raw".to_owned());
+        let second = run_case_variants_with_harness_and_worker(
+            &second_case,
+            RunMode::Interpreter,
+            None,
+            Some(&mut worker),
+        );
+        assert_eq!(second[0].result.outcome, Outcome::Pass);
+        assert_eq!(second[0].result.stdout, "0\nsecond timer\n");
+        assert_eq!(worker.completed_executions(), 2);
+        assert!(worker.is_reusable());
     }
 
     #[test]
