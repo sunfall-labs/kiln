@@ -117,6 +117,11 @@ never assumes that an ambient Tokio handle exists. The ABI prototype decides whe
 drives a nonblocking runtime handle or asks Kiln to own a runtime thread; both forms keep completion,
 cancellation and shutdown explicit, and neither changes realm ordering.
 
+Inside Rust, the provider trait makes shutdown a required implementation obligation. The realm
+runtime closes admission first, aborts protocol transports and their correlated requests, then asks
+the provider to cancel all remaining work and release resources. Explicit shutdown and `Drop` share
+that idempotent path; dropping the Tokio executor is not a substitute for it.
+
 Rust-only embedders may use an internal asynchronous API with an existing Tokio handle, but that is
 not the stable C contract and cannot change its observable scheduling rules.
 
