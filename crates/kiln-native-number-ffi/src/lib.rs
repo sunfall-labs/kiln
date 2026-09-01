@@ -202,10 +202,20 @@ mod realm {
     const FLAG_FILE: u32 = 1 << 3;
     const FLAG_DIRECTORY: u32 = 1 << 4;
 
+    /// What a queued work item keeps alive for the collector (ADR 0041). A payload the C side
+    /// allocated is itself a heap block; the two Rust-owned payloads name the C block they carry.
+    #[derive(Clone, Copy)]
+    enum WorkRoots {
+        Block,
+        Completion,
+        HttpEvent,
+    }
+
     struct WorkOwner {
         pointer: *mut c_void,
         run: RunWork,
         drop: DropWork,
+        roots: WorkRoots,
     }
 
     impl Drop for WorkOwner {
@@ -221,13 +231,47 @@ mod realm {
 
     impl NativeWork {
         fn new(pointer: *mut c_void, run: Option<RunWork>, drop: Option<DropWork>) -> Option<Self> {
+            Self::with_roots(pointer, run, drop, WorkRoots::Block)
+        }
+
+        fn with_roots(
+            pointer: *mut c_void,
+            run: Option<RunWork>,
+            drop: Option<DropWork>,
+            roots: WorkRoots,
+        ) -> Option<Self> {
             let (Some(run), Some(drop)) = (run, drop) else {
                 return None;
             };
             if pointer.is_null() {
                 return None;
             }
-            Some(Self(Rc::new(WorkOwner { pointer, run, drop })))
+            Some(Self(Rc::new(WorkOwner {
+                pointer,
+                run,
+                drop,
+                roots,
+            })))
+        }
+
+        fn mark_roots(&self, marker: &GcMarker) {
+            match self.0.roots {
+                WorkRoots::Block => marker.block(self.0.pointer),
+                WorkRoots::Completion => {
+                    // SAFETY: a Completion work item is always the boxed CompletionWork that
+                    // `drive` queued, and it stays boxed until its drop callback runs.
+                    let work = unsafe { &*self.0.pointer.cast::<CompletionWork>() };
+                    if let Some(continuation) = &work.continuation {
+                        marker.block(continuation.pointer);
+                    }
+                }
+                WorkRoots::HttpEvent => {
+                    // SAFETY: an HttpEvent work item is always the boxed HttpEventPayload that
+                    // `queue_http_event` queued, boxed until its drop callback runs.
+                    let payload = unsafe { &*self.0.pointer.cast::<HttpEventPayload>() };
+                    marker.block(payload.owner.pointer);
+                }
+            }
         }
 
         fn run(&self, host: *mut c_void, thrown: *mut c_void) -> i32 {
@@ -586,9 +630,11 @@ mod realm {
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
         value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
         entropy: Cell<Option<(u64, u64)>>,
-        heap_allocations: RefCell<Vec<OwnedHeapAllocation>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
+        /// Declared last so it is dropped last: `Drop for NativeRealm` tears the heap down only
+        /// after every field above has released what it held.
+        gc: RefCell<GcState>,
     }
 
     #[derive(Default)]
@@ -609,16 +655,185 @@ mod realm {
         drop: DropWork,
     }
 
-    struct OwnedHeapAllocation {
-        pointer: *mut c_void,
-        drop: DropWork,
+    type GcRootsFn = unsafe extern "C" fn(*mut c_void, *mut c_void, i32);
+
+    /// The prelude's collector entry points (ADR 0041). The prelude owns the heap layout and the
+    /// tracer; the archive only ever calls these and reads the hooks pointer that every heap keeps
+    /// as its first word.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct GcHooks {
+        version: u32,
+        size: u32,
+        collect: Option<unsafe extern "C" fn(*mut c_void, i32)>,
+        teardown_begin: Option<unsafe extern "C" fn(*mut c_void)>,
+        teardown_end: Option<unsafe extern "C" fn(*mut c_void)>,
+        mark_value: Option<unsafe extern "C" fn(*mut c_void, *const c_void)>,
+        mark_block: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
     }
 
-    impl Drop for OwnedHeapAllocation {
+    const GC_HOOKS_VERSION: u32 = 1;
+    const GC_PHASE_MARK: i32 = 0;
+    const GC_PHASE_TEARDOWN: i32 = 1;
+    const GC_PHASE_RESET: i32 = 2;
+    const GC_ROOT_SURVIVES_TEARDOWN: u32 = 1;
+
+    struct GcRoot {
+        roots: GcRootsFn,
+        context: *mut c_void,
+        flags: u32,
+    }
+
+    struct GcState {
+        heap: *mut c_void,
+        hooks: Option<GcHooks>,
+        roots: Vec<GcRoot>,
+    }
+
+    impl Default for GcState {
+        fn default() -> Self {
+            Self {
+                heap: std::ptr::null_mut(),
+                hooks: None,
+                roots: Vec::new(),
+            }
+        }
+    }
+
+    struct GcMarker {
+        heap: *mut c_void,
+        hooks: GcHooks,
+    }
+
+    impl GcMarker {
+        fn block(&self, pointer: *mut c_void) {
+            if pointer.is_null() {
+                return;
+            }
+            if let Some(mark) = self.hooks.mark_block {
+                // SAFETY: the prelude installed this hook for exactly this heap.
+                unsafe { mark(self.heap, pointer) };
+            }
+        }
+
+        fn value(&self, value: *const c_void) {
+            if value.is_null() {
+                return;
+            }
+            if let Some(mark) = self.hooks.mark_value {
+                // SAFETY: the prelude installed this hook for exactly this heap.
+                unsafe { mark(self.heap, value) };
+            }
+        }
+    }
+
+    fn gc_hooks_of(heap: *mut c_void) -> Option<GcHooks> {
+        if heap.is_null() {
+            return None;
+        }
+        // SAFETY: ADR 0041 fixes the heap's first word as the hooks pointer.
+        let hooks = unsafe { *heap.cast::<*const GcHooks>() };
+        if hooks.is_null() {
+            return None;
+        }
+        // SAFETY: the prelude keeps its hooks table static for the life of the program.
+        Some(unsafe { *hooks })
+    }
+
+    /// Marks everything the archive keeps a JavaScript reference to, then the roots each
+    /// translation unit and the launcher registered.
+    fn mark_realm_roots(realm: &NativeRealm, heap: *mut c_void) -> i32 {
+        let (hooks, roots) = {
+            let gc = realm.gc.borrow();
+            if gc.heap.is_null() || gc.heap != heap {
+                return INVALID_ARGUMENT;
+            }
+            let Some(hooks) = gc.hooks else {
+                return INVALID_ARGUMENT;
+            };
+            let roots: Vec<(GcRootsFn, *mut c_void)> = gc
+                .roots
+                .iter()
+                .map(|root| (root.roots, root.context))
+                .collect();
+            (hooks, roots)
+        };
+        let marker = GcMarker { heap, hooks };
+        for slot in realm.value_slots.borrow().values() {
+            marker.value(slot.as_ptr().cast::<c_void>());
+        }
+        for store in realm.callable_stores.borrow().values() {
+            marker.block(store.pointer);
+        }
+        for continuation in realm.continuations.borrow().values() {
+            marker.block(continuation.pointer);
+        }
+        for connection in realm.http_connections.borrow().values() {
+            marker.block(connection.events.pointer);
+        }
+        {
+            let work = realm.work.borrow();
+            work.for_each_queued(|item| item.mark_roots(&marker));
+            work.for_each_timer(|item| item.mark_roots(&marker));
+        }
+        for (roots, context) in roots {
+            // SAFETY: registration recorded a live root function and the context it asked for.
+            unsafe { roots(heap, context, GC_PHASE_MARK) };
+        }
+        0
+    }
+
+    /// Offers the collector a turn boundary: no generated frame is on the stack when the drive
+    /// loop calls this, so the prelude may sweep. The prelude decides whether it is due.
+    fn collect_if_due(realm: &NativeRealm) {
+        let (heap, collect) = {
+            let gc = realm.gc.borrow();
+            match (gc.heap, gc.hooks.as_ref().and_then(|hooks| hooks.collect)) {
+                (heap, Some(collect)) if !heap.is_null() => (heap, collect),
+                _ => return,
+            }
+        };
+        // SAFETY: the prelude installed this hook for this heap, and no RefCell of the realm is
+        // borrowed across the call, so the root walk it performs can borrow them.
+        unsafe { collect(heap, 0) };
+    }
+
+    impl Drop for NativeRealm {
         fn drop(&mut self) {
-            // SAFETY: registration transfers one live allocation and its matching destructor to
-            // the realm. The entry is never cloned or removed and realm teardown drops it once.
-            unsafe { (self.drop)(self.pointer) };
+            // Release what the archive holds first, while the heap is still alive: a queued work
+            // item or a continuation drops through a C callback that may release its block. Then
+            // mark only the roots that must outlive the realm (a borrowed result slot) and free
+            // the rest, and finally let every unit reset the statics that pointed into the heap.
+            *self.work.borrow_mut() = Realm::new();
+            self.continuations.borrow_mut().clear();
+            self.http_connections.borrow_mut().clear();
+            self.callable_stores.borrow_mut().clear();
+            self.value_slots.borrow_mut().clear();
+            let gc = std::mem::take(&mut *self.gc.borrow_mut());
+            let Some(hooks) = gc.hooks else {
+                return;
+            };
+            if gc.heap.is_null() {
+                return;
+            }
+            if let Some(begin) = hooks.teardown_begin {
+                // SAFETY: the heap is live until `teardown_end` returns.
+                unsafe { begin(gc.heap) };
+            }
+            for root in &gc.roots {
+                if root.flags & GC_ROOT_SURVIVES_TEARDOWN != 0 {
+                    // SAFETY: registered root functions stay valid for the realm's life.
+                    unsafe { (root.roots)(gc.heap, root.context, GC_PHASE_TEARDOWN) };
+                }
+            }
+            if let Some(end) = hooks.teardown_end {
+                // SAFETY: the last use of the heap; the prelude frees it here.
+                unsafe { end(gc.heap) };
+            }
+            for root in &gc.roots {
+                // SAFETY: the reset phase receives no heap and touches only unit statics.
+                unsafe { (root.roots)(std::ptr::null_mut(), root.context, GC_PHASE_RESET) };
+            }
         }
     }
 
@@ -646,12 +861,9 @@ mod realm {
                 callable_stores: RefCell::new(HashMap::new()),
                 value_slots: RefCell::new(HashMap::new()),
                 entropy: Cell::new(None),
-                // Server graphs create hundreds of objects and closures during bootstrap.
-                // Reserve one compact pointer/destructor slab so the common path does not keep
-                // reallocating; unlike the former leaks, every entry is released at teardown.
-                heap_allocations: RefCell::new(Vec::with_capacity(1024)),
                 entered: Cell::new(false),
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
+                gc: RefCell::new(GcState::default()),
             })
         }
     }
@@ -860,8 +1072,12 @@ mod realm {
 
     fn queue_http_event(realm: &NativeRealm, payload: HttpEventPayload) -> i32 {
         let pointer = Box::into_raw(Box::new(payload)).cast::<c_void>();
-        let Some(work) = NativeWork::new(pointer, Some(run_http_event), Some(drop_http_event))
-        else {
+        let Some(work) = NativeWork::with_roots(
+            pointer,
+            Some(run_http_event),
+            Some(drop_http_event),
+            WorkRoots::HttpEvent,
+        ) else {
             // SAFETY: ownership was not transferred when construction failed.
             unsafe { drop_http_event(pointer) };
             return RUNTIME_ERROR;
@@ -1381,6 +1597,7 @@ mod realm {
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         loop {
+            collect_if_due(realm);
             // Neither lane checkpoints between items. A checkpoint drives the Tokio scheduler,
             // and doing that after every microtask made the per-request cost scale with how many
             // microtasks a request happens to enqueue rather than with the work it does. The
@@ -1457,9 +1674,12 @@ mod realm {
                     });
                     realm.queued.borrow_mut().insert(completion.request);
                     let pointer = Box::into_raw(completion_work).cast::<c_void>();
-                    let Some(work) =
-                        NativeWork::new(pointer, Some(run_completion), Some(drop_completion))
-                    else {
+                    let Some(work) = NativeWork::with_roots(
+                        pointer,
+                        Some(run_completion),
+                        Some(drop_completion),
+                        WorkRoots::Completion,
+                    ) else {
                         // SAFETY: `pointer` was produced by Box::into_raw and ownership has not
                         // been transferred because the callback pair was rejected.
                         unsafe { drop_completion(pointer) };
@@ -1834,49 +2054,179 @@ mod realm {
         })
     }
 
-    /// Transfers one generated-C closure to the active realm for exact-once destruction.
+    /// Attaches the prelude's collector to the active realm (ADR 0041).
     ///
-    /// The provider never dereferences the pointer. This is the ownership seam used while
-    /// generated-C closure bodies still keep their private metadata layout: the realm owns the
-    /// allocation lifetime without making that layout part of the Rust ABI.
+    /// With a null `candidate` this only reports the realm's heap: the existing one, or null when
+    /// none has been created yet. With a candidate it adopts it when the realm has no heap and
+    /// otherwise reports the existing heap, in which case the caller frees its candidate.
+    ///
+    /// # Safety
+    ///
+    /// `hooks` must point at a hooks table that stays valid for the life of the program, and
+    /// `candidate` must be a heap whose first word is that hooks pointer.
     #[unsafe(no_mangle)]
-    unsafe fn own_heap_allocation(pointer: *mut c_void, drop_pointer: Option<DropWork>) -> i32 {
+    pub unsafe extern "C" fn kiln_realm_gc_attach(
+        hooks: *const GcHooks,
+        candidate: *mut c_void,
+        out_heap: *mut *mut c_void,
+    ) -> i32 {
         ffi(|| {
-            if pointer.is_null() || drop_pointer.is_none() {
+            if out_heap.is_null() {
                 return INVALID_ARGUMENT;
             }
+            // SAFETY: checked non-null; the caller owns the output slot.
+            unsafe { out_heap.write(std::ptr::null_mut()) };
             let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
-            let mut allocations = realm.heap_allocations.borrow_mut();
-            if allocations.try_reserve(1).is_err() {
+            let mut gc = realm.gc.borrow_mut();
+            if gc.heap.is_null() {
+                if candidate.is_null() {
+                    return 0;
+                }
+                if hooks.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                // SAFETY: checked non-null; the prelude's table is static.
+                let table = unsafe { *hooks };
+                if table.version != GC_HOOKS_VERSION
+                    || (table.size as usize) < std::mem::size_of::<GcHooks>()
+                    || table.collect.is_none()
+                    || table.teardown_begin.is_none()
+                    || table.teardown_end.is_none()
+                    || table.mark_value.is_none()
+                    || table.mark_block.is_none()
+                {
+                    return INVALID_ARGUMENT;
+                }
+                gc.heap = candidate;
+                gc.hooks = Some(table);
+            }
+            // SAFETY: checked non-null above.
+            unsafe { out_heap.write(gc.heap) };
+            0
+        })
+    }
+
+    /// Registers a root function the collector calls on every mark, and at teardown when
+    /// `flags` says the roots it marks must outlive the realm. Registering the same function and
+    /// context twice is idempotent.
+    ///
+    /// # Safety
+    ///
+    /// `roots` and `context` must stay valid until the realm is destroyed.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_gc_register_roots(
+        roots: Option<GcRootsFn>,
+        context: *mut c_void,
+        flags: u32,
+    ) -> i32 {
+        ffi(|| {
+            let Some(roots) = roots else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let mut gc = realm.gc.borrow_mut();
+            if gc
+                .roots
+                .iter()
+                .any(|root| root.roots as usize == roots as usize && root.context == context)
+            {
+                return 0;
+            }
+            if gc.roots.try_reserve(1).is_err() {
                 return RUNTIME_ERROR;
             }
-            allocations.push(OwnedHeapAllocation {
-                pointer,
-                drop: drop_pointer.expect("checked above"),
+            gc.roots.push(GcRoot {
+                roots,
+                context,
+                flags,
             });
             0
         })
     }
 
+    /// Removes a root registration whose memory is about to go away, so a later collection
+    /// does not call it. Unknown pairs are ignored.
+    ///
+    /// # Safety
+    ///
+    /// Only the registration's own `roots`/`context` pair may be passed.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_realm_own_closure(
-        pointer: *mut c_void,
-        drop_pointer: Option<DropWork>,
+    pub unsafe extern "C" fn kiln_realm_gc_unregister_roots(
+        roots: Option<GcRootsFn>,
+        context: *mut c_void,
     ) -> i32 {
-        // SAFETY: the typed exported boundary preserves the shared ownership contract.
-        unsafe { own_heap_allocation(pointer, drop_pointer) }
+        ffi(|| {
+            let Some(roots) = roots else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            realm
+                .gc
+                .borrow_mut()
+                .roots
+                .retain(|root| !(root.roots as usize == roots as usize && root.context == context));
+            0
+        })
     }
 
-    /// Transfers one generated-C ordinary object to the active realm for exact-once teardown.
+    /// Marks every root the archive and the registered root functions hold, through the hooks
+    /// of `heap`. Called by the prelude's collector at the start of a collection.
+    ///
+    /// # Safety
+    ///
+    /// `heap` must be the heap attached to the active realm.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_realm_own_object(
-        pointer: *mut c_void,
-        drop_pointer: Option<DropWork>,
+    pub unsafe extern "C" fn kiln_realm_gc_mark_roots(heap: *mut c_void) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            mark_realm_roots(&realm, heap)
+        })
+    }
+
+    /// Marks one value slot through `heap`'s hooks, for root functions outside the prelude.
+    ///
+    /// # Safety
+    ///
+    /// `heap` must be a live attached heap and `value` a readable `kiln_value`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_gc_mark_value(
+        heap: *mut c_void,
+        value: *const c_void,
     ) -> i32 {
-        // SAFETY: the typed exported boundary preserves the shared ownership contract.
-        unsafe { own_heap_allocation(pointer, drop_pointer) }
+        ffi(|| {
+            let Some(hooks) = gc_hooks_of(heap) else {
+                return INVALID_ARGUMENT;
+            };
+            GcMarker { heap, hooks }.value(value);
+            0
+        })
+    }
+
+    /// Marks one heap block through `heap`'s hooks, for root functions outside the prelude.
+    ///
+    /// # Safety
+    ///
+    /// `heap` must be a live attached heap.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_gc_mark_block(
+        heap: *mut c_void,
+        pointer: *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            let Some(hooks) = gc_hooks_of(heap) else {
+                return INVALID_ARGUMENT;
+            };
+            GcMarker { heap, hooks }.block(pointer);
+            0
+        })
     }
 
     /// Writes the active Realm's deterministic clock in ECMAScript milliseconds.
@@ -3079,74 +3429,113 @@ mod realm {
         }
 
         #[test]
-        fn generated_closures_are_realm_owned_and_dropped_exactly_once() {
-            unsafe extern "C" fn register(context: *mut c_void) -> i32 {
-                // SAFETY: the test passes a live counter for the duration of realm entry.
-                let counter = unsafe { &mut *context.cast::<usize>() };
-                let allocation = Box::into_raw(Box::new(counter as *mut usize)).cast::<c_void>();
-                // SAFETY: `allocation` is a unique Box allocation paired with its destructor.
-                let status = unsafe { kiln_realm_own_closure(allocation, Some(drop_counter)) };
-                if status != 0 {
-                    // SAFETY: ownership did not transfer on failure.
-                    unsafe { drop_counter(allocation) };
-                }
-                status
-            }
+        fn the_collector_seam_marks_registered_roots_and_tears_down_once() {
+            use std::sync::atomic::AtomicUsize;
+            static COLLECTS: AtomicUsize = AtomicUsize::new(0);
+            static BEGINS: AtomicUsize = AtomicUsize::new(0);
+            static ENDS: AtomicUsize = AtomicUsize::new(0);
+            static MARKED_VALUES: AtomicUsize = AtomicUsize::new(0);
+            static ROOT_PHASES: std::sync::Mutex<Vec<i32>> = std::sync::Mutex::new(Vec::new());
 
-            unsafe extern "C" fn drop_counter(pointer: *mut c_void) {
-                // SAFETY: `register` created this exact Box and transfers it at most once.
-                let counter = unsafe { Box::from_raw(pointer.cast::<*mut usize>()) };
-                // SAFETY: the pointed-to test counter outlives realm destruction.
-                unsafe { **counter += 1 };
+            unsafe extern "C" fn collect(_heap: *mut c_void, _force: i32) {
+                COLLECTS.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            unsafe extern "C" fn teardown_begin(_heap: *mut c_void) {
+                BEGINS.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            unsafe extern "C" fn teardown_end(heap: *mut c_void) {
+                ENDS.fetch_add(1, AtomicOrdering::SeqCst);
+                // SAFETY: the test allocated this heap as one Box below.
+                drop(unsafe { Box::from_raw(heap.cast::<[*const GcHooks; 2]>()) });
+            }
+            unsafe extern "C" fn mark_value(_heap: *mut c_void, _value: *const c_void) {
+                MARKED_VALUES.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            unsafe extern "C" fn mark_block(_heap: *mut c_void, _pointer: *mut c_void) {}
+            unsafe extern "C" fn roots(heap: *mut c_void, context: *mut c_void, phase: i32) {
+                ROOT_PHASES.lock().unwrap().push(phase);
+                if phase == GC_PHASE_MARK || phase == GC_PHASE_TEARDOWN {
+                    assert!(!heap.is_null());
+                    // SAFETY: the heap is live in both marking phases.
+                    assert_eq!(unsafe { kiln_realm_gc_mark_value(heap, context) }, 0);
+                }
+            }
+            static HOOKS: GcHooks = GcHooks {
+                version: GC_HOOKS_VERSION,
+                size: std::mem::size_of::<GcHooks>() as u32,
+                collect: Some(collect),
+                teardown_begin: Some(teardown_begin),
+                teardown_end: Some(teardown_end),
+                mark_value: Some(mark_value),
+                mark_block: Some(mark_block),
+            };
+
+            unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
+                let mut heap = std::ptr::null_mut();
+                // SAFETY: every pointer handed over below stays live for the call.
+                unsafe {
+                    // No heap yet: attach reports null without an error.
+                    assert_eq!(
+                        kiln_realm_gc_attach(&raw const HOOKS, std::ptr::null_mut(), &raw mut heap),
+                        0
+                    );
+                    assert!(heap.is_null());
+                    let candidate = Box::into_raw(Box::new([&raw const HOOKS, std::ptr::null()]))
+                        .cast::<c_void>();
+                    assert_eq!(
+                        kiln_realm_gc_attach(&raw const HOOKS, candidate, &raw mut heap),
+                        0
+                    );
+                    assert_eq!(heap, candidate);
+                    // A second candidate is refused in favour of the existing heap.
+                    let other = Box::into_raw(Box::new([&raw const HOOKS, std::ptr::null()]))
+                        .cast::<c_void>();
+                    assert_eq!(
+                        kiln_realm_gc_attach(&raw const HOOKS, other, &raw mut heap),
+                        0
+                    );
+                    assert_eq!(heap, candidate);
+                    drop(Box::from_raw(other.cast::<[*const GcHooks; 2]>()));
+                    assert_eq!(
+                        kiln_realm_gc_register_roots(
+                            Some(roots),
+                            context,
+                            GC_ROOT_SURVIVES_TEARDOWN
+                        ),
+                        0
+                    );
+                    assert_eq!(
+                        kiln_realm_gc_register_roots(
+                            Some(roots),
+                            context,
+                            GC_ROOT_SURVIVES_TEARDOWN
+                        ),
+                        0
+                    );
+                    assert_eq!(kiln_realm_gc_mark_roots(heap), 0);
+                }
+                0
             }
 
             let mut handle = 0;
-            let mut drops = 0_usize;
-            // SAFETY: both output and callback context stay live through the calls.
+            let mut slot = [0u64; 2];
+            // SAFETY: the output slot and the root context stay live through the calls.
             assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
             assert_eq!(
-                unsafe {
-                    kiln_realm_enter(handle, Some(register), (&raw mut drops).cast::<c_void>())
-                },
+                unsafe { kiln_realm_enter(handle, Some(enter), (&raw mut slot).cast::<c_void>()) },
                 0
             );
-            assert_eq!(drops, 0);
+            assert_eq!(ROOT_PHASES.lock().unwrap().as_slice(), &[GC_PHASE_MARK]);
+            assert_eq!(MARKED_VALUES.load(AtomicOrdering::SeqCst), 1);
             assert_eq!(kiln_realm_destroy(handle), 0);
-            assert_eq!(drops, 1);
-        }
-
-        #[test]
-        fn generated_objects_share_the_realm_heap_lifetime() {
-            unsafe extern "C" fn register(context: *mut c_void) -> i32 {
-                // SAFETY: the test passes a live counter through realm entry.
-                let allocation = Box::into_raw(Box::new(context.cast::<usize>())).cast::<c_void>();
-                // SAFETY: allocation and destructor are an exact pair.
-                let status = unsafe { kiln_realm_own_object(allocation, Some(drop_object)) };
-                if status != 0 {
-                    // SAFETY: transfer failed, so the caller still owns the allocation.
-                    unsafe { drop_object(allocation) };
-                }
-                status
-            }
-            unsafe extern "C" fn drop_object(pointer: *mut c_void) {
-                // SAFETY: `register` created this Box and transfers it at most once.
-                let counter = unsafe { Box::from_raw(pointer.cast::<*mut usize>()) };
-                // SAFETY: the test counter outlives realm destruction.
-                unsafe { **counter += 1 };
-            }
-
-            let mut handle = 0;
-            let mut drops = 0_usize;
-            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(BEGINS.load(AtomicOrdering::SeqCst), 1);
+            assert_eq!(ENDS.load(AtomicOrdering::SeqCst), 1);
             assert_eq!(
-                unsafe {
-                    kiln_realm_enter(handle, Some(register), (&raw mut drops).cast::<c_void>())
-                },
-                0
+                ROOT_PHASES.lock().unwrap().as_slice(),
+                &[GC_PHASE_MARK, GC_PHASE_TEARDOWN, GC_PHASE_RESET]
             );
-            assert_eq!(drops, 0);
-            assert_eq!(kiln_realm_destroy(handle), 0);
-            assert_eq!(drops, 1);
+            assert_eq!(MARKED_VALUES.load(AtomicOrdering::SeqCst), 2);
+            assert_eq!(COLLECTS.load(AtomicOrdering::SeqCst), 0);
         }
 
         struct RecordedWork {
@@ -4795,11 +5184,23 @@ mod realm {
         (realm, kiln_realm_entropy_word, realm_entropy_word) => {
             const _: unsafe extern "C" fn(u64, *mut u64) -> i32 = kiln_realm_entropy_word;
         };
-        (realm, kiln_realm_own_closure, realm_own_closure) => {
-            const _: unsafe extern "C" fn(*mut c_void, Option<DropWork>) -> i32 = kiln_realm_own_closure;
+        (realm, kiln_realm_gc_attach, realm_gc_attach) => {
+            const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;
         };
-        (realm, kiln_realm_own_object, realm_own_object) => {
-            const _: unsafe extern "C" fn(*mut c_void, Option<DropWork>) -> i32 = kiln_realm_own_object;
+        (realm, kiln_realm_gc_register_roots, realm_gc_register_roots) => {
+            const _: unsafe extern "C" fn(Option<GcRootsFn>, *mut c_void, u32) -> i32 = kiln_realm_gc_register_roots;
+        };
+        (realm, kiln_realm_gc_unregister_roots, realm_gc_unregister_roots) => {
+            const _: unsafe extern "C" fn(Option<GcRootsFn>, *mut c_void) -> i32 = kiln_realm_gc_unregister_roots;
+        };
+        (realm, kiln_realm_gc_mark_roots, realm_gc_mark_roots) => {
+            const _: unsafe extern "C" fn(*mut c_void) -> i32 = kiln_realm_gc_mark_roots;
+        };
+        (realm, kiln_realm_gc_mark_value, realm_gc_mark_value) => {
+            const _: unsafe extern "C" fn(*mut c_void, *const c_void) -> i32 = kiln_realm_gc_mark_value;
+        };
+        (realm, kiln_realm_gc_mark_block, realm_gc_mark_block) => {
+            const _: unsafe extern "C" fn(*mut c_void, *mut c_void) -> i32 = kiln_realm_gc_mark_block;
         };
         (realm, kiln_realm_now, realm_now) => {
             const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_now;
