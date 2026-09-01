@@ -3384,15 +3384,33 @@ impl Compiler {
     ) {
         self.expression(test);
         let false_jump = self.emit_jump(Instruction::JumpIfFalse(0));
-        self.statement(consequent);
+        self.branch_statement(consequent);
         if let Some(alternate) = alternate {
             let end_jump = self.emit_jump(Instruction::Jump(0));
             self.patch_jump(false_jump);
-            self.statement(alternate);
+            self.branch_statement(alternate);
             self.patch_jump(end_jump);
         } else {
             self.patch_jump(false_jump);
         }
+    }
+
+    /// One arm of an `if`, which is a statement rather than a block -- except when it is a
+    /// function declaration, which Annex B B.3.4 says to read as though a block were written
+    /// around it.
+    ///
+    /// The block matters: without it the declaration binds in whatever scope encloses the `if`,
+    /// so `function(f) { if (true) function f() {} }` overwrote the *parameter* instead of
+    /// creating a binding of its own and leaving the parameter alone, which is what B.3.2.1
+    /// declines to do for a formal.
+    fn branch_statement(&mut self, statement: &Statement) {
+        if !matches!(statement.kind, StatementKind::Function(_)) {
+            self.statement(statement);
+            return;
+        }
+        self.scopes.push(HashMap::new());
+        self.statement(statement);
+        self.scopes.pop().expect("branch scope was just pushed");
     }
 
     /// `try`/`catch`/`finally`.
@@ -5795,7 +5813,14 @@ impl Compiler {
         // Normally created by the hoisting pass. A function declaration can also appear where a
         // single statement is expected -- `if (x) function f() {}` -- and there is no block to
         // have hoisted it.
-        if !matches!(self.resolve(&name), Resolution::Local(_)) {
+        //
+        // The test is the *innermost* scope rather than resolution, and the difference is the
+        // whole of Annex B B.3.4: an `if` arm is read as though a block were written around it,
+        // so `function (f) { if (true) function f() {} }` declares a binding of its own there.
+        // Asking `resolve` instead found the enclosing parameter and overwrote it, which is
+        // exactly what B.3.2.1 declines to do for a formal.
+        let innermost = self.scopes.len() - 1;
+        if !self.scopes[innermost].contains_key(&name) {
             self.predeclare(VariableKind::Let, &name, true);
         }
 

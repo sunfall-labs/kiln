@@ -55,9 +55,15 @@ console.log('arguments:', (function () {
   return arguments.toString();
 }()));
 
-// `if (x) function f() {}` is the same rule reached through B.3.4.
+// `if (x) function f() {}` is the same rule reached through B.3.4: the arm is read as though a
+// block were written around it, so the declaration binds there and only the Annex B write
+// reaches the enclosing scope -- which is why the parameter below survives.
 if (true) function branch() { return 'branch'; }
 console.log('if-branch:', branch());
+console.log('if-branch parameter:', (function (p) {
+  if (true) function p() {}
+  return p;
+}(123)));
 
 // A switch clause is a block for this purpose too.
 switch (0) {
