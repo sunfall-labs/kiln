@@ -977,10 +977,25 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// whether another was needed. A caller that loops on its own progress does, and one turn per
     /// round is both cheaper and strictly more thorough: it stops at quiescence rather than at
     /// four, and it keeps going past four when a connection still has work.
+    /// Advances the local tasks that are already runnable, without parking the thread.
+    ///
+    /// The checkpoint calls this several times per request, so what it costs per call matters.
+    /// `block_on` around a `yield_now` would do the same scheduling work, but it also arms and
+    /// disarms the I/O driver each time, and that is a `kevent` per call. A run of 14,175
+    /// requests parked for real 13 times: the driver was almost always being armed only to find
+    /// work already waiting.
+    ///
+    /// Polling the `LocalSet` directly runs exactly the tasks that are ready and returns. It
+    /// deliberately does not turn the reactor, so readiness that has not arrived yet will not be
+    /// discovered here. That is not a gap the checkpoint has to cover. A round that applies no
+    /// actions and drains no events ends the checkpoint, control returns to the drive, and the
+    /// drive's own await parks and turns the reactor; the work resumes through
+    /// [`Self::poll_http_tasks_after_wake`]. Progress that needs the kernel still waits for the
+    /// kernel, in the one place that was already going to park.
     pub fn poll_http_tasks_once(&mut self) {
-        self.executor.local.block_on(&self.executor.runtime, async {
-            tokio::task::yield_now().await;
-        });
+        let _entered = self.executor.runtime.enter();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let _ = std::pin::Pin::new(&mut self.executor.local).poll(&mut context);
     }
 
     pub fn poll_http_tasks(&mut self) {

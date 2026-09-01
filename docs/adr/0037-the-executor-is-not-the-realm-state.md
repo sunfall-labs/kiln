@@ -134,7 +134,8 @@ per-entry cost.
 1. Split the types, mechanically, with no behaviour change. `scripts/native.sh` at 0 diverged after.
    *Done.*
 2. Split the operations to match the types, so the fence is structural. *Done.*
-3. Flip the drive to `async fn` and delete the `_in_context` family.
+3. Stop the checkpoint from parking. *Done.*
+4. Flip the drive to `async fn` and delete the `_in_context` family.
 
 Step 2 moved the nineteen executor-free operations onto `impl RealmState` and left the
 twenty-two that park on `impl RealmRuntime`. Membership was not chosen by hand: an operation
@@ -157,3 +158,28 @@ violation; a guard that cannot fail is not a guard.
 
 Each step is independently verifiable, which matters more here than usual: this is the component
 where a subtle aliasing mistake would be both easy to make and hard to see.
+
+## What step 3 measured
+
+The drive was already down to one `block_on` per call; the parks that mattered were the ones the
+checkpoint made from inside it. `poll_http_tasks_once` was a `block_on` around a `yield_now`,
+called several times per request, and arming the I/O driver was the whole cost of it: 14,175
+requests parked for real 13 times. It now polls the `LocalSet` directly and returns.
+
+A ten-line HTTP server, `bench/server/drive.mjs`, 5s at concurrency 16, three interleaved rounds
+per side on one machine:
+
+| | rps | p50 | p99 |
+| --- | --- | --- | --- |
+| before | 4,603 / 4,713 / 4,761 | 3.46 ms | 4.59 ms |
+| after | 8,875 / 9,155 / 9,138 | 1.73 ms | 2.55 ms |
+
+1.93x throughput, latency halved, no errors on either side. Node on the same box serves 88,424
+rps, so this closes about a twentieth of the gap rather than the gap; the next cost is whatever
+the profile says it is once the parks are gone, which is the honest position stated above.
+
+The correctness argument is that the checkpoint's termination condition did not change. A round
+that applies no actions and drains no events still ends it, and readiness that needs the kernel is
+still discovered where it always was: the drive's own await parks, and the work resumes through
+`poll_http_tasks_after_wake`. Confirmed by conformance at 45/45 and `scripts/native.sh` at 53
+matched, 0 diverged - the gate that a previous, unsound attempt at this hung for ten minutes.
