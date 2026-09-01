@@ -22,6 +22,10 @@ pub(crate) fn capabilities() -> ExecutionCapabilities {
         // Test262's `$262.createRealm`. A host capability rather than a language feature, so it
         // is named here beside the compiler rather than assumed by the engine.
         .with_host_realms()
+        // Test262's `$262.agent.start`, and the text a new agent's realm evaluates before the
+        // source it was started with. Named here for the same reason: an agent is a thread and a
+        // realm, and a program does not get one because the engine happened to be able to.
+        .with_host_agents(crate::harness::HOST_OBJECT_PRELUDE)
 }
 
 fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError> {
