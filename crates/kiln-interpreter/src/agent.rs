@@ -908,6 +908,10 @@ fn run_agent_realm(group: &Arc<AgentGroup>, id: usize, source: &str) -> Result<(
         strict: false,
         global_var_scope: true,
         script: true,
+        // An agent's realm evaluates a Script, with nothing lexically around it.
+        home: None,
+        new_target: kiln_ir::EvalNewTarget::Forbidden,
+        private_scopes: &[],
     })
     .map_err(|error| ExecutionError::Host {
         instruction: 0,
