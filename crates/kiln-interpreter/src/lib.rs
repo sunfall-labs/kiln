@@ -4014,15 +4014,7 @@ impl TypedKind {
             Self::Uint16 => slot.copy_from_slice(&(to_uint32(value) as u16).to_le_bytes()),
             Self::Int32 => slot.copy_from_slice(&to_int32(value).to_le_bytes()),
             Self::Uint32 => slot.copy_from_slice(&to_uint32(value).to_le_bytes()),
-            Self::Float16 => slot.copy_from_slice(
-                &f32_to_half(
-                    #[expect(clippy::cast_possible_truncation)]
-                    {
-                        value as f32
-                    },
-                )
-                .to_le_bytes(),
-            ),
+            Self::Float16 => slot.copy_from_slice(&f64_to_half(value).to_le_bytes()),
             #[allow(clippy::cast_possible_truncation)]
             Self::Float32 => slot.copy_from_slice(&(value as f32).to_le_bytes()),
             Self::Float64 => slot.copy_from_slice(&value.to_le_bytes()),
@@ -4060,38 +4052,51 @@ fn half_to_f32(bits: u16) -> f32 {
 
 /// A number as the nearest binary16 bit pattern, rounding halves to even.
 ///
-/// Not a truncation of the binary32 pattern: half's subnormals begin where nothing else's do, so
-/// a value too small for a normal half still has bits to keep, and a value too large becomes an
-/// *infinity* rather than the largest finite half. Rounding to even is the mode every other
-/// conversion in the language uses, and the one that does not drift when applied repeatedly.
+/// `ToFloat16`, in one rounding step from the number the language actually holds.
+///
+/// One step, and that is the whole point of not going through `f32`. Two roundings are not one:
+/// `2.980232238769532e-8` is a hair above half of the smallest subnormal half and rounds *up* to
+/// it, but rounding it to binary32 first lands exactly on the halfway point, where round-to-even
+/// then takes it down to zero. Every value between two adjacent binary32 neighbours of a half
+/// boundary has the same problem.
+///
+/// Not a truncation of the binary64 pattern either: half's subnormals begin where nothing else's
+/// do, so a value too small for a normal half still has bits to keep, and a value too large
+/// becomes an *infinity* rather than the largest finite half.
 #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn f32_to_half(value: f32) -> u16 {
+fn f64_to_half(value: f64) -> u16 {
     let bits = value.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exponent = ((bits >> 23) & 0xff) as i32;
-    let mantissa = bits & 0x7f_ffff;
+    let sign = ((bits >> 48) & 0x8000) as u16;
+    let exponent = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa = bits & 0x000f_ffff_ffff_ffff;
     // NaN keeps a non-empty mantissa so it does not come back as an infinity; which NaN it is
     // is not observable.
-    if exponent == 0xff {
+    if exponent == 0x7ff {
         return sign | 0x7c00 | u16::from(mantissa != 0) << 9;
     }
     // The unbiased exponent, rebiased for half. Above half's range is an infinity, which is what
     // the specification's `ToFloat16` produces rather than the largest finite value.
-    let unbiased = exponent - 127 + 15;
+    let unbiased = exponent - 1023 + 15;
     if unbiased >= 0x1f {
         return sign | 0x7c00;
     }
     if unbiased <= 0 {
-        // Subnormal. The implicit leading one comes back for the shift, and the whole thing is
-        // zero once the shift would take every bit.
-        if unbiased < -10 {
+        // Subnormal, and zero with it. The implicit leading one comes back for the shift; below
+        // this the shift would be wider than the word and the answer is a signed zero anyway.
+        if unbiased < -20 {
             return sign;
         }
-        let with_leading = mantissa | 0x80_0000;
-        let shift = (14 - unbiased) as u32;
+        let with_leading = if exponent == 0 {
+            // A binary64 subnormal is far below half's smallest, so it is already zero above --
+            // but a zero itself arrives here and has no implicit one.
+            mantissa
+        } else {
+            mantissa | 0x0010_0000_0000_0000
+        };
+        let shift = (43 - unbiased) as u32;
         let kept = with_leading >> shift;
-        let remainder = with_leading & ((1 << shift) - 1);
-        let half = 1_u32 << (shift - 1);
+        let remainder = with_leading & ((1_u64 << shift) - 1);
+        let half = 1_u64 << (shift - 1);
         let rounded = if remainder > half || (remainder == half && kept & 1 == 1) {
             kept + 1
         } else {
@@ -4099,10 +4104,10 @@ fn f32_to_half(value: f32) -> u16 {
         };
         return sign | rounded as u16;
     }
-    let kept = mantissa >> 13;
-    let remainder = mantissa & 0x1fff;
-    let mut raw = ((unbiased as u32) << 10) | kept;
-    if remainder > 0x1000 || (remainder == 0x1000 && kept & 1 == 1) {
+    let kept = mantissa >> 42;
+    let remainder = mantissa & 0x3ff_ffff_ffff;
+    let mut raw = ((unbiased as u64) << 10) | kept;
+    if remainder > 0x200_0000_0000 || (remainder == 0x200_0000_0000 && kept & 1 == 1) {
         // A carry out of the mantissa lands in the exponent, which is what makes 65520 round up
         // to an infinity rather than to the largest finite half.
         raw += 1;
@@ -29892,9 +29897,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let allowed = if op.waitable() {
             matches!(view.kind, TypedKind::Int32 | TypedKind::BigInt64)
         } else {
+            // `ValidateIntegerTypedArray` names the types atomics accept, and every float is
+            // outside it -- half included. `Float16Array` was missing here only because the
+            // conformance harness's `typeof Float16Array` guard could not see the constructor
+            // this realm registers, so no test ever reached the check.
             !matches!(
                 view.kind,
-                TypedKind::Uint8Clamped | TypedKind::Float32 | TypedKind::Float64
+                TypedKind::Uint8Clamped
+                    | TypedKind::Float16
+                    | TypedKind::Float32
+                    | TypedKind::Float64
             )
         };
         if !allowed {
@@ -34797,12 +34809,9 @@ fn call_native(
         // Through the bit pattern rather than through `as f32`: rounding to half and rounding to
         // single are different roundings, and doing the second one twice would answer with a
         // value half cannot hold.
-        Native::MathF16Round => Value::Number(f64::from(half_to_f32(f32_to_half(
-            #[expect(clippy::cast_possible_truncation)]
-            {
-                argument_number(arguments) as f32
-            },
-        )))),
+        Native::MathF16Round => {
+            Value::Number(f64::from(half_to_f32(f64_to_half(argument_number(arguments)))))
+        }
         Native::MathClz32 => Value::Number(f64::from(to_uint32(argument_number(arguments)).leading_zeros())),
         // Both operands are truncated to 32-bit *first*, which is what makes this different from
         // `a * b`: the product is exact in 32 bits and wraps rather than rounding.
