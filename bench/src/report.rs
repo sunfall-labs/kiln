@@ -629,9 +629,10 @@ pub struct Regression {
 ///
 /// Wall clock has a threshold and a noise floor because it is a noisy measurement; query and
 /// graph-cache work have neither, because they are exact and an edit that starts recomputing more
-/// work has regressed no matter what the clock says. Both sides must also be steady-state
-/// measurements: comparing timings that describe different work is invalid even if their
-/// first-iteration counters happen to match.
+/// work has regressed no matter what the clock says. Each query kind is gated independently so an
+/// improvement in one cannot pay for an invalidation regression in another; the aggregate is only
+/// a compact display metric. Both sides must also be steady-state measurements: comparing timings
+/// that describe different work is invalid even if their first-iteration counters happen to match.
 pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<Regression>) {
     let mut out = String::new();
     let mut regressions = Vec::new();
@@ -667,6 +668,24 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
         let slower = pct > threshold && delta > NOISE_FLOOR_MS;
         let recomputed = m.recomputes();
         let base_recomputed = base.recomputes();
+        let query_regressions: Vec<_> = [
+            ("parse", m.stats.parse_computed, base.stats.parse_computed),
+            ("IR", m.stats.ir_computed, base.stats.ir_computed),
+            (
+                "interface",
+                m.stats.interface_computed,
+                base.stats.interface_computed,
+            ),
+            (
+                "project",
+                m.stats.project_computed,
+                base.stats.project_computed,
+            ),
+        ]
+        .into_iter()
+        .filter(|(_, current, previous)| current > previous)
+        .collect();
+        let query_regressed = !query_regressions.is_empty();
         let unstable = !m.steady_state || !base.steady_state;
 
         let graph_misses = m.stats.graph_cache_misses;
@@ -694,7 +713,7 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
             base_graph_evictions,
             graph_invalidations,
             base_graph_invalidations,
-            if slower || recomputed > base_recomputed || graph_regressed || unstable {
+            if slower || query_regressed || graph_regressed || unstable {
                 "REGRESSION"
             } else {
                 "ok"
@@ -713,12 +732,10 @@ pub fn compare(run: &Report, baseline: &Report, threshold: f64) -> (String, Vec<
                 ),
             });
         }
-        if recomputed > base_recomputed {
+        for (label, current, previous) in query_regressions {
             regressions.push(Regression {
                 id: m.id.clone(),
-                detail: format!(
-                    "recomputed {recomputed} queries vs {base_recomputed} in the baseline"
-                ),
+                detail: format!("{label} recomputed {current} vs {previous} in the baseline"),
             });
         }
         for (label, current, previous) in [
@@ -839,6 +856,23 @@ mod tests {
             regressions[0].detail.contains("recomputed 5"),
             "{regressions:?}"
         );
+    }
+
+    #[test]
+    fn one_query_regression_cannot_hide_behind_another_query_improvement() {
+        let mut run = report(1.0, 1);
+        run.measurements[0].stats.project_computed = 0;
+        run.measurements[0].stats.parse_computed = 1;
+        let baseline = report(10.0, 1);
+
+        let (text, regressions) = compare(&run, &baseline, 0.15);
+
+        assert_eq!(regressions.len(), 1, "{regressions:?}");
+        assert!(
+            regressions[0].detail.contains("parse recomputed 1 vs 0"),
+            "{regressions:?}"
+        );
+        assert!(text.contains("REGRESSION"), "{text}");
     }
 
     #[test]
