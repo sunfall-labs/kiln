@@ -660,11 +660,16 @@ pub fn targeted_node_net_conformance(budget: Budget) -> Result<Measurement, Stri
     let mut fixture = ConformanceDaemonFixture::new()?;
     let mut durations = Vec::with_capacity(iters);
 
+    // Catalog construction is cold daemon setup, not the steady-state language-developer loop.
+    // Prime it outside the sample and require every measured request to prove reuse explicitly.
+    let cold = fixture.run_node_net(&root)?;
+    require_node_net_selection(&cold, false)?;
+
     for iteration in 0..warmup + iters {
         let started = Instant::now();
         let summary = fixture.run_node_net(&root)?;
         let elapsed = started.elapsed();
-        require_node_net_selection(&summary)?;
+        require_node_net_selection(&summary, true)?;
         if iteration >= warmup {
             durations.push(elapsed);
         }
@@ -684,24 +689,29 @@ pub fn targeted_node_net_conformance(budget: Budget) -> Result<Measurement, Stri
     ))
 }
 
-fn require_node_net_selection(summary: &TestSummary) -> Result<(), String> {
+fn require_node_net_selection(
+    summary: &TestSummary,
+    expected_cache_hit: bool,
+) -> Result<(), String> {
     if summary.discovered == 35
         && summary.selected == 5
         && summary.passed == 5
         && summary.failed == 0
         && summary.unsupported == 0
         && summary.skipped == 0
+        && summary.discovery_cache_hit == expected_cache_hit
     {
         return Ok(());
     }
     Err(format!(
-        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={}, expected 35/5/5/0/0/0",
+        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 35/5/5/0/0/0/{expected_cache_hit}",
         summary.discovered,
         summary.selected,
         summary.passed,
         summary.failed,
         summary.unsupported,
         summary.skipped,
+        summary.discovery_cache_hit,
     ))
 }
 
@@ -744,6 +754,14 @@ impl ConformanceDaemonFixture {
             .request(&Request::Test {
                 root: root.to_owned(),
                 mode: TestMode::Node,
+                changed_root: Some(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("..")
+                        .canonicalize()
+                        .map_err(|error| format!("canonicalizing benchmark project: {error}"))?
+                        .display()
+                        .to_string(),
+                ),
                 changed_paths: Some(vec!["crates/kiln-runtime/src/node_net.rs".to_owned()]),
                 previously_failed: Vec::new(),
             })
@@ -951,6 +969,8 @@ fn native_fixture_files(root: &Path) -> Result<(), String> {
 fn native_dependency_program(value: u64) -> ModuleProgram {
     ModuleProgram {
         program: Program {
+            // Assembled as bytecode, so there is no source text its spans could point into.
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::Number((value as f64).to_bits())],
             code: vec![
@@ -960,7 +980,6 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             ],
             local_count: 1,
             functions: Vec::new(),
-            source: "".into(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -968,12 +987,18 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             exported: "value".to_owned(),
             local_slot: 0,
         }],
+        strictness: kiln_ir::Strictness {
+            body: true,
+            functions: Vec::new(),
+        },
     }
 }
 
 fn native_entry_program() -> ModuleProgram {
     ModuleProgram {
         program: Program {
+            // Assembled as bytecode, so there is no source text its spans could point into.
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
@@ -986,7 +1011,6 @@ fn native_entry_program() -> ModuleProgram {
             ],
             local_count: 1,
             functions: Vec::new(),
-            source: "".into(),
         },
         dependencies: vec!["./dep.js".to_owned()],
         imports: vec![ImportBinding {
@@ -996,6 +1020,10 @@ fn native_entry_program() -> ModuleProgram {
             local_slot: 0,
         }],
         exports: Vec::new(),
+        strictness: kiln_ir::Strictness {
+            body: true,
+            functions: Vec::new(),
+        },
     }
 }
 
@@ -1093,7 +1121,11 @@ fn native_equivalence(
     let started = Instant::now();
     let mut host = kiln_runtime::CaptureHost::new();
     graph
-        .execute(&mut host, Default::default())
+        .execute(
+            &mut host,
+            Default::default(),
+            kiln_interpreter::ExecutionCapabilities::default(),
+        )
         .map_err(|error| format!("interpreter graph equivalence run: {error}"))?;
     let native = Command::new(&report.output)
         .output()
@@ -1257,8 +1289,13 @@ fn warm_execution(w: &Workload, budget: Budget) -> Result<Measurement, String> {
             format!("compiling interpreter scenario failed: {diagnostics:?}")
         })?;
         let mut host = kiln_runtime::CaptureHost::new();
-        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default())
-            .map_err(|error| format!("executing interpreter scenario failed: {error}"))?;
+        kiln_interpreter::execute(
+            std::rc::Rc::new(program),
+            &mut host,
+            Default::default(),
+            kiln_interpreter::ExecutionCapabilities::default(),
+        )
+        .map_err(|error| format!("executing interpreter scenario failed: {error}"))?;
         let elapsed = started.elapsed();
         let expected = format!("warm {}\n", 100 + seed);
         if host.stdout() != expected {
@@ -1431,7 +1468,11 @@ fn build_linked_graph(
 fn execute_linked(graph: &ModuleGraph) -> Result<String, String> {
     let mut host = kiln_runtime::CaptureHost::new();
     graph
-        .execute(&mut host, Default::default())
+        .execute(
+            &mut host,
+            Default::default(),
+            kiln_interpreter::ExecutionCapabilities::default(),
+        )
         .map_err(|error| format!("executing linked graph: {error}"))?;
     Ok(host.into_stdout())
 }

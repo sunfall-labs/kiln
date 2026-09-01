@@ -66,6 +66,14 @@ when installed, but it is not a mandatory bootstrap dependency; a compatible sys
 supported fallback. Unix links request the system math library because generated exponent and
 remainder operations use `pow` and `fmod`.
 
+When Zig is selected and `ZIG_GLOBAL_CACHE_DIR` is unset, the toolchain uses one versioned
+Kiln-managed global cache in the system temporary directory. Every Kiln process uses the same
+cross-process lock for that cache around `zig cc`, preventing concurrent worktrees from observing
+half-written Zig runtime archives while preserving warm compiler artifacts. An explicitly supplied
+`ZIG_GLOBAL_CACHE_DIR` remains authoritative and is not deleted or locked by Kiln. The managed cache
+path does not enter native artifact identity because it changes compiler scratch storage, not the
+compiler, target, search policy, or emitted result.
+
 The compiler identity also hashes the inherited search-policy variables relevant to the selected
 driver and C11 language mode. Every driver includes `CPATH`, `C_INCLUDE_PATH`, and `LIBRARY_PATH`;
 GCC and an unidentified `cc` additionally include `COMPILER_PATH` and `GCC_EXEC_PREFIX`, while Zig

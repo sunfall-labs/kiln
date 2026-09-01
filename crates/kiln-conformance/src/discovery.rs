@@ -18,6 +18,7 @@ use crate::case::{
 };
 use crate::harness::Harness;
 use crate::manifest::{MANIFEST_FILE_NAME, Manifest, ManifestError, ManifestTest};
+use crate::worker::InterpreterWorker;
 use crate::{program, test262};
 
 /// Where a test's metadata came from.  Reported so a summary can say which convention a corpus
@@ -113,10 +114,32 @@ impl ConformanceTest {
     /// script run, so re-running it under an injected strict directive would be judging a
     /// different program against that observation.
     pub fn run(&self, mode: RunMode) -> Vec<VariantResult> {
+        self.run_with_worker(mode, None)
+    }
+
+    /// Run this case on scheduler infrastructure owned by a resident interpreter thread.
+    ///
+    /// The worker is reused; the VM, realm, host capture, and globals are not. Node mode has a
+    /// separate resource lifecycle and therefore continues through [`Self::run`].
+    pub fn run_with_interpreter_worker(
+        &self,
+        worker: &mut InterpreterWorker,
+    ) -> Vec<VariantResult> {
+        self.run_with_worker(RunMode::Interpreter, Some(worker))
+    }
+
+    fn run_with_worker(
+        &self,
+        mode: RunMode,
+        worker: Option<&mut InterpreterWorker>,
+    ) -> Vec<VariantResult> {
         match &self.declaration {
-            Declaration::Frontmatter(case) => {
-                test262::run_case_variants_with_harness(case, mode, self.harness.as_deref())
-            }
+            Declaration::Frontmatter(case) => test262::run_case_variants_with_harness_and_worker(
+                case,
+                mode,
+                self.harness.as_deref(),
+                worker,
+            ),
             Declaration::FrontmatterError(error) => vec![VariantResult {
                 // Metadata could not be read, so there is no honest way to infer strictness or a
                 // module goal.  One harness failure is still enough to preserve the source file's
@@ -172,8 +195,8 @@ impl ConformanceTest {
                         &self.path, expected, mode,
                     )]
                 } else {
-                    vec![program::run_against_expected_stdout(
-                        &self.path, expected, mode,
+                    vec![program::run_against_expected_stdout_with_worker(
+                        &self.path, expected, mode, worker,
                     )]
                 }
             }

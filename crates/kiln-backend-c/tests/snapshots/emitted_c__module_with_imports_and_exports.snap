@@ -1,10 +1,9 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 1023
 expression: body(&unit)
 ---
-/* Module hash: c045662854357f98; bytecode version: 2; imports: 1; exports: 1. */
-static int kiln_module_c045662854357f9876c16d9a1bf8a04d_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
+/* Module hash: c6d415922e92ef41; bytecode version: 2; imports: 1; exports: 1. */
+static int kiln_module_c6d415922e92ef41bcd0947f5dad550a_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
     size_t sp = 0;
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
@@ -26,7 +25,7 @@ kiln_label_1:;
 kiln_label_2:;
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4607182418800017408));
 kiln_label_3:;
-    { kiln_value call_result; kiln_value callee = stack[sp - 2 - 1]; int status; kiln_value call_argbuf[(2) + 1]; for (size_t i = 0; i < (size_t)2; i++) { call_argbuf[i] = stack[sp - 2 + i]; } const kiln_value *call_args = 2 == 0 ? NULL : call_argbuf; { kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) { status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t)2, depth, thrown, NULL, 0); } else { status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t)2, depth, thrown); } } if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) { kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model"; } if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal("kiln_module_c045662854357f9876c16d9a1bf8a04d", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_c045662854357f9876c16d9a1bf8a04d", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; sp -= (size_t)3; stack[sp++] = call_result; }
+    { kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - 2 - 1]; int status; kiln_value call_argbuf[(2) + 1]; for (size_t i = 0; i < (size_t)2; i++) { call_argbuf[i] = stack[sp - 2 + i]; } const kiln_value *call_args = 2 == 0 ? NULL : call_argbuf; { kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) { status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t)2, depth, thrown, NULL, 0); } else { status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t)2, depth, thrown); } } if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) { *result = call_result; return status; } if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) { kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model"; } if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal("kiln_module_c6d415922e92ef41bcd0947f5dad550a", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_c6d415922e92ef41bcd0947f5dad550a", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; sp -= (size_t)3; stack[sp++] = call_result; }
 kiln_label_4:;
     locals[2] = stack[--sp];
 kiln_label_5:;
@@ -45,7 +44,7 @@ kiln_refusal:;
     return KILN_C99_CONTROL_ERROR;
 }
 
-int kiln_module_c045662854357f9876c16d9a1bf8a04d_namespace_wrapper(kiln_value *result, const char *const *names,
+int kiln_module_c6d415922e92ef41bcd0947f5dad550a_namespace_wrapper(kiln_value *result, const char *const *names,
                                const size_t *name_lengths, const kiln_value *values,
                                size_t count) {
     kiln_value object;
@@ -173,31 +172,44 @@ namespace_failure_without_order:
 
 
 
-typedef struct kiln_module_c045662854357f9876c16d9a1bf8a04d_realm_context {
+typedef struct kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context {
     kiln_host *host;
     kiln_value *result;
     const kiln_value *imports;
     size_t import_count;
     kiln_value *exports;
     size_t export_count;
-} kiln_module_c045662854357f9876c16d9a1bf8a04d_realm_context;
+} kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context;
 
-static int kiln_module_c045662854357f9876c16d9a1bf8a04d_realm_entry(void *opaque) {
-    kiln_module_c045662854357f9876c16d9a1bf8a04d_realm_context *context = (kiln_module_c045662854357f9876c16d9a1bf8a04d_realm_context *)opaque;
+static int kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_entry(void *opaque) {
+    kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context *context = (kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context *)opaque;
+    int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    return kiln_module_c045662854357f9876c16d9a1bf8a04d_body(context->host, context->result, context->imports,
-                         context->import_count, context->exports, context->export_count);
+    status = kiln_module_c6d415922e92ef41bcd0947f5dad550a_body(context->host, context->result, context->imports,
+                           context->import_count, context->exports, context->export_count);
+    /* A graph is linked from one C translation unit per JavaScript module. Diagnostic state is
+     * deliberately private to each unit, so the module that owns the refusing instruction must
+     * materialize it before control returns to a caller whose globals describe a different
+     * instruction. The result value is the graph boundary's existing error channel. */
+    if (status == KILN_C99_CONTROL_ERROR)
+        *context->result = kiln_c99_control_diagnostic();
+    return status;
 }
 
-int kiln_module_c045662854357f9876c16d9a1bf8a04d(kiln_host *host, kiln_value *result, const kiln_value *imports,
+int kiln_module_c6d415922e92ef41bcd0947f5dad550a(kiln_host *host, kiln_value *result, const kiln_value *imports,
              size_t import_count, kiln_value *exports, size_t export_count) {
-    kiln_module_c045662854357f9876c16d9a1bf8a04d_realm_context context;
+    kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context context;
     uint64_t realm = 0;
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_realm_is_active())
-        return kiln_module_c045662854357f9876c16d9a1bf8a04d_body(host, result, imports, import_count, exports, export_count);
+    if (kiln_realm_is_active()) {
+        (void)kiln_realm_diagnostic_reset();
+        status = kiln_module_c6d415922e92ef41bcd0947f5dad550a_body(host, result, imports, import_count, exports, export_count);
+        if (status == KILN_C99_CONTROL_ERROR)
+            *result = kiln_c99_control_diagnostic();
+        return status;
+    }
     kiln_c99_diagnostic_site = NULL;
     kiln_c99_diagnostic_operation = NULL;
     kiln_c99_diagnostic_instruction = 0;
@@ -216,7 +228,7 @@ int kiln_module_c045662854357f9876c16d9a1bf8a04d(kiln_host *host, kiln_value *re
     context.export_count = export_count;
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK)
-        status = kiln_realm_enter(realm, kiln_module_c045662854357f9876c16d9a1bf8a04d_realm_entry, &context);
+        status = kiln_realm_enter(realm, kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_entry, &context);
     if (status == KILN_C99_OK)
         status = kiln_realm_drive(realm, host, result);
     if (realm != 0) {
