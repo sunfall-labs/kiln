@@ -3014,6 +3014,28 @@ fn graph_import_value(
         local_slot,
         &import.imported,
     )?;
+    /* The launcher is straight-line C: it calls each module in order and takes an importer's
+     * values out of the export array the provider already returned. A cycle can make the origin
+     * of a name come *after* the module that imports it, and there is no array to read then --
+     * the generated code would read one that has not been filled. The interpreter answers that
+     * with a binding cell it fills in later; this backend has no such thing, so it refuses by
+     * name. A cyclic graph whose back edges carry no binding still compiles, because nothing in
+     * it reads forward. */
+    let importer_index = *indices.get(&node.path).ok_or_else(|| {
+        NativeError::Graph(ModuleGraphError::InternalMissingModule {
+            path: node.path.clone(),
+        })
+    })?;
+    if provider_index >= importer_index {
+        return Err(NativeError::Emit(EmitError::Unsupported {
+            feature: format!(
+                "`{}`, imported across a module cycle before `{}` has run, in native module \
+                 graphs",
+                import.imported,
+                origin.display()
+            ),
+        }));
+    }
     Ok(NativeGraphImport::Binding {
         provider_index,
         export_index,

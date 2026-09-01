@@ -775,9 +775,6 @@ fn classify_graph_error(error: &ModuleGraphError) -> LinkFailure {
         | ModuleGraphError::DuplicateExport { .. }
         | ModuleGraphError::UnresolvedImport { .. }
         | ModuleGraphError::Resolve { .. } => LinkFailure::Link(message),
-        // A cycle is legal JavaScript that this graph deliberately does not accept, so refusing it
-        // is a statement about the linker rather than about the test.
-        ModuleGraphError::Cycle { .. } => LinkFailure::OutOfReach(message),
         ModuleGraphError::Compile { diagnostics, .. } => {
             if diagnostics
                 .iter()
