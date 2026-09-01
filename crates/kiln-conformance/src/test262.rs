@@ -126,6 +126,12 @@ fn run_variant_with_harness_and_worker(
     worker: Option<&mut InterpreterWorker>,
 ) -> CaseResult {
     let started = Instant::now();
+    // `import()` names its module at run time, so the loader has to be reachable from a running
+    // program too. It is rooted at the test's own directory, which is where every fixture the
+    // corpus imports lives.
+    if let Some(directory) = case.path.parent() {
+        crate::module_loader::set_base(directory);
+    }
     // A compiler or interpreter bug reached by one test must not take the run with it. Before
     // this, a single `unreachable!` in lowering aborted the process, and a sweep of
     // `language/expressions` reported nothing at all for the other eleven thousand tests in the
