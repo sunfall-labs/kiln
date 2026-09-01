@@ -36830,7 +36830,7 @@ fn call_native(
             let requested = match digits {
                 Value::Undefined => None,
                 other => {
-                    let digits = other.as_number();
+                    let digits = to_integer_or_infinity(other.as_number());
                     // The range check runs even for a value that is not finite, which is why an
                     // infinite receiver is answered *after* it rather than before.
                     if !(0.0..=100.0).contains(&digits) && value.is_finite() {
@@ -36849,7 +36849,7 @@ fn call_native(
                     Value::String(number_string(value))
                 }
                 Some(other) => {
-                    let digits = other.as_number();
+                    let digits = to_integer_or_infinity(other.as_number());
                     if !value.is_finite() {
                         return Ok(Value::String(number_string(value)));
                     }
@@ -36861,8 +36861,11 @@ fn call_native(
             }
         }
         Native::BigIntAsIntN | Native::BigIntAsUintN => {
-            let bits = arguments.first().map_or(f64::NAN, Value::as_number);
-            if !(0.0..=9_007_199_254_740_991.0).contains(&bits) || bits.fract() != 0.0 {
+            // `ToIndex`: the bit count is truncated towards zero and NaN is zero, so
+            // `BigInt.asIntN(8.5, x)` is `asIntN(8, x)` rather than a RangeError. Only the range
+            // itself refuses.
+            let bits = to_integer_or_infinity(arguments.first().map_or(0.0, Value::as_number));
+            if !(0.0..=9_007_199_254_740_991.0).contains(&bits) {
                 return Err(ExecutionError::RadixOutOfRange);
             }
             let Some(Value::BigInt(value)) = arguments.get(1) else {
@@ -36877,7 +36880,11 @@ fn call_native(
         }
         Native::NumberToFixed => {
             let value = branded_number(receiver)?;
-            let digits = arguments.first().map_or(0.0, Value::as_number);
+            // `ToIntegerOrInfinity`, which answers zero for `undefined` and for NaN. Compared
+            // raw, both were NaN and failed the range test below -- so `(1.5).toFixed()` gave
+            // "2" and `(1.5).toFixed(undefined)` threw, for an argument the language says means
+            // the same thing.
+            let digits = to_integer_or_infinity(arguments.first().map_or(0.0, Value::as_number));
             if !(0.0..=100.0).contains(&digits) {
                 return Err(ExecutionError::RadixOutOfRange);
             }
@@ -39347,6 +39354,15 @@ const fn string_delegating_symbol(native: Native) -> Option<WellKnown> {
         Native::StringSplit => Some(WellKnown::Split),
         _ => None,
     }
+}
+
+/// `ToIntegerOrInfinity`, for the built-ins reached through `call_native`.
+///
+/// The same rule [`Vm::to_integer_or_infinity`] applies, spelled where a free function can use
+/// it: NaN -- which is what `undefined` coerces to -- is zero, and everything else truncates
+/// towards zero while an infinity stays one.
+fn to_integer_or_infinity(number: f64) -> f64 {
+    if number.is_nan() { 0.0 } else { number.trunc() }
 }
 
 /// `ToLength`: a count, clamped into the range an index may occupy.
@@ -42904,6 +42920,11 @@ const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::DataViewGet(_)
         | N::DataViewSet(_)
         | N::DataViewGetBig { .. }
+        // `ToIndex` of the bit count, which is a `ToNumber` first: `BigInt.asIntN(obj, x)` has
+        // to call `obj.valueOf()`. The *second* argument is deliberately not here -- it is a
+        // BigInt, and coercing it to a number would be the one conversion the language refuses.
+        | N::BigIntAsIntN
+        | N::BigIntAsUintN
         | N::DataViewSetBig => &[0],
         _ => &[],
     }
