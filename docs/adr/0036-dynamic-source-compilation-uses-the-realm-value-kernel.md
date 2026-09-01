@@ -97,10 +97,13 @@ realm's local task. Compiler completion cannot call into the heap concurrently.
 
 ## Migration sequence
 
-The first migration slice is complete: runtime-provided callable property stores now use an
-allocation-free lookup-or-publish ABI. The realm owns the winning opaque store and its destructor,
-separately emitted modules observe one identity, and realm teardown releases it exactly once. This
-is deliberately a bridge into the kernel, not the kernel extraction itself; generated closures,
+The first migration slices are complete. Runtime-provided callable property stores use an
+allocation-free lookup-or-publish ABI: the realm owns the winning opaque store and its destructor,
+separately emitted modules observe one identity, and realm teardown releases it exactly once.
+Generated graph launchers now enter the realm once around the complete CommonJS/ESM bootstrap
+rather than once per module, and every generated closure transfers its allocation to that realm for
+exact-once teardown. Calls still enter their generated C body directly, so this adds no dispatch
+indirection. These are deliberately bridges into the kernel, not the kernel extraction itself;
 ordinary objects and other per-unit state still follow the remaining sequence below.
 
 1. Extract the internal value/kernel declarations from emitted module source and give the shipped

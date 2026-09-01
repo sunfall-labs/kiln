@@ -2139,6 +2139,7 @@ typedef struct kiln_host {
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
+extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
 
 /* A closure is its body plus the boxes it captured.
  *
@@ -7126,6 +7127,13 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value) {
     return (kiln_closure *)(uintptr_t)value.bits;
 }
 
+static void kiln_c99_drop_closure(void *pointer) {
+    kiln_closure *closure = (kiln_closure *)pointer;
+    if (closure == NULL) return;
+    free(closure->upvalues);
+    free(closure);
+}
+
 static kiln_value *kiln_c99_cell_of(kiln_value value) {
     return (kiln_value *)(uintptr_t)value.bits;
 }
@@ -7216,6 +7224,13 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->proto = proto;
     closure->upvalue_count = count;
     closure->upvalues = upvalues;
+    {
+        int owned = kiln_realm_own_closure(closure, kiln_c99_drop_closure);
+        if (owned != KILN_C99_OK) {
+            kiln_c99_drop_closure(closure);
+            return owned;
+        }
+    }
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
 }
@@ -27453,6 +27468,7 @@ static int child_constructor(kiln_host *host, kiln_value *result, kiln_value *up
     return KILN_C99_OK;
 }}
 int main(void) {{
+    uint64_t realm;
     kiln_value exports[1];
     kiln_value result;
     kiln_value emitter;
@@ -27464,6 +27480,8 @@ int main(void) {{
     kiln_value inherited;
     kiln_value args[2];
     kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
@@ -27507,7 +27525,8 @@ int main(void) {{
     args[1] = kiln_c99_number(9.0);
     if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
                                0, &thrown) != KILN_C99_OK || kiln_c99_truthy(result)) return 9;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 39;
 }}
 "#,
             symbol = generated.symbol
@@ -27534,6 +27553,7 @@ static int readable_child(kiln_host *host, kiln_value *result, kiln_value *upval
     return KILN_C99_OK;
 }
 int main(void) {
+    uint64_t realm;
     kiln_value readable = kiln_c99_method(KILN_C99_METHOD_NODE_READABLE);
     kiln_value child;
     kiln_value result;
@@ -27543,6 +27563,8 @@ int main(void) {
     kiln_value emitter_prototype;
     kiln_value arguments[2];
     kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_callable_prototype(readable, &readable_prototype) != KILN_C99_OK) return 1;
     if (kiln_c99_callable_prototype(kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER),
                                     &emitter_prototype) != KILN_C99_OK) return 2;
@@ -27565,7 +27587,8 @@ int main(void) {
         method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 9;
     if (kiln_c99_get(NULL, instance, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 10;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 11;
 }
 "#;
         let run = run_with_main(&generated, wrapper, "native-readable-prototype-graph");
@@ -28110,10 +28133,13 @@ static int refuses_before_instruction(kiln_host *host, kiln_value *result,
     return KILN_C99_CONTROL_ERROR;
 }
 int main(void) {
+    uint64_t realm;
     kiln_value function;
     kiln_value result = kiln_c99_undefined();
     kiln_value thrown = kiln_c99_undefined();
     kiln_value diagnostic;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
                               NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
@@ -28125,7 +28151,8 @@ int main(void) {
     if (strstr(diagnostic.ptr, "module=node_modules/example/index.js") == NULL) return 4;
     if (strstr(diagnostic.ptr, "operation=FunctionBody") == NULL) return 5;
     if (strstr(diagnostic.ptr, "function=initialize") == NULL) return 6;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
 }
 "#;
         let run = run_with_main(&generated, wrapper, "function-refusal-source");
@@ -28330,6 +28357,9 @@ static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
+static void *kiln_test_owned_pointers[4096];
+static kiln_drop_opaque_fn kiln_test_owned_drops[4096];
+static size_t kiln_test_owned_count = 0;
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -28352,7 +28382,13 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
     return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
 }
 int kiln_realm_destroy(uint64_t realm) {
-    return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+    size_t index;
+    if (realm != 1 || kiln_test_realm_active) return KILN_C99_INVALID_ARGUMENT;
+    for (index = kiln_test_owned_count; index != 0; --index) {
+        kiln_test_owned_drops[index - 1](kiln_test_owned_pointers[index - 1]);
+    }
+    kiln_test_owned_count = 0;
+    return KILN_C99_OK;
 }
 /* Here rather than beside the other provider stubs, because its argument is a struct the runtime
  * prelude declares and this fixture is the first text that follows the prelude. */
@@ -28423,6 +28459,16 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     kiln_test_callable_codes[index] = code;
     kiln_test_callable_stores[index] = candidate;
     *out_store = candidate;
+    return KILN_C99_OK;
+}
+int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer) {
+    if (!kiln_test_realm_active || pointer == NULL || drop_pointer == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (kiln_test_owned_count == 4096) return KILN_C99_OUT_OF_MEMORY;
+    kiln_test_owned_pointers[kiln_test_owned_count] = pointer;
+    kiln_test_owned_drops[kiln_test_owned_count] = drop_pointer;
+    ++kiln_test_owned_count;
     return KILN_C99_OK;
 }
 int kiln_realm_now(double *out_milliseconds) {
@@ -30916,10 +30962,13 @@ static int callback(kiln_host *host, kiln_value *result, kiln_value *upvalues,
     return KILN_C99_OK;
 }
 int main(void) {
+    uint64_t realm;
     kiln_value thrown = kiln_c99_undefined();
     kiln_value result;
     kiln_value args[4];
     kiln_value callable;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
                               kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
@@ -30945,7 +30994,8 @@ int main(void) {
     args[2] = callable;
     if (kiln_c99_node_dns_lookup(NULL, &result, args, 3, 0, &thrown) != KILN_C99_OK)
         return 5;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 6;
 }
 "#;
         let run = run_with_main(&generated, wrapper, "node-support-facades");
