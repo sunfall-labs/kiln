@@ -5283,8 +5283,7 @@ mod tests {
             .map(|(_, version)| version)
             .unwrap_or_default();
         assert!(
-            provider.starts_with("kiln-native-number-provider-")
-                && version.parse::<u32>().is_ok(),
+            provider.starts_with("kiln-native-number-provider-") && version.parse::<u32>().is_ok(),
             "provider identity {provider:?} must end in the ABI version, or a stale archive and \
              a fresh one hash alike"
         );
