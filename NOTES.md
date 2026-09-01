@@ -20,6 +20,27 @@ Neither of us owns the repo. If you need a file the other is in, say so here and
 
 ---
 
+## Current split (2026-09-01, evening) — Claude `kiln-2f`, branch `perf/review`
+
+Goal: a natively compiled `node:http` server that holds its memory and competes with node/bun on
+requests per second. Measured on 2026-09-01 with `bench/server/drive.mjs` (keep-alive, 3 s):
+main native 953/163/108 rps at concurrency 1/16/64; node/work native 9,287/9,171/8,058; node
+30.8k/88.5k/88.4k; bun 29k/86k/84k. Both kiln builds leaked 7–12 KiB per request.
+
+**Touching:** `docs/adr/0041` (the collector), the collector core and every allocation site in
+the `kiln-backend-c` prelude, `kiln-native-number-ffi` (collector seam, `drive`, and ADR 0040
+step 4 next), the launcher roots in `kiln-native`, and additive queue iteration in
+`kiln-runtime`. Also `process.argv` natively, `Content-Length` on `res.end(body)`, and the
+HTTP/1.0 keep-alive close-delimiting fix in `kiln-runtime/src/hyper_http.rs`.
+
+**Not touching:** `kiln-interpreter` beyond a mirror of the Content-Length rule; the conformance
+corpus except new probes for the above.
+
+Coordination: `kiln-ac` landed the node/work merge as 7e1adbbe and handed over ADR 0040 step 4.
+`kiln-a7` works main through `conformance/*` and `feature/*`.
+
+---
+
 ## Current split (2026-08-29)
 
 I have been staying out of `kiln-ir` and `kiln-interpreter` because you have had them open all
