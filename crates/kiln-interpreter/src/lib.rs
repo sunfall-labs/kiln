@@ -2987,7 +2987,9 @@ fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
         Value::Function(closure) => closure.properties.borrow().is_extensible(),
         Value::Array(items) => items.properties.borrow().is_extensible(),
         Value::Bound(bound) => bound.properties.borrow().is_extensible(),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => intrinsics.extensible(target),
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
+            intrinsics.extensible(target)
+        }
         // An exotic object carries an ordinary store for its named properties, and closing it is
         // what `Object.preventExtensions(sample)` has to mean: the elements are not properties
         // of that store and are unaffected, which is what the specification says too.
@@ -5906,7 +5908,8 @@ impl Value {
             | Self::Generator(_)
             | Self::Promise(_)
             | Self::RegExp(_)
-            | Self::Settler(..) | Self::Capability(_)
+            | Self::Settler(..)
+            | Self::Capability(_)
             | Self::Bound(_)
             | Self::CommonJsRequire(_)
             | Self::CommonJsResolve(_) => f64::NAN,
@@ -5962,7 +5965,8 @@ impl Value {
             | Self::Promise(_)
             | Self::RegExp(_)
             | Self::Date(_)
-            | Self::Settler(..) | Self::Capability(_)
+            | Self::Settler(..)
+            | Self::Capability(_)
             | Self::Bound(_)
             | Self::CommonJsRequire(_)
             | Self::CommonJsResolve(_)
@@ -6034,7 +6038,9 @@ impl Value {
             },
             // No `n` suffix: that is the literal's spelling, not the value's.
             Self::BigInt(value) => value.to_string(),
-            Self::Settler(..) | Self::Capability(_) | Self::Bound(_) => "function () { [native code] }".to_owned(),
+            Self::Settler(..) | Self::Capability(_) | Self::Bound(_) => {
+                "function () { [native code] }".to_owned()
+            }
             Self::CommonJsRequire(_) => "function require() { [native code] }".to_owned(),
             Self::CommonJsResolve(_) => "function resolve() { [native code] }".to_owned(),
             Self::Proxy(proxy) => proxy.target.to_display_string(),
@@ -15008,6 +15014,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::PromiseTry => {
                 let callback = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let rest = arguments.get(1..).unwrap_or_default().to_vec();
+                if !is_an_object(receiver) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Promise.try called on a non-object".to_owned(),
+                    });
+                }
+                // Reached through a subclass, the promise is built by *that* constructor and the
+                // outcome goes through the pair its executor was handed -- the same capability
+                // every other promise-producing static takes.
+                if !Self::reached_through_intrinsic_promise(receiver) {
+                    let (promise, resolve, reject) =
+                        self.new_promise_capability(receiver, instruction)?;
+                    let settled = if is_callable(&callback) {
+                        self.call_catching(&callback, Value::Undefined, rest, instruction)?
+                    } else {
+                        Err(self.construct_error(
+                            ErrorKind::Type,
+                            &[Value::String(format!(
+                                "{} is not a function",
+                                callback.to_display_string()
+                            ))],
+                        ))
+                    };
+                    match settled {
+                        Ok(value) => {
+                            self.call_value(&resolve, Value::Undefined, vec![value], instruction)?;
+                        }
+                        Err(thrown) => {
+                            self.call_value(&reject, Value::Undefined, vec![thrown], instruction)?;
+                        }
+                    }
+                    return Ok(promise);
+                }
                 let promise = PromiseState::pending();
                 // A non-callable argument rejects rather than throwing, like every other failure
                 // here: the caller was handed a promise and is waiting on it, and a synchronous
@@ -16356,10 +16394,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let method = self.read_property(receiver, "then", instruction)?;
                 if !is_callable(&method) {
                     return Err(ExecutionError::TypeErrorMessage {
-                        message: format!(
-                            "{} is not a function",
-                            method.to_display_string()
-                        ),
+                        message: format!("{} is not a function", method.to_display_string()),
                     });
                 }
                 let on_rejected = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -17239,7 +17274,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(_)
                     | Value::Callback(_)
                     | Value::Bound(_)
-                    | Value::Settler(..) | Value::Capability(..) => {
+                    | Value::Settler(..)
+                    | Value::Capability(..) => {
                         self.intrinsics.close(&target, false);
                         true
                     }
@@ -21215,8 +21251,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let mut reject = record.reject.borrow_mut();
                 if !matches!(*resolve, Value::Undefined) || !matches!(*reject, Value::Undefined) {
                     return Err(ExecutionError::TypeErrorMessage {
-                        message: "Promise capability executor has already been invoked"
-                            .to_owned(),
+                        message: "Promise capability executor has already been invoked".to_owned(),
                     });
                 }
                 *resolve = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -22499,10 +22534,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<(Value, Value, Value), ExecutionError> {
         if !is_constructor(constructor) {
             return Err(ExecutionError::TypeErrorMessage {
-                message: format!(
-                    "{} is not a constructor",
-                    constructor.to_display_string()
-                ),
+                message: format!("{} is not a constructor", constructor.to_display_string()),
             });
         }
         let record = Rc::new(CapabilityRecord::default());
@@ -39353,7 +39385,8 @@ fn is_callable(value: &Value) -> bool {
         Value::Function(_)
             | Value::Native(_)
             | Value::Callback(_)
-            | Value::Settler(..) | Value::Capability(..)
+            | Value::Settler(..)
+            | Value::Capability(..)
             | Value::Bound(_)
             | Value::CommonJsRequire(_)
             | Value::CommonJsResolve(_)
@@ -42280,17 +42313,20 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         other if exotic_properties(other).is_some() => exotic_properties(target)
             .map(|store| store.borrow().keys().map(str::to_owned).collect())
             .unwrap_or_default(),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => intrinsic_key(target)
-            .and_then(|identity| {
-                intrinsics
-                    .entries
-                    .borrow()
-                    .iter()
-                    .find_map(|(held, slots)| {
-                        (*held == identity).then(|| slots.held.keys().map(str::to_owned).collect())
-                    })
-            })
-            .unwrap_or_default(),
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
+            intrinsic_key(target)
+                .and_then(|identity| {
+                    intrinsics
+                        .entries
+                        .borrow()
+                        .iter()
+                        .find_map(|(held, slots)| {
+                            (*held == identity)
+                                .then(|| slots.held.keys().map(str::to_owned).collect())
+                        })
+                })
+                .unwrap_or_default()
+        }
         _ => Vec::new(),
     };
     keys.extend(stored);
