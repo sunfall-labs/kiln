@@ -49,6 +49,19 @@ method registries, diagnostic fallbacks and other state that can only approximat
 duplicated. The application object cache remains independent of the shipped runtime identity, as
 ADR 0009 and ADR 0028 require.
 
+The generated-C prelude is split by ownership, not by textual convenience:
+
+1. immutable value layouts and constants form the private kernel contract;
+2. realm state and value operations are compiled once into the shared kernel object;
+3. dynamic call-frame state and generated instruction bodies remain in application units.
+
+This distinction is load-bearing. `globalThis`, registered symbols, entropy and diagnostics are
+realm state. `new.target`, the active arguments view and derived-constructor handoff are dynamic
+frame state and must not become process-global merely because both were formerly C `static`
+variables. The backend maintains an exhaustive owner manifest for mutable prelude state; adding an
+unclassified static fails its architecture tests. Hot generated bodies call the shared C kernel
+directly. They do not bounce every property access through Rust or a generic opcode dispatcher.
+
 ### `SourceCompiler` is an explicit realm capability
 
 A native realm has one of two source-code policies:
@@ -97,11 +110,23 @@ realm's local task. Compiler completion cannot call into the heap concurrently.
 
 ## Migration sequence
 
-The first migration slice is complete: runtime-provided callable property stores now use an
-allocation-free lookup-or-publish ABI. The realm owns the winning opaque store and its destructor,
-separately emitted modules observe one identity, and realm teardown releases it exactly once. This
-is deliberately a bridge into the kernel, not the kernel extraction itself; generated closures,
-ordinary objects and other per-unit state still follow the remaining sequence below.
+The first migration slices are complete. Runtime-provided callable property stores use an
+allocation-free lookup-or-publish ABI: the realm owns the winning opaque store and its destructor,
+separately emitted modules observe one identity, and realm teardown releases it exactly once.
+Generated graph launchers now enter the realm once around the complete CommonJS/ESM bootstrap
+rather than once per module, and every generated closure transfers its allocation to that realm for
+exact-once teardown. Calls still enter their generated C body directly, so this adds no dispatch
+indirection. Ordinary object allocation now follows the same typed realm-ownership contract: the
+object and its property array are released exactly once at realm teardown, while hot property reads
+and writes remain direct generated-C operations during this migration slice. Callable-store records
+and their object values have independent, non-overlapping ownership, so teardown order is not part
+of correctness. `globalThis`, `process`, and `Atomics` now occupy opaque realm-owned value slots:
+Rust owns only identity and lifetime, generated C alone interprets `kiln_value`, and separate
+generated modules observe the same objects without routing property operations through Rust. This
+establishes the general singleton seam without manufacturing a second C object library while the
+value representation remains non-opaque. These are deliberately bridges into the kernel, not the
+kernel extraction itself; object operations and other per-unit state still follow the remaining
+sequence below.
 
 1. Extract the internal value/kernel declarations from emitted module source and give the shipped
    runtime an explicit private export list.

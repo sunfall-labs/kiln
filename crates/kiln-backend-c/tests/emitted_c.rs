@@ -502,6 +502,18 @@ fn emitted_http_socket_close_is_runtime_owned_and_modeled() {
     assert!(http_branch.contains("kiln_realm_http_server_close_active("));
     assert!(http_branch.contains("KILN_REALM_HTTP_CLOSE_ABORT"));
     assert!(!http_branch.contains("KILN_REALM_OP_CLOSE_RESOURCE"));
+
+    let server_close = source
+        .find("static int kiln_c99_node_server_maybe_emit_close(")
+        .map(|offset| &source[offset..])
+        .expect("server close completion gate is emitted");
+    let server_close_end = server_close
+        .find("\n}\n")
+        .map(|offset| &server_close[..offset])
+        .expect("server close completion gate has a body");
+    assert!(server_close_end.contains("server->listener != 0"));
+    assert!(server_close_end.contains("if (!socket->closed) return KILN_C99_OK;"));
+    assert!(server_close_end.contains("server->closed = 1;"));
 }
 
 #[test]
@@ -1014,6 +1026,7 @@ fn linked_module() -> ModuleProgram {
             exported: "total".to_owned(),
             local_slot: 2,
         }],
+        strictness: kiln_ir::Strictness::default(),
     }
 }
 
