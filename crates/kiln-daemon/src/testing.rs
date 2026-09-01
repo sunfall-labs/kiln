@@ -173,6 +173,9 @@ fn selector_metadata(test: &ConformanceTest, mode: TestMode) -> TestMetadata {
         if let Some(module) = feature.strip_prefix("builtin-") {
             metadata.add_builtin_module(module);
         }
+        if feature == "node-http" {
+            metadata.add_builtin_module("node:http");
+        }
         if feature == "console-log" {
             metadata.add_host_op("console.log");
         }
@@ -215,6 +218,7 @@ where
     for path in paths {
         let normalized = normalize_path(Path::new(path));
         let components = normalized.split('/').collect::<Vec<_>>();
+        let owned_builtin = runtime_builtin_for_path(&normalized);
         if matches!(
             normalized.as_str(),
             "Cargo.toml" | "Cargo.lock" | "docs/design.md"
@@ -229,10 +233,15 @@ where
         if components.first() == Some(&"crates")
             && let Some(compiler_crate) = components.get(1)
         {
-            changes.add_compiler_crate(*compiler_crate);
+            if owned_builtin.is_none() {
+                changes.add_compiler_crate(*compiler_crate);
+            }
             if CONFORMANCE_SELECTION_CRATES.contains(compiler_crate) {
                 changes.force_full_run();
             }
+        }
+        if let Some(module) = owned_builtin {
+            changes.add_builtin_module(module);
         }
         if let Some(index) = components
             .iter()
@@ -263,6 +272,13 @@ where
         }
     }
     changes
+}
+
+fn runtime_builtin_for_path(path: &str) -> Option<&'static str> {
+    const NODE_HTTP_SOURCE: &str = "crates/kiln-runtime/src/node_http.rs";
+    path.strip_suffix(NODE_HTTP_SOURCE)
+        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
+        .then_some("node:http")
 }
 
 /// Normalize a repository path lexically. Changed paths can come from git on a different host,
@@ -517,6 +533,64 @@ expected_stdout = "bundle\n"
                 "kiln-module-resolver".to_owned(),
             ))
         }));
+    }
+
+    #[test]
+    fn changed_node_http_runtime_selects_only_the_http_builtin_cases() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let discovered =
+            kiln_conformance::discover(&repo.join("conformance")).expect("fixture corpus is valid");
+        let metadata = discovered
+            .iter()
+            .map(|test| selector_metadata(test, TestMode::Node))
+            .collect::<Vec<_>>();
+        let expected = [
+            "server/s01-http-hello",
+            "server/s02-routing-json",
+            "server/s03-request-body-streams",
+            "server/s04-fastify",
+            "server/s05-express",
+        ]
+        .into_iter()
+        .map(TestId::new)
+        .collect::<std::collections::BTreeSet<_>>();
+
+        for changed in [
+            "crates/kiln-runtime/src/node_http.rs",
+            r"C:\checkout\kiln\crates\kiln-runtime\src\node_http.rs",
+        ] {
+            let changes = change_set_for_tests(&[changed.to_owned()], discovered.iter());
+            assert!(!changes.full_run, "{changed}");
+            assert!(changes.builtin_modules.contains("node:http"), "{changed}");
+            assert!(
+                !changes.compiler_crates.contains("kiln-runtime"),
+                "{changed} should use the narrower builtin ownership tag"
+            );
+
+            let selection = select(&metadata, &changes, &FailureState::new());
+            let selected = selection
+                .ids()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(selected, expected, "{changed}");
+            assert!(selection.tests.iter().all(|test| {
+                test.has_reason(&kiln_test_selector::SelectionReason::ModifiedBuiltinModule(
+                    "node:http".to_owned(),
+                ))
+            }));
+        }
+
+        for unrelated in [
+            "crates/kiln-runtime/src/http_transport.rs",
+            "crates/kiln-runtime/src/node_http_agent.rs",
+        ] {
+            let changes = change_set_for_tests(&[unrelated.to_owned()], discovered.iter());
+            assert!(
+                changes.compiler_crates.contains("kiln-runtime"),
+                "{unrelated}"
+            );
+            assert!(changes.builtin_modules.is_empty(), "{unrelated}");
+        }
     }
 
     /// The point of the index-keyed collection: the summary must not be able to observe which
