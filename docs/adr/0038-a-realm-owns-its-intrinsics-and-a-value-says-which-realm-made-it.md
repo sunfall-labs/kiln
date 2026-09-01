@@ -159,12 +159,18 @@ MMTk and Whippet remain where ADR 0021 §5 left them: not chosen, and not chosen
 
 ## What this does not decide
 
-**`ShadowRealm`** is not implemented. It needs this — a realm whose intrinsics are its own — and
-two things this does not provide: an object that *is* a realm handle, and `WrappedFunctionCreate`,
-the callable that copies primitives across the boundary and wraps callables it returns. The second
-is a new value kind with its own identity and call behaviour, not a variation on `Bound`. Until
-both exist, `ShadowRealm` stays absent rather than half-present, for the reason at the top of this
-document.
+**`ShadowRealm`** is not decided here, only unblocked. It needs what this ADR provides — a realm
+whose intrinsics are its own — plus two things it does not: an object that *is* a realm handle, and
+`WrappedFunctionCreate`, the callable that copies primitives across the boundary and wraps the
+callables it returns.
+
+The second is the part worth flagging, because there is a cheap answer that is wrong. A wrapped
+function looks like a bound function with a flag on it — same `typeof`, same prototype chain, same
+property storage — and building it that way means every one of the three hundred `match` arms that
+already handles `Value::Bound` silently accepts a wrapper as an ordinary bound function. It is a
+*new value kind*, and spelling it as one is what makes the compiler point at the places that have
+to decide. `feature/shadowrealm` does exactly that, with `Value::Wrapped`; this ADR records the
+choice because the shortcut is the tempting one and its failure mode is invisible.
 
 **Whether a realm may hold host capabilities the realm that made it does not.** Today it cannot:
 the capabilities are the execution's and every realm sees the same ones. That is the conservative
