@@ -65,8 +65,6 @@ pub fn run_node_against_expected_stdout(
 /// becoming a second, easier-to-pass Node runtime that real programs never use.
 fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     let started = Instant::now();
-    crate::source_compiler::install();
-
     let project_root = path.parent().unwrap_or_else(|| Path::new("."));
     let resolver = match NodeRuntimeResolver::new(project_root) {
         Ok(resolver) => resolver,
@@ -143,7 +141,11 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     };
 
     let mut host = CaptureHost::new();
-    if let Err(error) = graph.execute_node(&mut host, ExecutionLimits::default()) {
+    if let Err(error) = graph.execute_node(
+        &mut host,
+        ExecutionLimits::default(),
+        crate::source_compiler::capabilities(),
+    ) {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
         result.stdout = host.into_stdout();
         return result;
@@ -159,8 +161,6 @@ fn run_with_executor(
     worker: Option<&mut InterpreterWorker>,
 ) -> CaseResult {
     let started = Instant::now();
-    crate::source_compiler::install();
-
     if let Some(reason) = out_of_process_build_requirement(path) {
         return skipped(reason, started);
     }
@@ -239,6 +239,7 @@ fn run_with_executor(
             std::rc::Rc::new(program),
             &mut host,
             ExecutionLimits::default(),
+            crate::source_compiler::capabilities(),
         )
         .map(|_| ())
     } else if let Some(worker) = worker {
@@ -249,6 +250,7 @@ fn run_with_executor(
                 strictness,
                 &mut host,
                 ExecutionLimits::default(),
+                crate::source_compiler::capabilities(),
             )
             .map(|_| ())
     } else {
@@ -256,6 +258,7 @@ fn run_with_executor(
             std::rc::Rc::new(program),
             &mut host,
             ExecutionLimits::default(),
+            crate::source_compiler::capabilities(),
         )
         .map(|_| ())
     };

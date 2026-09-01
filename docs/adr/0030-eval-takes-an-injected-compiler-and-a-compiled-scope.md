@@ -28,12 +28,20 @@ eval("Array"); }` would hand back the constructor — and nothing downstream can
 
 ## Decision
 
-**The frontend is injected, exactly as it is for the query engine.** `kiln-interpreter` declares a
-`SourceCompiler` function pointer over owned data and a thread-local slot to install one in. This
-is the shape ADR 0006 already gives `kiln-db`, which takes `frontend_oxc::parse` as a `Frontend`
-function pointer rather than depending on the parser. `kiln-conformance` installs one built from
-`frontend_oxc::parse_with_goal` + `kiln_ir::compile_eval`; a host that installs none has no
-`eval`, and says so rather than answering.
+**The frontend is an explicit realm execution capability.** `kiln-interpreter` declares a
+`SourceCompiler` function pointer over owned data and carries it in `ExecutionCapabilities` from
+each public execution boundary into the VM. There is no process-global or thread-local installer:
+two realms on one Tokio thread may select different compiler authority, and an execution cannot
+inherit one from whatever ran before it. This keeps the shape ADR 0006 gives `kiln-db`—the VM
+still depends on no parser—while satisfying ADR 0031's rule that realm authority is named.
+`kiln-conformance` supplies a value built from `frontend_oxc::parse_with_goal` +
+`kiln_ir::compile_eval`; a caller that supplies the default capabilities has no `eval`, and says
+so rather than answering.
+
+`ModuleLoader` authority travels in the same capability value. The former thread-local loader and
+thread-local referrer base were removed rather than retained as a compatibility path. A future
+filesystem loader must be a scoped, referrer-aware service; no execution may inherit resolution
+authority from an earlier run on the same worker thread.
 
 **A direct eval is an instruction, not a call.** `Instruction::DirectEval` carries an `EvalSite`:
 the names visible where the call is written, how the machine reaches each one, and whether the
@@ -91,5 +99,6 @@ callable until ADR 0036's shared value-kernel handle exists. None of the three f
 in a second heap or compiled ambiently, so the differential harness sees a refusal rather than a
 plausible value with broken identity.
 
-**`kiln run` has no `eval` yet.** The compiler is installed by the conformance runner; the daemon's
-execution path needs the same one line beside its existing `parse_with_goal`/`compile` pair.
+**Executable interpreter paths select Oxc explicitly.** The daemon and conformance runner pass the
+same capability value through script and module-graph execution, including lazy CommonJS modules.
+Compiler-free embedders and benchmarks pass the default value explicitly.

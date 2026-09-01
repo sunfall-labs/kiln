@@ -9231,6 +9231,7 @@ int main(void) {{
                 std::rc::Rc::new(program.clone()),
                 &mut host,
                 Default::default(),
+                kiln_interpreter::ExecutionCapabilities::default(),
             )
             .unwrap_or_else(|error| panic!("interpreter fixture {name} failed: {error}"));
             let expected = host.into_stdout().into_bytes();

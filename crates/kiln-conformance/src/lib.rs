@@ -28,7 +28,6 @@ mod case;
 mod discovery;
 mod harness;
 mod manifest;
-mod module_loader;
 pub mod node_compat;
 mod program;
 mod reasons;
@@ -55,11 +54,7 @@ pub use test262::{
 };
 pub use worker::InterpreterWorker;
 
-/// Install the frontend service used by runtime `eval` and `Function` compilation.
-///
-/// The interpreter remains downstream of parsing and lowering; executable hosts call this at
-/// their entry boundary so dynamically generated code uses the same Oxc → HIR → IR pipeline as
-/// source files. Keeping this explicit also lets embedders omit code generation deliberately.
-pub fn install_source_compiler() {
-    source_compiler::install();
+/// Explicit frontend capability for runtime `eval` and `Function` compilation.
+pub fn source_compiler_capability() -> kiln_interpreter::ExecutionCapabilities {
+    source_compiler::capabilities()
 }

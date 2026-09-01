@@ -126,16 +126,6 @@ fn run_variant_with_harness_and_worker(
     worker: Option<&mut InterpreterWorker>,
 ) -> CaseResult {
     let started = Instant::now();
-    // `eval` and `Function` compile source while a program is running, and the interpreter has no
-    // frontend of its own to do it with. Installing one here rather than at startup is what keeps
-    // this crate's execution path the same one the CLI takes -- a VM per case, nothing global.
-    crate::source_compiler::install();
-    // `import()` names its module at run time, so the linker has to be reachable from a running
-    // program too. It is rooted at the test's own directory, which is where every fixture the
-    // corpus imports lives.
-    if let Some(directory) = case.path.parent() {
-        crate::module_loader::install(directory);
-    }
     // A compiler or interpreter bug reached by one test must not take the run with it. Before
     // this, a single `unreachable!` in lowering aborted the process, and a sweep of
     // `language/expressions` reported nothing at all for the other eleven thousand tests in the
@@ -376,12 +366,14 @@ fn run_variant_uncaught(
             std::rc::Rc::new(strictness),
             &mut host,
             conformance_limits(case),
+            crate::source_compiler::capabilities(),
         ),
         None => execute_reclaiming_with_strictness(
             std::rc::Rc::new(program),
             std::rc::Rc::new(strictness),
             &mut host,
             conformance_limits(case),
+            crate::source_compiler::capabilities(),
         ),
     };
     match outcome {
@@ -439,12 +431,14 @@ fn execute_positive(
             std::rc::Rc::new(strictness),
             &mut host,
             limits,
+            crate::source_compiler::capabilities(),
         ),
         None => execute_reclaiming_with_strictness(
             std::rc::Rc::new(program),
             std::rc::Rc::new(strictness),
             &mut host,
             limits,
+            crate::source_compiler::capabilities(),
         ),
     }
     .map(|_| ());
@@ -474,8 +468,14 @@ fn execute_module_case(
     let is_async = has_flag(case, "async");
     let linked = if program.dependencies.is_empty() && program.imports.is_empty() {
         let mut host = CaptureHost::new();
-        let outcome =
-            execute_module(&program, &[], &mut host, conformance_limits(case)).map(|_| ());
+        let outcome = execute_module(
+            &program,
+            &[],
+            &mut host,
+            conformance_limits(case),
+            crate::source_compiler::capabilities(),
+        )
+        .map(|_| ());
         Ok((outcome, host))
     } else {
         link_and_execute(case, program)
@@ -613,7 +613,11 @@ fn link_and_execute(
 ) -> Result<(Result<(), ExecutionError>, CaptureHost), LinkFailure> {
     let graph = build_module_graph(case, entry_program)?;
     let mut host = CaptureHost::new();
-    match graph.execute(&mut host, conformance_limits(case)) {
+    match graph.execute(
+        &mut host,
+        conformance_limits(case),
+        crate::source_compiler::capabilities(),
+    ) {
         Ok(_) => Ok((Ok(()), host)),
         Err(ModuleGraphError::Execution { error, .. }) => Ok((Err(error), host)),
         Err(error) => Err(classify_graph_error(&error)),
