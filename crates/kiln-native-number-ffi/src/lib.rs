@@ -583,6 +583,20 @@ mod realm {
         symbols: RefCell<HashMap<Vec<u8>, u64>>,
         symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         entered: Cell<bool>,
+        diagnostic: RefCell<RealmDiagnostic>,
+    }
+
+    #[derive(Default)]
+    struct RealmDiagnostic {
+        site: Vec<u8>,
+        operation: Vec<u8>,
+        detail: Vec<u8>,
+        function: Vec<u8>,
+        instruction: u64,
+        depth: u64,
+        method: u64,
+        receiver_tag: u64,
+        has_method: bool,
     }
 
     impl NativeRealm {
@@ -599,6 +613,7 @@ mod realm {
                 symbols: RefCell::new(HashMap::new()),
                 symbol_keys: RefCell::new(HashMap::new()),
                 entered: Cell::new(false),
+                diagnostic: RefCell::new(RealmDiagnostic::default()),
             })
         }
     }
@@ -1440,6 +1455,127 @@ mod realm {
     #[unsafe(no_mangle)]
     pub extern "C" fn kiln_realm_is_active() -> i32 {
         i32::from(ACTIVE_REALM.with(|active| active.get() != 0))
+    }
+
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_diagnostic_reset() -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            *realm.diagnostic.borrow_mut() = RealmDiagnostic::default();
+            0
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_diagnostic_note(
+        site: *const u8,
+        site_len: u64,
+        instruction: u64,
+        operation: *const u8,
+        operation_len: u64,
+        depth: u64,
+        detail: *const u8,
+        detail_len: u64,
+        function: *const u8,
+        function_len: u64,
+        method: u64,
+        receiver_tag: u64,
+        has_method: i32,
+    ) -> i32 {
+        ffi(|| {
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(site) = (unsafe { borrowed_bytes(site, site_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(operation) = (unsafe { borrowed_bytes(operation, operation_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(detail) = (unsafe { borrowed_bytes(detail, detail_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(function) = (unsafe { borrowed_bytes(function, function_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let mut diagnostic = realm.diagnostic.borrow_mut();
+            if !diagnostic.site.is_empty() && depth <= diagnostic.depth {
+                return 0;
+            }
+            diagnostic.site = site.to_vec();
+            diagnostic.operation = operation.to_vec();
+            diagnostic.detail = detail.to_vec();
+            diagnostic.function = function.to_vec();
+            diagnostic.instruction = instruction;
+            diagnostic.depth = depth;
+            diagnostic.method = method;
+            diagnostic.receiver_tag = receiver_tag;
+            diagnostic.has_method = has_method != 0;
+            0
+        })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_diagnostic_render(
+        out: *mut u8,
+        capacity: u64,
+        out_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_len.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let diagnostic = realm.diagnostic.borrow();
+            let mut rendered = if diagnostic.site.is_empty() {
+                b"unknown native operation".to_vec()
+            } else {
+                format!(
+                    "module={} instruction={}",
+                    String::from_utf8_lossy(&diagnostic.site),
+                    diagnostic.instruction
+                )
+                .into_bytes()
+            };
+            for (label, value) in [
+                (" operation=", &diagnostic.operation),
+                (" detail=", &diagnostic.detail),
+                (" function=", &diagnostic.function),
+            ] {
+                if !value.is_empty() {
+                    rendered.extend_from_slice(label.as_bytes());
+                    rendered.extend_from_slice(value);
+                }
+            }
+            if diagnostic.has_method {
+                rendered.extend_from_slice(
+                    format!(
+                        " method={} receiver_tag={}",
+                        diagnostic.method, diagnostic.receiver_tag
+                    )
+                    .as_bytes(),
+                );
+            } else if diagnostic.receiver_tag != 0 {
+                rendered.extend_from_slice(
+                    format!(" receiver_tag={}", diagnostic.receiver_tag).as_bytes(),
+                );
+            }
+            unsafe { out_len.write(rendered.len() as u64) };
+            if capacity < rendered.len() as u64 {
+                return INVALID_ARGUMENT;
+            }
+            if !rendered.is_empty() {
+                if out.is_null() {
+                    return INVALID_ARGUMENT;
+                }
+                unsafe { std::ptr::copy_nonoverlapping(rendered.as_ptr(), out, rendered.len()) };
+            }
+            0
+        })
     }
 
     /// Interns a registered-symbol key in the active Realm. The returned identity is stable for
@@ -2342,6 +2478,66 @@ mod realm {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        unsafe extern "C" fn records_and_renders_diagnostic(context: *mut c_void) -> i32 {
+            let site = b"node_modules/provider/index.js";
+            let operation = b"CallMethod(listen)";
+            let detail = b"unsupported receiver";
+            if kiln_realm_diagnostic_reset() != 0
+                || unsafe {
+                    kiln_realm_diagnostic_note(
+                        site.as_ptr(),
+                        site.len() as u64,
+                        37,
+                        operation.as_ptr(),
+                        operation.len() as u64,
+                        3,
+                        detail.as_ptr(),
+                        detail.len() as u64,
+                        ptr::null(),
+                        0,
+                        0,
+                        19,
+                        0,
+                    )
+                } != 0
+            {
+                return RUNTIME_ERROR;
+            }
+            let mut needed = 0;
+            if unsafe { kiln_realm_diagnostic_render(ptr::null_mut(), 0, &raw mut needed) }
+                != INVALID_ARGUMENT
+                || needed == 0
+            {
+                return RUNTIME_ERROR;
+            }
+            let buffer = unsafe { &mut *context.cast::<Vec<u8>>() };
+            buffer.resize(needed as usize, 0);
+            unsafe { kiln_realm_diagnostic_render(buffer.as_mut_ptr(), needed, &raw mut needed) }
+        }
+
+        #[test]
+        fn diagnostics_are_owned_and_rendered_by_the_active_realm() {
+            let mut handle = 0;
+            let mut rendered = Vec::new();
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(records_and_renders_diagnostic),
+                        (&raw mut rendered).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                String::from_utf8(rendered).unwrap(),
+                "module=node_modules/provider/index.js instruction=37 operation=CallMethod(listen) detail=unsupported receiver receiver_tag=19"
+            );
+            assert_eq!(kiln_realm_diagnostic_reset(), INVALID_ARGUMENT);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+        }
 
         unsafe extern "C" fn close_unregistered_http_connection(context: *mut c_void) -> i32 {
             // A missing HTTP registration is a failed capability lookup, never permission to
@@ -4052,6 +4248,15 @@ mod realm {
         };
         (realm, kiln_realm_is_active, realm_is_active) => {
             const _: extern "C" fn() -> i32 = kiln_realm_is_active;
+        };
+        (realm, kiln_realm_diagnostic_reset, realm_diagnostic_reset) => {
+            const _: extern "C" fn() -> i32 = kiln_realm_diagnostic_reset;
+        };
+        (realm, kiln_realm_diagnostic_note, realm_diagnostic_note) => {
+            const _: unsafe extern "C" fn(*const u8, u64, u64, *const u8, u64, u64, *const u8, u64, *const u8, u64, u64, u64, i32) -> i32 = kiln_realm_diagnostic_note;
+        };
+        (realm, kiln_realm_diagnostic_render, realm_diagnostic_render) => {
+            const _: unsafe extern "C" fn(*mut u8, u64, *mut u64) -> i32 = kiln_realm_diagnostic_render;
         };
         (realm, kiln_realm_symbol_for, realm_symbol_for) => {
             const _: unsafe extern "C" fn(*const u8, u64, *mut u64) -> i32 = kiln_realm_symbol_for;

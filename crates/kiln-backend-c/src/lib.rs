@@ -1199,6 +1199,7 @@ method_ids! {
     (KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE, 426, Direct, NodeHttp),
     (KILN_C99_METHOD_NODE_QUERYSTRING_PARSE, 427, Direct),
     (KILN_C99_METHOD_FUNCTION_TO_STRING, 428, Generic),
+    (KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW, 429, Generic),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1774,6 +1775,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_FUNCTION_APPLY),
     emit_method_define!(KILN_C99_METHOD_FUNCTION_BIND),
     emit_method_define!(KILN_C99_METHOD_FUNCTION_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW),
     r#"
 /* The reflective statics, and the one instance method that walks a chain. */
 "#,
@@ -2496,6 +2498,10 @@ typedef struct kiln_bound {
      * arbitrarily later. */
     kiln_value *arguments;
     size_t count;
+    /* Bound functions are ordinary callable objects: libraries attach metadata to wrappers
+     * returned by `bind`. Keep that own store on the value, not on its target, so two bindings
+     * of one function do not share statics. */
+    kiln_value properties;
 } kiln_bound;
 
 typedef int (*kiln_commonjs_require_fn)(void *context, kiln_host *host, kiln_value specifier,
@@ -2753,6 +2759,13 @@ int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 int kiln_realm_destroy(uint64_t realm);
 int kiln_realm_is_active(void);
+int kiln_realm_diagnostic_reset(void);
+int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t instruction,
+                               const uint8_t *operation, uint64_t operation_len, uint64_t depth,
+                               const uint8_t *detail, uint64_t detail_len,
+                               const uint8_t *function, uint64_t function_len,
+                               uint64_t method, uint64_t receiver_tag, int has_method);
+int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_now(double *out_milliseconds);
@@ -4536,7 +4549,8 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
         return kiln_c99_put_mode(host, closure->properties, key, key_len, value, strict, depth,
                                  thrown);
     }
-    if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN) {
+    if (target.tag == KILN_VALUE_METHOD || target.tag == KILN_VALUE_BUILTIN ||
+        target.tag == KILN_VALUE_BOUND) {
         kiln_value store;
         status = kiln_c99_callable_store(target, &store, 1);
         if (status != KILN_C99_OK) return status;
@@ -7257,6 +7271,13 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
         kiln_c99_diagnostic_detail =
             "generated function body refused before an instruction owned the failure";
     }
+    /* Closures are the actual cross-module seam: an imported function pointer enters the C
+     * translation unit that emitted its body without going through that unit's module wrapper.
+     * Its diagnostic globals are private there, so preserve the owned refusal in the existing
+     * call-result channel before returning to a caller whose globals describe another module. */
+    if (status == KILN_C99_CONTROL_ERROR) {
+        *result = kiln_c99_control_diagnostic();
+    }
     kiln_c99_new_target = saved_target;
     kiln_c99_frame_args = saved_args;
     kiln_c99_frame_argc = saved_argc;
@@ -7700,6 +7721,16 @@ static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
 }
 
 static kiln_value kiln_c99_control_diagnostic(void) {
+    if (kiln_realm_is_active()) {
+        uint64_t len = 0;
+        uint8_t *bytes;
+        if (kiln_realm_diagnostic_render(NULL, 0, &len) == KILN_C99_INVALID_ARGUMENT && len != 0) {
+            bytes = (uint8_t *)malloc((size_t)len);
+            if (bytes != NULL && kiln_realm_diagnostic_render(bytes, len, &len) == KILN_C99_OK)
+                return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)bytes, (size_t)len);
+            free(bytes);
+        }
+    }
     kiln_text text = {NULL, 0, 0};
     char number[32];
     size_t written;
@@ -7776,6 +7807,19 @@ static void kiln_c99_note_refusal(const char *site, size_t instruction,
             kiln_c99_diagnostic_receiver_tag = 0;
             kiln_c99_diagnostic_has_method = 0;
         }
+    }
+    if (kiln_realm_is_active()) {
+        const char *detail = kiln_c99_diagnostic_detail;
+        const char *function = kiln_c99_diagnostic_function;
+        (void)kiln_realm_diagnostic_note(
+            (const uint8_t *)site, (uint64_t)strlen(site), (uint64_t)instruction,
+            (const uint8_t *)operation, (uint64_t)strlen(operation), (uint64_t)depth,
+            (const uint8_t *)(detail == NULL ? "" : detail),
+            (uint64_t)(detail == NULL ? 0 : strlen(detail)),
+            (const uint8_t *)(function == NULL ? "" : function),
+            (uint64_t)(function == NULL ? 0 : kiln_c99_diagnostic_function_len),
+            kiln_c99_diagnostic_method, kiln_c99_diagnostic_receiver_tag,
+            kiln_c99_diagnostic_has_method);
     }
 }
 
@@ -8386,6 +8430,19 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
             return KILN_C99_OK;
         }
         return kiln_c99_function_store(callable, out);
+    }
+    if (callable.tag == KILN_VALUE_BOUND) {
+        kiln_bound *bound = (kiln_bound *)(uintptr_t)callable.bits;
+        if (bound->properties.tag != KILN_VALUE_OBJECT) {
+            if (!create) {
+                *out = kiln_c99_undefined();
+                return KILN_C99_OK;
+            }
+            if (kiln_c99_new_object(&bound->properties) != KILN_C99_OK)
+                return KILN_C99_OUT_OF_MEMORY;
+        }
+        *out = bound->properties;
+        return KILN_C99_OK;
     }
     if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN)
         return KILN_C99_CONTROL_ERROR;
@@ -9642,6 +9699,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * which is what makes a stack trace through one readable. Both are derived from the
              * target rather than stored, so binding a bound function composes. */
             kiln_bound *bound = (kiln_bound *)(uintptr_t)target.bits;
+            stored = kiln_c99_callable_store(target, &store, 0);
+            if (stored != KILN_C99_OK) return stored;
+            if (store.tag == KILN_VALUE_OBJECT) {
+                kiln_object *properties = kiln_c99_object_of(store);
+                size_t index;
+                for (index = 0; index < properties->count; ++index) {
+                    if (kiln_c99_same_key(&properties->properties[index], key, key_len))
+                        return kiln_c99_get(host, store, key, key_len, out, depth, thrown);
+                }
+            }
             if (kiln_c99_same_name(key, key_len, "name")) {
                 kiln_value inner;
                 int status = kiln_c99_get(host, bound->target, "name", 4, &inner, depth, thrown);
@@ -9743,6 +9810,11 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             /* A name the namespace does not have is `undefined`, as it is on any object -- the
              * refusal below is for the ones that *do* exist and are not wired yet. */
             *out = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER &&
+            kiln_c99_same_name(key, key_len, "isView")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW);
             return KILN_C99_OK;
         }
         if (target.bits == KILN_C99_BUILTIN_TEMPORAL_NOW) {
@@ -14872,6 +14944,12 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 kiln_c99_diagnostic_detail = "Function.prototype.toString has no text to answer";
                 return KILN_C99_CONTROL_ERROR;
             }
+            return KILN_C99_OK;
+        case KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW:
+            /* DataView is not yet a native constructor, so every native ArrayBuffer view that
+             * can currently exist is represented by the shared typed-view tag (including Node
+             * Buffer). Keep the predicate on representation rather than enumerating constructors. */
+            *result = kiln_c99_boolean(argc > 0 && args[0].tag == KILN_VALUE_TYPED_ARRAY);
             return KILN_C99_OK;
         case KILN_C99_METHOD_NUMBER_VALUE_OF:
             /* The three below are the exception to the comment above: they are reached through a
@@ -21893,6 +21971,7 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
     bound->receiver = receiver;
     bound->arguments = NULL;
     bound->count = count;
+    bound->properties = kiln_c99_undefined();
     if (count != 0) {
         bound->arguments = (kiln_value *)malloc(count * sizeof *bound->arguments);
         if (bound->arguments == NULL) {
@@ -24820,9 +24899,17 @@ typedef struct {symbol}_realm_context {{
 
 static int {symbol}_realm_entry(void *opaque) {{
     {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
+    int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
-    return {symbol}_body(context->host, context->result, context->imports,
-                         context->import_count, context->exports, context->export_count);
+    status = {symbol}_body(context->host, context->result, context->imports,
+                           context->import_count, context->exports, context->export_count);
+    /* A graph is linked from one C translation unit per JavaScript module. Diagnostic state is
+     * deliberately private to each unit, so the module that owns the refusing instruction must
+     * materialize it before control returns to a caller whose globals describe a different
+     * instruction. The result value is the graph boundary's existing error channel. */
+    if (status == KILN_C99_CONTROL_ERROR)
+        *context->result = kiln_c99_control_diagnostic();
+    return status;
 }}
 
 int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
@@ -24832,8 +24919,13 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     int status;
     int destroy_status;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
-    if (kiln_realm_is_active())
-        return {symbol}_body(host, result, imports, import_count, exports, export_count);
+    if (kiln_realm_is_active()) {{
+        (void)kiln_realm_diagnostic_reset();
+        status = {symbol}_body(host, result, imports, import_count, exports, export_count);
+        if (status == KILN_C99_CONTROL_ERROR)
+            *result = kiln_c99_control_diagnostic();
+        return status;
+    }}
     kiln_c99_diagnostic_site = NULL;
     kiln_c99_diagnostic_operation = NULL;
     kiln_c99_diagnostic_instruction = 0;
@@ -25672,7 +25764,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -26107,7 +26199,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
@@ -26322,11 +26414,11 @@ fn emit_instruction(
     }
     {
         let emitted = &mut output[before..];
-        let refusal_target = if matches!(site, ReturnSite::Entry { .. }) {
-            "goto kiln_refusal;"
-        } else {
-            "return KILN_C99_CONTROL_ERROR;"
-        };
+        /* Every generated body owns a refusal label and its result slot. Routing through it is
+         * what materializes the diagnostic while this translation unit's private state is still
+         * visible. Returning directly from a closure loses that state when an imported function
+         * crosses back to its caller. */
+        let refusal_target = "goto kiln_refusal;";
         let refusal = format!(
             "{control_refusal} {refusal_target} }} if (status != KILN_C99_OK) return status;"
         );
@@ -28185,6 +28277,23 @@ int kiln_realm_destroy(uint64_t realm) {
  * prelude declares and this fixture is the first text that follows the prelude. */
 int32_t kiln_temporal_invoke(const kiln_temporal_call *call) { (void)call; return -1; }
 int kiln_realm_is_active(void) { return kiln_test_realm_active; }
+int kiln_realm_diagnostic_reset(void) { return KILN_C99_OK; }
+int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t instruction,
+                               const uint8_t *operation, uint64_t operation_len, uint64_t depth,
+                               const uint8_t *detail, uint64_t detail_len,
+                               const uint8_t *function, uint64_t function_len,
+                               uint64_t method, uint64_t receiver_tag, int has_method) {
+    (void)site; (void)site_len; (void)instruction; (void)operation; (void)operation_len;
+    (void)depth; (void)detail; (void)detail_len; (void)function; (void)function_len;
+    (void)method; (void)receiver_tag; (void)has_method;
+    return KILN_C99_OK;
+}
+int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len) {
+    (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id) {
     if (!kiln_test_realm_active || out_id == NULL || key_len > sizeof kiln_test_symbol_key) {
         return KILN_C99_INVALID_ARGUMENT;
@@ -28545,6 +28654,68 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
         );
         assert!(emitted.source.contains("const kiln_value *imports"));
         assert!(emitted.source.contains("size_t import_count"));
+    }
+
+    #[test]
+    fn callable_module_materializes_its_private_refusal_before_returning_to_the_graph() {
+        let generated = emit_module_with_logical_path(
+            &module(
+                Program {
+                    functions: vec![function(vec![Instruction::Return])],
+                    ..program(
+                        Vec::new(),
+                        vec![Instruction::MakeFunction(0), Instruction::Return],
+                        0,
+                    )
+                },
+                Vec::new(),
+                Vec::new(),
+            ),
+            "node_modules/provider/index.js",
+        )
+        .expect("callable module emits");
+
+        assert!(generated.source.contains(
+            "if (status == KILN_C99_CONTROL_ERROR)\n\
+             \x20       *context->result = kiln_c99_control_diagnostic();"
+        ));
+        assert!(generated.source.contains(
+            "if (status == KILN_C99_CONTROL_ERROR)\n\
+             \x20           *result = kiln_c99_control_diagnostic();"
+        ));
+    }
+
+    #[test]
+    fn closure_instruction_refusals_materialize_before_crossing_module_boundaries() {
+        let generated = emit_module_with_logical_path(
+            &module(
+                Program {
+                    functions: vec![function(vec![
+                        Instruction::LoadBuiltin(Builtin::Map),
+                        Instruction::Call { argc: 0 },
+                        Instruction::Return,
+                    ])],
+                    ..program(
+                        Vec::new(),
+                        vec![Instruction::MakeFunction(0), Instruction::Return],
+                        0,
+                    )
+                },
+                Vec::new(),
+                Vec::new(),
+            ),
+            "node_modules/provider/index.js",
+        )
+        .expect("refusing closure module emits");
+
+        assert!(generated.source.contains(
+            "kiln_c99_note_refusal(\"node_modules/provider/index.js\", (size_t)1, \"Call\""
+        ));
+        assert!(
+            generated
+                .source
+                .contains("(size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal;")
+        );
     }
 
     #[test]
@@ -29052,6 +29223,88 @@ int main(void) {
         assert!(
             run.status.success(),
             "native callable statics failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_bound_callables_have_isolated_own_property_stores() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value target = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_NOOP);
+    kiln_value first;
+    kiln_value second;
+    kiln_value read;
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value marker = kiln_c99_copy_text("first", 5);
+    if (kiln_c99_bind_with(&first, target, kiln_c99_undefined(), NULL, 0) != KILN_C99_OK ||
+        kiln_c99_bind_with(&second, target, kiln_c99_undefined(), NULL, 0) != KILN_C99_OK)
+        return 1;
+    if (kiln_c99_put(NULL, first, "unwrappedName", 13, marker, 1, &thrown) != KILN_C99_OK)
+        return 2;
+    if (kiln_c99_get(NULL, first, "unwrappedName", 13, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_STRING || read.len != 5 || memcmp(read.ptr, "first", 5) != 0)
+        return 3;
+    if (kiln_c99_get(NULL, second, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+        return 4;
+    if (kiln_c99_get(NULL, target, "unwrappedName", 13, &read, 0, &thrown) == KILN_C99_OK)
+        return 5;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "bound-callable-own-properties");
+        assert!(
+            run.status.success(),
+            "bound callable own properties failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_array_buffer_is_view_recognizes_native_views() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value method;
+    kiln_value view;
+    kiln_value buffer;
+    kiln_value result;
+    kiln_value argument;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER),
+                     "isView", 6, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW) return 1;
+    if (kiln_c99_new_typed_buffer(&buffer, 8) != KILN_C99_OK) return 2;
+    if (kiln_c99_new_typed_array(&view, KILN_TYPED_UINT8, buffer, 0, 8, 1,
+                                 &thrown) != KILN_C99_OK) return 3;
+    argument = view;
+    if (kiln_c99_call(NULL, &result, method,
+                      kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER),
+                      &argument, 1, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_BOOLEAN || !result.bits) return 4;
+    argument = buffer;
+    if (kiln_c99_call(NULL, &result, method,
+                      kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER),
+                      &argument, 1, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_BOOLEAN || result.bits) return 5;
+    argument = kiln_c99_undefined();
+    if (kiln_c99_call(NULL, &result, method,
+                      kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER),
+                      &argument, 1, 0, &thrown) != KILN_C99_OK ||
+        result.tag != KILN_VALUE_BOOLEAN || result.bits) return 6;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "array-buffer-is-view");
+        assert!(
+            run.status.success(),
+            "ArrayBuffer.isView failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
         );
