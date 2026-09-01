@@ -3,6 +3,9 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
 /* Program hash: 670dbd17e0e2bad3; bytecode version: 2. */
+static void kiln_module_670dbd17e0e2bad328c7d8c215250b62_gc_roots(void *heap, void *context, int phase) {
+    kiln_c99_gc_unit_roots(heap, context, phase);
+}
 static int kiln_module_670dbd17e0e2bad328c7d8c215250b62_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);
 static const char kiln_module_670dbd17e0e2bad328c7d8c215250b62_name_0[] = "add";
 /* function 0: add */
@@ -37,6 +40,7 @@ kiln_refusal:;
 }
 static int kiln_module_670dbd17e0e2bad328c7d8c215250b62_body(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
+    (void)kiln_realm_gc_register_roots(kiln_module_670dbd17e0e2bad328c7d8c215250b62_gc_roots, NULL, 0);
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
@@ -96,6 +100,11 @@ typedef struct kiln_module_670dbd17e0e2bad328c7d8c215250b62_realm_context {
     kiln_value *result;
 } kiln_module_670dbd17e0e2bad328c7d8c215250b62_realm_context;
 
+static int kiln_module_670dbd17e0e2bad328c7d8c215250b62_gc_result_entry(void *result) {
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}
+
 static int kiln_module_670dbd17e0e2bad328c7d8c215250b62_realm_entry(void *opaque) {
     kiln_module_670dbd17e0e2bad328c7d8c215250b62_realm_context *context = (kiln_module_670dbd17e0e2bad328c7d8c215250b62_realm_context *)opaque;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -112,6 +121,8 @@ int kiln_module_670dbd17e0e2bad328c7d8c215250b62(kiln_host *host, kiln_value *re
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, kiln_module_670dbd17e0e2bad328c7d8c215250b62_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, kiln_module_670dbd17e0e2bad328c7d8c215250b62_realm_entry, &context);
     if (status == KILN_C99_OK)

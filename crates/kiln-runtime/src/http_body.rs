@@ -28,6 +28,31 @@ struct Shared {
     in_flight: Option<RequestId>,
     finish_emitted: bool,
     waker: Option<Waker>,
+    events: Option<tokio::sync::mpsc::UnboundedSender<BodyEvent>>,
+}
+
+impl Shared {
+    /// The realm has ended the body and every byte of it is in Hyper's hands.
+    ///
+    /// This is deliberately not "Hyper polled past the end". A response that declares a
+    /// Content-Length lets Hyper stop polling the moment it holds the bytes it promised, so a
+    /// body that waited for one more poll would never finish, Node would never see `finish`, and
+    /// `server.close()` would wait on a response that has already been sent.
+    fn complete(&self) -> bool {
+        self.state.end_requested() && self.state.unsubmitted_writes() == 0
+    }
+
+    /// Announce completion exactly once, and only where there is somewhere to announce it.
+    fn finish(&mut self) {
+        if self.finish_emitted {
+            return;
+        }
+        let Some(events) = &self.events else {
+            return;
+        };
+        self.finish_emitted = true;
+        let _ = events.send(BodyEvent::Finish);
+    }
 }
 
 impl Default for ResponseBodyDriver {
@@ -45,6 +70,7 @@ impl ResponseBodyDriver {
                 in_flight: None,
                 finish_emitted: false,
                 waker: None,
+                events: None,
             })),
         }
     }
@@ -68,18 +94,46 @@ impl ResponseBodyDriver {
         } else {
             self.write(data)
         };
-        self.shared.borrow_mut().state.request_end();
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.state.request_end();
+            if shared.complete() {
+                shared.finish();
+            }
+        }
         self.wake();
         disposition
+    }
+
+    /// Whether Hyper holds the whole body. Read from the driver rather than from the event
+    /// channel so that asking does not consume the `finish` the realm still has to deliver.
+    pub(crate) fn finished(&self) -> bool {
+        self.shared.borrow().finish_emitted
+    }
+
+    /// A response that cannot carry a body - a HEAD request, or a status with no body - never has
+    /// its frames polled, so whatever the realm wrote is dropped on the floor and the body is
+    /// complete the moment it is ended. Without this it would wait for a poll that never comes.
+    pub(crate) fn finish_without_body(&mut self) {
+        let mut shared = self.shared.borrow_mut();
+        shared.state.request_end();
+        shared.finish();
     }
 
     pub(crate) fn body(
         &self,
         events: tokio::sync::mpsc::UnboundedSender<BodyEvent>,
     ) -> ResponseBody {
+        {
+            let mut shared = self.shared.borrow_mut();
+            shared.events = Some(events);
+            // A body ended before Hyper was handed it is already complete.
+            if shared.complete() {
+                shared.finish();
+            }
+        }
         ResponseBody {
             shared: Rc::clone(&self.shared),
-            events,
         }
     }
 
@@ -92,7 +146,6 @@ impl ResponseBodyDriver {
 
 pub(crate) struct ResponseBody {
     shared: Rc<RefCell<Shared>>,
-    events: tokio::sync::mpsc::UnboundedSender<BodyEvent>,
 }
 
 impl hyper::body::Body for ResponseBody {
@@ -107,16 +160,14 @@ impl hyper::body::Body for ResponseBody {
         if let Some(request) = shared.in_flight.take() {
             let (events, _) = shared.state.write_completed(request);
             for event in events {
-                if event == StreamEvent::Drain {
-                    let _ = self.events.send(BodyEvent::Drain);
+                if event == StreamEvent::Drain
+                    && let Some(sender) = &shared.events
+                {
+                    let _ = sender.send(BodyEvent::Drain);
                 }
             }
-            if shared.state.end_requested()
-                && shared.state.buffered_bytes() == 0
-                && !shared.finish_emitted
-            {
-                shared.finish_emitted = true;
-                let _ = self.events.send(BodyEvent::Finish);
+            if shared.complete() {
+                shared.finish();
             }
         }
         if shared.in_flight.is_none() {
@@ -124,6 +175,11 @@ impl hyper::body::Body for ResponseBody {
             shared.next_submission = shared.next_submission.wrapping_add(1).max(1);
             if let Some(payload) = shared.state.submit_next(request).cloned() {
                 shared.in_flight = Some(request);
+                // Handing over the last frame completes the body, whether or not Hyper polls
+                // again. With a declared length it will not.
+                if shared.complete() {
+                    shared.finish();
+                }
                 return std::task::Poll::Ready(Some(Ok(hyper::body::Frame::data(
                     bytes::Bytes::from(payload),
                 ))));
@@ -133,10 +189,7 @@ impl hyper::body::Body for ResponseBody {
             && shared.state.buffered_bytes() == 0
             && shared.in_flight.is_none()
         {
-            if !shared.finish_emitted {
-                shared.finish_emitted = true;
-                let _ = self.events.send(BodyEvent::Finish);
-            }
+            shared.finish();
             return std::task::Poll::Ready(None);
         }
         shared.waker = Some(context.waker().clone());
@@ -218,6 +271,44 @@ mod tests {
             assert!(frames.frame().await.is_none());
         });
         assert_eq!(events.try_recv(), Ok(BodyEvent::Finish));
+    }
+
+    #[test]
+    fn a_body_finishes_when_its_last_frame_is_taken_and_never_polled_again() {
+        // A response that declares a Content-Length lets Hyper stop the moment it holds the bytes
+        // it promised. The body must not wait for the extra poll a chunked encoder would make.
+        let mut body = ResponseBodyDriver::new(8);
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let mut frames = body.body(sender);
+        assert!(body.end(b"kiln".to_vec()).ready);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("runtime builds");
+        runtime.block_on(async {
+            let data = frames
+                .frame()
+                .await
+                .expect("the only frame")
+                .expect("infallible")
+                .into_data()
+                .expect("data frame");
+            assert_eq!(data.as_ref(), b"kiln");
+        });
+        assert_eq!(events.try_recv(), Ok(BodyEvent::Finish));
+        assert!(body.finished());
+    }
+
+    #[test]
+    fn a_response_that_carries_no_body_finishes_without_being_polled() {
+        // HEAD requests and bodiless statuses: hyper never asks for a frame at all.
+        let mut body = ResponseBodyDriver::new(8);
+        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let _frames = body.body(sender);
+        body.end(b"discarded".to_vec());
+        assert!(!body.finished(), "hyper still holds a frame it may take");
+        body.finish_without_body();
+        assert_eq!(events.try_recv(), Ok(BodyEvent::Finish));
+        assert!(body.finished());
     }
 
     #[test]

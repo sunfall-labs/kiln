@@ -537,8 +537,11 @@ typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
-extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
-extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+typedef struct kiln_gc_hooks {
+extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_mark_roots(void *heap);
 struct kiln_closure;
 struct kiln_generator;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
@@ -580,7 +583,9 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
 static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
 typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
+static void kiln_c99_node_unlink_socket(kiln_node_socket *socket) {
 static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
+static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
 typedef struct kiln_node_completion {
 typedef struct kiln_node_fs_completion {
 typedef struct kiln_json_reader {
@@ -590,7 +595,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 4
+#define KILN_REALM_ASYNC_ABI_VERSION 5
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -626,6 +631,8 @@ int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);
+int kiln_realm_argv_count(uint64_t *out_count);
+int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
 int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
@@ -745,6 +752,7 @@ static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
+static kiln_value kiln_c99_text_value(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
@@ -940,10 +948,50 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
 done:
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
-static void kiln_c99_drop_object(void *pointer) {
 static kiln_array *kiln_c99_array_of(kiln_value value) {
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
+typedef enum kiln_gc_kind {
+#define KILN_GC_PHASE_MARK 0
+#define KILN_GC_PHASE_TEARDOWN 1
+#define KILN_GC_PHASE_RESET 2
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_HOOKS_VERSION 1u
+#define KILN_GC_DEFAULT_FLOOR ((size_t)2 * 1024 * 1024)
+typedef struct kiln_gc_block {
+typedef struct kiln_gc_heap {
+static const kiln_gc_hooks kiln_c99_gc_hooks;
+static kiln_gc_heap kiln_c99_gc_fallback;
+static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
+static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
+static void kiln_c99_gc_trace_count(uint64_t count) {
+static kiln_gc_heap *kiln_c99_gc_heap(void) {
+static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
+static int kiln_c99_gc_table_grow(kiln_gc_heap *heap, size_t wanted) {
+static int kiln_c99_gc_table_insert(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *block) {
+static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
+static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
+static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_gc_finalize(kiln_gc_block *block);
+static void kiln_c99_gc_release(void *payload) {
+static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
+static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
+static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
+static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_gc_finalize(kiln_gc_block *block) {
+static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
+static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
+static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
+static void kiln_c99_gc_collect(void *opaque, int force) {
+static void kiln_c99_gc_teardown_begin(void *opaque) {
+static void kiln_c99_gc_teardown_end(void *opaque) {
+static void kiln_c99_gc_hook_mark_value(void *opaque, const void *value) {
+static void kiln_c99_gc_hook_mark_block(void *opaque, void *payload) {
+static const kiln_gc_hooks kiln_c99_gc_hooks = {
+static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
+static char *kiln_c99_gc_alloc_text(size_t len) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_abort_signal(kiln_value *out) {
 static int kiln_c99_new_abort_controller(kiln_value *out) {
@@ -1081,7 +1129,6 @@ static kiln_value kiln_c99_null(void) {
 static kiln_value kiln_c99_boolean(int value) {
 static kiln_value kiln_c99_function(kiln_closure *closure) {
 static kiln_closure *kiln_c99_closure_of(kiln_value value) {
-static void kiln_c99_drop_closure(void *pointer) {
 static kiln_value *kiln_c99_cell_of(kiln_value value) {
 static int kiln_c99_make_cell(kiln_value *slot) {
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
@@ -1113,6 +1160,7 @@ static kiln_value kiln_c99_control_diagnostic(void) {
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
+static kiln_value kiln_c99_text_value(kiln_text *text) {
 static kiln_value kiln_c99_copy_utf8_lossy(const uint8_t *bytes, size_t length) {
 oom:
 static kiln_value kiln_c99_text(kiln_value value) {
@@ -1186,7 +1234,7 @@ static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, si
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
 static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
-static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_completion(void *opaque) { kiln_c99_gc_release(opaque); }
 static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t argument,
@@ -1196,7 +1244,7 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
 static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
-static void kiln_c99_node_drop_fs_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_fs_completion(void *opaque) { kiln_c99_gc_release(opaque); }
 static int kiln_c99_node_fs_error_property(kiln_value error, const char *key, size_t key_len,
 static int kiln_c99_node_fs_stat(kiln_value *out, const kiln_async_completion *completion) {
 static int kiln_c99_node_fs_complete(void *opaque, const kiln_async_completion *completion,
@@ -1348,3 +1396,4 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {

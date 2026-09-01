@@ -8,6 +8,9 @@ static const char kiln_module_7d521260231c49f2e76cba43ffb069a3_constant_3[] = "m
 static const char kiln_module_7d521260231c49f2e76cba43ffb069a3_constant_4[] = "call";
 static const char kiln_module_7d521260231c49f2e76cba43ffb069a3_constant_5[] = "constructor";
 static const char kiln_module_7d521260231c49f2e76cba43ffb069a3_constant_6[] = "2";
+static void kiln_module_7d521260231c49f2e76cba43ffb069a3_gc_roots(void *heap, void *context, int phase) {
+    kiln_c99_gc_unit_roots(heap, context, phase);
+}
 static int kiln_module_7d521260231c49f2e76cba43ffb069a3_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);
 static const char kiln_module_7d521260231c49f2e76cba43ffb069a3_name_0[] = "receiver";
 /* function 0: receiver */
@@ -37,6 +40,7 @@ kiln_refusal:;
 }
 static int kiln_module_7d521260231c49f2e76cba43ffb069a3_body(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
+    (void)kiln_realm_gc_register_roots(kiln_module_7d521260231c49f2e76cba43ffb069a3_gc_roots, NULL, 0);
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
@@ -107,6 +111,11 @@ typedef struct kiln_module_7d521260231c49f2e76cba43ffb069a3_realm_context {
     kiln_value *result;
 } kiln_module_7d521260231c49f2e76cba43ffb069a3_realm_context;
 
+static int kiln_module_7d521260231c49f2e76cba43ffb069a3_gc_result_entry(void *result) {
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}
+
 static int kiln_module_7d521260231c49f2e76cba43ffb069a3_realm_entry(void *opaque) {
     kiln_module_7d521260231c49f2e76cba43ffb069a3_realm_context *context = (kiln_module_7d521260231c49f2e76cba43ffb069a3_realm_context *)opaque;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -123,6 +132,8 @@ int kiln_module_7d521260231c49f2e76cba43ffb069a3(kiln_host *host, kiln_value *re
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, kiln_module_7d521260231c49f2e76cba43ffb069a3_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, kiln_module_7d521260231c49f2e76cba43ffb069a3_realm_entry, &context);
     if (status == KILN_C99_OK)

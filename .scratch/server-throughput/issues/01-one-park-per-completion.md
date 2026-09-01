@@ -1,5 +1,23 @@
 # The server parks once per completion, so concurrency buys nothing
 
+Status: resolved (2026-09-01, `perf/review`)
+
+## Resolution
+
+The premise was wrong in a useful way: the realm never parked. Instrumented at concurrency 64,
+every connection had a read armed, 126 completions sat ready in the harvest queue, and
+`next_turn` entered `block_on` zero times. The 122 µs was `poll_http_tasks`: a `block_on` around
+four `yield_now()`s, each a `park_yield` (a zero-timeout kevent turn, ~12 µs), called once per HTTP
+completion, harvesting nothing, 78% of wall time. `poll_http_tasks_after_wake` now polls the
+LocalSet directly (commit 32744447); `next_turn` then parks for real and harvests ~61 completions
+per park. bench/server, collector on: 18.5k / 65.8k / 39.9k rps at 1/16/64 (was 9.3k / 9.2k /
+8.1k). The interpreter's loop keeps its four reactor turns; without them it parks in `next_turn`
+and never wakes, and why the two loops differ is the open question that replaces this one.
+
+The c=64 plateau at ~40k against ~85k for node is the next cost.
+
+## Original report
+
 Status: needs-triage
 
 ## What was measured

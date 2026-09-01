@@ -3,8 +3,12 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
 /* Module hash: c6d415922e92ef41; bytecode version: 2; imports: 1; exports: 1. */
+static void kiln_module_c6d415922e92ef41bcd0947f5dad550a_gc_roots(void *heap, void *context, int phase) {
+    kiln_c99_gc_unit_roots(heap, context, phase);
+}
 static int kiln_module_c6d415922e92ef41bcd0947f5dad550a_body(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {
     size_t sp = 0;
+    (void)kiln_realm_gc_register_roots(kiln_module_c6d415922e92ef41bcd0947f5dad550a_gc_roots, NULL, 0);
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
@@ -162,10 +166,11 @@ namespace_failure_without_order:
             if (data->properties[index].key_len == (size_t)13 &&
                 memcmp(data->properties[index].key, "@@toStringTag", (size_t)13) == 0 &&
                 data->properties[index].value.tag == KILN_VALUE_STRING)
-                free((void *)data->properties[index].value.ptr);
+                kiln_c99_gc_release((void *)data->properties[index].value.ptr);
         }
-        free(data->properties);
-        free(data);
+        /* The object is a collected block; releasing it runs the finaliser that owns
+         * `properties`, and unlinks it from the heap the way free() could not. */
+        kiln_c99_gc_release(data);
     }
     return status;
 }
@@ -180,6 +185,11 @@ typedef struct kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context {
     kiln_value *exports;
     size_t export_count;
 } kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context;
+
+static int kiln_module_c6d415922e92ef41bcd0947f5dad550a_gc_result_entry(void *result) {
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}
 
 static int kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_entry(void *opaque) {
     kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context *context = (kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_context *)opaque;
@@ -227,6 +237,8 @@ int kiln_module_c6d415922e92ef41bcd0947f5dad550a(kiln_host *host, kiln_value *re
     context.exports = exports;
     context.export_count = export_count;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, kiln_module_c6d415922e92ef41bcd0947f5dad550a_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, kiln_module_c6d415922e92ef41bcd0947f5dad550a_realm_entry, &context);
     if (status == KILN_C99_OK)

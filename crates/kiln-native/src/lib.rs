@@ -51,7 +51,7 @@ static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const PRIVATE_ASYNC_ABI_VERSION: u32 = 4;
+const PRIVATE_ASYNC_ABI_VERSION: u32 = 5;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
@@ -3346,6 +3346,44 @@ fn write_graph_namespace_build(
     .unwrap();
 }
 
+/// The graph launcher's root function (ADR 0041): the export, import and namespace arrays it
+/// links with, and the two result slots `main` reads after the realm is destroyed.
+fn render_graph_roots(
+    output: &mut String,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) {
+    output.push_str(
+        "static void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET) return;\n",
+    );
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let export_count = native_graph_export_count(node);
+        if export_count != 0 {
+            writeln!(
+                output,
+                "    for (index = 0; index < (size_t){export_count}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_exports_{index}[index]);"
+            )
+            .unwrap();
+        }
+        if !node.program.imports.is_empty() {
+            writeln!(
+                output,
+                "    for (index = 0; index < (size_t){}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_imports_{index}[index]);",
+                node.program.imports.len()
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        output,
+        "    for (index = 0; index < (size_t){}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_namespaces[index]);",
+        modules.len()
+    )
+    .unwrap();
+    output.push_str(
+        "    if (graph != NULL) {\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n    }\n}\n",
+    );
+}
+
 fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -3441,8 +3479,15 @@ extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure(int status, kiln_value value);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
+extern int kiln_realm_gc_mark_value(void *heap, const void *value);
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_PHASE_RESET 2
 "#,
     );
     for (_, module) in modules {
@@ -3607,7 +3652,11 @@ typedef struct kiln_graph_context {
     kiln_value result;
     kiln_value entry_result;
 } kiln_graph_context;
-
+"#,
+    );
+    render_graph_roots(&mut output, modules);
+    output.push_str(
+        r#"
 static int kiln_graph_enter(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
@@ -3615,6 +3664,8 @@ static int kiln_graph_enter(void *opaque) {
     kiln_value *result;
     int status = 0;
     if (graph == NULL) return -1;
+    status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
+    if (status != 0) return status;
     host = &graph->host;
     result = &graph->result;
 "#,
@@ -3750,7 +3801,7 @@ static int kiln_graph_enter(void *opaque) {
     }
     output.push_str(&evaluation);
     output.push_str(
-        "    return 0;\n}\n\nint main(void) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
+        "    return 0;\n}\n\n/* argc/argv reach the realm before it is entered, so the first `process` a module builds\n * already has the command line. The strings are copied on the other side of this call. */\nint main(int argc, char **argv) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0 && argc > 0)\n        status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);\n    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
     );
     Ok(output)
 }
@@ -3966,6 +4017,48 @@ const kiln_module_api_v2 *{api_symbol}(void) {{
     )
 }
 
+/// The embedding wrapper's root function (ADR 0041): the link arrays its body allocates, for as
+/// long as they exist, and the module result slot the body writes into.
+fn render_shared_wrapper_roots(
+    output: &mut String,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    wrapper_symbol: &str,
+) {
+    writeln!(
+        output,
+        "\ntypedef struct {wrapper_symbol}_gc_context {{\n    kiln_value **imports;\n    kiln_value **exports;\n    kiln_value *namespaces;\n    kiln_value *result;\n}} {wrapper_symbol}_gc_context;"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static const size_t {wrapper_symbol}_gc_import_counts[{}] = {{{}}};",
+        modules.len().max(1),
+        modules
+            .iter()
+            .map(|(node, _)| node.program.imports.len().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static const size_t {wrapper_symbol}_gc_export_counts[{}] = {{{}}};",
+        modules.len().max(1),
+        modules
+            .iter()
+            .map(|(node, _)| native_graph_export_count(node).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static void {wrapper_symbol}_gc_roots(void *heap, void *context, int phase) {{\n    {wrapper_symbol}_gc_context *roots = ({wrapper_symbol}_gc_context *)context;\n    size_t module;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || roots == NULL) return;\n    for (module = 0; module < (size_t){count}; ++module) {{\n        if (roots->imports != NULL && roots->imports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_import_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->imports[module][index]);\n        if (roots->exports != NULL && roots->exports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_export_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->exports[module][index]);\n        if (roots->namespaces != NULL) (void)kiln_realm_gc_mark_value(heap, &roots->namespaces[module]);\n    }}\n    if (roots->result != NULL) (void)kiln_realm_gc_mark_value(heap, roots->result);\n}}",
+        count = modules.len()
+    )
+    .unwrap();
+}
+
 fn graph_shared_wrapper_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -4005,6 +4098,12 @@ extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
+extern int kiln_realm_gc_mark_value(void *heap, const void *value);
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_PHASE_RESET 2
 extern int kiln_realm_is_active(void);
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -4201,9 +4300,10 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             "    if (thrown != NULL) *thrown = specifier;\n    return KILN_C99_HOST_ERROR;\n}\n",
         );
     }
+    render_shared_wrapper_roots(&mut output, modules, wrapper_symbol);
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;",
+        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    {wrapper_symbol}_gc_context gc_context;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;\n    gc_context.imports = import_arrays;\n    gc_context.exports = export_arrays;\n    gc_context.namespaces = namespaces;\n    gc_context.result = &module_result;\n    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, &gc_context, 0);\n    if (status != KILN_C99_OK) goto cleanup;",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -4300,7 +4400,13 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             output.push_str("    if (status != KILN_C99_OK) goto cleanup;\n");
         }
     }
-    output.push_str("cleanup:\n    for (index = 0; index < (size_t)");
+    output.push_str("cleanup:\n");
+    writeln!(
+        output,
+        "    (void)kiln_realm_gc_unregister_roots({wrapper_symbol}_gc_roots, &gc_context);"
+    )
+    .unwrap();
+    output.push_str("    for (index = 0; index < (size_t)");
     write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    free(namespaces);\n    free(commonjs_modules);\n    return status;\n}}\n", modules.len()).unwrap();
     writeln!(
         output,
@@ -4312,9 +4418,18 @@ typedef struct {wrapper_symbol}_realm_context {{
     kiln_host proxy_host;
 }} {wrapper_symbol}_realm_context;
 
+static void {wrapper_symbol}_gc_result_roots(void *heap, void *context, int phase) {{
+    if (phase == KILN_GC_PHASE_RESET || context == NULL) return;
+    (void)kiln_realm_gc_mark_value(heap, context);
+}}
+
 static int {wrapper_symbol}_realm_entry(void *opaque) {{
     {wrapper_symbol}_realm_context *context = ({wrapper_symbol}_realm_context *)opaque;
+    int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_result_roots, context->result,
+                                          KILN_GC_ROOT_SURVIVES_TEARDOWN);
+    if (status != KILN_C99_OK) return status;
     return {wrapper_symbol}_body(&context->proxy_host, context->result);
 }}
 
@@ -5317,9 +5432,9 @@ mod tests {
                  makes two different ABIs hash alike and every cached artifact is then suspect"
             );
         }
-        assert!(runtime_abi_identity().contains("async-4"));
+        assert!(runtime_abi_identity().contains("async-5"));
         // Same reasoning as above, and the same history: this pin was 14, then 15, then 18, and
-        // is 22 as this is written -- all on one day, all intended, none caught by being pinned.
+        // is 23 as this is written -- all intended, none caught by being pinned.
         // What matters is that the provider's version reaches the identity at all: if it did not,
         // an archive built before an ABI change would keep being linked against emitted C that
         // expects the change, which is exactly the "undefined symbols from a stale archive"
@@ -6794,8 +6909,15 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             response.starts_with("HTTP/1.1 200 OK\r\n"),
             "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
         );
+        // The body arrives whole with `end`, so it is length-declared rather than chunked. What
+        // this test pins is the ordering - the response completes before the close - not the
+        // framing, so both facts are asserted separately.
         assert!(
-            response.ends_with("\r\n7\r\ndelayed\r\n0\r\n\r\n"),
+            response.contains("\r\ncontent-length: 7\r\n"),
+            "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
+        );
+        assert!(
+            response.ends_with("\r\n\r\ndelayed"),
             "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
         );
         assert!(status.success(), "server failed: {stderr}");
@@ -7412,6 +7534,78 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         assert_eq!(
             run.stdout,
             b"entry body\ndependency microtask\ndependency timer\n"
+        );
+    }
+
+    /// A compiled binary is a single-executable application in node's sense, so it reports the
+    /// command line the way node does for one: `argv[0]` and `argv[1]` both name the executable,
+    /// and the program's own arguments start at index 2. That is not a cosmetic choice -- every
+    /// argument-reading program, and `const [, , first] = process.argv`, counts from there, and a
+    /// one-element argv would silently hand each of them the wrong argument.
+    ///
+    /// Run through `Command` rather than `run_graph`, because the whole question is what the OS
+    /// put in `main`'s `argv` and there is no other way to put anything there.
+    #[test]
+    fn native_process_argv_reports_the_single_executable_command_line() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native process.argv integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-process-argv");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"console.log(JSON.stringify([
+  process.argv.length,
+  process.argv[0] === process.argv[1],
+  process.execPath === process.argv[0],
+  process.argv.slice(2),
+]));
+"#,
+        )
+        .expect("write process.argv fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("process.argv source compiles");
+        let output = project.path.join("program");
+        NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: output.clone(),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("process.argv graph builds natively");
+
+        let bare = std::process::Command::new(&output)
+            .output()
+            .expect("run the compiled program");
+        assert_eq!(bare.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&bare.stdout),
+            "[2,true,true,[]]\n",
+            "stderr: {}",
+            String::from_utf8_lossy(&bare.stderr)
+        );
+
+        let passed = std::process::Command::new(&output)
+            .args(["a", "b", "c"])
+            .output()
+            .expect("run the compiled program with arguments");
+        assert_eq!(passed.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&passed.stdout),
+            "[5,true,true,[\"a\",\"b\",\"c\"]]\n",
+            "stderr: {}",
+            String::from_utf8_lossy(&passed.stderr)
         );
     }
 
@@ -9579,7 +9773,9 @@ int main(void) {{
             })
             .collect::<Vec<_>>();
         let launcher = graph_launcher_source(&first_graph, &first_modules).expect("launcher emits");
-        let main = launcher.find("int main(void)").expect("launcher has main");
+        let main = launcher
+            .find("int main(int argc, char **argv)")
+            .expect("launcher has main");
         assert!(launcher[..main].contains("static kiln_value kiln_exports_"));
         assert!(launcher[..main].contains("static kiln_value kiln_imports_"));
         assert!(!launcher[main..].contains("kiln_value kiln_exports_"));
