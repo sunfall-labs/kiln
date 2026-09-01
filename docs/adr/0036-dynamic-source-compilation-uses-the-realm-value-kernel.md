@@ -120,8 +120,13 @@ indirection. Ordinary object allocation now follows the same typed realm-ownersh
 object and its property array are released exactly once at realm teardown, while hot property reads
 and writes remain direct generated-C operations during this migration slice. Callable-store records
 and their object values have independent, non-overlapping ownership, so teardown order is not part
-of correctness. These are deliberately bridges into the kernel, not the kernel extraction itself;
-object operations and other per-unit state still follow the remaining sequence below.
+of correctness. `globalThis`, `process`, and `Atomics` now occupy opaque realm-owned value slots:
+Rust owns only identity and lifetime, generated C alone interprets `kiln_value`, and separate
+generated modules observe the same objects without routing property operations through Rust. This
+establishes the general singleton seam without manufacturing a second C object library while the
+value representation remains non-opaque. These are deliberately bridges into the kernel, not the
+kernel extraction itself; object operations and other per-unit state still follow the remaining
+sequence below.
 
 1. Extract the internal value/kernel declarations from emitted module source and give the shipped
    runtime an explicit private export list.
