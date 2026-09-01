@@ -6,10 +6,9 @@
 //! this is the same `frontend_oxc` → `kiln_ir` path every other run in the suite takes rather
 //! than a second, conformance-only compiler.
 
-use frontend_oxc::parse_with_goal;
-use kiln_hir::SourceGoal;
+use frontend_oxc::{EvalSyntax, parse_eval};
 use kiln_interpreter::{EvalCompileError, EvalSource, ExecutionCapabilities};
-use kiln_ir::{EvalOptions, Program, Strictness};
+use kiln_ir::{EvalNewTarget, EvalOptions, Program, Strictness};
 
 /// Give this thread's VMs a compiler, so `eval` and `Function` can build a program at run time.
 ///
@@ -42,7 +41,22 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
     // would silently accept syntax the language does not allow here. That is a different
     // question from `request.script`, which says whether this text is a Script rather than eval
     // code and so decides where its `var`s live and whether they can be deleted.
-    let module = parse_with_goal("<eval>", &source, SourceGoal::Script);
+    //
+    // The call site's own context rides along, because a Script's early errors are not quite
+    // this source's: `super.x`, `new.target` and a private name are each legal here exactly when
+    // the code the `eval` was written in could have written them, and refusing them outright
+    // rejected legal programs at parse time -- which costs a whole file rather than one
+    // expression.
+    let allow = EvalSyntax {
+        new_target: !matches!(request.new_target, EvalNewTarget::Forbidden),
+        super_property: request.home.is_some(),
+        private_names: request
+            .private_scopes
+            .iter()
+            .flat_map(|scope| scope.names.iter().cloned())
+            .collect(),
+    };
+    let module = parse_eval("<eval>", &source, &allow);
     if let Some(diagnostic) = module.diagnostics.first() {
         return Err(EvalCompileError::Syntax(diagnostic.message.clone()));
     }
@@ -58,6 +72,8 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
             strict: request.strict,
             global_var_scope: request.global_var_scope,
             script: request.script,
+            home: request.home.map(str::to_owned),
+            private_scopes: request.private_scopes.to_vec(),
         },
     )
     .map_err(|diagnostics| {

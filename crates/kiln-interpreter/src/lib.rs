@@ -1493,6 +1493,10 @@ impl Native {
                 | Self::StringCodePointAt
                 | Self::StringLocaleCompare
                 | Self::StringNormalize
+                // `CreateHTML` opens with `RequireObjectCoercible` and `ToString` exactly as
+                // every other `String.prototype` method does, and being Annex B does not change
+                // that: `String.prototype.bold.call(5)` is `"5".bold()`.
+                | Self::StringHtml(_)
         )
     }
 
@@ -5914,6 +5918,9 @@ pub struct RegExpData {
     compiled: regress::Regex,
     global: bool,
     sticky: bool,
+    /// The `d` flag. Read once here rather than off `flags` at every match, and kept beside the
+    /// other two for the same reason they are: a flag the matcher consults is not a string search.
+    has_indices: bool,
     /// Where the next `g` or `y` search starts, in UTF-16 units. Mutable and program-visible,
     /// which is why two evaluations of one literal must not share an object.
     last_index: std::cell::Cell<usize>,
@@ -6702,6 +6709,13 @@ pub struct EvalSource<'a> {
     /// Whether this source is a Script rather than eval code: its `var`s reach the global object
     /// even in strict mode, and the bindings it makes there are not configurable.
     pub script: bool,
+    /// The name, among `outer`, of the caller's home-object binding -- `None` where the language
+    /// does not allow `super.x` to be written at this call.
+    pub home: Option<&'a str>,
+    /// What `new.target` means here, including whether it may be written at all.
+    pub new_target: kiln_ir::EvalNewTarget,
+    /// The private names the calling code can see, outermost class first.
+    pub private_scopes: &'a [kiln_ir::PrivateScope],
 }
 
 /// Why a run-time compilation produced no program.
@@ -7740,9 +7754,11 @@ impl ExecutionError {
                 ErrorKind::Range,
                 "Maximum call stack size exceeded".to_owned(),
             ),
-            // The specification has a `URIError` for this; this realm's nearest kind is used
-            // rather than adding one nothing else would ever raise.
-            Self::MalformedUri => (ErrorKind::Type, "URI malformed".to_owned()),
+            // `URIError` is the whole reason that kind exists, and it is the one a program
+            // catches: `decodeURI` on user input is a routine thing to guard, and the guard is
+            // written as `catch (e) { if (e instanceof URIError) ... }`. Reported as a TypeError,
+            // every one of those guards fell through to a rethrow.
+            Self::MalformedUri => (ErrorKind::Uri, "URI malformed".to_owned()),
             Self::FrozenArray => (
                 ErrorKind::Type,
                 "Cannot add property, object is not extensible".to_owned(),
@@ -16931,6 +16947,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
+        // `ToString` for every argument a built-in reads as text, on the same terms and in the
+        // same place as the numeric pass above: after the receiver, because that is the order a
+        // `toString` counting its calls can see.
+        let textual = textual_arguments(native);
+        if !textual.is_empty()
+            && textual
+                .iter()
+                .any(|&index| arguments.get(index).is_some_and(needs_text_conversion))
+        {
+            let mut converted = arguments.to_vec();
+            for &index in textual {
+                let Some(argument) = converted.get(index) else {
+                    continue;
+                };
+                if !needs_text_conversion(argument) {
+                    continue;
+                }
+                let text = self.as_text(&argument.clone(), instruction)?;
+                converted[index] = Value::String(text);
+            }
+            return self.dispatch_native(native, receiver, &converted, instruction);
+        }
         // A prototype is stored rather than read, so the only two things it may be are an object
         // and the explicit absence of one.
         if matches!(native, Native::ObjectSetPrototypeOf) {
@@ -18318,7 +18356,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // being permanently stuck past the end.
                     regexp.last_index.set(0);
                 }
-                if let Some((range, _)) = &found
+                if let Some((range, _, _)) = &found
                     && (regexp.global || regexp.sticky)
                 {
                     regexp.last_index.set(range.end);
@@ -18326,10 +18364,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(native, Native::RegExpTest) {
                     return Ok(Value::Boolean(found.is_some()));
                 }
-                let Some((range, groups)) = found else {
+                let Some((range, groups, names)) = found else {
                     return Ok(Value::Null);
                 };
-                Ok(match_result(&subject, &range, &groups))
+                Ok(match_result(
+                    &subject,
+                    &range,
+                    &groups,
+                    &names,
+                    regexp.has_indices,
+                ))
             }
             Native::StringReplace | Native::StringReplaceAll
                 if matches!(arguments.first(), Some(Value::RegExp(_)))
@@ -18358,7 +18402,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     return Ok(Value::Array(ArrayData::new(parts)));
                 }
-                for (range, groups) in regexp_search_all(regexp, &subject) {
+                for (range, groups, _) in regexp_search_all(regexp, &subject) {
                     // A separator that matches nothing would split between every character
                     // *and* produce an empty piece for each; the specification skips an empty
                     // match at the position the last piece started.
@@ -18399,7 +18443,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `search` ignores `lastIndex` entirely and always scans from the start.
                 Ok(Value::Number(
                     regexp_search(regexp, &subject, 0)
-                        .map_or(-1.0, |(range, _)| range.start as f64),
+                        .map_or(-1.0, |(range, _, _)| range.start as f64),
                 ))
             }
             Native::StringMatch | Native::StringMatchAll => {
@@ -18417,15 +18461,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !all {
                     // Without `g`, `match` is `exec`: one result with its groups.
                     return Ok(match regexp_search(regexp, &subject, 0) {
-                        Some((range, groups)) => match_result(&subject, &range, &groups),
+                        Some((range, groups, names)) => {
+                            match_result(&subject, &range, &groups, &names, regexp.has_indices)
+                        }
                         None => Value::Null,
                     });
                 }
                 let mut results = Vec::new();
-                for (range, groups) in regexp_search_all(regexp, &subject) {
+                for (range, groups, names) in regexp_search_all(regexp, &subject) {
                     results.push(if matches!(native, Native::StringMatchAll) {
                         // `matchAll` yields full results; `match` with `g` yields only the text.
-                        match_result(&subject, &range, &groups)
+                        match_result(&subject, &range, &groups, &names, regexp.has_indices)
                     } else {
                         Value::String(utf16_slice(&subject, range))
                     });
@@ -28494,7 +28540,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         let mut out = String::new();
         let mut copied = 0;
-        for (range, groups) in matches {
+        for (range, groups, names) in matches {
             push_bounded(&mut out, &utf16_slice(&subject, copied..range.start))?;
             let matched = utf16_slice(&subject, range.clone());
             if callable {
@@ -28509,6 +28555,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 call_arguments.push(Value::Number(range.start as f64));
                 call_arguments.push(Value::String(text.clone()));
+                // The groups object is last, and only for a pattern that has names -- which is
+                // what keeps the replacer's argument count what it has always been otherwise.
+                if !names.is_empty() {
+                    call_arguments.push(named_group_object(&names, |group| match group {
+                        Some(range) => Value::String(utf16_slice(&subject, range.clone())),
+                        None => Value::Undefined,
+                    }));
+                }
                 let produced =
                     self.call_value(&replacement, Value::Undefined, call_arguments, instruction)?;
                 push_bounded(&mut out, &produced.to_display_string())?;
@@ -28520,6 +28574,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &subject,
                         &range,
                         &groups,
+                        &names,
                     )?,
                 )?;
             }
@@ -32677,12 +32732,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // A direct one goes there only when the call was written at the top level of a script,
         // which the compiler recorded on the site.
         let global_var_scope = site.is_none_or(|site| site.global_var_scope);
+        // An indirect eval is global code with no method, no class and no call around it, so it
+        // carries none of the syntactic context a direct one does.
+        let new_target = site.map_or(kiln_ir::EvalNewTarget::Forbidden, |site| site.new_target);
+        let no_private_scopes: [kiln_ir::PrivateScope; 0] = [];
         let (program, program_strictness) = compile(&EvalSource {
             source,
             outer: &outer,
             strict,
             global_var_scope,
             script,
+            home: site.and_then(|site| site.home.as_deref()),
+            new_target,
+            private_scopes: site.map_or(&no_private_scopes, |site| &site.private_scopes),
         })
         .map_err(|error| match error {
             EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
@@ -32715,11 +32777,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 limit: self.limits.max_call_depth,
             });
         }
-        let (this_value, arguments, new_target) = match site {
+        let (this_value, arguments, frame_new_target) = match site {
             Some(_) => (
                 self.this_value.clone(),
                 self.arguments.clone(),
-                self.new_target.clone(),
+                // A class field initialiser is its own function boundary for `new.target`, and
+                // Kiln emits its code into the constructor -- so the running frame's value is
+                // the constructor's, and an eval written in an initialiser must not see it.
+                match new_target {
+                    kiln_ir::EvalNewTarget::Undefined => Value::Undefined,
+                    kiln_ir::EvalNewTarget::Forbidden | kiln_ir::EvalNewTarget::Caller => {
+                        self.new_target.clone()
+                    }
+                },
             ),
             // An indirect eval is called with no receiver from global scope, which makes `this`
             // the global object -- the one place a sloppy call still gets one.
@@ -32733,7 +32803,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             strict: std::mem::replace(&mut self.strict, program_is_strict),
             function: self.function.take(),
             this_value: std::mem::replace(&mut self.this_value, this_value),
-            new_target: std::mem::replace(&mut self.new_target, new_target),
+            new_target: std::mem::replace(&mut self.new_target, frame_new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
             arguments_object: self.arguments_object.take(),
             mapped_arguments: self.mapped_arguments,
@@ -36786,7 +36856,7 @@ fn call_native(
             let requested = match digits {
                 Value::Undefined => None,
                 other => {
-                    let digits = other.as_number();
+                    let digits = to_integer_or_infinity(other.as_number());
                     // The range check runs even for a value that is not finite, which is why an
                     // infinite receiver is answered *after* it rather than before.
                     if !(0.0..=100.0).contains(&digits) && value.is_finite() {
@@ -36805,7 +36875,7 @@ fn call_native(
                     Value::String(number_string(value))
                 }
                 Some(other) => {
-                    let digits = other.as_number();
+                    let digits = to_integer_or_infinity(other.as_number());
                     if !value.is_finite() {
                         return Ok(Value::String(number_string(value)));
                     }
@@ -36817,8 +36887,11 @@ fn call_native(
             }
         }
         Native::BigIntAsIntN | Native::BigIntAsUintN => {
-            let bits = arguments.first().map_or(f64::NAN, Value::as_number);
-            if !(0.0..=9_007_199_254_740_991.0).contains(&bits) || bits.fract() != 0.0 {
+            // `ToIndex`: the bit count is truncated towards zero and NaN is zero, so
+            // `BigInt.asIntN(8.5, x)` is `asIntN(8, x)` rather than a RangeError. Only the range
+            // itself refuses.
+            let bits = to_integer_or_infinity(arguments.first().map_or(0.0, Value::as_number));
+            if !(0.0..=9_007_199_254_740_991.0).contains(&bits) {
                 return Err(ExecutionError::RadixOutOfRange);
             }
             let Some(Value::BigInt(value)) = arguments.get(1) else {
@@ -36833,7 +36906,11 @@ fn call_native(
         }
         Native::NumberToFixed => {
             let value = branded_number(receiver)?;
-            let digits = arguments.first().map_or(0.0, Value::as_number);
+            // `ToIntegerOrInfinity`, which answers zero for `undefined` and for NaN. Compared
+            // raw, both were NaN and failed the range test below -- so `(1.5).toFixed()` gave
+            // "2" and `(1.5).toFixed(undefined)` threw, for an argument the language says means
+            // the same thing.
+            let digits = to_integer_or_infinity(arguments.first().map_or(0.0, Value::as_number));
             if !(0.0..=100.0).contains(&digits) {
                 return Err(ExecutionError::RadixOutOfRange);
             }
@@ -37208,6 +37285,7 @@ fn call_native(
                                 &replacement,
                                 &subject,
                                 &(start..start + needle.len()),
+                                &[],
                                 &[],
                             )?,
                         )?;
@@ -39304,6 +39382,15 @@ const fn string_delegating_symbol(native: Native) -> Option<WellKnown> {
     }
 }
 
+/// `ToIntegerOrInfinity`, for the built-ins reached through `call_native`.
+///
+/// The same rule [`Vm::to_integer_or_infinity`] applies, spelled where a free function can use
+/// it: NaN -- which is what `undefined` coerces to -- is zero, and everything else truncates
+/// towards zero while an infinity stays one.
+fn to_integer_or_infinity(number: f64) -> f64 {
+    if number.is_nan() { 0.0 } else { number.trunc() }
+}
+
 /// `ToLength`: a count, clamped into the range an index may occupy.
 fn to_length(number: f64) -> usize {
     if number.is_nan() || number <= 0.0 {
@@ -40701,6 +40788,7 @@ fn build_regexp(pattern: &str, flags: &str) -> Option<Value> {
         compiled,
         global: flags.contains('g'),
         sticky: flags.contains('y'),
+        has_indices: flags.contains('d'),
         last_index: std::cell::Cell::new(0),
         properties: RefCell::new(ObjectData::default()),
     })))
@@ -40720,7 +40808,11 @@ fn regexp_search(regexp: &RegExpData, subject: &[u16], start: usize) -> Option<R
         return None;
     }
     let groups = found.groups().collect();
-    Some((found.range(), groups))
+    let names = found
+        .named_groups()
+        .map(|(name, range)| (name.to_owned(), range))
+        .collect();
+    Some((found.range(), groups, names))
 }
 
 /// `new Array(...)`: a length when given one number, the elements themselves otherwise.
@@ -41633,7 +41725,14 @@ fn is_callable(value: &Value) -> bool {
 ///
 /// Every range is in UTF-16 units, which is what the language counts in and what the engine
 /// reports when matching over UTF-16.
-type RegExpMatch = (std::ops::Range<usize>, Vec<Option<std::ops::Range<usize>>>);
+/// The third element is the pattern's *named* groups, in declaration order and already
+/// de-duplicated by `regress`: the duplicate-named-groups proposal lets two alternatives share a
+/// name, and only one of them can have participated.
+type RegExpMatch = (
+    std::ops::Range<usize>,
+    Vec<Option<std::ops::Range<usize>>>,
+    Vec<(String, Option<std::ops::Range<usize>>)>,
+);
 
 /// Where a literal needle occurs, in the shape a regexp match has, so replacement is one path.
 fn literal_matches(subject: &[u16], needle: &[u16], all: bool) -> Vec<RegExpMatch> {
@@ -41642,7 +41741,8 @@ fn literal_matches(subject: &[u16], needle: &[u16], all: bool) -> Vec<RegExpMatc
     while at + needle.len() <= subject.len() {
         if subject[at..at + needle.len()] == *needle {
             let range = at..at + needle.len();
-            found.push((range.clone(), vec![Some(range)]));
+            // A literal needle has no groups at all, named or otherwise.
+            found.push((range.clone(), vec![Some(range)], Vec::new()));
             if !all {
                 break;
             }
@@ -41670,6 +41770,7 @@ fn expand_replacement(
     subject: &[u16],
     range: &std::ops::Range<usize>,
     groups: &[Option<std::ops::Range<usize>>],
+    names: &[(String, Option<std::ops::Range<usize>>)],
 ) -> Result<String, ExecutionError> {
     let mut out = String::new();
     let characters: Vec<char> = template.chars().collect();
@@ -41722,6 +41823,23 @@ fn expand_replacement(
                 }
                 at += width;
             }
+            // `$<name>` is a group reference only for a pattern that *has* named groups: in
+            // one that does not, the specification leaves the text exactly as written, so
+            // `"x".replace(/x/, "$<a>")` is the literal `$<a>` rather than an empty string.
+            '<' if !names.is_empty() => {
+                let Some(end) = characters[at + 2..].iter().position(|c| *c == '>') else {
+                    push_bounded_char(&mut out, '$')?;
+                    at += 1;
+                    continue;
+                };
+                let name: String = characters[at + 2..at + 2 + end].iter().collect();
+                // A name the pattern does not declare expands to nothing, like a group that did
+                // not participate -- it is not an error, and not the literal text either.
+                if let Some((_, Some(group))) = names.iter().find(|(key, _)| *key == name) {
+                    push_bounded(&mut out, &utf16_slice(subject, group.clone()))?;
+                }
+                at += 3 + end;
+            }
             _ => {
                 push_bounded_char(&mut out, '$')?;
                 at += 1;
@@ -41739,7 +41857,7 @@ fn regexp_search_all(regexp: &RegExpData, subject: &[u16]) -> Vec<RegExpMatch> {
     let mut found = Vec::new();
     let mut at = 0;
     while at <= subject.len() {
-        let Some((range, groups)) = regexp_search(regexp, subject, at) else {
+        let Some((range, groups, names)) = regexp_search(regexp, subject, at) else {
             break;
         };
         at = if range.end == range.start {
@@ -41747,9 +41865,39 @@ fn regexp_search_all(regexp: &RegExpData, subject: &[u16]) -> Vec<RegExpMatch> {
         } else {
             range.end
         };
-        found.push((range, groups));
+        found.push((range, groups, names));
     }
     found
+}
+
+/// A capture range as the two-element array `indices` reports it, or `undefined`.
+fn indices_pair(group: Option<&std::ops::Range<usize>>) -> Value {
+    match group {
+        Some(range) => Value::Array(ArrayData::new(vec![
+            Value::Number(range.start as f64),
+            Value::Number(range.end as f64),
+        ])),
+        None => Value::Undefined,
+    }
+}
+
+/// The object `result.groups` and `result.indices.groups` are: one key per *name*, in declaration
+/// order, and no prototype.
+///
+/// No prototype because the specification says `OrdinaryObjectCreate(null)`, and it is visible:
+/// a pattern with a group called `toString` would otherwise inherit one, and
+/// `result.groups.__proto__` would answer `Object.prototype` where a program checking for a
+/// group of that name expects `undefined`.
+fn named_group_object(
+    names: &[(String, Option<std::ops::Range<usize>>)],
+    value: impl Fn(Option<&std::ops::Range<usize>>) -> Value,
+) -> Value {
+    let mut object = ObjectData::default();
+    object.set_prototype(Value::Null);
+    for (name, range) in names {
+        object.set(name, value(range.as_ref()));
+    }
+    Value::Object(Rc::new(RefCell::new(object)))
 }
 
 /// The array `exec` and `match` produce: the whole match, then each group, with `index` and
@@ -41758,6 +41906,8 @@ fn match_result(
     subject: &[u16],
     range: &std::ops::Range<usize>,
     groups: &[Option<std::ops::Range<usize>>],
+    names: &[(String, Option<std::ops::Range<usize>>)],
+    has_indices: bool,
 ) -> Value {
     let mut items = vec![Value::String(utf16_slice(subject, range.clone()))];
     // The first group `regress` reports is the whole match, which is already element zero.
@@ -41779,13 +41929,37 @@ fn match_result(
         "input",
         Value::String(utf16_slice(subject, 0..subject.len())),
     );
-    // Present and undefined rather than absent: a program reads `m.groups?.name`, and node shows
-    // the key. Named groups themselves are not collected yet, which is why it is always
-    // undefined -- the key being there is what stops that from looking like a different shape.
-    result
-        .properties
-        .borrow_mut()
-        .set("groups", Value::Undefined);
+    // Present and undefined rather than absent when the pattern has no named groups: a program
+    // reads `m.groups?.name`, and node shows the key. With names, it is a real object -- reading
+    // `m.groups.year` off `undefined` was a TypeError from ordinary, widely written code.
+    let named = if names.is_empty() {
+        Value::Undefined
+    } else {
+        named_group_object(names, |group| match group {
+            Some(range) => Value::String(utf16_slice(subject, range.clone())),
+            None => Value::Undefined,
+        })
+    };
+    result.properties.borrow_mut().set("groups", named);
+    // `indices` is the `d` flag's whole observable effect: the same shape as the result itself,
+    // holding `[start, end]` pairs instead of text, and carrying a `groups` of its own.
+    if has_indices {
+        let mut pairs = vec![indices_pair(Some(range))];
+        for group in groups.iter().skip(1) {
+            pairs.push(indices_pair(group.as_ref()));
+        }
+        let indices = ArrayData::new(pairs);
+        let named = if names.is_empty() {
+            Value::Undefined
+        } else {
+            named_group_object(names, indices_pair)
+        };
+        indices.properties.borrow_mut().set("groups", named);
+        result
+            .properties
+            .borrow_mut()
+            .set("indices", Value::Array(indices));
+    }
     Value::Array(result)
 }
 
@@ -42662,6 +42836,39 @@ fn needs_number_conversion(value: &Value) -> bool {
     }
 }
 
+/// The argument positions a built-in reads as *text*, so `ToString` runs the program's own
+/// `toString` before the built-in ever sees the value.
+///
+/// The same shape as [`numeric_arguments`] and for the same reason: the conversion can call back
+/// into the program -- and can therefore throw, which is exactly what these are written to do --
+/// and the pure table has no machine to run it with. It read every object as
+/// `"[object Object]"` instead, so a `toString` that threw was silently skipped.
+const fn textual_arguments(native: Native) -> &'static [usize] {
+    use Native as N;
+    match native {
+        // `CreateHTML` converts the attribute value only when there *is* an attribute; the nine
+        // wrappers that take none ignore whatever they are passed, symbols included.
+        N::StringHtml(
+            HtmlWrapper::Anchor
+            | HtmlWrapper::FontColor
+            | HtmlWrapper::FontSize
+            | HtmlWrapper::Link,
+        )
+        | N::Escape
+        | N::Unescape => &[0],
+        _ => &[],
+    }
+}
+
+/// Whether an argument still has to go through `ToString`.
+///
+/// An object, because the conversion is a call it may define; and a symbol, because `ToString`
+/// is the step that refuses one. Every other primitive spells itself, so it is left for the
+/// built-in's own `to_display_string` and nothing is re-dispatched for it.
+fn needs_text_conversion(value: &Value) -> bool {
+    matches!(value, Value::Symbol(_)) || is_reflect_target(value)
+}
+
 /// Whether this value reduces to a primitive by calling one of its own methods.
 fn is_object_like(value: &Value) -> bool {
     matches!(
@@ -42772,6 +42979,11 @@ const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::DataViewGet(_)
         | N::DataViewSet(_)
         | N::DataViewGetBig { .. }
+        // `ToIndex` of the bit count, which is a `ToNumber` first: `BigInt.asIntN(obj, x)` has
+        // to call `obj.valueOf()`. The *second* argument is deliberately not here -- it is a
+        // BigInt, and coercing it to a number would be the one conversion the language refuses.
+        | N::BigIntAsIntN
+        | N::BigIntAsUintN
         | N::DataViewSetBig => &[0],
         _ => &[],
     }
@@ -46555,6 +46767,9 @@ mod tests {
                     strict: false,
                     global_var_scope: false,
                     argc: Some(1),
+                    home: None,
+                    new_target: kiln_ir::EvalNewTarget::Forbidden,
+                    private_scopes: Vec::new(),
                 })),
                 // The eval's completion value is discarded; the caller's binding is the answer.
                 Instruction::Pop,

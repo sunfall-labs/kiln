@@ -15358,7 +15358,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return kiln_c99_number_in_radix(result, subject, (int)radix);
         }
         case KILN_C99_METHOD_NUMBER_TO_FIXED: {
+            /* `ToIntegerOrInfinity`: `undefined` and NaN both mean zero digits, so
+             * `(1.5).toFixed(undefined)` is `(1.5).toFixed()` and not a RangeError. */
             double digits = argc > 0 ? first : 0.0;
+            if (digits != digits) digits = 0.0;
+            digits = trunc(digits);
             if (!(digits >= 0.0 && digits <= 100.0)) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "toString() radix must be between 2 and 36");
@@ -15601,12 +15605,28 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * per code unit. They work in code units rather than scalars, which is exactly why
              * they were replaced and exactly why they cannot be written in terms of the four
              * below. */
-            kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_value argument = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value subject;
             kiln_text built = {NULL, 0, 0};
             uint16_t *units = NULL;
             size_t count = 0;
             size_t at = 0;
             int failed = 0;
+            /* `ToString` of the argument, which for an object is a call the program wrote and
+             * may therefore throw -- `escape({toString() { throw e; }})` raises `e`.
+             * `kiln_c99_text` is pure, so on its own it read every object as
+             * "[object Object]" and swallowed the throw. */
+            if (kiln_c99_is_reference(argument)) {
+                int reduced = kiln_c99_to_primitive(host, argument, 1, &argument, depth, thrown);
+                if (reduced != KILN_C99_OK) {
+                    return reduced;
+                }
+            }
+            if (argument.tag == KILN_VALUE_SYMBOL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert a Symbol value to a string");
+            }
+            subject = kiln_c99_text(argument);
             if (subject.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -15756,9 +15776,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 high = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 1]) : -1;
                 low = at + 2 < subject.len ? kiln_c99_hex_digit(subject.ptr[at + 2]) : -1;
                 if (high < 0 || low < 0) {
-                    /* A `%` not followed by two hex digits is malformed, not a literal percent. */
+                    /* A `%` not followed by two hex digits is malformed, not a literal percent.
+                     * `URIError` rather than `TypeError`: that kind exists for exactly this, and
+                     * it is what a program guarding `decodeURI` on user input catches. */
                     free(built.bytes);
-                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR,
                                                 "URI malformed");
                 }
                 byte = (char)(high * 16 + low);
@@ -15781,7 +15803,7 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             if (!kiln_c99_valid_utf8(built.bytes, built.len)) {
                 /* The escapes named bytes that are not a string. */
                 free(built.bytes);
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, "URI malformed");
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR, "URI malformed");
             }
             *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
             return KILN_C99_OK;
