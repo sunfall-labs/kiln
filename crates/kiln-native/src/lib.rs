@@ -4894,6 +4894,7 @@ mod tests {
         let builtin_path = NodeBuiltin::QueryString.virtual_path(&project.path);
         let entry_program = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(1_f64.to_bits())],
                 code: vec![
@@ -4955,6 +4956,7 @@ mod tests {
 
         let module = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
@@ -6607,6 +6609,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         .expect("write one-module graph entry");
         let module = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(value.to_bits())],
                 code: vec![
@@ -6636,6 +6639,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         }
         let dependency = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![
                     Constant::String("dependency microtask".to_owned()),
@@ -6659,6 +6663,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 local_count: 0,
                 functions: vec![
                     FunctionProto {
+                        span: kiln_ir::Span::default(),
                         prologue_end: 0,
                         asynchronous: false,
                         name: None,
@@ -6679,6 +6684,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                         upvalues: Vec::new(),
                     },
                     FunctionProto {
+                        span: kiln_ir::Span::default(),
                         prologue_end: 0,
                         asynchronous: false,
                         name: None,
@@ -6706,6 +6712,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         };
         let entry = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![
                     Constant::String("entry body".to_owned()),
@@ -6927,6 +6934,7 @@ int main(void) {{
         }
         let origin = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(42.0_f64.to_bits())],
                 code: vec![
@@ -6947,6 +6955,7 @@ int main(void) {{
         };
         let barrel = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Undefined],
                 code: vec![Instruction::Const(0), Instruction::Return],
@@ -6967,6 +6976,7 @@ int main(void) {{
         };
         let entry = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Undefined],
                 code: vec![
@@ -7012,6 +7022,7 @@ int main(void) {{
         }
         let origin = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(42.0_f64.to_bits())],
                 code: vec![
@@ -7032,6 +7043,7 @@ int main(void) {{
         };
         let entry = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Undefined],
                 code: vec![Instruction::Const(0), Instruction::Return],
@@ -7597,6 +7609,7 @@ int main(void) {{
         let second_output = root.join("second");
         let builder = NativeBuilder::new(ArtifactCache::new(cache), toolchain);
         let program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![
                 Constant::String("native".to_owned()),
@@ -7673,6 +7686,7 @@ int main(void) {{
                 });
         let builder = NativeBuilder::new(ArtifactCache::new(cache), toolchain.clone());
         let program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![
                 Constant::String("embedded\0tail=".to_owned()),
@@ -7902,6 +7916,7 @@ int main(void) {
             toolchain.clone(),
         );
         let program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::String("left\0right".to_owned())],
             code: vec![Instruction::Const(0), Instruction::Return],
@@ -8029,6 +8044,7 @@ int main(void) {{
         };
         let root = TestDirectory::new("kiln-native-owned-result-malformed-scalar-test");
         let program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
@@ -8137,6 +8153,7 @@ int main(void) {{
         fs::write(project.join("main.js"), "").expect("write throw graph entry");
         let thrown = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::String("thrown\0value".to_owned())],
                 code: vec![Instruction::Const(0), Instruction::Throw],
@@ -8450,6 +8467,7 @@ int main(void) {{
         }
         let dependency = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(42.0_f64.to_bits())],
                 code: vec![
@@ -8470,6 +8488,7 @@ int main(void) {{
         };
         let entry = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(99.0_f64.to_bits())],
                 code: vec![
@@ -8570,6 +8589,7 @@ int main(void) {{
 
         let edited_dependency = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(43.0_f64.to_bits())],
                 code: vec![
@@ -8660,6 +8680,7 @@ int main(void) {{
         fs::write(project.join("dep.js"), "").expect("write shared graph dependency");
         let dependency = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: vec![Constant::Number(7.0_f64.to_bits())],
                 code: vec![
@@ -8680,6 +8701,7 @@ int main(void) {{
         };
         let entry = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::LoadLocal(0), Instruction::Return],
@@ -8889,6 +8911,7 @@ int main(void) {{
 
         let dependency = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![
@@ -8912,6 +8935,7 @@ int main(void) {{
         };
         let entry = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![
@@ -9107,6 +9131,7 @@ int main(void) {{
             "same.so"
         };
         let program = |value: f64| Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::Number(value.to_bits())],
             code: vec![Instruction::Const(0), Instruction::Return],
@@ -9436,6 +9461,7 @@ int main(int argc, char **argv) {{
 
     fn stdout_program(text: &str, result: f64) -> Program {
         Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![
                 Constant::String(text.to_owned()),
@@ -9465,6 +9491,7 @@ int main(int argc, char **argv) {{
         let root = TestDirectory::new("kiln-native-host-clock");
         let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
         let program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::String("now".to_owned())],
             code: vec![
@@ -9532,6 +9559,7 @@ int main(int argc, char **argv) {{
         let root = TestDirectory::new("kiln-native-entropy");
         let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
         let program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: vec![Constant::String("random".to_owned())],
             code: vec![
@@ -9651,6 +9679,7 @@ int main(int argc, char **argv) {{
         });
         string_numeric_code.push(Instruction::Return);
         let string_numeric_program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: string_numeric_inputs
                 .into_iter()
@@ -9755,6 +9784,7 @@ int main(int argc, char **argv) {{
             Instruction::Return,
         ]);
         let operator_program = Program {
+            source: "".into(),
             version: BYTECODE_VERSION,
             constants: operator_constants,
             code: operator_code,
@@ -9766,6 +9796,7 @@ int main(int argc, char **argv) {{
             (
                 "loop",
                 Program {
+                    source: "".into(),
                     version: BYTECODE_VERSION,
                     constants: vec![
                         Constant::Number(0.0_f64.to_bits()),
@@ -9800,6 +9831,7 @@ int main(int argc, char **argv) {{
             (
                 "concat",
                 Program {
+                    source: "".into(),
                     version: BYTECODE_VERSION,
                     constants: vec![
                         Constant::String("value=".to_owned()),
@@ -9825,6 +9857,7 @@ int main(int argc, char **argv) {{
             (
                 "number-formatting",
                 Program {
+                    source: "".into(),
                     version: BYTECODE_VERSION,
                     constants: vec![
                         Constant::String("v=".to_owned()),
@@ -9913,6 +9946,7 @@ int main(int argc, char **argv) {{
             (
                 "utf16-order",
                 Program {
+                    source: "".into(),
                     version: BYTECODE_VERSION,
                     constants: vec![
                         Constant::String("😀".to_owned()),
@@ -9935,6 +9969,7 @@ int main(int argc, char **argv) {{
             (
                 "special-numbers",
                 Program {
+                    source: "".into(),
                     version: BYTECODE_VERSION,
                     constants: vec![
                         Constant::Number(f64::NAN.to_bits()),

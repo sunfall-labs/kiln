@@ -5138,6 +5138,26 @@ impl Closure {
     pub fn is_strict(&self) -> bool {
         self.strictness.function(self.function)
     }
+
+    /// The text this function was written as, which is what `Function.prototype.toString` answers.
+    ///
+    /// A borrow into the program's one copy of its source, so asking costs nothing and asking
+    /// twice costs nothing twice. The closure already carries the program for the reason
+    /// documented on `program` -- a function value that crossed a module boundary must be read
+    /// against its own tables -- and that is exactly what makes the span resolvable here.
+    ///
+    /// An empty answer where the span does not resolve. Every proto the compiler emits has a real
+    /// span, so this is unreachable in practice; it is written as an empty string rather than a
+    /// panic because a `toString` is not worth ending a program over.
+    pub fn source_text(&self) -> &str {
+        let Some(proto) = self.program.functions.get(self.function as usize) else {
+            return "";
+        };
+        self.program
+            .source
+            .get(proto.span.start as usize..proto.span.end as usize)
+            .unwrap_or("")
+    }
 }
 
 /// Two closures are equal when they are the same object, which is what `===` asks.
@@ -5931,28 +5951,29 @@ impl Value {
             Self::Boolean(value) => value.to_string(),
             Self::Number(value) => number_string(*value),
             Self::String(value) => value.clone(),
-            // Not `Function.prototype.toString`, which returns the source text. Producing that
-            // needs the span and the original source, neither of which reaches the VM; naming
-            // the function is more useful here than an invented body would be.
-            // Not `Function.prototype.toString`, which returns source text the VM never sees.
-            // The proto index is stable and useful when reading a trace; a made-up body is not.
-            Self::Function(closure) => format!("[Function {}]", closure.function),
+            // `Function.prototype.toString`: the text the program wrote. The span and the source
+            // both travel on the program the closure already carries, so this is a slice rather
+            // than a reconstruction -- there is no spelling to invent and none to get wrong.
+            Self::Function(closure) => closure.source_text().to_owned(),
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) => "[object Object]".to_owned(),
             // The same name a console shows. `String(f)` in node is the source text, which a
             // backend does not have; naming the function beats an invented body, and naming it
             // the way the program does beats naming it the way the implementation does.
+            // A built-in has no source text to answer with, and the specification says so: it
+            // must produce the NativeFunction form instead. Getting this backwards is worse than
+            // saying nothing, because feature detection is written as
+            // `/native code/.test(String(x))` -- a built-in that reported a body would be read as
+            // a polyfill, and a user function that reported `[native code]` as already-native.
             Self::Native(native) => match namespace_name(native) {
                 // A namespace is an object that happens to hold functions, and `String` of an
                 // object is its `toString` tag. `typeof Math` already answered `"object"`; this
                 // is the same fact reaching the other conversion.
                 Some(name) => format!("[object {name}]"),
-                None => format!("[Function: {}]", native_js_name(native)),
+                None => native_code_source(&native_js_name(native)),
             },
-            Self::Callback(method) => {
-                format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
-            }
+            Self::Callback(method) => native_code_source(&builtin_js_name(&format!("{method:?}"))),
             Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
@@ -32387,7 +32408,21 @@ fn call_native(
         // exception, and it is opened before this arm is reached.
         Native::ObjectValueOf => receiver.clone(),
         Native::PrimitiveToString => Value::String(receiver.to_display_string()),
-        Native::FunctionToString => Value::String(receiver.to_display_string()),
+        // `Function.prototype.toString` is one of the few built-ins that checks what it was
+        // called on: the specification throws for a receiver that is not callable rather than
+        // describing it. `Function.prototype.toString.call({})` is a TypeError, and answering
+        // `"[object Object]"` let a program that probes with it read an object as a function.
+        Native::FunctionToString => {
+            if !is_callable(receiver) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "Function.prototype.toString called on {}",
+                        receiver.to_display_string()
+                    ),
+                });
+            }
+            Value::String(receiver.to_display_string())
+        }
         // Both build a program from source, which needs the machine: a compilation has to be
         // entered as a frame and run. `Vm::dispatch_native` intercepts them before this, and
         // every call of a built-in goes through it -- so reaching here means a caller found a
@@ -41600,6 +41635,16 @@ fn empty_items(count: usize) -> String {
 /// implementation, and the payload is spelled `Type` where the language spells it `TypeError` --
 /// so it is answered from the same table that binds the global, not from the variant. Every other
 /// name is derived, for the reason [`builtin_js_name`] gives.
+/// The `NativeFunction` form: what `Function.prototype.toString` must answer for a built-in.
+///
+/// The specification allows an implementation-defined string here but requires this *shape*, and
+/// the shape is what programs read. Feature detection across the ecosystem is written as
+/// `/\{\s*\[native code\]/.test(String(fn))` to tell a real built-in from a polyfill that
+/// replaced it, so this is not decoration -- it is the answer to a question real code asks.
+fn native_code_source(name: &str) -> String {
+    format!("function {name}() {{ [native code] }}")
+}
+
 fn native_js_name(native: &Native) -> String {
     match native {
         // Derivation cannot reach these: the payload is the whole of the name.
@@ -41735,13 +41780,18 @@ fn builtin_js_name(variant: &str) -> String {
         return "toString".to_owned();
     }
     // Longest first, so `ArrayBuffer` is not read as `Array` followed by `Buffer`.
-    const TYPES: [&str; 26] = [
+    const TYPES: [&str; 27] = [
         "AsyncGenerator",
         "ArrayBuffer",
         "TypedArray",
         "Collection",
         "Generator",
         "Primitive",
+        // `Function.prototype.toString` is called `toString`, not `functionToString` -- and it is
+        // the one whose name a program is most likely to read, because it is the one whose own
+        // answer now names it. `FunctionConstructor` is not caught here: the suffix rule above
+        // has already turned it into `Function`.
+        "Function",
         "Promise",
         "Boolean",
         "Reflect",
@@ -42166,6 +42216,7 @@ mod tests {
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
@@ -42277,6 +42328,7 @@ mod tests {
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
@@ -42358,11 +42410,13 @@ mod tests {
         code.push(Instruction::Call { argc });
         code.push(Instruction::Return);
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0), number(2.0), number(3.0)],
             code,
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: Some("second".to_owned()),
@@ -42384,6 +42438,7 @@ mod tests {
     /// they would index is irrelevant and an empty one says so.
     fn no_program() -> Rc<Program> {
         Rc::new(Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42423,6 +42478,7 @@ mod tests {
     #[test]
     fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42480,6 +42536,7 @@ mod tests {
     #[test]
     fn virtual_clock_never_calls_the_host() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42505,6 +42562,7 @@ mod tests {
     #[test]
     fn realm_timezone_and_locale_are_resolved_once_at_entry() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42544,6 +42602,7 @@ mod tests {
     #[test]
     fn named_timezone_and_locale_never_call_the_host() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42580,6 +42639,7 @@ mod tests {
     #[test]
     fn host_entropy_is_one_explicit_word_per_draw() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42635,6 +42695,7 @@ mod tests {
     #[test]
     fn seeded_entropy_reproduces_without_calling_the_host() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42678,6 +42739,7 @@ mod tests {
     #[test]
     fn date_methods_stay_on_the_machine_dispatch_path() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42703,6 +42765,7 @@ mod tests {
     #[test]
     fn array_species_definition_observes_a_proxy_define_property_trap() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42736,6 +42799,7 @@ mod tests {
     #[test]
     fn array_species_definition_writes_typed_array_elements() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42774,6 +42838,7 @@ mod tests {
     #[test]
     fn node_events_builtin_exposes_event_emitter() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42854,6 +42919,7 @@ mod tests {
     #[test]
     fn node_http_exports_a_server_constructor_with_coded_option_errors() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42902,6 +42968,7 @@ mod tests {
     #[test]
     fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42955,6 +43022,7 @@ mod tests {
     #[test]
     fn node_event_once_is_removed_before_reentrant_emit() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -43002,6 +43070,7 @@ mod tests {
     #[test]
     fn node_event_new_listener_runs_before_registration() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -43074,6 +43143,7 @@ mod tests {
         assert_eq!(request.outer[0].name, "x");
         Ok((
             Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 // `x = 2; x` against the cell installed in slot 0.
                 constants: vec![Constant::Number(2.0f64.to_bits())],
@@ -43442,6 +43512,7 @@ mod tests {
     #[test]
     fn new_on_a_non_constructor_is_rejected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0)],
             code: vec![
@@ -43623,6 +43694,7 @@ mod tests {
     #[test]
     fn an_uncaught_throw_names_what_was_thrown() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![Constant::String("boom".to_owned())],
             code: vec![Instruction::Const(0), Instruction::Throw],
@@ -43640,6 +43712,7 @@ mod tests {
     #[test]
     fn unwinding_restores_the_stack_the_handler_expected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned())],
             code: vec![
@@ -43751,6 +43824,7 @@ mod tests {
     #[test]
     fn setting_a_property_on_a_primitive_is_rejected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![Constant::String("x".to_owned()), number(1.0)],
             code: vec![
@@ -43773,6 +43847,7 @@ mod tests {
     fn closures_from_separate_calls_capture_separate_cells() {
         // outer(): let c = <cell>; return closure(inner) -- inner increments and returns c.
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0)],
             code: vec![
@@ -43787,6 +43862,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("outer".to_owned()),
@@ -43806,6 +43882,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("inner".to_owned()),
@@ -43836,6 +43913,7 @@ mod tests {
     #[test]
     fn a_captured_cell_outlives_the_frame_that_created_it() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(5.0)],
             code: vec![
@@ -43847,6 +43925,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("outer".to_owned()),
@@ -43866,6 +43945,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("read".to_owned()),
@@ -43886,11 +43966,13 @@ mod tests {
     #[test]
     fn capturing_a_slot_that_was_never_boxed_is_rejected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![Instruction::MakeFunction(0), Instruction::Return],
             local_count: 1,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: None,
@@ -43952,6 +44034,7 @@ mod tests {
     #[test]
     fn calling_a_non_function_is_an_error_rather_than_a_coercion() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0)],
             code: vec![
@@ -43976,6 +44059,7 @@ mod tests {
     #[test]
     fn runaway_recursion_is_bounded_by_call_depth() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
@@ -43985,6 +44069,7 @@ mod tests {
             ],
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: Some("forever".to_owned()),
@@ -44029,6 +44114,7 @@ mod tests {
     #[test]
     fn module_slots_are_shared_across_frames() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(7.0)],
             code: vec![
@@ -44042,6 +44128,7 @@ mod tests {
             local_count: 1,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("write".to_owned()),
@@ -44060,6 +44147,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("read".to_owned()),
@@ -44080,6 +44168,7 @@ mod tests {
     #[test]
     fn an_unknown_function_index_is_rejected_rather_than_indexed() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![Instruction::MakeFunction(3), Instruction::Return],
@@ -44098,6 +44187,7 @@ mod tests {
 
     fn program(constants: Vec<Constant>, code: Vec<Instruction>) -> Program {
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants,
             code,
@@ -44164,6 +44254,7 @@ mod tests {
         // reduced first (or both operands are reduced before the numeric check), its `valueOf`
         // throws "called" and hides the required Symbol TypeError.
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![
                 Constant::String("valueOf".to_owned()),
@@ -44180,6 +44271,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("right".to_owned()),
@@ -44198,6 +44290,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("valueOf".to_owned()),
@@ -44270,6 +44363,7 @@ mod tests {
         // like a captured cell does. This is deliberately hand-written bytecode: it catches a
         // regression where `LoadLocal` silently returned the marker as `undefined`.
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
@@ -44413,6 +44507,7 @@ mod tests {
     fn module_execution_initializes_import_slots_and_publishes_exports() {
         let module = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 constants: vec![number(2.0)],
                 // An import slot holds a cell and an exported slot must too, which is what the
@@ -45058,6 +45153,7 @@ mod tests {
             code.push(Instruction::Call { argc: 2 });
             code.push(Instruction::Pop);
             functions.push(kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: None,
@@ -45080,6 +45176,7 @@ mod tests {
         }
         code.push(Instruction::Return);
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants,
             code,
@@ -45099,6 +45196,7 @@ mod tests {
             Constant::String("value".to_owned()),
         ];
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants,
             code: vec![
@@ -45118,6 +45216,7 @@ mod tests {
             ],
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: None,
@@ -45167,6 +45266,7 @@ mod tests {
     #[test]
     fn node_next_tick_runs_before_promise_reactions() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![
                 Constant::String("nextTick".into()),
@@ -45191,6 +45291,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: None,
@@ -45211,6 +45312,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: None,
@@ -45246,6 +45348,7 @@ mod tests {
     #[test]
     fn an_async_arrow_captures_its_defining_receiver() {
         let maker = kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
             name: None,
@@ -45259,6 +45362,7 @@ mod tests {
             upvalues: Vec::new(),
         };
         let arrow = kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: true,
             name: None,
@@ -45276,6 +45380,7 @@ mod tests {
             upvalues: Vec::new(),
         };
         let report = kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
             name: None,
@@ -45296,6 +45401,7 @@ mod tests {
             upvalues: Vec::new(),
         };
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![
                 Constant::String("make".into()),

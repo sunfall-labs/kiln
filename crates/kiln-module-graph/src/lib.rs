@@ -1520,13 +1520,12 @@ enum WorkItem {
         path: PathBuf,
         source: ModuleSource,
     },
-    Exit {
-        path: PathBuf,
-        source: ModuleSource,
-        program: ModuleProgram,
-        data: Option<String>,
-        dependencies: Vec<Dependency>,
-    },
+    /// A module whose own compilation is finished, waiting below its dependencies' work.
+    ///
+    /// The payload is exactly the [`ModuleNode`] this will become, so it is spelled as one --
+    /// and boxed, because it is an order of magnitude larger than `Enter` and every item in the
+    /// queue would otherwise be sized for it.
+    Exit(Box<ModuleNode>),
 }
 
 #[derive(Clone, Copy)]
@@ -1694,13 +1693,13 @@ where
 
                         // LIFO work preserves the original source order: the first dependency is
                         // entered first, while Exit remains below all child work.
-                        work.push(WorkItem::Exit {
+                        work.push(WorkItem::Exit(Box::new(ModuleNode {
                             path,
                             source,
                             program,
                             data,
                             dependencies: dependencies.clone(),
-                        });
+                        })));
                         for (dependency, source) in
                             dependencies.into_iter().zip(dependency_sources).rev()
                         {
@@ -1711,27 +1710,12 @@ where
                         }
                     }
                 },
-                WorkItem::Exit {
-                    path,
-                    source,
-                    program,
-                    data,
-                    dependencies,
-                } => {
+                WorkItem::Exit(node) => {
                     self.stack.pop();
                     self.stack_sources.pop();
-                    self.states.insert(path.clone(), VisitState::Done);
-                    self.order.push(path.clone());
-                    self.modules.insert(
-                        path.clone(),
-                        ModuleNode {
-                            path,
-                            source,
-                            program,
-                            data,
-                            dependencies,
-                        },
-                    );
+                    self.states.insert(node.path.clone(), VisitState::Done);
+                    self.order.push(node.path.clone());
+                    self.modules.insert(node.path.clone(), *node);
                 }
             }
         }
@@ -1753,6 +1737,8 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
             code: vec![Instruction::Return],
             local_count: names.len() as u32,
             functions: vec![],
+            // A builtin has no source body at all, which is why it has no functions either.
+            source: "".into(),
         },
         dependencies: vec![],
         imports: vec![],
@@ -1778,6 +1764,8 @@ fn json_module_program() -> ModuleProgram {
             code: vec![Instruction::Return],
             local_count: 1,
             functions: vec![],
+            // The JSON text is the node's `data`, not a program the compiler produced.
+            source: "".into(),
         },
         dependencies: vec![],
         imports: vec![],
@@ -4444,6 +4432,7 @@ mod tests {
                 .collect();
             ModuleProgram {
                 program: Program {
+                    source: "".into(),
                     version: BYTECODE_VERSION,
                     constants: Vec::new(),
                     code: vec![Instruction::Return],
@@ -4476,6 +4465,7 @@ mod tests {
             let is_entry = path.file_name().and_then(|name| name.to_str()) == Some("main.js");
             ModuleProgram {
                 program: Program {
+                    source: "".into(),
                     version: BYTECODE_VERSION,
                     constants: Vec::new(),
                     code: vec![Instruction::Return],
