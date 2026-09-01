@@ -25481,12 +25481,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// becomes a `TypeError` belonging to `realm`, which is the caller's.
     fn wrap_callable(&mut self, target: &Value, realm: RealmId) -> Result<Value, ExecutionError> {
         let target_realm = value_realm(target);
+        // `length` first and `name` only if it succeeded, which is the specification's order and
+        // is observable: both may be accessors, and a `length` getter that throws must stop the
+        // copy before a `name` getter runs at all.
         let copied = self.entering(target_realm, |vm| {
-            let length = vm.catching(|vm| vm.wrapped_length(target));
-            let name = vm.catching(|vm| vm.wrapped_name(target));
-            Ok((length, name))
+            Ok(match vm.catching(|vm| vm.wrapped_length(target)) {
+                Ok(length) => vm
+                    .catching(|vm| vm.wrapped_name(target))
+                    .map(|name| (length, name)),
+                Err(thrown) => Err(thrown),
+            })
         })?;
-        let (Ok(length), Ok(name)) = copied else {
+        let Ok((length, name)) = copied else {
             // Deliberately discarding what was thrown: it is an object from the target realm,
             // and handing it out is exactly the leak this boundary exists to stop. The caller
             // learns that the copy failed, which is all the specification says it learns.
