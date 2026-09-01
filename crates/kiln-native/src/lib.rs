@@ -5364,6 +5364,7 @@ mod tests {
                 exported: "marker".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let provider_entry = fs::canonicalize(&entry).expect("canonical entry");
         let graph = ModuleGraph::build_with_typed_policy(
@@ -5471,6 +5472,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
                     local_slot: 1,
                 },
             ],
+            strictness: kiln_ir::Strictness::default(),
         };
         let node = kiln_module_graph::ModuleNode {
             path: PathBuf::from("/.kiln/builtins/events.builtin"),
@@ -7209,6 +7211,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 exported: export.to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |_| module.clone())
             .expect("construct one-module graph")
@@ -7291,6 +7294,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7316,6 +7320,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             dependencies: vec!["./dep.js".to_owned()],
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path =
             fs::canonicalize(project.join("dep.js")).expect("canonical dependency");
@@ -7534,6 +7539,7 @@ int main(void) {{
                 exported: "answer".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let barrel = ModuleProgram {
             program: Program {
@@ -7555,6 +7561,7 @@ int main(void) {{
                 exported: format!("{}./origin.js", kiln_ir::STAR_REEXPORT_PREFIX),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7582,6 +7589,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
         let barrel_path = fs::canonicalize(project.join("barrel.js")).expect("canonical barrel");
@@ -7622,6 +7630,7 @@ int main(void) {{
                 exported: "answer".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7648,6 +7657,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
@@ -9067,6 +9077,7 @@ int main(void) {{
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let graph = ModuleGraph::build_with_modules(project.join("main.js"), &project, move |_| {
             thrown.clone()
@@ -9389,6 +9400,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9416,6 +9428,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let make_graph = |project: &Path| {
             let entry_path = project.join("main.js");
@@ -9511,6 +9524,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let edited_graph = {
             let entry_path = first_project.join("main.js");
@@ -9672,6 +9686,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9690,6 +9705,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
         let graph =
@@ -9906,6 +9922,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9931,6 +9948,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
         let graph =

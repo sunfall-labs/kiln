@@ -987,6 +987,10 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             exported: "value".to_owned(),
             local_slot: 0,
         }],
+        strictness: kiln_ir::Strictness {
+            body: true,
+            functions: Vec::new(),
+        },
     }
 }
 
@@ -1016,6 +1020,10 @@ fn native_entry_program() -> ModuleProgram {
             local_slot: 0,
         }],
         exports: Vec::new(),
+        strictness: kiln_ir::Strictness {
+            body: true,
+            functions: Vec::new(),
+        },
     }
 }
 
