@@ -114,6 +114,9 @@ fn run(args: &Args) -> Result<Outcome, String> {
     report
         .measurements
         .push(scenarios::targeted_conformance(args.budget)?);
+    report
+        .measurements
+        .push(scenarios::targeted_node_net_conformance(args.budget)?);
     if let Some(native) = scenarios::native(args.budget)? {
         report.measurements.extend(native);
     }

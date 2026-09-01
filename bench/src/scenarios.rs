@@ -19,7 +19,9 @@ use kiln_ir::{
 use kiln_module_graph::ModuleGraph;
 use kiln_native::{NativeBuildOptions, NativeBuilder, NativeProfile};
 use kiln_native_toolchain::{Toolchain, ToolchainError};
-use kiln_proto::{Request, Response, RunSummary, SourceView, Stats, StepBudget};
+use kiln_proto::{
+    Request, Response, RunSummary, SourceView, Stats, StepBudget, TestMode, TestSummary,
+};
 
 use crate::report::{Measurement, NativeArtifactInfo, Scenario};
 use crate::timing::Samples;
@@ -643,6 +645,131 @@ pub fn targeted_conformance(budget: Budget) -> Result<Measurement, String> {
     ))
 }
 
+/// Measure the resident daemon's affected Node batch for a concrete `node:net` runtime edit.
+///
+/// The selected count is part of the benchmark contract: timing all 35 cases after an ownership
+/// metadata regression would still produce a number, but it would no longer measure the
+/// design.md §9 fast-iteration path this row names.
+pub fn targeted_node_net_conformance(budget: Budget) -> Result<Measurement, String> {
+    let (warmup, iters) = budget.apply(WARM_WARMUP, WARM_ITERS);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../conformance/node");
+    let root = fs::canonicalize(&root)
+        .map_err(|error| format!("canonicalizing pinned Node corpus: {error}"))?
+        .display()
+        .to_string();
+    let mut fixture = ConformanceDaemonFixture::new()?;
+    let mut durations = Vec::with_capacity(iters);
+
+    for iteration in 0..warmup + iters {
+        let started = Instant::now();
+        let summary = fixture.run_node_net(&root)?;
+        let elapsed = started.elapsed();
+        require_node_net_selection(&summary)?;
+        if iteration >= warmup {
+            durations.push(elapsed);
+        }
+    }
+
+    Ok(Measurement::new(
+        Scenario {
+            workload: "conformance",
+            slug: "changed-node-net",
+            operation: "resident daemon node:net affected batch",
+            goal_ms: Some(10_000.0),
+        },
+        warmup,
+        Samples::from(&durations),
+        DbStats::default(),
+        true,
+    ))
+}
+
+fn require_node_net_selection(summary: &TestSummary) -> Result<(), String> {
+    if summary.discovered == 35
+        && summary.selected == 5
+        && summary.passed == 5
+        && summary.failed == 0
+        && summary.unsupported == 0
+        && summary.skipped == 0
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={}, expected 35/5/5/0/0/0",
+        summary.discovered,
+        summary.selected,
+        summary.passed,
+        summary.failed,
+        summary.unsupported,
+        summary.skipped,
+    ))
+}
+
+struct ConformanceDaemonFixture {
+    root: PathBuf,
+    client: Option<kiln_daemon::Client>,
+    stop: Option<kiln_daemon::ShutdownHandle>,
+    serving: Option<JoinHandle<()>>,
+}
+
+impl ConformanceDaemonFixture {
+    fn new() -> Result<Self, String> {
+        let root = reserve_daemon_root("conformance")?;
+        let socket = root.join("daemon.sock");
+        let daemon = kiln_daemon::Daemon::bind(&socket)
+            .map_err(|error| format!("binding conformance benchmark daemon: {error}"))?;
+        let stop = daemon.shutdown_handle();
+        let serving = std::thread::Builder::new()
+            .stack_size(kiln_daemon::SERVE_STACK_BYTES)
+            .spawn(move || daemon.serve())
+            .map_err(|error| format!("spawning conformance benchmark daemon: {error}"))?;
+        let mut client = kiln_daemon::Client::connect(&socket)
+            .map_err(|error| format!("connecting conformance benchmark daemon: {error}"))?;
+        client
+            .handshake()
+            .map_err(|error| format!("handshaking conformance benchmark daemon: {error}"))?;
+        Ok(Self {
+            root,
+            client: Some(client),
+            stop: Some(stop),
+            serving: Some(serving),
+        })
+    }
+
+    fn run_node_net(&mut self, root: &str) -> Result<TestSummary, String> {
+        let response = self
+            .client
+            .as_mut()
+            .ok_or_else(|| "conformance benchmark client is unavailable".to_owned())?
+            .request(&Request::Test {
+                root: root.to_owned(),
+                mode: TestMode::Node,
+                changed_paths: Some(vec!["crates/kiln-runtime/src/node_net.rs".to_owned()]),
+                previously_failed: Vec::new(),
+            })
+            .map_err(|error| format!("resident conformance Test request: {error}"))?;
+        match response {
+            Response::Tested(summary) => Ok(summary),
+            other => Err(format!(
+                "resident conformance Test request returned {other:?}"
+            )),
+        }
+    }
+}
+
+impl Drop for ConformanceDaemonFixture {
+    fn drop(&mut self) {
+        self.client.take();
+        if let Some(stop) = self.stop.take() {
+            stop.shutdown();
+        }
+        if let Some(serving) = self.serving.take() {
+            let _ = serving.join();
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 /// Measure the real native linked-graph seam on two scalar modules. The graph is rebuilt for every
 /// sample so the operation includes graph construction as well as `NativeBuilder::build_graph`.
 /// Cold samples use isolated caches; warm samples prove whole-graph reuse and one-module
@@ -833,6 +960,7 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             ],
             local_count: 1,
             functions: Vec::new(),
+            source: "".into(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -858,6 +986,7 @@ fn native_entry_program() -> ModuleProgram {
             ],
             local_count: 1,
             functions: Vec::new(),
+            source: "".into(),
         },
         dependencies: vec!["./dep.js".to_owned()],
         imports: vec![ImportBinding {
@@ -1557,6 +1686,24 @@ esac
         assert_eq!(edited.stats.graph_cache_entries, 1);
         assert_eq!(edited.stats.graph_cache_modules, 2);
         assert!(edited.steady_state);
+    }
+
+    #[test]
+    fn changed_node_net_batch_is_a_measured_resident_daemon_request() {
+        let measurement = targeted_node_net_conformance(Budget {
+            warmup: Some(0),
+            iterations: Some(1),
+        })
+        .expect("measure changed node:net conformance batch");
+
+        assert_eq!(measurement.id, "conformance/changed-node-net");
+        assert_eq!(
+            measurement.operation,
+            "resident daemon node:net affected batch"
+        );
+        assert_eq!(measurement.iterations, 1);
+        assert_eq!(measurement.goal_ms, Some(10_000.0));
+        assert!(measurement.steady_state);
     }
 
     #[test]
