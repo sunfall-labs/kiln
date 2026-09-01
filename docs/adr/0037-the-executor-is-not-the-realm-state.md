@@ -132,8 +132,28 @@ per-entry cost.
 ## Sequence
 
 1. Split the types, mechanically, with no behaviour change. `scripts/native.sh` at 0 diverged after.
-2. Remove each remaining `block_on` on a path reachable from a callback, one at a time.
+   *Done.*
+2. Split the operations to match the types, so the fence is structural. *Done.*
 3. Flip the drive to `async fn` and delete the `_in_context` family.
+
+Step 2 moved the nineteen executor-free operations onto `impl RealmState` and left the
+twenty-two that park on `impl RealmRuntime`. Membership was not chosen by hand: an operation
+stays on the runtime if it calls `block_on`, touches `self.executor`, or transitively calls one
+that does. That closure is what put `start_http1_connection_with_options` and
+`start_http1_client_connection` on the runtime side — they spawn onto the `LocalSet` — and what
+pulled `poll_http_tasks_after_wake` and `next_referenced_turn` across with their callees.
+
+`RealmRuntime` dereferences to its state, so no call site changed: a realm is its state plus the
+executor that drives it, and code reaching for state reads through the runtime as before. The
+conversion is deliberately one-way. State cannot reach back to the executor, which is the whole
+point — the async drive of step 3 will hold `&mut RealmState`, so a nested park stops being a
+runtime deadlock and becomes a name that does not resolve.
+
+The type system carries that argument but does not finish it, because `Handle::current` reaches
+the ambient runtime without going through `self`. `realm_state_operations_never_park_the_thread`
+closes the gap by reading the crate's own source and failing if `block_on`, `Handle::current`, or
+`self.executor` appears inside the state block. It was confirmed to fail on an injected
+violation; a guard that cannot fail is not a guard.
 
 Each step is independently verifiable, which matters more here than usual: this is the component
 where a subtle aliasing mistake would be both easy to make and hard to see.
