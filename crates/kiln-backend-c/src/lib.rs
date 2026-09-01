@@ -7122,8 +7122,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown) {
     kiln_closure *closure;
-    kiln_value callable = kiln_c99_proxy_inner(callee);
-    if (!kiln_c99_is_callable(callable)) {
+    if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "function");
     }
     if (depth >= KILN_C99_MAX_CALL_DEPTH) {
@@ -7171,7 +7170,6 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return kiln_c99_call(host, result, trap, handler, arguments, 3, depth, thrown);
         }
     }
-    callee = callable;
     if (callee.tag == KILN_VALUE_BOUND) {
         /* Binding is transparent to the call: the receiver is the one that was fixed, whatever
          * the target turns out to be, and the fixed arguments come before the call's own. */
