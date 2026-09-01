@@ -25446,7 +25446,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if !is_an_object(value) {
             return Ok(value.clone());
         }
-        if !is_callable(value) {
+        // `type_of` rather than `is_callable`, and the difference is a proxy: `is_callable`
+        // answers `true` for every proxy without asking what it wraps, so a `new Proxy({}, {})`
+        // -- an ordinary object by every rule the language has, `typeof` included -- would cross
+        // the boundary as a callable and come back a wrapped function. That is exactly the leak
+        // this check exists to stop, so the question asked here is the one `typeof` asks: it
+        // follows a proxy to its target, and a proxy over a plain object is not callable.
+        if value.type_of() != "function" {
             return Err(ExecutionError::TypeErrorMessage {
                 message: format!(
                     "cannot pass a non-callable object ({}) across a ShadowRealm boundary",
