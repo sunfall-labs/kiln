@@ -15605,12 +15605,28 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * per code unit. They work in code units rather than scalars, which is exactly why
              * they were replaced and exactly why they cannot be written in terms of the four
              * below. */
-            kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
+            kiln_value argument = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_value subject;
             kiln_text built = {NULL, 0, 0};
             uint16_t *units = NULL;
             size_t count = 0;
             size_t at = 0;
             int failed = 0;
+            /* `ToString` of the argument, which for an object is a call the program wrote and
+             * may therefore throw -- `escape({toString() { throw e; }})` raises `e`.
+             * `kiln_c99_text` is pure, so on its own it read every object as
+             * "[object Object]" and swallowed the throw. */
+            if (kiln_c99_is_reference(argument)) {
+                int reduced = kiln_c99_to_primitive(host, argument, 1, &argument, depth, thrown);
+                if (reduced != KILN_C99_OK) {
+                    return reduced;
+                }
+            }
+            if (argument.tag == KILN_VALUE_SYMBOL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert a Symbol value to a string");
+            }
+            subject = kiln_c99_text(argument);
             if (subject.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
