@@ -5058,8 +5058,11 @@ pub struct Closure {
     /// The enclosing function's `arguments`, captured for an arrow.
     ///
     /// An arrow has no `arguments` of its own; it sees the enclosing function's, from where it
-    /// was written. Captured alongside `this` because the rule is the same one.
-    pub captured_arguments: Option<Vec<Value>>,
+    /// was written. Captured alongside `this` because the rule is the same one -- and captured as
+    /// the *object*, not as a copy of the list: `arguments` names one object per call, and an
+    /// arrow that copied it would hand back something the enclosing function could not see a
+    /// write to.
+    pub captured_arguments: Option<Value>,
     /// `new.target` captured where the closure was written, for an arrow function.
     ///
     /// An arrow has no `new.target` of its own for the same reason it has no `this`.
@@ -8511,6 +8514,8 @@ struct Frame {
     this_value: Value,
     /// What this frame was called with, so `super(...arguments)` can forward them.
     arguments: Vec<Value>,
+    /// The `arguments` object this frame handed out, restored with the frame.
+    arguments_object: Option<Value>,
     /// The instance being built, when this frame is a `new` call.
     ///
     /// Held here rather than in a parallel stack so that `Return` can decide locally: a
@@ -8553,6 +8558,14 @@ struct Vm<'host, H: HostOps + ?Sized> {
     handlers: Vec<Handler>,
     /// The arguments the running frame received.
     arguments: Vec<Value>,
+    /// The `arguments` object the running frame has handed out, if it has asked for one.
+    ///
+    /// One object per call, built on first mention. `arguments` is a single object in the
+    /// language, and every read of the name produces it again: `arguments[0] = 1` is visible to
+    /// the next read, and `arguments === arguments` is true. A fresh array per read made both
+    /// false -- a write went into an array nothing else could reach, and every definition made
+    /// on it was discarded by the statement after it.
+    arguments_object: Option<Value>,
     /// One prototype per error kind for this execution, created on first use.
     ///
     /// One object per run per kind, because `e instanceof TypeError` compares it by identity:
@@ -8782,6 +8795,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             suspended: false,
             handlers: Vec::new(),
             arguments: Vec::new(),
+            arguments_object: None,
             error_prototypes: [const { None }; ErrorKind::ALL.len()],
             async_context: AsyncContext::default(),
             this_value: Value::Undefined,
@@ -13013,8 +13027,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.unwind(thrown, current)?;
                 }
                 Instruction::LoadArguments => {
-                    let arguments = self.visible_arguments();
-                    self.stack.push(Value::Array(ArrayData::new(arguments)));
+                    let arguments = self.arguments_object();
+                    self.stack.push(arguments);
                 }
                 // A rest parameter is always the *call's* arguments, arrow or not.
                 Instruction::RestArguments(from) => {
@@ -13931,6 +13945,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.this_value = frame.this_value;
                     self.new_target = frame.new_target;
                     self.arguments = frame.arguments;
+                    self.arguments_object = frame.arguments_object;
                     self.global_base = frame.global_base;
                     self.instruction = frame.instruction;
                     if let Some(instance) = frame.constructing
@@ -14007,6 +14022,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 self.this_value = frame.this_value;
                 self.new_target = frame.new_target;
                 self.arguments = frame.arguments;
+                self.arguments_object = frame.arguments_object;
                 self.global_base = frame.global_base;
                 self.instruction = frame.instruction;
             }
@@ -14024,6 +14040,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.this_value = frame.this_value;
             self.new_target = frame.new_target;
             self.arguments = frame.arguments;
+            self.arguments_object = frame.arguments_object;
             self.global_base = frame.global_base;
             self.instruction = frame.instruction;
         }
@@ -14135,6 +14152,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             this_value: std::mem::replace(&mut self.this_value, this_value.clone()),
             new_target: std::mem::replace(&mut self.new_target, new_target.clone()),
             arguments: std::mem::replace(&mut self.arguments, arguments.to_vec()),
+            arguments_object: self.arguments_object.take(),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, std::mem::take(locals)),
             // The binding reads the module scope its own function was written in, which is the
@@ -14257,6 +14275,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
+            arguments_object: self.arguments_object.take(),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
             // A generator body belongs to the module that wrote it, and so does the module scope
@@ -14573,6 +14592,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.this_value = frame.this_value;
         self.new_target = frame.new_target;
         self.arguments = frame.arguments;
+        self.arguments_object = frame.arguments_object;
         self.global_base = frame.global_base;
         self.instruction = frame.instruction;
     }
@@ -24516,15 +24536,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// An arrow has none of its own and sees the enclosing function's, which it captured when it
     /// was created. Everything else sees the call it is in.
-    fn visible_arguments(&self) -> Vec<Value> {
-        match self
+    /// The one `arguments` object this call hands out, built on first mention.
+    ///
+    /// Cached rather than rebuilt because `arguments` names an *object*: a write through it has
+    /// to be visible to the next read, and `Object.defineProperty(arguments, "0", …)` has to
+    /// survive the statement that made it. A fresh array per mention lost both silently, and
+    /// `arguments === arguments` was false.
+    ///
+    /// An arrow has none of its own and answers with the one it captured, which is the enclosing
+    /// call's -- the same object that call hands out, so a write through either is seen by both.
+    fn arguments_object(&mut self) -> Value {
+        if let Some(captured) = self
             .function
             .as_ref()
-            .and_then(|closure| closure.captured_arguments.as_ref())
+            .and_then(|closure| closure.captured_arguments.clone())
         {
-            Some(captured) => captured.clone(),
-            None => self.arguments.clone(),
+            return captured;
         }
+        if let Some(existing) = &self.arguments_object {
+            return existing.clone();
+        }
+        let built = Value::Array(ArrayData::new(self.arguments.clone()));
+        self.arguments_object = Some(built.clone());
+        built
     }
 
     /// The call stack as names, innermost first, at the moment this error object was built.
@@ -25848,6 +25882,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// Build a closure, resolving each upvalue descriptor against the frame creating it.
     fn make_closure(&mut self, function: u32) -> Result<Rc<Closure>, ExecutionError> {
+        // What `arguments` means *here*, which for an arrow defined inside another arrow is what
+        // that one captured -- not its own call's list, which is its rest parameter's business
+        // and nothing else's. Taken before the proto below, because building it reads the frame
+        // and only an arrow needs it at all.
+        let arrow = self
+            .program
+            .functions
+            .get(function as usize)
+            .ok_or(ExecutionError::UnknownFunction { function })?
+            .arrow;
+        let captured_arguments = arrow.then(|| self.arguments_object());
         let Some(proto) = self.program.functions.get(function as usize) else {
             return Err(ExecutionError::UnknownFunction { function });
         };
@@ -25891,14 +25936,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             program: Rc::clone(&self.program),
             strictness: Rc::clone(&self.strictness),
             captured_new_target: proto.arrow.then(|| self.new_target.clone()),
-            captured_arguments: if proto.arrow {
-                // What `arguments` means *here*, which for an arrow defined inside another
-                // arrow is what that one captured -- not its own call's list, which is its rest
-                // parameter's business and nothing else's.
-                Some(self.visible_arguments())
-            } else {
-                None
-            },
+            captured_arguments,
             prototype: RefCell::new(None),
             properties: RefCell::new(ObjectData::default()),
         });
@@ -30427,6 +30465,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             this_value: std::mem::replace(&mut self.this_value, entering),
             new_target: std::mem::replace(&mut self.new_target, target),
             arguments: std::mem::replace(&mut self.arguments, received),
+            arguments_object: self.arguments_object.take(),
             constructing,
             locals: std::mem::replace(&mut self.locals, locals),
             // Inherited: a called function reads the same module bindings its caller does.
@@ -30523,6 +30562,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             this_value: std::mem::replace(&mut self.this_value, this_value),
             new_target: std::mem::replace(&mut self.new_target, new_target),
             arguments: std::mem::replace(&mut self.arguments, arguments),
+            arguments_object: self.arguments_object.take(),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
             global_base: self.global_base,
@@ -30766,6 +30806,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             this_value: std::mem::replace(&mut self.this_value, Value::Undefined),
             new_target: std::mem::replace(&mut self.new_target, Value::Undefined),
             arguments: std::mem::take(&mut self.arguments),
+            arguments_object: self.arguments_object.take(),
             constructing: None,
             locals: std::mem::replace(&mut self.locals, locals),
             global_base: self.global_base,

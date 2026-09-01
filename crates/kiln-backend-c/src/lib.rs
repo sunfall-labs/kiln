@@ -5951,13 +5951,25 @@ static const kiln_value *kiln_c99_frame_args;
 static size_t kiln_c99_frame_argc;
 static kiln_value kiln_c99_captured_arguments;
 static int kiln_c99_frame_is_arrow;
+/* The one `arguments` object this call has handed out, built on first mention and undefined
+ * until then.
+ *
+ * `arguments` names a single object per call, not a snapshot: `arguments[0] = 1` has to be
+ * visible to the next read of `arguments`, and `arguments === arguments` is true. Materialising
+ * a fresh array per mention made both false, and every definition made on one was discarded by
+ * the statement after it. Still built lazily, so a call nothing asks it of pays nothing. */
+static kiln_value kiln_c99_frame_arguments_object;
 
-/* The `arguments` this frame can see: an arrow's captured list, or this call's own. */
+/* The `arguments` this frame can see: an arrow's captured object, or this call's own. */
 static int kiln_c99_visible_arguments(kiln_value *out) {
     size_t at;
     int status;
     if (kiln_c99_frame_is_arrow) {
         *out = kiln_c99_captured_arguments;
+        return KILN_C99_OK;
+    }
+    if (kiln_c99_frame_arguments_object.tag == KILN_VALUE_ARRAY) {
+        *out = kiln_c99_frame_arguments_object;
         return KILN_C99_OK;
     }
     status = kiln_c99_new_array(out);
@@ -5970,6 +5982,7 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
             return status;
         }
     }
+    kiln_c99_frame_arguments_object = *out;
     return KILN_C99_OK;
 }
 
@@ -7297,6 +7310,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     const kiln_value *saved_args = kiln_c99_frame_args;
     size_t saved_argc = kiln_c99_frame_argc;
     kiln_value saved_captured = kiln_c99_captured_arguments;
+    kiln_value saved_arguments_object = kiln_c99_frame_arguments_object;
     int saved_is_arrow = kiln_c99_frame_is_arrow;
     int saved_diagnostic_depth = kiln_c99_diagnostic_active_depth;
     int status;
@@ -7305,6 +7319,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
             closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
     }
     kiln_c99_frame_is_arrow = closure->arrow;
+    kiln_c99_frame_arguments_object = kiln_c99_undefined();
     if (closure->arrow) {
         kiln_c99_captured_arguments = closure->captured_arguments;
     } else {
@@ -7335,6 +7350,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     kiln_c99_frame_args = saved_args;
     kiln_c99_frame_argc = saved_argc;
     kiln_c99_captured_arguments = saved_captured;
+    kiln_c99_frame_arguments_object = saved_arguments_object;
     kiln_c99_frame_is_arrow = saved_is_arrow;
     kiln_c99_diagnostic_active_depth = saved_diagnostic_depth;
     return status;
@@ -19925,6 +19941,44 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     if (status != KILN_C99_OK) {
         return status;
     }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        /* An array index is an element, not a name. The store below holds `a.total = 1`; putting
+         * a definition of `"0"` there recorded a property nothing reads, so
+         * `Object.defineProperty(a, "0", { value: 10 })` returned the array unchanged and
+         * `a[0]` still answered what it had -- a silent wrong answer, and the shape
+         * `arguments` reaches through every ES5 test that redefines a parameter slot.
+         *
+         * Only the definition an element can actually carry is accepted. There is no per-element
+         * attribute table here, so a definition that would make one non-writable, hidden or
+         * non-configurable, or turn it into an accessor, is refused by name rather than written
+         * as an ordinary element that lies about its own flags. */
+        double at = kiln_c99_key_index(key, key_len);
+        if (at >= 0.0) {
+            kiln_array *array = kiln_c99_array_of(target);
+            size_t slot = (size_t)at;
+            size_t fill;
+            if (has_getter || has_setter || !has_value || array->frozen ||
+                (has_writable && !kiln_c99_truthy(writable)) ||
+                (has_enumerable && !kiln_c99_truthy(enumerable)) ||
+                (has_configurable && !kiln_c99_truthy(configurable))) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
+                                      sizeof *array->elements);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* Growing leaves holes, which read as undefined and are not the same thing. */
+            for (fill = array->count; fill < slot; ++fill) {
+                array->elements[fill] = kiln_c99_hole();
+            }
+            array->elements[slot] = value;
+            if (slot + 1 > array->count) {
+                array->count = slot + 1;
+            }
+            return KILN_C99_OK;
+        }
+    }
     status = kiln_c99_definition_store(target, &store);
     if (status != KILN_C99_OK) {
         return status;
@@ -23731,6 +23785,7 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_frame_args", C99StateOwner::Frame),
     ("kiln_c99_frame_argc", C99StateOwner::Frame),
     ("kiln_c99_captured_arguments", C99StateOwner::Frame),
+    ("kiln_c99_frame_arguments_object", C99StateOwner::Frame),
     ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
     ("kiln_c99_symbols", C99StateOwner::Realm),
     ("kiln_c99_symbol_count", C99StateOwner::Realm),
