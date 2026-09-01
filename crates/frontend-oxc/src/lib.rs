@@ -1675,7 +1675,7 @@ impl Lowerer<'_> {
     ) -> Result<kiln_hir::Class, String> {
         let mut constructor = None;
         let mut methods = Vec::new();
-        let mut fields = Vec::new();
+        let mut initialisers = Vec::new();
 
         for element in &class.body.body {
             let method = match element {
@@ -1699,15 +1699,34 @@ impl Lowerer<'_> {
                             kiln_hir::ObjectKey::Computed(_) => {}
                         }
                     }
-                    fields.push(kiln_hir::ClassField {
+                    initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
                         key,
                         value,
                         is_static: property.r#static,
-                    });
+                    }));
                     continue;
                 }
                 ClassElement::MethodDefinition(method) => method,
-                ClassElement::StaticBlock(_) => return Err("class static block".into()),
+                ClassElement::StaticBlock(block) => {
+                    initialisers.push(kiln_hir::ClassInitialiser::StaticBlock(HirFunction {
+                        // Anonymous, and it binds no name: nothing can refer to a static block,
+                        // so a name here would only show up in a stack frame that should read
+                        // as the class body it is.
+                        name: None,
+                        binds_own_name: false,
+                        arrow: false,
+                        generator: false,
+                        asynchronous: false,
+                        parameters: Vec::new(),
+                        rest: None,
+                        body: self.statements(&block.body),
+                        // A class body is strict whatever encloses it, and the block is part of
+                        // the body.
+                        strict: true,
+                        span: span(block.span),
+                    }));
+                    continue;
+                }
                 ClassElement::AccessorProperty(_) => {
                     return Err("class accessor property".into());
                 }
@@ -1754,7 +1773,7 @@ impl Lowerer<'_> {
                 .map(|heritage| self.expression(&heritage.expression)),
             constructor,
             methods,
-            fields,
+            initialisers,
             span: statement_span,
         })
     }
@@ -2612,12 +2631,13 @@ mod tests {
     #[test]
     fn a_refused_class_names_the_member_that_refused_it() {
         // A class is refused whole, so every cause used to arrive as the wrapper "class
-        // expression" -- one bucket covering a static block, an async method and a computed key
-        // alike, and 2,294 guard-corpus cases behind it with nothing to rank them by. What is
+        // expression" -- one bucket covering an accessor property, an async method and a
+        // computed key alike, and 2,294 guard-corpus cases behind it with nothing to rank them
+        // by. (The static block that used to stand here lowers now.) What is
         // protected here is that the reported name describes the *member*, not the syntactic
         // position the class sat in. If a case here starts failing, the member was lowered:
         // delete the line.
-        let module = parse("module.js", "const value = class { static {} };");
+        let module = parse("module.js", "const value = class { accessor x = 1; };");
         let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
             panic!("expected a variable declaration");
         };
@@ -2627,15 +2647,15 @@ mod tests {
             .expect("fixture has an initializer");
         assert!(matches!(
             &initializer.kind,
-            HirExpressionKind::Unsupported { feature } if feature == "class static block"
+            HirExpressionKind::Unsupported { feature } if feature == "class accessor property"
         ));
 
         // The declaration form reports the same name: the two callers differ only in what they
         // wrap it in, which is what made them report two different useless ones.
-        let module = parse("module.js", "class Holder { static {} }");
+        let module = parse("module.js", "class Holder { accessor x = 1; }");
         assert!(matches!(
             &module.body[0].kind,
-            HirStatementKind::Unsupported { feature } if feature == "class static block"
+            HirStatementKind::Unsupported { feature } if feature == "class accessor property"
         ));
     }
 
