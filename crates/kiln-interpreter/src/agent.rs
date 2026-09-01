@@ -231,6 +231,31 @@ impl WaitOutcome {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Terminated;
 
+/// One entry on a cell's waiter list.
+///
+/// Both spellings of `Atomics.wait` share one list, because the specification has one: a `notify`
+/// takes the oldest waiters whichever kind they are, and `waiterlist-order-of-operations-is-fifo`
+/// checks it. The synchronous kind is an agent that has stopped; the asynchronous kind is a
+/// promise in an agent that has not.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Waiter {
+    Sync(usize),
+    Async { agent: usize, ticket: u64 },
+}
+
+/// An `Atomics.waitAsync` that has not settled.
+///
+/// The promise itself stays in the agent that made it -- it is `Rc`-based and cannot travel --
+/// so the scheduler holds only the ticket that names it, and the agent matches the two up when
+/// it next runs.
+#[derive(Clone, Copy, Debug)]
+struct AsyncWait {
+    ticket: u64,
+    agent: usize,
+    address: (usize, usize),
+    until: Option<u64>,
+}
+
 /// What an agent is doing when it is not the one running.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum State {
@@ -245,6 +270,9 @@ enum State {
     },
     /// `$262.agent.receiveBroadcast`, until somebody broadcasts.
     AwaitingBroadcast,
+    /// The agent's realm has no work left, but an `Atomics.waitAsync` it made has not settled.
+    /// Its own deadline is on the wait rather than on the agent, so this state has none.
+    AwaitingAsync,
     /// `$262.agent.broadcast`, until every started agent has taken its copy.
     Broadcasting,
     /// The agent's script and event loop are finished.
@@ -271,9 +299,15 @@ struct Sched {
     turn: usize,
     states: Vec<State>,
     outcomes: Vec<WaitOutcome>,
-    /// Agents inside `Atomics.wait`, oldest first. The specification wakes a waiter list in
-    /// arrival order and `waiterlist-order-of-operations-is-fifo.js` checks it.
-    waiters: VecDeque<usize>,
+    /// Everything inside `Atomics.wait` or `Atomics.waitAsync`, oldest first. The specification
+    /// wakes a waiter list in arrival order and `waiterlist-order-of-operations-is-fifo.js`
+    /// checks it.
+    waiters: VecDeque<Waiter>,
+    /// The unsettled `waitAsync` records, by ticket.
+    async_waits: Vec<AsyncWait>,
+    /// Settled `waitAsync` tickets each agent has not yet turned into a resolved promise.
+    async_ready: Vec<VecDeque<(u64, WaitOutcome)>>,
+    next_ticket: u64,
     /// `$262.agent.report`, in the order the agents reported. One queue, because Test262's
     /// `getReport` is one queue.
     reports: VecDeque<String>,
@@ -299,7 +333,40 @@ impl Sched {
     }
 
     fn earliest_deadline(&self) -> Option<u64> {
-        self.states.iter().filter_map(|s| s.deadline()).min()
+        self.states
+            .iter()
+            .filter_map(|s| s.deadline())
+            .chain(self.async_waits.iter().filter_map(|wait| wait.until))
+            .min()
+    }
+
+    /// An agent parked with nothing left but an unsettled `waitAsync` has something to do again
+    /// the moment one of them settles.
+    fn wake_if_async_ready(&mut self, agent: usize) {
+        if self.states[agent] == State::AwaitingAsync && !self.async_ready[agent].is_empty() {
+            self.states[agent] = State::Runnable;
+        }
+    }
+
+    /// Settle one asynchronous waiter, and let its agent know.
+    fn settle_async(&mut self, ticket: u64, outcome: WaitOutcome) {
+        let Some(position) = self
+            .async_waits
+            .iter()
+            .position(|wait| wait.ticket == ticket)
+        else {
+            return;
+        };
+        let wait = self.async_waits.remove(position);
+        self.waiters.retain(|waiter| {
+            *waiter
+                != Waiter::Async {
+                    agent: wait.agent,
+                    ticket,
+                }
+        });
+        self.async_ready[wait.agent].push_back((ticket, outcome));
+        self.wake_if_async_ready(wait.agent);
     }
 
     /// Move every agent whose deadline has arrived back to runnable.
@@ -314,10 +381,19 @@ impl Sched {
                 } if until <= instant => {
                     self.outcomes[id] = WaitOutcome::TimedOut;
                     self.states[id] = State::Runnable;
-                    self.waiters.retain(|&waiter| waiter != id);
+                    self.waiters.retain(|waiter| *waiter != Waiter::Sync(id));
                 }
                 _ => {}
             }
+        }
+        let due: Vec<u64> = self
+            .async_waits
+            .iter()
+            .filter(|wait| wait.until.is_some_and(|until| until <= instant))
+            .map(|wait| wait.ticket)
+            .collect();
+        for ticket in due {
+            self.settle_async(ticket, WaitOutcome::TimedOut);
         }
     }
 
@@ -344,6 +420,11 @@ impl Sched {
                 }
                 _ => {}
             }
+        }
+        let stranded: Vec<u64> = self.async_waits.iter().map(|wait| wait.ticket).collect();
+        for ticket in stranded {
+            self.settle_async(ticket, WaitOutcome::TimedOut);
+            released = true;
         }
         self.waiters.clear();
         if !released {
@@ -411,9 +492,15 @@ impl Sched {
 pub(crate) struct AgentGroup {
     sched: Mutex<Sched>,
     baton: Condvar,
-    /// Read without the lock on every quantum boundary, so a program with one agent pays a
-    /// relaxed load and nothing else. False until `$262.agent.start` has actually started one.
-    concurrent: AtomicBool,
+    /// Whether the dispatch loop's quantum boundary has anything to do.
+    ///
+    /// Read without the lock on every quantum boundary, so a program that never asked for
+    /// anything concurrent pays a relaxed load and nothing else. Set by `$262.agent.start`, and
+    /// also by `Atomics.waitAsync` -- a single agent that waits asynchronously still needs the
+    /// scheduler's clock to move, and the only thing that can move it is a quantum boundary in
+    /// that same agent. Never cleared: a program that has once needed the scheduler goes on
+    /// paying one comparison per quantum, which is nothing next to what it asked for.
+    scheduled: AtomicBool,
     execution: ExecutionCapabilities,
     limits: ExecutionLimits,
     threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
@@ -429,13 +516,16 @@ impl AgentGroup {
                 states: vec![State::Runnable],
                 outcomes: vec![WaitOutcome::TimedOut],
                 waiters: VecDeque::new(),
+                async_waits: Vec::new(),
+                async_ready: vec![VecDeque::new()],
+                next_ticket: 1,
                 reports: VecDeque::new(),
                 mailboxes: vec![None],
                 spun: 0,
                 terminating: false,
             }),
             baton: Condvar::new(),
-            concurrent: AtomicBool::new(false),
+            scheduled: AtomicBool::new(false),
             execution,
             limits,
             threads: Mutex::new(Vec::new()),
@@ -443,8 +533,8 @@ impl AgentGroup {
     }
 
     /// Whether the quantum check in the interpreter's dispatch loop has anything to do.
-    pub(crate) fn concurrent(&self) -> bool {
-        self.concurrent.load(Ordering::Relaxed)
+    pub(crate) fn scheduled(&self) -> bool {
+        self.scheduled.load(Ordering::Relaxed)
     }
 
     /// The virtual clock, in milliseconds -- `$262.agent.monotonicNow`.
@@ -526,7 +616,7 @@ impl AgentGroup {
             None
         };
         guard.outcomes[me] = WaitOutcome::TimedOut;
-        guard.waiters.push_back(me);
+        guard.waiters.push_back(Waiter::Sync(me));
         guard.states[me] = State::Waiting { address, until };
         guard.schedule(me);
         self.baton.notify_all();
@@ -540,25 +630,91 @@ impl AgentGroup {
     /// every run because the schedule that put them there is.
     pub(crate) fn notify(&self, address: (usize, usize), count: usize) -> usize {
         let mut guard = lock(&self.sched);
-        let mut woken = Vec::new();
-        for &id in &guard.waiters {
-            if woken.len() >= count {
+        let mut chosen = Vec::new();
+        for &waiter in &guard.waiters {
+            if chosen.len() >= count {
                 break;
             }
-            if matches!(guard.states[id], State::Waiting { address: at, .. } if at == address) {
-                woken.push(id);
+            let waiting_here = match waiter {
+                Waiter::Sync(id) => {
+                    matches!(guard.states[id], State::Waiting { address: at, .. } if at == address)
+                }
+                Waiter::Async { ticket, .. } => guard
+                    .async_waits
+                    .iter()
+                    .any(|wait| wait.ticket == ticket && wait.address == address),
+            };
+            if waiting_here {
+                chosen.push(waiter);
             }
         }
-        for &id in &woken {
-            guard.outcomes[id] = WaitOutcome::Woken;
-            guard.states[id] = State::Runnable;
-            guard.waiters.retain(|&waiter| waiter != id);
+        for waiter in &chosen {
+            match *waiter {
+                Waiter::Sync(id) => {
+                    guard.outcomes[id] = WaitOutcome::Woken;
+                    guard.states[id] = State::Runnable;
+                    guard.waiters.retain(|held| *held != Waiter::Sync(id));
+                }
+                Waiter::Async { ticket, .. } => {
+                    guard.settle_async(ticket, WaitOutcome::Woken);
+                }
+            }
         }
-        if !woken.is_empty() {
+        if !chosen.is_empty() {
             guard.spun = 0;
             self.baton.notify_all();
         }
-        woken.len()
+        chosen.len()
+    }
+
+    /// Register an `Atomics.waitAsync` and answer with the ticket that names its promise.
+    ///
+    /// Nothing blocks: the agent goes on running, and finds out how the wait ended through
+    /// [`Self::take_async_settled`] the next time it looks.
+    pub(crate) fn wait_async(&self, me: usize, address: (usize, usize), timeout_ms: f64) -> u64 {
+        let mut guard = lock(&self.sched);
+        let ticket = guard.next_ticket;
+        guard.next_ticket += 1;
+        let until = if timeout_ms.is_finite() {
+            Some(guard.now_us.saturating_add(microseconds(timeout_ms)))
+        } else {
+            None
+        };
+        guard.async_waits.push(AsyncWait {
+            ticket,
+            agent: me,
+            address,
+            until,
+        });
+        guard.waiters.push_back(Waiter::Async { agent: me, ticket });
+        drop(guard);
+        // Even with one agent: nothing else will advance the clock this wait's deadline is on.
+        self.scheduled.store(true, Ordering::Relaxed);
+        ticket
+    }
+
+    /// The `waitAsync` tickets that have settled since this agent last asked.
+    pub(crate) fn take_async_settled(&self, me: usize) -> Vec<(u64, WaitOutcome)> {
+        let mut guard = lock(&self.sched);
+        guard.async_ready[me].drain(..).collect()
+    }
+
+    /// Park until one of this agent's `waitAsync` promises can settle.
+    ///
+    /// The event loop calls this when its realm has run out of work but a wait has not ended:
+    /// returning instead would finish the program with a promise nobody could ever settle, which
+    /// is what an engine with no second agent had to do.
+    pub(crate) fn await_async(&self, me: usize) -> Result<(), Terminated> {
+        {
+            let guard = lock(&self.sched);
+            if !guard.async_ready[me].is_empty() {
+                return Ok(());
+            }
+            if guard.async_waits.iter().all(|wait| wait.agent != me) {
+                return Ok(());
+            }
+        }
+        self.block(me, State::AwaitingAsync)
     }
 
     /// `$262.agent.report(text)`.
@@ -666,6 +822,7 @@ impl AgentGroup {
             let id = guard.states.len();
             guard.states.push(State::Runnable);
             guard.outcomes.push(WaitOutcome::TimedOut);
+            guard.async_ready.push(VecDeque::new());
             guard.mailboxes.push(None);
             id
         };
@@ -682,7 +839,7 @@ impl AgentGroup {
                 message: format!("kiln: could not start an agent: {error}"),
             })?;
         lock(&self.threads).push(handle);
-        self.concurrent.store(true, Ordering::Relaxed);
+        self.scheduled.store(true, Ordering::Relaxed);
         Ok(())
     }
 
