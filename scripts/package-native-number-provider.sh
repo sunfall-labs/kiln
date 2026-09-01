@@ -137,7 +137,7 @@ fi
 # Everything upstream of here is derived from the same macro registry, so the manifest and the
 # resolver's `PROVIDER_EXPORTS` agree with each other by construction and neither of them has ever
 # looked at the archive. `regexp`, `bigint` and `temporal` are off by default, so an archive built
-# without those features is missing 20 of the 65 exports and still passes every check the compiler
+# without those features is missing 20 of the 68 exports and still passes every check the compiler
 # makes -- the failure surfaces much later as `Undefined symbols for architecture arm64` from the
 # linker of whatever program happened to be built next, naming a symbol rather than a cause.
 KILN_PROVIDER_NM="${NM:-nm}"

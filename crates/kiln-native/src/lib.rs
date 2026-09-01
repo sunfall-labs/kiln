@@ -8098,7 +8098,10 @@ int main(void) {{
             .canonicalize()
             .expect("workspace root");
         let package_root = workspace.join("conformance/server/packages");
-        if !package_root.join("node_modules/fastify/fastify.js").is_file() {
+        if !package_root
+            .join("node_modules/fastify/fastify.js")
+            .is_file()
+        {
             return;
         }
         let entry = package_root.join(format!(
@@ -8134,7 +8137,12 @@ int main(void) {{
         fs::remove_file(&entry).expect("remove Fastify constructor probe");
         let Some(report) = result else { return };
         let report = report.expect("Fastify constructor runs natively");
-        assert_eq!(report.exit_code, Some(0), "stderr={}", String::from_utf8_lossy(&report.stderr));
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stderr={}",
+            String::from_utf8_lossy(&report.stderr)
+        );
         assert_eq!(report.stdout, b"function\n");
     }
 
