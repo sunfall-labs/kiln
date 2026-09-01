@@ -687,27 +687,64 @@ fn sync_project_sources_with_override(
     // One `realpath` for the root instead of one per file, and the reads run concurrently. Both
     // were measured on the 641-file workload: the warm no-op goes from ~34.8 ms to ~14.5 ms, and
     // `read_all` keeps the walk's order so `FileId` assignment stays reproducible.
-    let mut texts = sources::read_all(root, &walk.files, source_override)?;
+    // The walk's digests come from `stat` where it can answer, so an unchanged project is not
+    // re-read to be re-hashed. Text is fetched only where it is actually consumed: the reachable
+    // closure below, and whatever the daemon says it is missing.
+    let walked = sources::digest_all(root, &walk.files, source_override)?;
+    let mut texts: Vec<(String, String)> = Vec::new();
     let (resolution_entries, node_formats) = if let Some((entry, _)) = source_override {
+        // Starting from an empty snapshot makes this read the entry and its closure and nothing
+        // else; every module it reaches is absent from `texts` and so is read on the same terms
+        // the entry always was.
         sources::include_reachable_dependencies(root, entry, &mut texts, node)?
     } else {
         (Vec::new(), Vec::new())
     };
-    let manifest = texts
-        .iter()
-        .map(|(path, text)| (path.clone(), source_digest(text)))
-        .collect::<SourceManifest>();
-    let synced_paths = texts
+    // The caller's snapshot is authoritative for its own path. The closure above reads the entry
+    // from disk when the walk did not volunteer it, so a save landing between the two would
+    // otherwise advertise bytes the caller never saw -- which is the one thing the override
+    // exists to prevent.
+    if let Some((override_path, override_text)) = source_override {
+        match texts.iter_mut().find(|(path, _)| path == override_path) {
+            Some((_, text)) => *text = override_text.to_owned(),
+            None => texts.push((override_path.to_owned(), override_text.to_owned())),
+        }
+    }
+    // Walk order first, then anything the closure added. `FileId` assignment keys on position,
+    // so this order is part of the contract and a map's ordering is not a substitute for it.
+    let walked_paths = walked
         .iter()
         .map(|(path, _)| path.clone())
         .collect::<HashSet<_>>();
-    let files = texts
+    let mut files = walked
         .iter()
-        .map(|(path, text)| SourceHash {
+        .map(|(path, hash)| SourceHash {
             path: path.clone(),
-            hash: source_digest(text),
+            hash: *hash,
         })
         .collect::<Vec<_>>();
+    for (path, text) in &texts {
+        if !walked_paths.contains(path) {
+            files.push(SourceHash {
+                path: path.clone(),
+                hash: source_digest(text),
+            });
+        }
+    }
+    // The override's own digest must come from the snapshot, not from whatever the walk hashed.
+    if let Some((override_path, override_text)) = source_override
+        && let Some(entry) = files.iter_mut().find(|file| file.path == override_path)
+    {
+        entry.hash = source_digest(override_text);
+    }
+    let manifest = files
+        .iter()
+        .map(|file| (file.path.clone(), file.hash))
+        .collect::<SourceManifest>();
+    let synced_paths = files
+        .iter()
+        .map(|file| file.path.clone())
+        .collect::<HashSet<_>>();
     // The resolver and every synchronized source use the canonical project root. Pin that same
     // spelling in the resolution map: on macOS `/var` names `/private/var`, and retaining the
     // caller's alias would make the daemon reject its own otherwise-identical authority root.
@@ -724,10 +761,19 @@ fn sync_project_sources_with_override(
         .map_err(|error| Error::Protocol(format!("resolution map: {error:?}")))?;
         let plan = backend.begin_sync(files.clone(), resolutions)?;
         let needed = plan.paths.into_iter().collect::<HashSet<_>>();
-        for (path, text) in &texts {
-            if needed.contains(path) {
-                backend.stage_source(plan.sync_id, path.clone(), text.clone())?;
-            }
+        for path in &needed {
+            // A path the closure already read is staged from that snapshot; anything else the
+            // daemon is missing is read now, which is the only place a walked file is read at all.
+            let text = match texts.iter().find(|(known, _)| known == path) {
+                Some((_, text)) => text.clone(),
+                None => match source_override {
+                    Some((override_path, override_text)) if path == override_path => {
+                        override_text.to_owned()
+                    }
+                    _ => read_source(std::path::Path::new(path))?,
+                },
+            };
+            backend.stage_source(plan.sync_id, path.clone(), text)?;
         }
         match backend.commit_sync(plan.sync_id)? {
             SyncCommit::Synced(source_view) => {

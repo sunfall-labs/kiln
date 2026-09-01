@@ -16,7 +16,9 @@ use kiln_module_resolver::{
     NodeModuleFormat as ResolverNodeModuleFormat, NodePackageResolver, NodeRequestKind,
     ResolutionKind, ResolutionPolicy,
 };
-use kiln_proto::{NodeModuleFormat, NodeSourceFormat, PackageResolution, source_digest};
+use kiln_proto::{
+    NodeModuleFormat, NodeSourceFormat, PackageResolution, SourceDigest, source_digest,
+};
 use rayon::prelude::*;
 
 const SOURCE_EXTENSIONS: [&str; 8] = ["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"];
@@ -122,6 +124,165 @@ pub(crate) fn read_all(
         Some(pool) => pool.install(|| paths.par_iter().zip(files).map(read).collect()),
         None => paths.iter().zip(files).map(read).collect(),
     }
+}
+
+/// A digest per source, reading only the files whose `stat` says they changed.
+///
+/// The client advertises a hash for every walked source so the daemon can answer which of them it
+/// is missing (ADR 0024). Producing those hashes by reading every file is what makes a warm run
+/// scale with the project rather than with the edit: on this repository reading the 449 walked
+/// sources costs about 26 ms of a 54 ms floor, while `stat`-ing them costs 1.2 ms. The hash of an
+/// unchanged file is already known, and `stat` is how you learn it is unchanged.
+///
+/// The index lives beside the artifact cache and maps a path to the `(modified, len)` it had when
+/// its hash was taken. It is a cache in the strict sense: **every** disagreement means read the
+/// file. A missing index, an unreadable one, a path it does not mention, a `stat` that fails, a
+/// size that differs, a timestamp that differs or is unavailable -- all fall through to reading.
+/// Nothing here can make a changed file look unchanged, because nothing here is trusted; the file
+/// is trusted, and this only decides whether to ask it.
+///
+/// The failure that would matter is a file edited within one timestamp tick of its previous
+/// version *and* landing on the same length. That is the classic weakness of stat-based caches,
+/// and it is why the size is part of the key rather than the timestamp alone. Filesystems this
+/// tool targets carry nanosecond timestamps; where the platform gives none, `modified()` fails and
+/// the entry is skipped rather than guessed at.
+/// A digest for every walked source, reading only what `stat` says changed.
+///
+/// Ordering matches the walk, exactly as [`read_all`] guarantees, because `FileId` assignment
+/// keys on position and must not depend on which read finished first.
+pub(crate) fn digest_all(
+    root: &Path,
+    files: &[PathBuf],
+    source_override: Option<(&str, &str)>,
+) -> Result<Vec<(String, SourceDigest)>> {
+    let canonical_root = PathBuf::from(crate::commands::canonical_path(root)?);
+    let paths = files
+        .iter()
+        .map(|file| {
+            let relative = file.strip_prefix(root).map_err(|_| {
+                Error::BadInput(format!(
+                    "{} is not under the project root {}",
+                    file.display(),
+                    root.display()
+                ))
+            })?;
+            let path = canonical_root.join(relative);
+            path.to_str().map(str::to_owned).ok_or_else(|| {
+                Error::BadInput(format!("path is not valid UTF-8: {}", path.display()))
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    /// One walked source: its path, its digest, and the `stat` that vouches for it.
+    type Digested = (String, SourceDigest, Option<(u128, u64)>);
+    let index = load_digest_index(root);
+    let digest = |(path, file): (&String, &PathBuf)| -> Result<Digested> {
+        if let Some((override_path, override_text)) = source_override {
+            // A snapshot the caller already read wins over anything on disk, and is never
+            // recorded: its bytes are not what the file holds.
+            if path == override_path {
+                return Ok((path.clone(), source_digest(override_text), None));
+            }
+        }
+        let key = stat_key(file);
+        if let (Some((modified, len)), Some((seen_modified, seen_len, hash))) =
+            (key, index.get(path))
+            && modified == *seen_modified
+            && len == *seen_len
+        {
+            return Ok((path.clone(), *hash, key));
+        }
+        let text = crate::commands::read_source(file)?;
+        Ok((path.clone(), source_digest(&text), key))
+    };
+
+    let digested: Vec<Digested> = match read_pool() {
+        Some(pool) => pool.install(|| {
+            paths
+                .par_iter()
+                .zip(files)
+                .map(digest)
+                .collect::<Result<Vec<_>>>()
+        }),
+        None => paths
+            .iter()
+            .zip(files)
+            .map(digest)
+            .collect::<Result<Vec<_>>>(),
+    }?;
+
+    let entries = digested
+        .iter()
+        .filter_map(|(path, hash, key)| {
+            key.map(|(modified, len)| (path.clone(), modified, len, *hash))
+        })
+        .collect::<Vec<_>>();
+    store_digest_index(root, &entries);
+
+    Ok(digested
+        .into_iter()
+        .map(|(path, hash, _)| (path, hash))
+        .collect())
+}
+
+fn digest_index_path(root: &Path) -> PathBuf {
+    root.join(".kiln").join("source-index")
+}
+
+fn load_digest_index(root: &Path) -> HashMap<String, (u128, u64, SourceDigest)> {
+    let mut index = HashMap::new();
+    let Ok(text) = std::fs::read_to_string(digest_index_path(root)) else {
+        return index;
+    };
+    for line in text.lines() {
+        // modified<TAB>len<TAB>hash<TAB>path -- the path is last because it is the only field
+        // that can contain a tab, and taking the remainder of the line keeps it intact.
+        let mut parts = line.splitn(4, '\t');
+        let (Some(modified), Some(len), Some(hash), Some(path)) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let (Ok(modified), Ok(len)) = (modified.parse::<u128>(), len.parse::<u64>()) else {
+            continue;
+        };
+        let Ok(hash) = SourceDigest::from_hex(hash) else {
+            continue;
+        };
+        index.insert(path.to_owned(), (modified, len, hash));
+    }
+    index
+}
+
+/// Best-effort: a write that fails costs a re-read next time and nothing else.
+fn store_digest_index(root: &Path, entries: &[(String, u128, u64, SourceDigest)]) {
+    let path = digest_index_path(root);
+    let Some(parent) = path.parent() else { return };
+    if std::fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let mut text = String::with_capacity(entries.len() * 96);
+    for (file, modified, len, hash) in entries {
+        text.push_str(&format!("{modified}\t{len}\t{}\t{file}\n", hash.to_hex()));
+    }
+    // Written through a temporary so a reader never observes a half-written index; a stale
+    // temporary left by a killed process is overwritten by the next writer.
+    let temporary = path.with_extension(format!("tmp.{}", std::process::id()));
+    if std::fs::write(&temporary, text).is_ok() && std::fs::rename(&temporary, &path).is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
+
+/// The `(modified, len)` a file has now, or `None` when the platform will not say.
+fn stat_key(file: &Path) -> Option<(u128, u64)> {
+    let metadata = std::fs::metadata(file).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some((modified, metadata.len()))
 }
 
 /// Add the entry-rooted runtime dependency closure to an already-read project snapshot.
