@@ -8036,6 +8036,60 @@ int main(void) {{
     }
 
     #[test]
+    #[ignore = "ADR 0036 migration gate: runtime callable stores are still per translation unit"]
+    fn native_runtime_callable_properties_are_realm_wide_across_modules() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-realm-callable-properties");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
+        fs::write(
+            root.path.join("writer.mjs"),
+            r#"import { Buffer } from "node:buffer";
+Buffer.realmMarker = { answer: 42 };
+export { Buffer };"#,
+        )
+        .expect("write callable-property producer");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { Buffer as written } from "./writer.mjs";
+import { Buffer as read } from "node:buffer";
+console.log(written === read, read.realmMarker.answer);"#,
+        )
+        .expect("write callable-property consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build realm callable-property graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping realm callable-property integration: no C compiler found");
+            return;
+        };
+        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native realm callable-property graph builds and runs");
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&report.stdout),
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(report.stdout, b"true 42\n");
+    }
+
+    #[test]
     fn native_commonjs_real_package_callable_executes_after_require() {
         use kiln_module_resolver::NodeRuntimeResolver;
 

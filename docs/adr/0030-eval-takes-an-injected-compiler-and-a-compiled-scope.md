@@ -2,8 +2,9 @@
 
 ## Status
 
-Accepted and implemented for the interpreter. The native backend refuses a direct `eval` and
-does not provide the indirect one.
+Accepted and implemented for the interpreter. The native backend refuses dynamic source until
+ADR 0036's realm-owned value kernel and injected native compiler service are implemented; it does
+not approximate direct eval, indirect eval, or `Function` through a second heap.
 
 ## Context
 
@@ -83,9 +84,12 @@ larger change than this one, and the failure is loud in the meantime.
 string literal is a directive and the frontend drops it. Both are gaps rather than wrong answers:
 nothing else can claim to be the result.
 
-**The native backend refuses a direct `eval`.** It ships without a compiler, and `LoadBuiltin` of
-`Builtin::Eval` is refused for the same reason. Neither is approximated, so the differential
-harness sees a refusal rather than a divergence.
+**The native backend refuses dynamic source.** It ships without a compiler service, and
+`LoadBuiltin` of `Builtin::Eval` is refused for the same reason. `Function` is present as a global
+constructor so feature detection remains structurally honest, but invoking it cannot produce a
+callable until ADR 0036's shared value-kernel handle exists. None of the three forms is interpreted
+in a second heap or compiled ambiently, so the differential harness sees a refusal rather than a
+plausible value with broken identity.
 
 **`kiln run` has no `eval` yet.** The compiler is installed by the conformance runner; the daemon's
 execution path needs the same one line beside its existing `parse_with_goal`/`compile` pair.
