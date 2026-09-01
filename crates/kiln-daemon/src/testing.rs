@@ -629,7 +629,7 @@ where
     for path in paths {
         let normalized = normalize_path(Path::new(path));
         let components = normalized.split('/').collect::<Vec<_>>();
-        let owned_builtin = runtime_builtin_for_path(&normalized);
+        let owned_builtins = runtime_builtins_for_path(&normalized);
         if matches!(
             normalized.as_str(),
             "Cargo.toml" | "Cargo.lock" | "docs/design.md"
@@ -644,15 +644,15 @@ where
         if components.first() == Some(&"crates")
             && let Some(compiler_crate) = components.get(1)
         {
-            if owned_builtin.is_none() {
+            if owned_builtins.is_empty() {
                 changes.add_compiler_crate(*compiler_crate);
             }
             if CONFORMANCE_SELECTION_CRATES.contains(compiler_crate) {
                 changes.force_full_run();
             }
         }
-        if let Some(module) = owned_builtin {
-            changes.add_builtin_module(module);
+        for module in owned_builtins {
+            changes.add_builtin_module(*module);
         }
         if let Some(index) = components
             .iter()
@@ -685,16 +685,23 @@ where
     changes
 }
 
-fn runtime_builtin_for_path(path: &str) -> Option<&'static str> {
-    const OWNED_BUILTINS: &[(&str, &str)] = &[
-        ("crates/kiln-runtime/src/node_http.rs", "node:http"),
-        ("crates/kiln-runtime/src/node_net.rs", "node:net"),
+fn runtime_builtins_for_path(path: &str) -> &'static [&'static str] {
+    const OWNED_BUILTINS: &[(&str, &[&str])] = &[
+        ("crates/kiln-runtime/src/node_http.rs", &["node:http"]),
+        ("crates/kiln-runtime/src/node_net.rs", &["node:net"]),
+        (
+            "crates/kiln-runtime/src/node_stream.rs",
+            &["node:stream", "node:http", "node:net"],
+        ),
     ];
-    OWNED_BUILTINS.iter().find_map(|(source, module)| {
-        path.strip_suffix(source)
-            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
-            .then_some(*module)
-    })
+    OWNED_BUILTINS
+        .iter()
+        .find_map(|(source, module)| {
+            path.strip_suffix(source)
+                .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
+                .then_some(*module)
+        })
+        .unwrap_or(&[])
 }
 
 /// Normalize a repository path lexically. Changed paths can come from git on a different host,
@@ -1575,6 +1582,59 @@ expected_stdout = "bundle\n"
                 test.has_reason(&kiln_test_selector::SelectionReason::ModifiedBuiltinModule(
                     "node:net".to_owned(),
                 ))
+            }));
+        }
+    }
+
+    #[test]
+    fn changed_node_stream_runtime_selects_only_stream_consumers() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let discovered = kiln_conformance::discover(&repo.join("conformance/node"))
+            .expect("pinned Node corpus is valid");
+        let metadata = discovered
+            .iter()
+            .map(|test| selector_metadata(test, TestMode::Node))
+            .collect::<Vec<_>>();
+        let owned_modules = ["node:stream", "node:http", "node:net"];
+        let expected = metadata
+            .iter()
+            .filter(|test| {
+                test.features
+                    .iter()
+                    .any(|feature| owned_modules.contains(&feature.as_str()))
+            })
+            .map(|test| test.id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(!expected.is_empty(), "fixture corpus has stream consumers");
+
+        for changed in [
+            "crates/kiln-runtime/src/node_stream.rs",
+            r"C:\checkout\kiln\crates\kiln-runtime\src\node_stream.rs",
+        ] {
+            let changes = change_set_for_tests(&[changed.to_owned()], discovered.iter());
+            assert!(!changes.full_run, "{changed}");
+            assert_eq!(
+                changes.builtin_modules,
+                owned_modules.into_iter().map(str::to_owned).collect(),
+                "{changed}"
+            );
+            assert!(
+                !changes.compiler_crates.contains("kiln-runtime"),
+                "{changed} should use the narrower builtin ownership tags"
+            );
+
+            let selection = select(&metadata, &changes, &FailureState::new());
+            let selected = selection
+                .ids()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(selected, expected, "{changed}");
+            assert!(selection.tests.iter().all(|test| {
+                owned_modules.iter().any(|module| {
+                    test.has_reason(&kiln_test_selector::SelectionReason::ModifiedBuiltinModule(
+                        (*module).to_owned(),
+                    ))
+                })
             }));
         }
     }
