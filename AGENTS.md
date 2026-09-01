@@ -81,7 +81,7 @@ produced by `scripts/package-native-number-provider.sh`.
 The consequence: a change to the provider ABI can leave the workspace build completely clean while
 every native link fails with `Undefined symbols for architecture arm64`. `regexp`, `bigint` and
 `temporal` are off by default, and dropping just `bigint` and `temporal` leaves an archive missing
-24 of the 68 exports — measured, by building one that way.
+24 of the 69 exports — measured, by building one that way.
 
 The packager now verifies the archive's symbol table against `PROVIDER_EXPORTS` and names the
 missing symbols, so this fails at packaging time with the fix in the message. If you are chasing

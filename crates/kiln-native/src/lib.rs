@@ -8036,7 +8036,6 @@ int main(void) {{
     }
 
     #[test]
-    #[ignore = "ADR 0036 migration gate: runtime callable stores are still per translation unit"]
     fn native_runtime_callable_properties_are_realm_wide_across_modules() {
         use kiln_module_resolver::NodeRuntimeResolver;
 

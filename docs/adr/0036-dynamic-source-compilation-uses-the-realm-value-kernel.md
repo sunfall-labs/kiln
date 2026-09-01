@@ -95,6 +95,12 @@ realm's local task. Compiler completion cannot call into the heap concurrently.
 
 ## Migration sequence
 
+The first migration slice is complete: runtime-provided callable property stores now use an
+allocation-free lookup-or-publish ABI. The realm owns the winning opaque store and its destructor,
+separately emitted modules observe one identity, and realm teardown releases it exactly once. This
+is deliberately a bridge into the kernel, not the kernel extraction itself; generated closures,
+ordinary objects and other per-unit state still follow the remaining sequence below.
+
 1. Extract the internal value/kernel declarations from emitted module source and give the shipped
    runtime an explicit private export list.
 2. Route allocation, property access, calls, diagnostics and realm queues through that kernel while

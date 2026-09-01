@@ -49,6 +49,7 @@ mod realm {
     use std::cell::{Cell, RefCell};
     use std::collections::{HashMap, HashSet};
     use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::ptr;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -582,6 +583,7 @@ mod realm {
         queued: Rc<RefCell<HashSet<RequestId>>>,
         symbols: RefCell<HashMap<Vec<u8>, u64>>,
         symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
+        callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
     }
@@ -599,6 +601,19 @@ mod realm {
         has_method: bool,
     }
 
+    struct CallableStore {
+        pointer: *mut c_void,
+        drop: DropWork,
+    }
+
+    impl Drop for CallableStore {
+        fn drop(&mut self) {
+            // SAFETY: publication transfers this pointer to the realm together with its matching
+            // destructor. A CallableStore is inserted at most once and dropped exactly once.
+            unsafe { (self.drop)(self.pointer) };
+        }
+    }
+
     impl NativeRealm {
         fn new() -> Result<Self, kiln_runtime::RuntimeBuildError> {
             Ok(Self {
@@ -612,6 +627,7 @@ mod realm {
                 queued: Rc::new(RefCell::new(HashSet::new())),
                 symbols: RefCell::new(HashMap::new()),
                 symbol_keys: RefCell::new(HashMap::new()),
+                callable_stores: RefCell::new(HashMap::new()),
                 entered: Cell::new(false),
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
             })
@@ -1640,6 +1656,49 @@ mod realm {
         })
     }
 
+    /// Returns the realm-wide opaque property store for one runtime-provided callable.
+    ///
+    /// A null candidate performs an allocation-free lookup. Otherwise the first candidate for
+    /// `(tag, code)` is published and its destructor transfers to the realm. Later callers
+    /// receive that exact pointer and retain ownership of their unpublished candidate. Rust
+    /// never dereferences this private C object, so layout stays behind the ABI while identity
+    /// and lifetime become realm-wide.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_callable_store(
+        tag: u32,
+        code: u64,
+        candidate: *mut c_void,
+        drop_candidate: Option<DropWork>,
+        out_store: *mut *mut c_void,
+    ) -> i32 {
+        ffi(|| {
+            if out_store.is_null() || (candidate.is_null() != drop_candidate.is_none()) {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let mut stores = realm.callable_stores.borrow_mut();
+            if let Some(store) = stores.get(&(tag, code)) {
+                unsafe { out_store.write(store.pointer) };
+                return 0;
+            }
+            let Some(drop) = drop_candidate else {
+                unsafe { out_store.write(ptr::null_mut()) };
+                return 0;
+            };
+            stores.insert(
+                (tag, code),
+                CallableStore {
+                    pointer: candidate,
+                    drop,
+                },
+            );
+            unsafe { out_store.write(candidate) };
+            0
+        })
+    }
+
     /// Writes the active Realm's deterministic clock in ECMAScript milliseconds.
     ///
     /// # Safety
@@ -2472,6 +2531,14 @@ mod realm {
 
     #[cfg(test)]
     mod tests {
+        use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+        static CALLABLE_STORE_DROPS: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn record_callable_store_drop(_pointer: *mut c_void) {
+            CALLABLE_STORE_DROPS.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+
         use super::*;
         use std::fs;
         use std::ptr;
@@ -2625,6 +2692,103 @@ mod realm {
             assert_eq!(second[2], b"fastify-error-generic".len() as u64);
             assert_eq!(kiln_realm_destroy(first_realm), 0);
             assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
+
+        unsafe extern "C" fn exercises_callable_store_registry(context: *mut c_void) -> i32 {
+            let output = unsafe { &mut *context.cast::<[*mut c_void; 3]>() };
+            let first_candidate = 1usize as *mut c_void;
+            let duplicate_candidate = 2usize as *mut c_void;
+            let other_candidate = 3usize as *mut c_void;
+            if unsafe {
+                kiln_realm_callable_store(8, 27, ptr::null_mut(), None, &raw mut output[0])
+            } != 0
+                || !output[0].is_null()
+                || unsafe {
+                    kiln_realm_callable_store(
+                        8,
+                        27,
+                        first_candidate,
+                        Some(record_callable_store_drop),
+                        &raw mut output[0],
+                    )
+                } != 0
+                || unsafe {
+                    kiln_realm_callable_store(
+                        8,
+                        27,
+                        duplicate_candidate,
+                        Some(record_callable_store_drop),
+                        &raw mut output[1],
+                    )
+                } != 0
+                || unsafe {
+                    kiln_realm_callable_store(
+                        11,
+                        27,
+                        other_candidate,
+                        Some(record_callable_store_drop),
+                        &raw mut output[2],
+                    )
+                } != 0
+            {
+                return RUNTIME_ERROR;
+            }
+            0
+        }
+
+        unsafe extern "C" fn publishes_second_realm_callable_store(context: *mut c_void) -> i32 {
+            let output = unsafe { &mut *context.cast::<*mut c_void>() };
+            unsafe {
+                kiln_realm_callable_store(
+                    8,
+                    27,
+                    4usize as *mut c_void,
+                    Some(record_callable_store_drop),
+                    output,
+                )
+            }
+        }
+
+        #[test]
+        fn runtime_callable_stores_are_stable_distinct_and_realm_owned() {
+            CALLABLE_STORE_DROPS.store(0, AtomicOrdering::SeqCst);
+            let mut first_realm = 0;
+            let mut second_realm = 0;
+            let mut first = [ptr::null_mut(); 3];
+            let mut second: *mut c_void = ptr::null_mut();
+            assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
+            assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        first_realm,
+                        Some(exercises_callable_store_registry),
+                        (&raw mut first).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        second_realm,
+                        Some(publishes_second_realm_callable_store),
+                        (&raw mut second).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(first[0], 1usize as *mut c_void);
+            assert_eq!(first[1], first[0]);
+            assert_eq!(first[2], 3usize as *mut c_void);
+            assert_eq!(second, 4usize as *mut c_void);
+            assert_eq!(
+                unsafe { kiln_realm_callable_store(8, 27, ptr::null_mut(), None, ptr::null_mut()) },
+                INVALID_ARGUMENT
+            );
+            assert_eq!(kiln_realm_destroy(first_realm), 0);
+            assert_eq!(kiln_realm_destroy(second_realm), 0);
+            assert_eq!(CALLABLE_STORE_DROPS.load(AtomicOrdering::SeqCst), 3);
         }
 
         struct RecordedWork {
@@ -4263,6 +4427,9 @@ mod realm {
         };
         (realm, kiln_realm_symbol_key_for, realm_symbol_key_for) => {
             const _: unsafe extern "C" fn(u64, *mut *const u8, *mut u64) -> i32 = kiln_realm_symbol_key_for;
+        };
+        (realm, kiln_realm_callable_store, realm_callable_store) => {
+            const _: unsafe extern "C" fn(u32, u64, *mut c_void, Option<DropWork>, *mut *mut c_void) -> i32 = kiln_realm_callable_store;
         };
         (realm, kiln_realm_now, realm_now) => {
             const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_now;
