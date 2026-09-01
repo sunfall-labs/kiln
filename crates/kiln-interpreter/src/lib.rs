@@ -13451,6 +13451,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let removed = self.delete(&globals, &key, current)?;
                     self.stack.push(Value::Boolean(removed));
                 }
+                Instruction::LoadGlobalBindingOrUndefined(name) => {
+                    // What `typeof` reads for a name no scope bound: the global object's property
+                    // if it has one, and `undefined` if it does not -- which is the answer that
+                    // makes `typeof maybeMissing === "undefined"` the feature test it is.
+                    let name = self.string_constant(*name, current)?;
+                    let bound = match self.global_object() {
+                        Value::Object(globals) => globals.borrow().get_own(&name).cloned(),
+                        _ => None,
+                    };
+                    self.stack.push(bound.unwrap_or(Value::Undefined));
+                }
                 Instruction::RequireGlobalBinding(name) => {
                     // `ResolveBinding` in strict code: an assignment target no scope bound is an
                     // unresolvable reference unless the global object has it, and an
