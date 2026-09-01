@@ -29738,7 +29738,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             let handler = held.get_own("onabort").cloned();
             handler
-                .filter(|handler| is_callable(handler))
+                .filter(is_callable)
                 .into_iter()
                 .chain(listeners)
                 .collect::<Vec<_>>()
