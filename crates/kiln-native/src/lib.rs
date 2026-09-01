@@ -3365,14 +3365,13 @@ enum kiln_value_tag {
 
 typedef struct kiln_value {
     uint32_t tag;
-    uint32_t reserved;
-    uint64_t bits;
-    const char *ptr;
-    size_t len;
+    uint32_t len;
+    union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
 static kiln_value kiln_graph_diagnostic(const char *phase, const char *module) {
-    kiln_value value = { KILN_VALUE_STRING, 0, 0, phase, 0 };
+    kiln_value value = { KILN_VALUE_STRING, 0, {0} };
+    value.ptr = phase;
     static char text[2048];
     size_t phase_len = strlen(phase);
     size_t module_len = strlen(module);
@@ -3590,8 +3589,8 @@ static int kiln_graph_enter_module(void *opaque) {
 
 int main(void) {
     kiln_host host;
-    kiln_value result = { KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
-    kiln_value entry_result = { KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
+    kiln_value result = { KILN_VALUE_UNDEFINED, 0, {0} };
+    kiln_value entry_result = { KILN_VALUE_UNDEFINED, 0, {0} };
     kiln_graph_entry_context context;
     uint64_t realm = 0;
     int status;
@@ -3848,7 +3847,6 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
     }}
-    result->reserved = 0;
     if (result->tag != KILN_VALUE_STRING) return KILN_C99_OK;
     if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
@@ -3874,7 +3872,7 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
     {arena} arena = {{ NULL, 0, 0 }};
     {proxy} proxy = {{ host, &arena, KILN_C99_OK }};
     kiln_host proxy_host = {{ {stem}_proxy_call, &proxy }};
-    kiln_value value = {{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+    kiln_value value = {{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
     kiln_result_v2 *owned = NULL;
     char *copy = NULL;
     int status;
@@ -3887,7 +3885,6 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
         status = KILN_C99_INVALID_ARGUMENT;
         goto cleanup;
     }}
-    value.reserved = 0;
     if (value.tag == KILN_VALUE_STRING &&
         (value.len == (size_t)-1 || (value.len != 0 && value.ptr == NULL))) {{
         status = KILN_C99_INVALID_ARGUMENT;
@@ -3899,7 +3896,6 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
         goto cleanup;
     }}
     owned->value = value;
-    owned->value.reserved = 0;
     if (value.tag == KILN_VALUE_STRING) {{
         copy = (char *)malloc(value.len == 0 ? 1 : value.len);
         if (copy == NULL) {{
@@ -3910,7 +3906,9 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
         owned->value.ptr = copy;
         copy = NULL;
     }} else {{
-        owned->value.ptr = NULL;
+        /* `ptr` shares the payload word with `bits`, so clearing it here would erase the number
+         * or boolean this value carries. A non-string has no pointer that could dangle; only the
+         * length needs normalising. */
         owned->value.len = 0;
     }}
     *out = owned;
@@ -3931,8 +3929,13 @@ static int {read}(const kiln_result_v2 *result, kiln_value *value) {{
 
 static void {dispose}(kiln_result_v2 **result) {{
     if (result == NULL || *result == NULL) return;
-    free((void *)(*result)->value.ptr);
-    (*result)->value.ptr = NULL;
+    /* Only a string owns heap bytes. `ptr` shares the payload word with `bits`, so freeing it
+     * unconditionally would pass a number's bit pattern to `free`, and clearing it afterwards
+     * would erase the value. */
+    if ((*result)->value.tag == KILN_VALUE_STRING) {{
+        free((void *)(*result)->value.ptr);
+        (*result)->value.ptr = NULL;
+    }}
     (*result)->value.len = 0;
     free(*result);
     *result = NULL;
@@ -4192,7 +4195,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
     }
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;",
+        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -4277,7 +4280,7 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         }
         writeln!(
             output,
-            "    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}",
+            "    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = {}(proxy_host, &module_result, import_arrays[{index}], (size_t){import_count}, export_arrays[{index}], (size_t){export_count});\n    if (status != KILN_C99_OK) {{ *result = module_result; goto cleanup; }}",
             modules[index].1.symbol
         )
         .unwrap();
@@ -4330,12 +4333,12 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
     /* Public v1 results remain borrowed; private v2 calls preserve strings across cleanup. */
     if (preserve_result != 0 && result->tag == KILN_VALUE_STRING) {{
         if (result->len == (size_t)-1 || (result->len != 0 && result->ptr == NULL)) {{
-            *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+            *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
             status = KILN_C99_INVALID_ARGUMENT;
         }} else {{
             preserved = (char *)malloc(result->len == 0 ? 1 : result->len);
             if (preserved == NULL) {{
-                *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+                *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
                 status = KILN_C99_HOST_ERROR;
             }} else {{
                 if (result->len != 0) memcpy(preserved, result->ptr, result->len);
@@ -7485,7 +7488,7 @@ static int write_host_call(void *context, uint16_t operation, uint16_t argc,
         (arguments[0].len != 0 && arguments[0].ptr == NULL)) return KILN_C99_HOST_ERROR;
     if (fwrite(arguments[0].ptr, 1, arguments[0].len, stdout) != arguments[0].len ||
         fputc('\n', stdout) == EOF) return KILN_C99_HOST_ERROR;
-    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 }};
+    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
     return KILN_C99_OK;
 }}
 
@@ -8656,7 +8659,7 @@ struct capture {
     capture->length = arguments[0].len;
     capture->bytes[capture->length++] = '\n';
     capture->calls += 1;
-    *result = (kiln_value){KILN_VALUE_UNDEFINED, 0, 0, NULL, 0};
+    *result = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
     return KILN_C99_OK;
 }
 
@@ -8902,7 +8905,7 @@ static int malformed_call(void *context, uint16_t operation, uint16_t argc,
     (void)argc;
     (void)arguments;
     if (result == NULL) return KILN_C99_HOST_ERROR;
-    *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, NULL, 3}};
+    *result = (kiln_value){{ KILN_VALUE_STRING, 3, {{0}} }};
     return KILN_C99_OK;
 }}
 
@@ -9894,15 +9897,16 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
     if (argc == 0) {{
         if (context->mode == 2) return 7;
         if (context->mode == 3) {{
-            *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, NULL, 3}};
+            *result = (kiln_value){{ KILN_VALUE_STRING, 3, {{0}} }};
             return KILN_C99_OK;
         }}
         if (context->mode == 1) {{
-            *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, NULL, 0}};
+            *result = (kiln_value){{ KILN_VALUE_STRING, 0, {{0}} }};
             return KILN_C99_OK;
         }}
         memcpy(context->storage, "dep", 3);
-        *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, context->storage, 3}};
+        *result = (kiln_value){{KILN_VALUE_STRING, 3, {{0}}}};
+        result->ptr = context->storage;
         return KILN_C99_OK;
     }}
     if (argc != 1 || arguments == NULL || arguments[0].tag != KILN_VALUE_STRING)
@@ -9916,9 +9920,10 @@ static int host_call(void *opaque, uint16_t operation, uint16_t argc,
         return KILN_C99_HOST_ERROR;
     }}
     if (context->mode == 0) {{
-        *result = (kiln_value){{KILN_VALUE_STRING, 0, 0, context->storage, 3}};
+        *result = (kiln_value){{KILN_VALUE_STRING, 3, {{0}}}};
+        result->ptr = context->storage;
     }} else {{
-        *result = (kiln_value){{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}};
+        *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
     }}
     return KILN_C99_OK;
 }}
