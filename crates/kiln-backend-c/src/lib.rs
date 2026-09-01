@@ -1227,6 +1227,13 @@ method_ids! {
     (KILN_C99_METHOD_SET_MILLISECONDS, 184, Generic, DateSetter),
 }
 
+/// The hook a host installs when it lets a program make a second realm.
+///
+/// Spelled here rather than shared with `kiln-interpreter` because this backend deliberately
+/// takes no dependency on that crate: what it needs is the *name* a program would reach for, and
+/// a name is a fact about the program, not about the interpreter's tables.
+const HOST_CREATE_REALM: &str = "$262CreateRealm";
+
 const NATIVE_CONSTRUCTORS: &[NativeConstructor] = &[
     native_constructor!(KILN_C99_METHOD_NODE_EVENT_EMITTER, None, EventEmitter),
     native_constructor!(
@@ -24210,6 +24217,27 @@ fn validate_code(
             Instruction::HostCall { op, .. } if !matches!(op, HostOp::WriteStdout) => {
                 return Err(EmitError::Unsupported {
                     feature: format!("host operation {op:?} at instruction {index}"),
+                });
+            }
+            // The interpreter can make a second realm; this backend cannot. Its global object is
+            // built once in C, in one copy, so a compiled program that reached the hook would get
+            // a plausible-looking realm whose intrinsics were secretly this one's -- and every
+            // cross-realm identity question would then be answered confidently and wrongly.
+            // Refused by name instead, which is what the interpreter does when its host has not
+            // granted the capability.
+            Instruction::RequireGlobalBinding(name)
+            | Instruction::LoadGlobalBindingOrUndefined(name)
+            | Instruction::GetProperty(name)
+            | Instruction::CallMethod { name, .. }
+                if matches!(
+                    program.constants.get(*name as usize),
+                    Some(Constant::String(text)) if text == HOST_CREATE_REALM
+                ) =>
+            {
+                return Err(EmitError::Unsupported {
+                    feature: format!(
+                        "creating a realm ({HOST_CREATE_REALM}) at instruction {index}"
+                    ),
                 });
             }
             // Where a closure's captures are checked: the descriptors name slots in *this*

@@ -37,6 +37,13 @@ pub const HOST_CAPABILITY_MARKER: &str = "kiln: host capability not provided:";
 /// second, host-only path to the same state would be a second thing to keep correct, and the
 /// engine would then have a way to detach a buffer that no program could reach.
 ///
+/// `createRealm` is real when the runner asked the engine for it, and refuses by name when it
+/// did not -- the same shape as every other entry here, and the reason the check is `typeof` on
+/// the hook rather than a flag the runner substitutes into the text. The `$262` a new realm gets
+/// is assembled by [`$262For`] from that realm's global object, because what a host can do is
+/// the host's statement to make and not the engine's: `evalScript` and `gc` refuse there for
+/// exactly the reasons they refuse here.
+///
 /// `$262.agent` is an object of throwing methods rather than `undefined` for the same reason.
 /// Kiln has no second agent to start, but a test that reads `$262.agent.start` and gets a
 /// `TypeError` about reading a property of `undefined` reports a *language* failure for a
@@ -52,6 +59,24 @@ pub const ASYNC_COMPLETE: &str = "Test262:AsyncTestComplete";
 pub const ASYNC_FAILURE: &str = "Test262:AsyncTestFailure:";
 
 pub const HOST_OBJECT_PRELUDE: &str = r#"var print = function (message) { console.log(message); };
+function $262For(realmGlobal) {
+  return {
+    global: realmGlobal,
+    agent: $262.agent,
+    createRealm: function () {
+      return $262For(realmGlobal.$262CreateRealm());
+    },
+    evalScript: function () {
+      throw new Error("kiln: host capability not provided: $262.evalScript");
+    },
+    detachArrayBuffer: function (buffer) {
+      realmGlobal.ArrayBuffer.prototype.transfer.call(buffer);
+    },
+    gc: function () {
+      throw new Error("kiln: host capability not provided: $262.gc");
+    }
+  };
+}
 var $262 = {
   global: globalThis,
   agent: {
@@ -81,7 +106,10 @@ var $262 = {
     }
   },
   createRealm: function () {
-    throw new Error("kiln: host capability not provided: $262.createRealm");
+    if (typeof $262CreateRealm !== "function") {
+      throw new Error("kiln: host capability not provided: $262.createRealm");
+    }
+    return $262For($262CreateRealm());
   },
   evalScript: function () {
     throw new Error("kiln: host capability not provided: $262.evalScript");
@@ -258,6 +286,27 @@ mod tests {
                 "`$262.agent.{method}` must refuse with the host-capability marker"
             );
         }
+    }
+
+    #[test]
+    fn host_prelude_create_realm_refuses_by_name_when_the_engine_has_no_hook() {
+        // The refusal has to survive the capability existing: a runner that does *not* ask for
+        // realms must still get the marker rather than a `TypeError` about calling undefined,
+        // which is the difference between "this host cannot" and "the language is broken".
+        assert!(
+            HOST_OBJECT_PRELUDE.contains("kiln: host capability not provided: $262.createRealm")
+        );
+        assert!(HOST_OBJECT_PRELUDE.contains("typeof $262CreateRealm !== \"function\""));
+    }
+
+    #[test]
+    fn a_new_realm_gets_a_host_object_built_from_its_own_global() {
+        // Not `global: globalThis`. A `$262` whose `global` was the parent's would make every
+        // cross-realm test in the suite compare a realm against itself and pass for the wrong
+        // reason, which is worse than refusing.
+        assert!(HOST_OBJECT_PRELUDE.contains("function $262For(realmGlobal)"));
+        assert!(HOST_OBJECT_PRELUDE.contains("global: realmGlobal,"));
+        assert!(HOST_OBJECT_PRELUDE.contains("realmGlobal.ArrayBuffer.prototype.transfer"));
     }
 
     #[test]
