@@ -5421,7 +5421,7 @@ fn new_date(time: f64) -> Value {
 }
 
 /// A JavaScript scalar value represented by the interpreter.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Value {
     Undefined,
     Null,
@@ -5518,6 +5518,16 @@ pub enum Value {
     /// through captured cells are not collected; that is a real limitation and the right fix is
     /// a collector, not a weaker representation here.
     Function(Rc<Closure>),
+}
+
+// Rust-side equality for interpreter values is JavaScript strict equality. Keeping this manual
+// rather than deriving it prevents `Rc<T>` payload equality from turning object identity into a
+// structural comparison, and `strict_equal` remains exhaustive so every new representation must
+// choose its semantics before the crate compiles.
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        strict_equal(self, other)
+    }
 }
 
 /// Materialize the public exports of a Node builtin module.
@@ -43854,9 +43864,14 @@ mod tests {
         let left = object(&[("a", Value::Number(1.0))]);
         let right = object(&[("a", Value::Number(1.0))]);
         assert!(strict_equal(&left, &left), "an object equals itself");
+        assert_eq!(&left, &left, "Rust equality uses JavaScript identity too");
         assert!(
             !strict_equal(&left, &right),
             "equal contents are not the same object"
+        );
+        assert_ne!(
+            &left, &right,
+            "derived payload equality must not leak through Value"
         );
         assert!(strict_equal(&left, &left.clone()), "a clone shares the Rc");
     }
