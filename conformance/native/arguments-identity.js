@@ -45,3 +45,47 @@ function perCall(depth) {
   return inner !== arguments && arguments[0] === depth;
 }
 console.log("per-call", perCall(1));
+
+// `arguments` is an *object*, not an array, and the difference is what four separate type tests
+// ask about. Both engines used to hand back an array: `Array.isArray(arguments)` said true,
+// `Object.prototype.toString.call(arguments)` said `[object Array]`, the prototype was
+// `Array.prototype`, and `length` was the array's own rather than an ordinary property. The
+// `@@iterator` here is an own property for exactly that reason -- `Object.prototype` has none,
+// so a spread would stop working the moment this stopped being an array.
+function shape(a, b) {
+  return [
+    Object.prototype.toString.call(arguments),
+    Array.isArray(arguments),
+    Object.getPrototypeOf(arguments) === Object.getPrototypeOf({}),
+    Object.getOwnPropertyNames(arguments).join("|"),
+    Object.keys(arguments).join("|"),
+    JSON.stringify(Object.getOwnPropertyDescriptor(arguments, "length")),
+    Object.getOwnPropertyDescriptor(arguments, Symbol.iterator).value === [][Symbol.iterator],
+    [...arguments].join("|"),
+    Array.prototype.slice.call(arguments).join("|"),
+  ].join(" ");
+}
+console.log("shape", shape(1, "two"));
+
+// `length` is an ordinary writable property that nothing keeps in step with the indices, which
+// is the whole difference from an array's.
+function lengthIsOrdinary() {
+  arguments.length = 5;
+  arguments[9] = "nine";
+  return [arguments.length, Object.getOwnPropertyNames(arguments).join("|")].join(" ");
+}
+console.log("length", lengthIsOrdinary(1));
+
+// This module is strict, so its `arguments` is the *unmapped* object, whose `callee` is a pair of
+// `%ThrowTypeError%` rather than the function. (Running this file under `node` directly answers
+// "function" instead, because node reads a bare `.js` as CommonJS and kiln reads it as ESM. The
+// comparison here is kiln against kiln, so the goal is the same on both sides; the mapped object
+// is gated by `arguments-mapped.cjs`, which is the corpus's one sloppy entry.)
+function unmappedCallee() {
+  try {
+    return typeof arguments.callee;
+  } catch (error) {
+    return error.constructor.name;
+  }
+}
+console.log("callee", unmappedCallee());

@@ -9,6 +9,7 @@ static const char kiln_module_670dbd17e0e2bad328c7d8c215250b62_name_0[] = "add";
 static int kiln_module_670dbd17e0e2bad328c7d8c215250b62_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {
     size_t sp = 0;
     size_t slot;
+    kiln_c99_frame_mapped_arguments = 0;
     kiln_value stack[2];
     kiln_value locals[2];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;

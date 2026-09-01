@@ -227,14 +227,51 @@ pub struct Class {
     /// `None` when the class declares no constructor; one is synthesized.
     pub constructor: Option<Function>,
     pub methods: Vec<ClassMethod>,
-    /// Field initialisers, in source order.
+    /// Field initialisers and `static { }` blocks, in source order.
     ///
     /// An instance field runs inside the constructor, after `super()` and before the body, and
     /// it is evaluated in the class's enclosing scope -- so a field can close over a variable
     /// the class was defined next to. Keeping them here rather than rewriting them into the
     /// constructor at lowering preserves that they are fields.
-    pub fields: Vec<ClassField>,
+    ///
+    /// Blocks share the list rather than having one of their own because the two interleave and
+    /// the order is observable: `class C { static a = f(); static { g() } }` runs `f` before
+    /// `g`, and two lists could only put every block before or after every field.
+    pub initialisers: Vec<ClassInitialiser>,
     pub span: Span,
+}
+
+/// One thing a class body *runs*, as opposed to one it merely installs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClassInitialiser {
+    Field(ClassField),
+    /// `static { ... }`: a body evaluated once, where the class is defined, with `this` bound to
+    /// the constructor.
+    ///
+    /// A whole function rather than a splice of statements because that is what the block is:
+    /// its `var` declarations stay inside it, `return` is a syntax error rather than a return
+    /// from the enclosing function, and `this` is the constructor rather than whatever `this`
+    /// the surrounding code had.
+    StaticBlock(Function),
+}
+
+impl ClassInitialiser {
+    /// The field this is, for the passes that walk keys and initialiser expressions and have
+    /// nothing to say about a block.
+    pub const fn as_field(&self) -> Option<&ClassField> {
+        match self {
+            Self::Field(field) => Some(field),
+            Self::StaticBlock(_) => None,
+        }
+    }
+
+    /// The block this is, for the passes that walk function bodies.
+    pub const fn as_static_block(&self) -> Option<&Function> {
+        match self {
+            Self::StaticBlock(body) => Some(body),
+            Self::Field(_) => None,
+        }
+    }
 }
 
 /// One element of a list built by evaluating expressions in order.

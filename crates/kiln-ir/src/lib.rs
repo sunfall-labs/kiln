@@ -8,10 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use kiln_hir::{
-    AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
-    Expression, ExpressionKind, Function, ImportName, ListElement, Literal, LogicalOperator,
-    Module, ObjectKey, ObjectMember, Pattern, PatternKey, SourceGoal, Statement, StatementKind,
-    SwitchCase, UnaryOperator, VariableKind,
+    AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ClassInitialiser,
+    ExportName, ExportOrigin, Expression, ExpressionKind, Function, ImportName, ListElement,
+    Literal, LogicalOperator, Module, ObjectKey, ObjectMember, Pattern, PatternKey, SourceGoal,
+    Statement, StatementKind, SwitchCase, UnaryOperator, VariableKind,
 };
 
 /// Re-exported because [`FunctionProto::span`] is one: a consumer of a `Program` has to be able
@@ -481,6 +481,14 @@ pub struct FunctionProto {
     /// pair cannot say which of the three shapes this is. This is the third bit.
     pub async_generator: bool,
     pub parameter_count: u32,
+    /// Whether this function's `arguments` is the *mapped* kind: the code is sloppy and
+    /// `IsSimpleParameterList` is true.
+    ///
+    /// A fact about the function rather than about the mention, which is why it is here beside
+    /// `arrow` rather than on `LoadArguments`. An arrow captures the enclosing call's object
+    /// where it is created, which can be before anything has mentioned `arguments` -- so the
+    /// answer has to be reachable from the frame, not only from the instruction that asks.
+    pub mapped_arguments: bool,
     /// What `f.length` reports: the parameters before the first one with an initializer, and
     /// before a rest.
     ///
@@ -1628,6 +1636,12 @@ struct Compiler {
     loops: Vec<LoopContext>,
     /// Counter for compiler-introduced bindings, so two in one scope never collide.
     hidden_bindings: usize,
+    /// Whether the function being compiled would be given a *mapped* `arguments` object:
+    /// `IsSimpleParameterList` is true and the code is sloppy.
+    ///
+    /// Recorded here because the mention of `arguments` is compiled far from the parameter list
+    /// that decides it, and only [`Instruction::LoadArguments`] reads it.
+    mapped_arguments: bool,
     /// Whether the function being compiled is an async generator.
     ///
     /// `yield*` is the only thing that reads it, and it needs it because the two generator kinds
@@ -1775,6 +1789,8 @@ impl Compiler {
             hidden_bindings: 0,
             resource_scopes: Vec::new(),
             async_generator: false,
+            // The module body has no parameters and no `arguments`; the flag is a function's.
+            mapped_arguments: false,
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
             next_private_scope: 0,
@@ -5222,8 +5238,9 @@ impl Compiler {
         self.next_private_scope += 1;
         self.private_declarations.push(
             class
-                .fields
+                .initialisers
                 .iter()
+                .filter_map(ClassInitialiser::as_field)
                 .map(|field| &field.key)
                 .chain(class.methods.iter().map(|method| &method.key))
                 .filter_map(|key| match key {
@@ -5323,8 +5340,9 @@ impl Compiler {
             })
             .collect();
         let instance_fields: Vec<&ClassField> = class
-            .fields
+            .initialisers
             .iter()
+            .filter_map(ClassInitialiser::as_field)
             .filter(|field| !field.is_static)
             .collect();
         self.home_bindings.push(instance_home.clone());
@@ -5384,9 +5402,31 @@ impl Compiler {
         self.code.push(Instruction::GetProperty(prototype));
         self.store_home_binding(&instance_home);
 
-        // Static fields are ordinary properties of the constructor, assigned once here.
+        // Static fields are ordinary properties of the constructor, assigned once here, and a
+        // `static { }` block is a body run once, here, with `this` bound to the constructor.
+        // One loop over one list because the two interleave and the order is observable.
         self.home_bindings.push(static_home.clone());
-        for field in class.fields.iter().filter(|field| field.is_static) {
+        for initialiser in &class.initialisers {
+            let field = match initialiser {
+                ClassInitialiser::Field(field) if field.is_static => field,
+                ClassInitialiser::Field(_) => continue,
+                // Compiled as the function it is and called immediately with the constructor as
+                // its receiver -- which is the whole of the block's semantics: `this` is the
+                // class, `var` stays inside, and `super.x` reads through the same home binding a
+                // static method does.
+                ClassInitialiser::StaticBlock(body) => {
+                    let Some(block) = self.compile_function(body, class.span) else {
+                        self.home_bindings.pop();
+                        return;
+                    };
+                    self.load_local_or_cell(local);
+                    self.code.push(Instruction::MakeFunction(block));
+                    self.code.push(Instruction::NewArray { count: 0 });
+                    self.code.push(Instruction::Apply);
+                    self.code.push(Instruction::Pop);
+                    continue;
+                }
+            };
             self.load_local_or_cell(local);
             match &field.key {
                 ObjectKey::Private(name) => {
@@ -5828,6 +5868,23 @@ impl Compiler {
         // written after a strict function is not strict because of it.
         let inherited_strict = self.strict || function.strict;
         let outer_strict = std::mem::replace(&mut self.strict, inherited_strict);
+        // `IsSimpleParameterList`, and the strictness beside it: together they are the
+        // specification's own test for which of the two `arguments` objects this function gets.
+        //
+        // An arrow inherits rather than deciding, because the `arguments` it sees is not its
+        // own: it is the enclosing call's, and so is the kind.
+        let mapped_arguments = if function.arrow {
+            self.mapped_arguments
+        } else {
+            !inherited_strict
+                && function.rest.is_none()
+                && function
+                    .parameters
+                    .iter()
+                    .all(|parameter| matches!(parameter.pattern, Pattern::Identifier(_)))
+        };
+        let outer_mapped_arguments =
+            std::mem::replace(&mut self.mapped_arguments, mapped_arguments);
         let outer = FunctionState {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
@@ -5934,6 +5991,7 @@ impl Compiler {
             .pop()
             .expect("this function pushed its own enclosing state");
         let strict = std::mem::replace(&mut self.strict, outer_strict);
+        self.mapped_arguments = outer_mapped_arguments;
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
@@ -5944,6 +6002,7 @@ impl Compiler {
             generator: function.generator || function.asynchronous,
             async_generator: function.generator && function.asynchronous,
             parameter_count,
+            mapped_arguments,
             declared_length,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             prologue_end,
@@ -7272,12 +7331,17 @@ fn class_contains_direct_eval(class: &Class) -> bool {
             .methods
             .iter()
             .any(|method| function_contains_direct_eval(&method.function))
-        || class.fields.iter().any(|field| {
-            matches!(&field.key, ObjectKey::Computed(key) if expression_contains_direct_eval(key))
-                || field
-                    .value
-                    .as_ref()
-                    .is_some_and(expression_contains_direct_eval)
+        || class.initialisers.iter().any(|initialiser| match initialiser {
+            ClassInitialiser::Field(field) => {
+                matches!(&field.key, ObjectKey::Computed(key) if expression_contains_direct_eval(key))
+                    || field
+                        .value
+                        .as_ref()
+                        .is_some_and(expression_contains_direct_eval)
+            }
+            // A static block is a body like any other, and a direct `eval` inside it sees the
+            // same scope the block does.
+            ClassInitialiser::StaticBlock(body) => function_contains_direct_eval(body),
         })
 }
 
@@ -7705,7 +7769,14 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
     let bodies = class
         .constructor
         .iter()
-        .chain(class.methods.iter().map(|method| &method.function));
+        .chain(class.methods.iter().map(|method| &method.function))
+        // A static block closes over the class's surroundings exactly as a method body does.
+        .chain(
+            class
+                .initialisers
+                .iter()
+                .filter_map(ClassInitialiser::as_static_block),
+        );
     for function in bodies {
         for parameter in &function.parameters {
             collect_pattern_identifiers(&parameter.pattern, names);
@@ -7717,7 +7788,11 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
             collect_nested_function_names(statement, names, true);
         }
     }
-    for field in &class.fields {
+    for field in class
+        .initialisers
+        .iter()
+        .filter_map(ClassInitialiser::as_field)
+    {
         if let ObjectKey::Computed(key) = &field.key {
             collect_identifiers(key, names, true);
         }
@@ -8266,7 +8341,7 @@ mod tests {
                 is_static: false,
                 kind: kiln_hir::MethodKind::Normal,
             }],
-            fields: Vec::new(),
+            initialisers: Vec::new(),
             span: Span::default(),
         };
         let (_, strictness) = compile_with_strictness(
@@ -8979,7 +9054,7 @@ mod tests {
                     is_static: false,
                     kind: kiln_hir::MethodKind::Normal,
                 }],
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             }))),
         ]))
@@ -9032,7 +9107,7 @@ mod tests {
                 is_static: true,
                 kind: kiln_hir::MethodKind::Normal,
             }],
-            fields: Vec::new(),
+            initialisers: Vec::new(),
             span: Span::default(),
         };
         let make = kiln_hir::Function {
@@ -9059,11 +9134,11 @@ mod tests {
                     is_static: true,
                     kind: kiln_hir::MethodKind::Normal,
                 }],
-                fields: vec![ClassField {
+                initialisers: vec![ClassInitialiser::Field(ClassField {
                     key: ObjectKey::Private("x".to_owned()),
                     value: Some(number(1.0)),
                     is_static: true,
-                }],
+                })],
                 span: Span::default(),
             },
         )))]))
@@ -9130,7 +9205,7 @@ mod tests {
                 superclass: None,
                 constructor: Some(constructor),
                 methods: Vec::new(),
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             })))],
             span: Span::default(),
@@ -9172,7 +9247,7 @@ mod tests {
                 superclass: None,
                 constructor: None,
                 methods: Vec::new(),
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             }))),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
@@ -9197,7 +9272,7 @@ mod tests {
                     span: Span::default(),
                 }),
                 methods: Vec::new(),
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             }))),
         ]))
@@ -9318,7 +9393,7 @@ mod tests {
                     superclass: None,
                     constructor: None,
                     methods: Vec::new(),
-                    fields: Vec::new(),
+                    initialisers: Vec::new(),
                     span: Span::default(),
                 })),
                 span: Span::default(),
