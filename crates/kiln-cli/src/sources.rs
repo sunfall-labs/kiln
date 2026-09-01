@@ -149,6 +149,21 @@ pub(crate) fn include_reachable_dependencies(
         .enumerate()
         .map(|(index, (path, _))| (PathBuf::from(path), index))
         .collect::<HashMap<_, _>>();
+    // The project walk skips dot-directories, so an entry inside one -- `.scratch/probe.mjs` is
+    // the everyday case, since that is where the issue tracker puts working files -- is reachable
+    // but absent from the snapshot. Read it here on the same terms a transitively reached module
+    // gets read below. Running a file the caller named explicitly must not depend on whether the
+    // walk would have volunteered it.
+    if !indexes.contains_key(&entry) {
+        let entry_text = std::fs::read_to_string(&entry)
+            .map_err(|source| Error::io(format!("cannot read {}", entry.display()), source))?;
+        let entry_path = entry.to_str().ok_or_else(|| {
+            Error::BadInput(format!("path is not valid UTF-8: {}", entry.display()))
+        })?;
+        indexes.insert(entry.clone(), texts.len());
+        texts.push((entry_path.to_owned(), entry_text));
+    }
+
     let mut pending = vec![entry];
     let mut visited = HashSet::new();
     let mut resolutions = BTreeMap::new();
@@ -158,9 +173,14 @@ pub(crate) fn include_reachable_dependencies(
         if !visited.insert(importer.clone()) {
             continue;
         }
+        // Every module reaches `pending` only after being inserted into `indexes` -- the entry
+        // just above, each import target below -- so a miss here is a broken invariant in this
+        // function rather than anything the caller did. Say so, because the older wording read
+        // like a complaint about the user's file and sent people looking in the wrong place.
         let Some(&index) = indexes.get(&importer) else {
             return Err(Error::BadInput(format!(
-                "reachable module was not captured in the source snapshot: {}",
+                "internal: module {} reached the work list without being read into the source \
+                 snapshot; this is a bug in kiln's dependency collection, not in your project",
                 importer.display()
             )));
         };
@@ -580,6 +600,83 @@ mod tests {
             )
         );
         assert!(node_formats.is_empty());
+    }
+
+    /// The project walk skips every dot-directory, so nothing under `.scratch/` is in the
+    /// snapshot. Naming such a file as the entry used to fail with "reachable module was not
+    /// captured in the source snapshot", which reads like a compiler bug and cost several people
+    /// an afternoon each; `.scratch/` is where `docs/agents/issue-tracker.md` tells them to work.
+    #[test]
+    fn an_entry_inside_a_dot_directory_runs_with_its_own_neighbours() {
+        let tree = Tree::new("dot-directory-entry");
+        tree.file("src/unrelated.ts");
+        tree.file(".scratch/probe/dep.mjs");
+        tree.file(".scratch/probe/main.mjs");
+        std::fs::write(
+            tree.0.join(".scratch/probe/dep.mjs"),
+            "export const value = 42;\n",
+        )
+        .expect("write scratch dependency");
+        std::fs::write(
+            tree.0.join(".scratch/probe/main.mjs"),
+            "import { value } from './dep.mjs'; console.log(value);\n",
+        )
+        .expect("write scratch entry");
+
+        let walk = collect(&tree.0).expect("walk project sources");
+        let mut texts = walk
+            .files
+            .iter()
+            .map(|path| {
+                (
+                    path.canonicalize()
+                        .expect("canonical source")
+                        .to_string_lossy()
+                        .into_owned(),
+                    std::fs::read_to_string(path).expect("read source"),
+                )
+            })
+            .collect::<Vec<_>>();
+        // Precondition: the walk really does not volunteer the scratch tree, so the assertion
+        // below is testing the entry fallback rather than an accidentally-complete snapshot.
+        assert!(
+            texts.iter().all(|(path, _)| !path.contains(".scratch")),
+            "the walk was expected to skip .scratch/, but it collected {texts:?}"
+        );
+
+        let entry = tree
+            .0
+            .join(".scratch/probe/main.mjs")
+            .canonicalize()
+            .expect("canonical entry");
+        include_reachable_dependencies(
+            &tree.0,
+            entry.to_str().expect("UTF-8 entry"),
+            &mut texts,
+            false,
+        )
+        .expect("an entry under a dot-directory is runnable");
+
+        let canonical_root = tree.0.canonicalize().expect("canonical root");
+        let paths = texts
+            .iter()
+            .map(|(path, _)| {
+                Path::new(path)
+                    .strip_prefix(&canonical_root)
+                    .expect("source under root")
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paths,
+            [
+                ".scratch/probe/dep.mjs",
+                ".scratch/probe/main.mjs",
+                "src/unrelated.ts",
+            ],
+            "the entry and the modules it imports must both reach the snapshot"
+        );
     }
 
     #[test]

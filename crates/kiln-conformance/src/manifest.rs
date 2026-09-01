@@ -49,6 +49,15 @@ pub struct ManifestTest {
     /// What the corpus records about the test's runnability.  The runner does not read this: an
     /// observed result must never be steerable from the file that records the expectation.
     pub status: Option<String>,
+    /// A host adapter the program cannot run without, currently only `"node"`.
+    ///
+    /// This is read, and `status` is not, because the two say different kinds of thing. `status`
+    /// records an *expectation* — whether the test is thought to pass — and letting the file that
+    /// holds the expectation decide whether it is checked would make the corpus unfalsifiable. A
+    /// required host is a *capability*: the program imports `node:http`, so without the adapter
+    /// there is no run to judge at all. Reading it converts 37 identical, mysterious assertion
+    /// failures into 37 statements of which flag is missing.
+    pub requires_host: Option<String>,
     /// Exactly what the program must write, including its trailing newline.
     pub expected_stdout: String,
 }
@@ -268,6 +277,7 @@ fn read_test(table: &Table) -> Result<ManifestTest, UnlocatedError> {
             .collect(),
         features: optional_strings(table, "features")?,
         status: optional_string(table, "status")?.map(str::to_owned),
+        requires_host: optional_string(table, "requires_host")?.map(str::to_owned),
         expected_stdout: required_string(table, "expected_stdout")?.to_owned(),
     })
 }

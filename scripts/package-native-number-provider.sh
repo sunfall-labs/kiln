@@ -132,6 +132,63 @@ if [[ -z $KILN_PROVIDER_EXPORTS ]]; then
 	exit 1
 fi
 
+# Prove the archive actually *defines* every symbol the manifest is about to promise.
+#
+# Everything upstream of here is derived from the same macro registry, so the manifest and the
+# resolver's `PROVIDER_EXPORTS` agree with each other by construction and neither of them has ever
+# looked at the archive. `regexp`, `bigint` and `temporal` are off by default, so an archive built
+# without those features is missing 20 of the 65 exports and still passes every check the compiler
+# makes -- the failure surfaces much later as `Undefined symbols for architecture arm64` from the
+# linker of whatever program happened to be built next, naming a symbol rather than a cause.
+KILN_PROVIDER_NM="${NM:-nm}"
+if command -v "$KILN_PROVIDER_NM" >/dev/null 2>&1; then
+	# `nm` exits non-zero merely because some archive members carry no symbols at all, which is
+	# ordinary. Take its status separately from its output, or `set -e` aborts this script with no
+	# message whatsoever -- which is exactly what the first draft of this check did.
+	KILN_PROVIDER_NM_OUTPUT=$("$KILN_PROVIDER_NM" -g "$KILN_PROVIDER_BUILT_ARCHIVE" 2>/dev/null) ||
+		true
+	# A defined symbol has a type letter; `U` is undefined and `-g` keeps only external ones.
+	# Mach-O prefixes C symbols with an underscore and ELF does not, so accept either spelling.
+	KILN_PROVIDER_DEFINED=$(
+		printf '%s\n' "$KILN_PROVIDER_NM_OUTPUT" |
+			awk '$2 ~ /^[A-TV-Z]$/ { name = $3; sub(/^_/, "", name); print name }' |
+			sort -u
+	)
+	if [[ -z $KILN_PROVIDER_DEFINED ]]; then
+		printf '%s read no symbols at all from %s, so the export check could not run\n' \
+			"$KILN_PROVIDER_NM" "$KILN_PROVIDER_BUILT_ARCHIVE" >&2
+		exit 1
+	fi
+	# Membership is tested with bash pattern matching rather than a `grep -q` per export: `grep -q`
+	# exits at the first match and closes the pipe under it, so the writing `printf` reports
+	# "broken pipe" for most of the 65 lookups and buries the real message in noise.
+	KILN_PROVIDER_DEFINED_LINES=$'\n'$KILN_PROVIDER_DEFINED$'\n'
+	KILN_PROVIDER_MISSING=""
+	for KILN_PROVIDER_EXPORT in ${KILN_PROVIDER_EXPORTS//[\",]/ }; do
+		if [[ $KILN_PROVIDER_DEFINED_LINES != *$'\n'"$KILN_PROVIDER_EXPORT"$'\n'* ]]; then
+			KILN_PROVIDER_MISSING+=" $KILN_PROVIDER_EXPORT"
+		fi
+	done
+	if [[ -n $KILN_PROVIDER_MISSING ]]; then
+		printf 'the built provider archive does not define %d of its declared exports:\n' \
+			"$(printf '%s' "$KILN_PROVIDER_MISSING" | wc -w | tr -d '[:space:]')" >&2
+		for KILN_PROVIDER_EXPORT in $KILN_PROVIDER_MISSING; do
+			printf '  %s\n' "$KILN_PROVIDER_EXPORT" >&2
+		done
+		printf '\n%s\n%s\n' \
+			'Packaging it would ship a manifest promising symbols the archive lacks, and the' \
+			'failure would resurface as "Undefined symbols" from an unrelated native link.' >&2
+		printf '%s\n' \
+			'Most often the archive was built without the optional features. This script builds' \
+			'with --features regexp,bigint,temporal; check that those still cover every group in' \
+			'provider_abi_registry! in crates/kiln-native-number-abi/src/lib.rs.' >&2
+		exit 1
+	fi
+else
+	printf 'warning: %s is not available, so the archive symbol table was not verified\n' \
+		"$KILN_PROVIDER_NM" >&2
+fi
+
 cp "$KILN_PROVIDER_BUILT_ARCHIVE" "$KILN_PROVIDER_ARCHIVE_TEMP"
 KILN_PROVIDER_ARCHIVE_DIGEST=$(kiln_provider_sha256_file "$KILN_PROVIDER_ARCHIVE_TEMP")
 KILN_PROVIDER_RUSTC_DIGEST=$("$KILN_PROVIDER_RUSTC" -vV | kiln_provider_sha256_stream)
