@@ -1227,6 +1227,19 @@ method_ids! {
     (KILN_C99_METHOD_SET_MILLISECONDS, 184, Generic, DateSetter),
 }
 
+/// The hook a host installs when it lets a program make a second realm.
+///
+/// Spelled here rather than shared with `kiln-interpreter` because this backend deliberately
+/// takes no dependency on that crate: what it needs is the *name* a program would reach for, and
+/// a name is a fact about the program, not about the interpreter's tables.
+const HOST_CREATE_REALM: &str = "$262CreateRealm";
+
+/// The hook a host installs when it lets a program evaluate Script source at run time.
+///
+/// Refused for the same reason `DirectEval` is: this backend has no compiler to reach at run
+/// time. Named separately from `eval` because it is a different name in the program.
+const HOST_EVAL_SCRIPT: &str = "$262EvalScript";
+
 const NATIVE_CONSTRUCTORS: &[NativeConstructor] = &[
     native_constructor!(KILN_C99_METHOD_NODE_EVENT_EMITTER, None, EventEmitter),
     native_constructor!(
@@ -24142,6 +24155,30 @@ fn validate_code(
                     format!("constant {constant} is out of bounds"),
                 ));
             }
+            // The interpreter can make a second realm; this backend cannot. Its global object is
+            // built once in C, in one copy, so a compiled program that reached the hook would get
+            // a plausible-looking realm whose intrinsics were secretly this one's -- and every
+            // cross-realm identity question would then be answered confidently and wrongly.
+            // Refused by name instead, which is what the interpreter does when its host has not
+            // granted the capability.
+            Instruction::RequireGlobalBinding(name)
+            | Instruction::LoadGlobalBindingOrUndefined(name)
+            | Instruction::GetProperty(name)
+            | Instruction::CallMethod { name, .. }
+                if matches!(
+                    program.constants.get(*name as usize),
+                    Some(Constant::String(text))
+                        if text == HOST_CREATE_REALM || text == HOST_EVAL_SCRIPT
+                ) =>
+            {
+                let hook = match program.constants.get(*name as usize) {
+                    Some(Constant::String(text)) => text.clone(),
+                    _ => HOST_CREATE_REALM.to_owned(),
+                };
+                return Err(EmitError::Unsupported {
+                    feature: format!("host realm facility {hook} at instruction {index}"),
+                });
+            }
             // A property name is emitted by naming the constant's own C symbol, and only a
             // string constant has one.
             Instruction::GetProperty(name)
@@ -29979,6 +30016,69 @@ int main(void) {{
             "generated numeric conversion inherited the embedding locale: {:?}",
             run.status.code()
         );
+    }
+
+    #[test]
+    fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
+        // The backend's global object is one copy built in C. A program that reached the host's
+        // realm hook would get an object whose intrinsics were secretly this realm's, and every
+        // cross-realm identity question would be answered confidently and wrongly -- so the hook
+        // is refused where it is named, not where its answer is used.
+        for code in [
+            vec![
+                Instruction::RequireGlobalBinding(0),
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+            vec![
+                Instruction::LoadGlobalBindingOrUndefined(0),
+                Instruction::Pop,
+                Instruction::Return,
+            ],
+        ] {
+            let refused = emit(&program(
+                vec![Constant::String(HOST_CREATE_REALM.to_owned())],
+                code,
+                0,
+            ));
+            let Err(EmitError::Unsupported { feature }) = refused else {
+                panic!("the backend must refuse {HOST_CREATE_REALM}, not compile it");
+            };
+            assert!(
+                feature.contains(HOST_CREATE_REALM),
+                "the refusal must name what it refused, got {feature}"
+            );
+            let refused_eval = emit(&program(
+                vec![Constant::String(HOST_EVAL_SCRIPT.to_owned())],
+                vec![
+                    Instruction::LoadGlobalBindingOrUndefined(0),
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                0,
+            ));
+            let Err(EmitError::Unsupported { feature }) = refused_eval else {
+                panic!("the backend must refuse {HOST_EVAL_SCRIPT}, not compile it");
+            };
+            assert!(
+                feature.contains(HOST_EVAL_SCRIPT),
+                "the refusal must name what it refused, got {feature}"
+            );
+        }
+        // An ordinary global of another name is untouched: this refuses one hook, not a class of
+        // instruction the backend already supports.
+        assert!(matches!(
+            emit(&program(
+                vec![Constant::String("Array".to_owned())],
+                vec![
+                    Instruction::LoadGlobalBindingOrUndefined(0),
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                0,
+            )),
+            Ok(_)
+        ));
     }
 
     #[test]
