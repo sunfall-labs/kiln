@@ -7,9 +7,10 @@
 // Only the operations the native backend actually carries are exercised. `Temporal.X.prototype`
 // is the one member still refused by name under `--native`, and it stays out: a probe that
 // printed several lines and then refused would read as a divergence rather than as the refusal it
-// is. It is refused rather than answered because the interpreter's own `prototype` is a method
-// table rather than an object -- it reports `typeof` as "function" -- so there is no answer the
-// native backend could give that is both correct and equal to the interpreter's.
+// is. What keeps it refused is no longer `typeof` -- the interpreter's method table now reports
+// "object" and links to `Object.prototype`, so `d instanceof Temporal.PlainDate` is true there --
+// it is that the table has no property store, so a name a program writes on the prototype has
+// nowhere to go. Reproducing that here would make the two engines agree on an incomplete object.
 //
 // `Temporal.Instant.fromEpochMilliseconds` and `fromEpochNanoseconds` are the other pair missing
 // here, and for the opposite reason: the native backend now answers both exactly as `deno` does,
@@ -69,18 +70,21 @@ console.log(Temporal.Duration.compare(month, thirty, { relativeTo: "2024-01-01" 
 
 // The type keeps its identity as far as both engines agree it does. `typeof` is "object" in both.
 //
-// Three neighbouring questions are deliberately *not* asked here, because the two engines answer
-// them differently and the native answer is the correct one -- checked against `deno`, which has
-// `Temporal` where `node` does not:
+// THE THREE QUESTIONS BELOW HAVE CHANGED SIDES SINCE THIS HEADER WAS WRITTEN, and the note is
+// updated rather than deleted because the direction is the whole point. They were excluded when
+// the interpreter was the wrong one. Measured again against `deno`, which has `Temporal` where
+// `node` does not, one is fixed and the other two are now the *backend's*:
 //
-//   Object.prototype.toString.call(date)  spec/deno/native: "[object Temporal.PlainDate]"
-//                                         interpreter:      "[object Object]"
-//   date.constructor === Temporal.PlainDate  spec/deno/native: true   interpreter: false
-//   Number(date)                          spec/deno/native: TypeError  interpreter: NaN
+//   date.constructor === Temporal.PlainDate  spec/deno: true.  Both engines agree: true.
+//   Object.prototype.toString.call(date)     spec/deno: "[object Temporal.PlainDate]"
+//                                            interpreter: the same.  native: "[object Object]".
+//   Number(date)                             spec/deno: TypeError
+//                                            interpreter: TypeError.  native: NaN.
 //
-// Adding them would either fail this corpus or force the backend to reproduce a wrong answer to
-// match, and agreeing on a wrong answer is the one outcome this arrangement exists to prevent.
-// They belong in the interpreter, which is where the divergence is.
+// So the two that remain are silent wrong answers in the native backend -- a brand tag it does
+// not carry, and a `valueOf` that should throw and does not -- and they stay out for the same
+// reason as before: adding them would fail this corpus rather than measure it. They belong in the
+// backend now, which is where the divergence moved.
 console.log(typeof date);
 
 // A range the calendar refuses, and the class of error it refuses with.
