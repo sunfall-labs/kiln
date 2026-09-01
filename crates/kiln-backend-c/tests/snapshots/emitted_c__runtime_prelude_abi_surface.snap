@@ -583,6 +583,7 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
 static kiln_node_client_request *kiln_c99_node_client_for_id(kiln_node_socket *socket,
 typedef struct kiln_node_response {
 static void kiln_c99_node_unlink_response(kiln_node_response *response) {
+static void kiln_c99_node_unlink_socket(kiln_node_socket *socket) {
 static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
 typedef struct kiln_node_completion {
 typedef struct kiln_node_fs_completion {
@@ -1230,7 +1231,7 @@ static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, si
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
 static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
-static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_completion(void *opaque) { kiln_c99_gc_release(opaque); }
 static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t argument,
@@ -1240,7 +1241,7 @@ static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thr
 static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
-static void kiln_c99_node_drop_fs_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_fs_completion(void *opaque) { kiln_c99_gc_release(opaque); }
 static int kiln_c99_node_fs_error_property(kiln_value error, const char *key, size_t key_len,
 static int kiln_c99_node_fs_stat(kiln_value *out, const kiln_async_completion *completion) {
 static int kiln_c99_node_fs_complete(void *opaque, const kiln_async_completion *completion,
