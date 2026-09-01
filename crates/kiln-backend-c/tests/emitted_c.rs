@@ -598,11 +598,16 @@ fn runtime_prelude_size() {
     // Every time it went red, the verbatim body snapshots went red beside it and said what had
     // actually changed, so the exact number contributed a merge conflict and no information.
     //
-    // A band keeps the signal that is genuinely worth having -- the prelude has not halved, and
-    // has not run away by an order of magnitude -- and only needs editing when the prelude really
-    // does change scale, which is the moment somebody should look anyway.
-    const FLOOR_LINES: usize = 15_000;
-    const CEILING_LINES: usize = 30_000;
+    // The band is set at roughly +/-9% of the 21,982 lines emitted today, which is tight enough to
+    // be worth having: a section that stopped being emitted, or one emitted twice, moves the count
+    // by far more than 9%, and a 10% move in either direction (19,784 or 24,180) falls outside.
+    //
+    // It is loose enough to be nearly free. The prelude grew 33 lines across the last four commits
+    // that touched it, so ~8 lines a commit leaves a couple of hundred commits of headroom before
+    // anyone edits this -- against a snapshot that conflicted on every single merge. When it does
+    // need widening, that is a real change of scale and the right moment for somebody to look.
+    const FLOOR_LINES: usize = 20_000;
+    const CEILING_LINES: usize = 24_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
