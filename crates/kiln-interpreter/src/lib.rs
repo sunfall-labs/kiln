@@ -33160,6 +33160,11 @@ fn call_native(
             }
             Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
                 .is_some_and(|store| store.borrow().is_frozen()),
+            // A built-in -- `Object`, `Math`, `JSON`, `Error.prototype` -- is an object whose
+            // methods are writable and configurable, so it is not frozen and never was. It fell
+            // into the primitive arm below and answered `true`, which also contradicted
+            // `isSealed` answering `false` for the very same value.
+            Some(target) if is_object_type(target) => false,
             // A primitive cannot be changed at all, so it is frozen by definition.
             _ => true,
         }),
@@ -33275,7 +33280,10 @@ fn call_native(
             }
             Some(target) if exotic_properties(target).is_some() => exotic_properties(target)
                 .is_some_and(|store| store.borrow().is_sealed()),
-            _ => false,
+            // Everything left is either a built-in object, which has configurable properties and
+            // so is not sealed, or a primitive, which has no properties to seal and so is.
+            Some(target) => !is_object_type(target),
+            None => true,
         }),
         // Symbol keys are stored as reserved strings, and a string cannot be turned back into
         // the symbol it came from -- so this reports none rather than inventing any.
@@ -35772,6 +35780,27 @@ fn prototype_of(value: &Value) -> Value {
     }
 }
 
+/// Whether `Type(value)` is Object, in the specification's sense.
+///
+/// The reflection statics all begin by asking it: `Object.isFrozen`, `Object.isSealed` and
+/// `Object.isExtensible` each answer for a primitive by definition and have to *look* for an
+/// object. Spelled once rather than as a `_` arm in each, because the two that had one disagreed
+/// -- `Object.isFrozen(Object)` was `true` while `Object.isSealed(Object)` was `false`, which no
+/// object can be at once.
+fn is_object_type(value: &Value) -> bool {
+    !matches!(
+        value,
+        Value::Undefined
+            | Value::Null
+            | Value::Boolean(_)
+            | Value::Number(_)
+            | Value::String(_)
+            | Value::BigInt(_)
+            | Value::Symbol(_)
+            | Value::Cell(_)
+    )
+}
+
 /// `key in target`.
 fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
     // `1 in [1, , 3]` is false and `1 in [1, undefined, 3]` is true: the one place the difference
@@ -35817,12 +35846,21 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
                 || string_exotic(target, &name).is_some()
                 // The chain may end at a built-in's method table -- a wrapper's does, and so
                 // does a class that extends one -- which `lookup` cannot walk into. `in` has to
-                // agree with the read that does.
+                // agree with the read that does. `own_attributes` rather than the table's own
+                // `property`, because a program may have *added* a name to `String.prototype`
+                // and the table alone answers only for what it was built with: `new String()`
+                // read `String.prototype.zz` correctly and denied it to `in`.
                 || object
                     .borrow()
                     .prototype_table()
-                    .and_then(|table| Native::PrototypeOf(table).property(&name))
-                    .is_some_and(|found| !matches!(found, Value::Undefined))
+                    .is_some_and(|table| {
+                        own_attributes(
+                            intrinsics,
+                            &Value::Native(Native::PrototypeOf(table)),
+                            &name,
+                        )
+                        .is_some()
+                    })
                 || !matches!(inherited_object_property(intrinsics, &name), Value::Undefined)
                 // A property the program *defined* on `Object.prototype` that reads as
                 // undefined is still there: an accessor given only a setter answers `undefined`
@@ -35850,6 +35888,16 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
             items.properties.borrow().lookup(&name).is_some()
                 || name == "length"
                 || !matches!(array_property(&name), Value::Undefined)
+                // A name the program put on `Array.prototype` is on the chain too, and only the
+                // realm's store knows about it. Without this step `Array.prototype.value = 1`
+                // read through every array and answered `false` to `"value" in arr` -- which is
+                // the question `ToPropertyDescriptor` asks of an array used as a descriptor.
+                || own_attributes(
+                    intrinsics,
+                    &Value::Native(Native::PrototypeOf(PrototypeTable::Array)),
+                    &name,
+                )
+                .is_some()
                 || !matches!(
                     inherited_object_property(intrinsics, &name),
                     Value::Undefined
@@ -35899,23 +35947,34 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
         // Mirrors the read: the realm's store first, then the table, then the `name` and
         // `length` every callable owns. A property a program deleted is absent here too, or
         // `delete` and the `in` after it would disagree.
-        Value::Native(native) => match intrinsics.overridden(target, &name) {
-            Overridden::Held(..) => true,
-            Overridden::Removed => false,
-            Overridden::Untouched => {
-                native.property(&name).is_some()
-                    || identity_property(target, &name).is_some()
-                    || (matches!(native, Native::Error(kind) if *kind != ErrorKind::Error)
-                        && name == "isError"
-                        && !matches!(
-                            intrinsics.overridden(
-                                &Value::Native(Native::Error(ErrorKind::Error)),
-                                &name,
-                            ),
-                            Overridden::Removed
-                        ))
-            }
-        },
+        Value::Native(native) => {
+            let own = match intrinsics.overridden(target, &name) {
+                Overridden::Held(..) => true,
+                Overridden::Removed => false,
+                Overridden::Untouched => {
+                    native.property(&name).is_some()
+                        || identity_property(target, &name).is_some()
+                        || (matches!(native, Native::Error(kind) if *kind != ErrorKind::Error)
+                            && name == "isError"
+                            && !matches!(
+                                intrinsics.overridden(
+                                    &Value::Native(Native::Error(ErrorKind::Error)),
+                                    &name,
+                                ),
+                                Overridden::Removed
+                            ))
+                }
+            };
+            // `Math` and `JSON` are ordinary objects that inherit from `Object.prototype`, and so
+            // is every constructor and method table but that one. Answering from the built-in's
+            // own names alone denied them `hasOwnProperty`, and denied `Math` a property the
+            // program had put on `Object.prototype` and could read straight off it.
+            own || (!matches!(native, Native::PrototypeOf(PrototypeTable::Object))
+                && !matches!(
+                    inherited_object_property(intrinsics, &name),
+                    Value::Undefined
+                ))
+        }
         // Mirrors the read: a function answers from its own store, then from `name`, `length`
         // and `prototype`, then from the methods every callable inherits. `in` has to agree with
         // what a read would produce, or a feature-detect and the call after it disagree.

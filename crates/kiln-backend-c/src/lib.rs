@@ -17910,8 +17910,20 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 flag = &kiln_c99_object_of(closure->properties)->frozen;
             }
             if (flag == NULL) {
+                /* A built-in -- `Object`, `Math`, `JSON`, `Array.prototype.push` -- is an object
+                 * whose properties are writable and configurable, so it is not frozen and there
+                 * is nowhere to record that it became so. It shares this arm with the primitives
+                 * only because neither keeps a store; answering `true` for it said the realm's
+                 * own namespaces could not be changed, which every one of them can. */
+                int is_object = subject.tag == KILN_VALUE_BUILTIN ||
+                                subject.tag == KILN_VALUE_METHOD ||
+                                subject.tag == KILN_VALUE_GENERATOR ||
+                                subject.tag == KILN_VALUE_SETTLER ||
+                                subject.tag == KILN_VALUE_TEMPORAL ||
+                                subject.tag == KILN_VALUE_COMMONJS_REQUIRE;
                 /* A primitive has nothing to freeze and is already as frozen as it gets. */
-                *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject : kiln_c99_boolean(1);
+                *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject
+                                                                : kiln_c99_boolean(!is_object);
                 return KILN_C99_OK;
             }
             if (code == KILN_C99_METHOD_OBJECT_FREEZE) {
