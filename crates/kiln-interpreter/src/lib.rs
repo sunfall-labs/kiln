@@ -1493,6 +1493,10 @@ impl Native {
                 | Self::StringCodePointAt
                 | Self::StringLocaleCompare
                 | Self::StringNormalize
+                // `CreateHTML` opens with `RequireObjectCoercible` and `ToString` exactly as
+                // every other `String.prototype` method does, and being Annex B does not change
+                // that: `String.prototype.bold.call(5)` is `"5".bold()`.
+                | Self::StringHtml(_)
         )
     }
 
@@ -16940,6 +16944,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let number = self.as_number_argument(Some(&argument.clone()), instruction)?;
                 converted[index] = Value::Number(number);
+            }
+            return self.dispatch_native(native, receiver, &converted, instruction);
+        }
+        // `ToString` for every argument a built-in reads as text, on the same terms and in the
+        // same place as the numeric pass above: after the receiver, because that is the order a
+        // `toString` counting its calls can see.
+        let textual = textual_arguments(native);
+        if !textual.is_empty()
+            && textual
+                .iter()
+                .any(|&index| arguments.get(index).is_some_and(needs_text_conversion))
+        {
+            let mut converted = arguments.to_vec();
+            for &index in textual {
+                let Some(argument) = converted.get(index) else {
+                    continue;
+                };
+                if !needs_text_conversion(argument) {
+                    continue;
+                }
+                let text = self.as_text(&argument.clone(), instruction)?;
+                converted[index] = Value::String(text);
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
@@ -42808,6 +42834,39 @@ fn needs_number_conversion(value: &Value) -> bool {
         Value::Symbol(_) | Value::BigInt(_) => true,
         other => is_reflect_target(other),
     }
+}
+
+/// The argument positions a built-in reads as *text*, so `ToString` runs the program's own
+/// `toString` before the built-in ever sees the value.
+///
+/// The same shape as [`numeric_arguments`] and for the same reason: the conversion can call back
+/// into the program -- and can therefore throw, which is exactly what these are written to do --
+/// and the pure table has no machine to run it with. It read every object as
+/// `"[object Object]"` instead, so a `toString` that threw was silently skipped.
+const fn textual_arguments(native: Native) -> &'static [usize] {
+    use Native as N;
+    match native {
+        // `CreateHTML` converts the attribute value only when there *is* an attribute; the nine
+        // wrappers that take none ignore whatever they are passed, symbols included.
+        N::StringHtml(
+            HtmlWrapper::Anchor
+            | HtmlWrapper::FontColor
+            | HtmlWrapper::FontSize
+            | HtmlWrapper::Link,
+        )
+        | N::Escape
+        | N::Unescape => &[0],
+        _ => &[],
+    }
+}
+
+/// Whether an argument still has to go through `ToString`.
+///
+/// An object, because the conversion is a call it may define; and a symbol, because `ToString`
+/// is the step that refuses one. Every other primitive spells itself, so it is left for the
+/// built-in's own `to_display_string` and nothing is re-dispatched for it.
+fn needs_text_conversion(value: &Value) -> bool {
+    matches!(value, Value::Symbol(_)) || is_reflect_target(value)
 }
 
 /// Whether this value reduces to a primitive by calling one of its own methods.
