@@ -1441,8 +1441,9 @@ mod tests {
         // test has moved five times as coverage grew -- `function f() {}`, `switch (0) {}`,
         // `async function f() {}`, `#private` and `with` all stopped refusing. That churn is the
         // signal working, though: a refused construct must never be scored as a negative test's
-        // expected failure. A class static block is what is left; when it lands, move this again.
-        let mut negative = case("class C { static { } }\n");
+        // expected failure. A class accessor property is what is left; when it lands, move this
+        // again.
+        let mut negative = case("class C { accessor x = 1; }\n");
         negative.metadata.flags.push("raw".to_owned());
         negative.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,
