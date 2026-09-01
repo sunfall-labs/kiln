@@ -1198,6 +1198,7 @@ method_ids! {
     (KILN_C99_METHOD_TEXT_ENCODER_ENCODE, 425, Generic),
     (KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE, 426, Direct, NodeHttp),
     (KILN_C99_METHOD_NODE_QUERYSTRING_PARSE, 427, Direct),
+    (KILN_C99_METHOD_FUNCTION_TO_STRING, 428, Generic),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1772,6 +1773,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_FUNCTION_CALL),
     emit_method_define!(KILN_C99_METHOD_FUNCTION_APPLY),
     emit_method_define!(KILN_C99_METHOD_FUNCTION_BIND),
+    emit_method_define!(KILN_C99_METHOD_FUNCTION_TO_STRING),
     r#"
 /* The reflective statics, and the one instance method that walks a chain. */
 "#,
@@ -5168,6 +5170,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_FUNCTION_CALL: return "call";
     case KILN_C99_METHOD_FUNCTION_APPLY: return "apply";
     case KILN_C99_METHOD_FUNCTION_BIND: return "bind";
+    case KILN_C99_METHOD_FUNCTION_TO_STRING: return "toString";
     case KILN_C99_METHOD_OBJECT_FREEZE: return "freeze";
     case KILN_C99_METHOD_OBJECT_IS_FROZEN: return "isFrozen";
     default: return NULL;
@@ -6633,9 +6636,18 @@ static kiln_value kiln_c99_symbol_key_for(kiln_value value) {
     return kiln_c99_copy_text((const char *)key, (size_t)key_len);
 }
 
-/* `call`, `apply` and `bind`, which every callable answers to whatever kind of callable it is.
- * Not a range lookup, because the three are not contiguous with anything and a function's *own*
- * property of the same name has to win -- so each caller asks after its own store. */
+/* `call`, `apply`, `bind` and `toString`, which every callable answers to whatever kind of
+ * callable it is. Not a range lookup, because the four are not contiguous with anything and a
+ * function's *own* property of the same name has to win -- so each caller asks after its own
+ * store.
+ *
+ * `toString` here is `Function.prototype.toString`, which is why it belongs beside the other
+ * three rather than in the `Object.prototype` fallback below -- that one would answer
+ * `[object Function]` for `String(Object)`, and refusing was rightly preferred to saying that.
+ * This answers `function Object() { [native code] }`, which is what the interpreter says and what
+ * node says. Without it a program reading `f.toString()` found no property at all and got
+ * `undefined is not a function`: a wrong answer where `String(f)` on the very same value had been
+ * right all along, because that path goes through `kiln_c99_text` instead. */
 static uint64_t kiln_c99_callable_method(const char *key, size_t key_len) {
     if (kiln_c99_same_name(key, key_len, "call")) {
         return KILN_C99_METHOD_FUNCTION_CALL;
@@ -6645,6 +6657,9 @@ static uint64_t kiln_c99_callable_method(const char *key, size_t key_len) {
     }
     if (kiln_c99_same_name(key, key_len, "bind")) {
         return KILN_C99_METHOD_FUNCTION_BIND;
+    }
+    if (kiln_c99_same_name(key, key_len, "toString")) {
+        return KILN_C99_METHOD_FUNCTION_TO_STRING;
     }
     return 0;
 }
@@ -8019,6 +8034,18 @@ static kiln_value kiln_c99_text(kiln_value value) {
         }
         return kiln_c99_copy_text(closure->source, closure->source_len);
     }
+    /* The remaining callables, each of which `kiln_c99_is_callable` already answers `1` for.
+     * None has source text a program wrote, so each takes the NativeFunction form the
+     * specification allows for a built-in -- the same answer the interpreter gives.
+     *
+     * Their absence here is what `callable_text_covers_every_callable_tag` now pins. They fell to
+     * `default:` and returned `undefined`, so `bind(f).toString()` refused where `String(f)` on
+     * the very same value was right: one conversion, two routes, and only one of them complete. */
+    case KILN_VALUE_SETTLER:
+    case KILN_VALUE_BOUND:
+        return kiln_c99_copy_text("function () { [native code] }", 29);
+    case KILN_VALUE_COMMONJS_REQUIRE:
+        return kiln_c99_copy_text("function require() { [native code] }", 35);
     default:
         return kiln_c99_undefined();
     }
@@ -9090,6 +9117,35 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 return KILN_C99_OK;
             }
         }
+        /* `f.constructor === Function`, which is how a program asks what it is holding. The
+         * bound and method paths already answered this; a plain function did not. */
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION);
+            return KILN_C99_OK;
+        }
+        /* ...and the `Object.prototype` members a program borrows, which the builtin path below
+         * already answers and this one never did.
+         *
+         * `valueOf` is here and `toString` is not, which is the whole of the distinction once
+         * written as "toString and valueOf would shadow what a constructor answers". Only
+         * `toString` would: `Object.prototype.toString` gives `[object Function]`, which is worse
+         * than refusing, and a callable answers that name for itself through
+         * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
+         * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
+         * `toString` exactly as it does for a plain object. */
+        {
+            uint64_t borrowed =
+                kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
+                : kiln_c99_same_name(key, key_len, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                    ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                : kiln_c99_same_name(key, key_len, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
+                    : 0;
+            if (borrowed != 0) {
+                *out = kiln_c99_method(borrowed);
+                return KILN_C99_OK;
+            }
+        }
         if (closure->properties.tag != KILN_VALUE_OBJECT) {
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
@@ -9558,6 +9614,29 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(callable);
             return KILN_C99_OK;
         }
+        /* ...and the `Object.prototype` members a program borrows, which the builtin path below
+         * already answers and this one never did.
+         *
+         * `valueOf` is here and `toString` is not, which is the whole of the distinction once
+         * written as "toString and valueOf would shadow what a constructor answers". Only
+         * `toString` would: `Object.prototype.toString` gives `[object Function]`, which is worse
+         * than refusing, and a callable answers that name for itself through
+         * `kiln_c99_callable_method`. `Object.prototype.valueOf` hands back the receiver, so it
+         * shadows nothing -- `ToPrimitive` gets a non-primitive from it and falls through to
+         * `toString` exactly as it does for a plain object. */
+        {
+            uint64_t borrowed =
+                kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
+                : kiln_c99_same_name(key, key_len, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
+                : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
+                    ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                : kiln_c99_same_name(key, key_len, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
+                    : 0;
+            if (borrowed != 0) {
+                *out = kiln_c99_method(borrowed);
+                return KILN_C99_OK;
+            }
+        }
         if (target.tag == KILN_VALUE_BOUND) {
             /* `bind` reports the arity still to be supplied and prefixes the name it wrapped,
              * which is what makes a stack trace through one readable. Both are derived from the
@@ -9789,13 +9868,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         if (code == 0) {
             /* ...and everything inherits from `Object.prototype`, which is where
              * `Object.hasOwnProperty.call(x, k)` finds its function. Only the three a program
-             * borrows: `toString` and `valueOf` would shadow what a constructor already answers
-             * with, and answering `[object Function]` for `String(Object)` would be worse than
-             * not answering at all. */
+             * borrows. `toString` is the one still withheld here: `Object.prototype.toString`
+             * would answer `[object Function]` for `String(Object)`, which is worse than not
+             * answering at all, and a constructor already gives its own text through
+             * `kiln_c99_callable_method`. `valueOf` hands back the receiver and shadows nothing. */
             code = kiln_c99_same_name(key, key_len, "hasOwnProperty") ? KILN_C99_METHOD_HAS_OWN_PROPERTY
                    : kiln_c99_same_name(key, key_len, "isPrototypeOf") ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                    : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
                        ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                   : kiln_c99_same_name(key, key_len, "valueOf") ? KILN_C99_METHOD_OBJECT_VALUE_OF
                        : 0;
         }
         /* `RangeError.name` is how `error.constructor.name` gets its answer, which is the ordinary
@@ -9829,6 +9910,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OK;
                 }
             }
+            /* Anything else answers for what it *is*, which the table above could not say because
+             * it maps prototypes rather than values. A callable is a function, so
+             * `Object.constructor` is `Function` exactly as `f.constructor` is for a function a
+             * program wrote; a namespace is an ordinary object holding functions, so
+             * `Math.constructor` is `Object`. Refusing had been the answer to both. */
+            *out = kiln_c99_builtin(kiln_c99_is_namespace(target.bits) ? KILN_C99_BUILTIN_OBJECT
+                                                                      : KILN_C99_BUILTIN_FUNCTION);
+            return KILN_C99_OK;
         }
         if (!kiln_c99_is_namespace(target.bits) && kiln_c99_same_name(key, key_len, "name")) {
             const char *builtin = kiln_c99_builtin_name(target.bits);
@@ -14590,9 +14679,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
      * instead, so borrowing one onto a proxy would quietly bypass the handler. */
     if (receiver.tag == KILN_VALUE_PROXY) {
         if (code == KILN_C99_METHOD_FUNCTION_CALL || code == KILN_C99_METHOD_FUNCTION_APPLY ||
-            code == KILN_C99_METHOD_FUNCTION_BIND) {
-            /* These three touch no storage at all: each hands the receiver back to
-             * `kiln_c99_call`, which is where the `apply` trap lives. */
+            code == KILN_C99_METHOD_FUNCTION_BIND ||
+            code == KILN_C99_METHOD_FUNCTION_TO_STRING) {
+            /* These four touch no storage at all: the first three hand the receiver back to
+             * `kiln_c99_call`, which is where the `apply` trap lives, and `toString` reads the
+             * target's own text through a conversion that follows the proxy itself. */
         } else if (code == KILN_C99_METHOD_HAS_OWN_PROPERTY) {
             /* `Object.prototype.hasOwnProperty.call(p, k)` asks `[[GetOwnProperty]]`, which is a
              * trap -- so it must not read a store the proxy does not have. */
@@ -14773,6 +14864,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return kiln_c99_bind_with(result, receiver,
                                       argc > 0 ? args[0] : kiln_c99_undefined(),
                                       argc > 1 ? args + 1 : NULL, argc > 1 ? argc - 1 : 0);
+        case KILN_C99_METHOD_FUNCTION_TO_STRING:
+            /* The same conversion `String(f)` and `"" + f` already went through, so the three
+             * spellings cannot disagree with each other or with the interpreter. */
+            *result = kiln_c99_text(receiver);
+            if (result->tag != KILN_VALUE_STRING) {
+                kiln_c99_diagnostic_detail = "Function.prototype.toString has no text to answer";
+                return KILN_C99_CONTROL_ERROR;
+            }
+            return KILN_C99_OK;
         case KILN_C99_METHOD_NUMBER_VALUE_OF:
             /* The three below are the exception to the comment above: they are reached through a
              * number rather than through a namespace, so the receiver is the whole subject. */
@@ -27669,6 +27769,74 @@ int main(void) {
             generated
                 .source
                 .contains("Object.defineProperty invalid key or arity")
+        );
+    }
+
+    /// Every value kind that answers "yes" to `kiln_c99_is_callable` converts to text.
+    ///
+    /// `Function.prototype.toString` reaches a value by two routes -- `String(f)` through the
+    /// text conversion and `f.toString()` through a member lookup -- and both end at
+    /// `kiln_c99_text`. `kiln_c99_is_callable` listed six tags and `kiln_c99_text` handled three,
+    /// so a bound function, a promise settler and a `require` all fell to `default:` and answered
+    /// `undefined`. Nothing failed: `String(f)` was right for a plain function, and no probe
+    /// called the method on any of the other three.
+    ///
+    /// This is the pairing, not the symptom. Adding a callable tag without a text case is now a
+    /// test failure here rather than a wrong answer discovered later by whoever happens to call
+    /// `toString` on the one shape nobody wrote a probe for.
+    #[test]
+    fn callable_text_covers_every_callable_tag() {
+        let runtime = include_str!("lib.rs");
+
+        fn body<'a>(runtime: &'a str, signature: &str) -> &'a str {
+            let start = runtime
+                .split(signature)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{signature} must exist"));
+            // The C function ends at the first line that closes it in column zero.
+            let end = start.find("\n}").expect("function must be closed");
+            &start[..end]
+        }
+
+        let callable = body(
+            runtime,
+            "static int kiln_c99_is_callable(kiln_value value) {",
+        );
+        let text = body(
+            runtime,
+            "static kiln_value kiln_c99_text(kiln_value value) {",
+        );
+
+        let tags: Vec<&str> = callable
+            .split("value.tag == ")
+            .skip(1)
+            .filter_map(|rest| {
+                rest.split(|c: char| !c.is_ascii_uppercase() && c != '_')
+                    .next()
+            })
+            .filter(|tag| tag.starts_with("KILN_VALUE_"))
+            .collect();
+        // A guard that has quietly stopped reading the thing it checks is worse than none.
+        assert!(
+            tags.len() >= 5,
+            "read only {tags:?} out of `kiln_c99_is_callable`; the parse has stopped working"
+        );
+        assert!(
+            text.contains("case KILN_VALUE_FUNCTION:"),
+            "the parse of `kiln_c99_text` has stopped working"
+        );
+
+        let missing: Vec<&&str> = tags
+            .iter()
+            .filter(|tag| !text.contains(&format!("case {tag}:")))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "`kiln_c99_is_callable` accepts {missing:?}, which `kiln_c99_text` has no case for. \
+             Each would fall to `default:` and answer `undefined`, so `String(x)` and \
+             `x.toString()` on that shape would report a value the program never wrote. A \
+             callable with no source text of its own takes the NativeFunction form, which is what \
+             the interpreter answers and what the specification allows for a built-in."
         );
     }
 

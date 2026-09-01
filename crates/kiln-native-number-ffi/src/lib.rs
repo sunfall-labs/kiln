@@ -2673,7 +2673,8 @@ mod realm {
             assert_eq!(attempt.request, 0);
             assert_eq!(attempt.observation.drops, 1);
             assert!(
-                realm(handle).is_some_and(|registered| registered.continuations.borrow().is_empty()),
+                realm(handle)
+                    .is_some_and(|registered| registered.continuations.borrow().is_empty()),
                 "realm remains registered through the test, with no continuations left"
             );
             assert_eq!(kiln_realm_destroy(handle), 0);
