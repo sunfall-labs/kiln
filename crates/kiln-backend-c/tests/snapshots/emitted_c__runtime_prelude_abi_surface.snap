@@ -746,6 +746,7 @@ static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
+static kiln_value kiln_c99_text_value(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
@@ -1142,6 +1143,7 @@ static kiln_value kiln_c99_control_diagnostic(void) {
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
+static kiln_value kiln_c99_text_value(kiln_text *text) {
 static kiln_value kiln_c99_copy_utf8_lossy(const uint8_t *bytes, size_t length) {
 oom:
 static kiln_value kiln_c99_text(kiln_value value) {
