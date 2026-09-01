@@ -25463,7 +25463,12 @@ fn emit_instruction(
         // are ever tested -- the check would otherwise be a branch on every local read for a
         // state almost no program reaches.
         Instruction::MarkUninitialized(local) => {
-            writeln!(output, "    kiln_c99_mark_uninitialized(&locals[{local}]);").unwrap();
+            // Inlined rather than `kiln_c99_mark_uninitialized(&locals[N])`. Taking the address
+            // of a slot and passing it to an opaque function makes the whole `locals[]` array
+            // address-escaped, and an escaped array cannot be promoted to registers *anywhere in
+            // the function* -- so one TDZ mark in the prologue costs every loop in the body. The
+            // body it replaces is two lines and is kept verbatim.
+            writeln!(output, "    if (locals[{local}].tag == KILN_VALUE_CELL) {{ *kiln_c99_cell_of(locals[{local}]) = kiln_c99_uninitialized(); }} else {{ locals[{local}] = kiln_c99_uninitialized(); }}").unwrap();
         }
         // An upvalue slot always holds a cell -- that is what capturing means -- but the cell can
         // still be in its owner's temporal dead zone. The owner may be a module or an enclosing
@@ -26181,7 +26186,17 @@ fn emit_instruction(
             if *argc > 0 && *callables {
                 writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_crosses_boundary(stack[arg])) stack[arg] = kiln_c99_inspect(stack[arg]); }}").unwrap();
             }
-            writeln!(output, "    {{ kiln_value host_result; const kiln_value *args = {argc} == 0 ? NULL : &stack[sp - {argc}]; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+            // The arguments are copied into a fresh buffer rather than passed as `&stack[sp - n]`.
+            // Pointing into `stack[]` and handing that pointer to the host makes the stack array
+            // address-escaped for the entire function, which defeats the promotion the numeric
+            // fast paths exist to enable: a single `console.log` at the end of a program was
+            // enough to keep a fifty-million-iteration loop's values in memory. The buffer is a
+            // local whose address escaping costs nothing, because nothing else reads it.
+            if *argc == 0 {
+                writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+            } else {
+                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = stack[sp - {argc} + i]; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+            }
         }
         Instruction::Return => match site {
             ReturnSite::Body => output.push_str(
