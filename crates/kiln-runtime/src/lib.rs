@@ -39,7 +39,9 @@ use crate::http_body::{BodyEvent, ResponseBodyDriver};
 use crate::http_transport::HttpTransportDriver;
 use crate::node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin};
 
-pub use crate::http_transport::{HttpHostOp, HttpResourceId, HttpStreamAction};
+pub use crate::http_transport::{
+    HttpCloseCapability, HttpHostOp, HttpResourceId, HttpStreamAction,
+};
 
 /// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
 /// objects and stream events. No Hyper or Tokio type crosses this seam.
@@ -142,10 +144,13 @@ pub trait ActiveHttpRuntime {
         operation: &HttpHostOp,
         request: RequestId,
     ) -> bool;
-    /// Start the only raw resource close authorized for an HTTP-owned connection.
-    fn start_connection_close(&mut self, resource: HttpResourceId) -> Option<RequestId>;
-    /// Start the authorized close while already executing inside this realm runtime.
-    fn start_connection_close_in_context(&mut self, resource: HttpResourceId) -> Option<RequestId>;
+    /// Consume the only raw resource-close capability authorized for an HTTP-owned connection.
+    fn start_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId>;
+    /// Consume an authorized close while already executing inside this realm runtime.
+    fn start_connection_close_in_context(
+        &mut self,
+        close: HttpCloseCapability,
+    ) -> Option<RequestId>;
     fn complete_connection(
         &mut self,
         resource: ResourceId,
@@ -919,29 +924,30 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .is_some_and(|connection| connection.transport.started(operation, request))
     }
 
-    /// Start and register the raw close selected by an HTTP transport.
+    /// Consume and register the raw close selected by an HTTP transport.
     ///
     /// HTTP actions cannot express `AsyncHostOp::CloseResource` directly. Keeping the conversion
     /// here ensures adapters cannot bypass the protocol drain/abort decision accidentally.
     #[doc(hidden)]
-    pub fn start_http_connection_close(&mut self, resource: HttpResourceId) -> Option<RequestId> {
-        self.start_http_connection_close_with_context(resource, false)
+    pub fn start_http_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId> {
+        self.start_http_connection_close_with_context(close, false)
     }
 
-    /// Start an authorized HTTP close while already executing inside this realm runtime.
+    /// Consume an authorized HTTP close while already executing inside this realm runtime.
     #[doc(hidden)]
     pub fn start_http_connection_close_in_context(
         &mut self,
-        resource: HttpResourceId,
+        close: HttpCloseCapability,
     ) -> Option<RequestId> {
-        self.start_http_connection_close_with_context(resource, true)
+        self.start_http_connection_close_with_context(close, true)
     }
 
     fn start_http_connection_close_with_context(
         &mut self,
-        resource: HttpResourceId,
+        close: HttpCloseCapability,
         in_context: bool,
     ) -> Option<RequestId> {
+        let resource = close.into_resource();
         let raw = resource.resource();
         if !self.http_connections.contains_key(&raw) {
             return None;
@@ -1500,12 +1506,15 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         self.http_connection_started(resource, operation, request)
     }
 
-    fn start_connection_close(&mut self, resource: HttpResourceId) -> Option<RequestId> {
-        self.start_http_connection_close(resource)
+    fn start_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId> {
+        self.start_http_connection_close(close)
     }
 
-    fn start_connection_close_in_context(&mut self, resource: HttpResourceId) -> Option<RequestId> {
-        self.start_http_connection_close_in_context(resource)
+    fn start_connection_close_in_context(
+        &mut self,
+        close: HttpCloseCapability,
+    ) -> Option<RequestId> {
+        self.start_http_connection_close_in_context(close)
     }
 
     fn complete_connection(
@@ -3783,12 +3792,12 @@ mod tests {
                 })
             })
             .unwrap_or_else(|| panic!("response write must be acknowledged before close"));
-        assert!(matches!(
-            close_action,
-            HttpStreamAction::Close(closed) if closed.resource() == resource
-        ));
+        let HttpStreamAction::Close(close_action) = close_action else {
+            panic!("response write must select an authorized close");
+        };
+        assert_eq!(close_action.resource(), resource);
         let close_request = runtime
-            .start_http_connection_close(HttpResourceId::new(resource))
+            .start_http_connection_close(close_action)
             .expect("authorized HTTP close starts");
         assert_eq!(
             next_host_completion(&mut runtime)
@@ -3828,19 +3837,18 @@ mod tests {
         let actions = runtime
             .close_http_connection(resource, HttpCloseMode::Abort)
             .expect("HTTP connection is registered");
-        assert_eq!(
-            actions,
-            vec![
-                HttpStreamAction::Cancel(read_request),
-                HttpStreamAction::Close(HttpResourceId::new(resource)),
-            ]
-        );
+        assert_eq!(actions.len(), 2);
+        assert!(matches!(
+            actions.first(),
+            Some(HttpStreamAction::Cancel(request)) if *request == read_request
+        ));
         assert!(runtime.cancel_host_op(read_request));
-        let HttpStreamAction::Close(close_resource) = actions[1] else {
+        let Some(HttpStreamAction::Close(close_action)) = actions.into_iter().nth(1) else {
             panic!("abort must select a portable close operation");
         };
+        assert_eq!(close_action.resource(), resource);
         let close_request = runtime
-            .start_http_connection_close(close_resource)
+            .start_http_connection_close(close_action)
             .expect("authorized HTTP close starts");
         assert_eq!(
             next_host_completion(&mut runtime)

@@ -76,6 +76,49 @@ impl HttpHostOp {
     }
 }
 
+/// One close selected by the runtime-owned HTTP transport state machine.
+///
+/// The constructor is deliberately private. Language adapters may inspect and consume a close
+/// selected by the transport, but cannot fabricate one from a raw [`ResourceId`]. Keeping the
+/// capability non-`Clone` also prevents one state-machine transition from authorizing two host
+/// closes.
+///
+/// ```compile_fail
+/// use kiln_host_abi::ResourceId;
+/// use kiln_runtime::{HttpCloseCapability, HttpResourceId, HttpStreamAction};
+///
+/// let resource = HttpResourceId::new(ResourceId::new(7));
+/// let close = HttpCloseCapability::new(resource);
+/// let _ = HttpStreamAction::Close(close);
+/// ```
+///
+/// ```compile_fail
+/// use kiln_runtime::HttpCloseCapability;
+///
+/// fn duplicate(close: &HttpCloseCapability) -> HttpCloseCapability {
+///     HttpCloseCapability::clone(close)
+/// }
+/// ```
+#[derive(Debug, PartialEq, Eq)]
+pub struct HttpCloseCapability {
+    resource: HttpResourceId,
+}
+
+impl HttpCloseCapability {
+    fn new(resource: HttpResourceId) -> Self {
+        Self { resource }
+    }
+
+    /// Return the provider resource identity for adapter-side correlation checks.
+    pub const fn resource(&self) -> ResourceId {
+        self.resource.resource()
+    }
+
+    pub(crate) const fn into_resource(self) -> HttpResourceId {
+        self.resource
+    }
+}
+
 /// Side effect selected by an HTTP transport.
 ///
 /// Unlike the generic Node stream action, this type cannot contain
@@ -89,14 +132,14 @@ impl HttpHostOp {
 /// let resource = HttpResourceId::new(ResourceId::new(7));
 /// let _ = HttpHostOp::CloseResource { resource };
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum HttpStreamAction {
     Start(HttpHostOp),
     Cancel(RequestId),
     Data(Vec<u8>),
     Event(StreamEvent),
     Error(AsyncHostError),
-    Close(HttpResourceId),
+    Close(HttpCloseCapability),
 }
 
 fn http_action(action: StreamAction) -> HttpStreamAction {
@@ -119,7 +162,7 @@ fn http_action(action: StreamAction) -> HttpStreamAction {
             })
         }
         StreamAction::Start(AsyncHostOp::CloseResource { resource }) => {
-            HttpStreamAction::Close(HttpResourceId::new(resource))
+            HttpStreamAction::Close(HttpCloseCapability::new(HttpResourceId::new(resource)))
         }
         StreamAction::Cancel(request) => HttpStreamAction::Cancel(request),
         StreamAction::Data(data) => HttpStreamAction::Data(data),
@@ -714,7 +757,7 @@ mod tests {
                 driver.abort(),
                 vec![
                     HttpStreamAction::Cancel(RequestId::new(1)),
-                    HttpStreamAction::Close(http_resource),
+                    HttpStreamAction::Close(HttpCloseCapability::new(http_resource)),
                 ]
             );
         });
