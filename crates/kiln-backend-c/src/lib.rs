@@ -7216,27 +7216,6 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
                                         const kiln_value *args, size_t argc, int depth,
                                         kiln_value *thrown, kiln_generator *frame,
                                         int inherit_new_target) {
-    if (!closure->publishes_frame && !inherit_new_target) {
-        /* The callee cannot observe the frame context; see `proto_publishes_frame`. Diagnostic
-         * depth and refusal attribution are still performed, so a refusal reads the same. */
-        int saved_depth = kiln_c99_diagnostic_active_depth;
-        int quick;
-        kiln_c99_diagnostic_active_depth = depth + 1;
-        quick = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
-                              thrown, frame);
-        if (quick == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
-            kiln_c99_diagnostic_site = closure->diagnostic_source;
-            kiln_c99_diagnostic_operation = "FunctionBody";
-            kiln_c99_diagnostic_function = closure->name;
-            kiln_c99_diagnostic_function_len = closure->name_len;
-            kiln_c99_diagnostic_depth = (size_t)(depth + 1);
-            kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
-            kiln_c99_diagnostic_detail =
-                "generated function body refused before an instruction owned the failure";
-        }
-        kiln_c99_diagnostic_active_depth = saved_depth;
-        return quick;
-    }
     kiln_value saved_target = kiln_c99_new_target;
     const kiln_value *saved_args = kiln_c99_frame_args;
     size_t saved_argc = kiln_c99_frame_argc;
@@ -7275,6 +7254,56 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     kiln_c99_frame_is_arrow = saved_is_arrow;
     kiln_c99_diagnostic_active_depth = saved_diagnostic_depth;
     return status;
+}
+
+/* Attribute a refusal that reached the caller without an instruction claiming it. Out of line
+ * because it runs only on the refusal path, which is what keeps `kiln_c99_invoke_closure` small
+ * enough for the compiler to inline. */
+static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int depth) {
+    kiln_c99_diagnostic_site = closure->diagnostic_source;
+    kiln_c99_diagnostic_operation = "FunctionBody";
+    kiln_c99_diagnostic_function = closure->name;
+    kiln_c99_diagnostic_function_len = closure->name_len;
+    kiln_c99_diagnostic_depth = (size_t)(depth + 1);
+    kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+    kiln_c99_diagnostic_detail =
+        "generated function body refused before an instruction owned the failure";
+}
+
+/* The call entry every emitted call site uses.
+ *
+ * A callee that cannot observe the frame context needs nothing published around it, so its whole
+ * call is the body call plus a depth save -- small enough to inline, which removes a frame per
+ * JavaScript call. Worth 1.25x on a recursive benchmark now that values are sixteen bytes,
+ * against 1.11x when they were thirty-two and the frame moved more; the saving grew because what
+ * the frame costs is mostly what it moves. Everything else tail-calls
+ * `kiln_c99_invoke_closure_body`, which stays out of line because it covers `arguments`,
+ * `new.target`, arrows and generators, and is far past the inliner's threshold. */
+/* `static inline` is a hint and the compiler declined it: measured 1.06x, against 1.25x when the
+ * frame was forced away. The wrapper is a dozen instructions on the path that matters, so the
+ * hint is made a requirement where the compiler supports saying so. */
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((always_inline))
+#endif
+static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_value *result,
+                                          kiln_closure *closure, kiln_value receiver,
+                                          const kiln_value *args, size_t argc, int depth,
+                                          kiln_value *thrown, kiln_generator *frame,
+                                          int inherit_new_target) {
+    if (!closure->publishes_frame && !inherit_new_target) {
+        int saved_depth = kiln_c99_diagnostic_active_depth;
+        int quick;
+        kiln_c99_diagnostic_active_depth = depth + 1;
+        quick = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
+                              thrown, frame);
+        if (quick == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
+            kiln_c99_attribute_body_refusal(closure, depth);
+        }
+        kiln_c99_diagnostic_active_depth = saved_depth;
+        return quick;
+    }
+    return kiln_c99_invoke_closure_body(host, result, closure, receiver, args, argc, depth,
+                                        thrown, frame, inherit_new_target);
 }
 
 /* Bind a generator's parameters, before the generator object reaches the program.
@@ -25627,7 +25656,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure_body(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
