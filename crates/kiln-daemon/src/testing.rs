@@ -173,6 +173,9 @@ fn selector_metadata(test: &ConformanceTest, mode: TestMode) -> TestMetadata {
         if let Some(module) = feature.strip_prefix("builtin-") {
             metadata.add_builtin_module(module);
         }
+        if feature.starts_with("node:") {
+            metadata.add_builtin_module(feature);
+        }
         if feature == "node-http" {
             metadata.add_builtin_module("node:http");
         }
@@ -275,10 +278,15 @@ where
 }
 
 fn runtime_builtin_for_path(path: &str) -> Option<&'static str> {
-    const NODE_HTTP_SOURCE: &str = "crates/kiln-runtime/src/node_http.rs";
-    path.strip_suffix(NODE_HTTP_SOURCE)
-        .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
-        .then_some("node:http")
+    const OWNED_BUILTINS: &[(&str, &str)] = &[
+        ("crates/kiln-runtime/src/node_http.rs", "node:http"),
+        ("crates/kiln-runtime/src/node_net.rs", "node:net"),
+    ];
+    OWNED_BUILTINS.iter().find_map(|(source, module)| {
+        path.strip_suffix(source)
+            .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))
+            .then_some(*module)
+    })
 }
 
 /// Normalize a repository path lexically. Changed paths can come from git on a different host,
@@ -590,6 +598,52 @@ expected_stdout = "bundle\n"
                 "{unrelated}"
             );
             assert!(changes.builtin_modules.is_empty(), "{unrelated}");
+        }
+    }
+
+    #[test]
+    fn changed_node_net_runtime_selects_only_the_net_builtin_cases() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let discovered = kiln_conformance::discover(&repo.join("conformance/node"))
+            .expect("pinned Node corpus is valid");
+        let metadata = discovered
+            .iter()
+            .map(|test| selector_metadata(test, TestMode::Node))
+            .collect::<Vec<_>>();
+        let expected = [
+            "node-v24.7.0/net/listen-close-server",
+            "node-v24.7.0/net/socket-set-encoding",
+            "node-v24.7.0/http/tokio-owned-server-client",
+            "node-v24.7.0/http/server-allow-half-open",
+            "node-v24.7.0/http/pipelined-request-identity",
+        ]
+        .into_iter()
+        .map(TestId::new)
+        .collect::<std::collections::BTreeSet<_>>();
+
+        for changed in [
+            "crates/kiln-runtime/src/node_net.rs",
+            r"C:\checkout\kiln\crates\kiln-runtime\src\node_net.rs",
+        ] {
+            let changes = change_set_for_tests(&[changed.to_owned()], discovered.iter());
+            assert!(!changes.full_run, "{changed}");
+            assert!(changes.builtin_modules.contains("node:net"), "{changed}");
+            assert!(
+                !changes.compiler_crates.contains("kiln-runtime"),
+                "{changed} should use the narrower builtin ownership tag"
+            );
+
+            let selection = select(&metadata, &changes, &FailureState::new());
+            let selected = selection
+                .ids()
+                .cloned()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(selected, expected, "{changed}");
+            assert!(selection.tests.iter().all(|test| {
+                test.has_reason(&kiln_test_selector::SelectionReason::ModifiedBuiltinModule(
+                    "node:net".to_owned(),
+                ))
+            }));
         }
     }
 
