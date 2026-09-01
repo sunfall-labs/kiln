@@ -1527,14 +1527,13 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE 68
 #define KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE 69
 #define KILN_C99_BUILTIN_PROMISE_PROTOTYPE 70
-/* The error kind that reports several failures as one. Reachable only through `Promise.any` for
- * now -- the emitter still refuses the `AggregateError` global, because constructing one iterates
- * its first argument and this runtime has no `IterableToList` to do it with. A refusal is the
- * honest state; naming the global without the iteration would make the two engines disagree. */
-#define KILN_C99_BUILTIN_AGGREGATE_ERROR 70
+/* The error kind that reports several failures as one. It has its own value (rather than sharing
+ * the promise prototype's marker) because the kind is stored in every error instance. */
+#define KILN_C99_BUILTIN_AGGREGATE_ERROR 74
 #define KILN_C99_BUILTIN_ABORT_CONTROLLER 71
 #define KILN_C99_BUILTIN_ABORT_SIGNAL 72
 #define KILN_C99_BUILTIN_TEXT_ENCODER 73
+#define KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE 75
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -3201,6 +3200,9 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
                                     int depth, kiln_value *thrown);
 static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message);
 static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons);
+static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
+                                               const kiln_value *args, size_t argc, int depth,
+                                               kiln_value *thrown);
 static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t key_len,
                                   int mode);
@@ -5749,6 +5751,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_OBJECT_PROTOTYPE: return "Object";
     case KILN_C99_BUILTIN_ARRAY_PROTOTYPE: return "Array";
     case KILN_C99_BUILTIN_ERROR_PROTOTYPE: return "Error";
+    case KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE: return "AggregateError";
     case KILN_C99_BUILTIN_MAP_PROTOTYPE: return "Map";
     case KILN_C99_BUILTIN_SET_PROTOTYPE: return "Set";
     case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE: return "WeakMap";
@@ -6061,6 +6064,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"ReferenceError", KILN_C99_BUILTIN_REFERENCE_ERROR},
                         {"SyntaxError", KILN_C99_BUILTIN_SYNTAX_ERROR},
                         {"URIError", KILN_C99_BUILTIN_URI_ERROR},
+                        {"AggregateError", KILN_C99_BUILTIN_AGGREGATE_ERROR},
                         {"AbortController", KILN_C99_BUILTIN_ABORT_CONTROLLER},
                         {"AbortSignal", KILN_C99_BUILTIN_ABORT_SIGNAL},
                         {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER}};
@@ -6658,6 +6662,7 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_OBJECT_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_ERROR_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_MAP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_SET_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
@@ -7453,6 +7458,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             *result = kiln_c99_boolean(
                 argc == 0 ? 0 : kiln_c99_truthy(args[0]));
             return KILN_C99_OK;
+        case KILN_C99_BUILTIN_AGGREGATE_ERROR:
+            return kiln_c99_aggregate_error_from_args(host, result, args, argc, depth, thrown);
         /* The two constructors that do the same thing called as they do constructed. Everything
          * else in this enum either has no call behaviour at all (`Map()` without `new` is a
          * TypeError) or is a namespace, and both keep saying so. */
@@ -9791,6 +9798,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             } owners[] = {{KILN_C99_BUILTIN_OBJECT_PROTOTYPE, KILN_C99_BUILTIN_OBJECT},
                           {KILN_C99_BUILTIN_ARRAY_PROTOTYPE, KILN_C99_BUILTIN_ARRAY},
                           {KILN_C99_BUILTIN_ERROR_PROTOTYPE, KILN_C99_BUILTIN_ERROR},
+                          {KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE,
+                           KILN_C99_BUILTIN_AGGREGATE_ERROR},
                           {KILN_C99_BUILTIN_MAP_PROTOTYPE, KILN_C99_BUILTIN_MAP},
                           {KILN_C99_BUILTIN_SET_PROTOTYPE, KILN_C99_BUILTIN_SET},
                           {KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE, KILN_C99_BUILTIN_WEAK_MAP},
@@ -9866,7 +9875,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 return KILN_C99_OK;
             }
             if (kiln_c99_error_name(target.bits) != NULL) {
-                *out = kiln_c99_builtin(KILN_C99_BUILTIN_ERROR_PROTOTYPE);
+                *out = kiln_c99_builtin(target.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR
+                                            ? KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE
+                                            : KILN_C99_BUILTIN_ERROR_PROTOTYPE);
                 return KILN_C99_OK;
             }
             if (target.bits == KILN_C99_BUILTIN_MAP) {
@@ -21352,6 +21363,24 @@ static int kiln_c99_aggregate_error(kiln_value *out, kiln_value reasons) {
     return KILN_C99_OK;
 }
 
+static int kiln_c99_aggregate_error_from_args(kiln_host *host, kiln_value *out,
+                                              const kiln_value *args, size_t argc, int depth,
+                                              kiln_value *thrown) {
+    kiln_value errors;
+    int status = kiln_c99_new_array(&errors);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_iterate(host, errors, argc > 0 ? args[0] : kiln_c99_undefined(), depth,
+                              thrown);
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_new_error(out, KILN_C99_BUILTIN_AGGREGATE_ERROR,
+                                argc > 1 ? args[1] : kiln_c99_undefined());
+    if (status != KILN_C99_OK) return status;
+    status = kiln_c99_put(NULL, *out, "errors", 6, errors, 0, NULL);
+    if (status != KILN_C99_OK) return status;
+    kiln_c99_object_of(*out)->properties[kiln_c99_object_of(*out)->count - 1].enumerable = 0;
+    return KILN_C99_OK;
+}
+
 /* The own slot a private name occupies, or NULL.
  *
  * Own-only, and that own-only rule *is* the brand check: an object of another class does not carry
@@ -22338,6 +22367,10 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         return kiln_c99_call(host, result, callee, kiln_c99_undefined(), args, argc, depth,
                              thrown);
     }
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        callee.bits == KILN_C99_BUILTIN_AGGREGATE_ERROR) {
+        return kiln_c99_aggregate_error_from_args(host, result, args, argc, depth, thrown);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_PROMISE) {
         kiln_value promise;
         kiln_value settlers[2];
@@ -22763,7 +22796,8 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
         case KILN_C99_BUILTIN_RANGE_ERROR:
         case KILN_C99_BUILTIN_REFERENCE_ERROR:
         case KILN_C99_BUILTIN_SYNTAX_ERROR:
-        case KILN_C99_BUILTIN_URI_ERROR: {
+        case KILN_C99_BUILTIN_URI_ERROR:
+        case KILN_C99_BUILTIN_AGGREGATE_ERROR: {
             /* `Error` is the base of all of them, so it accepts any kind; the others accept only
              * their own. There is no prototype chain here to walk, and this is the same answer
              * one would give. */
@@ -23596,6 +23630,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::ReferenceError
             | kiln_ir::Builtin::SyntaxError
             | kiln_ir::Builtin::UriError
+            | kiln_ir::Builtin::AggregateError
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity
             | kiln_ir::Builtin::Boolean
@@ -26029,6 +26064,9 @@ fn emit_instruction(
                 }
                 kiln_ir::Builtin::SyntaxError => "kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)",
                 kiln_ir::Builtin::UriError => "kiln_c99_builtin(KILN_C99_BUILTIN_URI_ERROR)",
+                kiln_ir::Builtin::AggregateError => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)"
+                }
                 kiln_ir::Builtin::Boolean => "kiln_c99_builtin(KILN_C99_BUILTIN_BOOLEAN)",
                 // A global function is a namespace method with no namespace: nothing is reached
                 // through to get at it, so the method value is what the name resolves to.
