@@ -37349,10 +37349,32 @@ fn call_native(
                         .first()
                         .map_or_else(String::new, Value::to_display_string);
                     // The index counts what `length` counts, which is UTF-16 code units --
-                    // not bytes, and not characters either.
-                    Value::Number(text.rfind(&needle).map_or(-1.0, |offset| {
-                        text[..offset].encode_utf16().count() as f64
-                    }))
+                    // not bytes, and not characters either. The whole search is done in those
+                    // units rather than in bytes because the *position* argument is measured in
+                    // them, and that argument was being dropped: `"abcabc".lastIndexOf("c", 1)`
+                    // answered 5, which is not a later match than the caller allowed but the
+                    // last one in the string, found by a search that never looked at the bound.
+                    let units: Vec<u16> = text.encode_utf16().collect();
+                    let needle_units: Vec<u16> = needle.encode_utf16().collect();
+                    // The one position argument in the language where NaN means the *end* of
+                    // the string rather than the start: the specification names it as
+                    // `+Infinity`, which is also what a missing argument gives, so both search
+                    // the whole string.
+                    let requested = arguments.get(1).map_or(f64::NAN, Value::as_number);
+                    let start = if requested.is_nan() {
+                        units.len()
+                    } else {
+                        to_integer_or_infinity(requested).clamp(0.0, units.len() as f64) as usize
+                    };
+                    let found = units
+                        .len()
+                        .checked_sub(needle_units.len())
+                        .and_then(|last| {
+                            (0..=last.min(start))
+                                .rev()
+                                .find(|at| units[*at..*at + needle_units.len()] == needle_units[..])
+                        });
+                    Value::Number(found.map_or(-1.0, |at| at as f64))
                 }
                 // `substring` clamps both ends into range and swaps them if they are the wrong
                 // way round, where `slice` counts a negative from the end and yields nothing
