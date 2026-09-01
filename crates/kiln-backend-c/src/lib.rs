@@ -1009,6 +1009,8 @@ method_ids! {
     (KILN_C99_METHOD_GLOBAL_IS_FINITE, 120, Generic),
     (KILN_C99_METHOD_NUMBER_TO_STRING, 121, Generic),
     (KILN_C99_METHOD_NUMBER_TO_FIXED, 122, Generic),
+    (KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL, 197, Generic),
+    (KILN_C99_METHOD_NUMBER_TO_PRECISION, 198, Generic),
     (KILN_C99_METHOD_NUMBER_VALUE_OF, 123, Generic),
     (KILN_C99_METHOD_ESCAPE, 124, Generic),
     (KILN_C99_METHOD_UNESCAPE, 125, Generic),
@@ -1763,6 +1765,8 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_NUMBER_TO_STRING),
     emit_method_define!(KILN_C99_METHOD_NUMBER_TO_FIXED),
+    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL),
+    emit_method_define!(KILN_C99_METHOD_NUMBER_TO_PRECISION),
     emit_method_define!(KILN_C99_METHOD_NUMBER_VALUE_OF),
     r#"
 /* The text-escaping globals. `escape`/`unescape` are Annex B and work in code units; the four URI
@@ -3242,6 +3246,15 @@ static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len);
 static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix);
 static int kiln_c99_to_fixed(kiln_value *out, double value, int places);
+static size_t kiln_c99_exact_digits(double value, unsigned char *digits, size_t capacity,
+                                    size_t *fractional);
+static void kiln_c99_significant_digits(double value, size_t count, char *mantissa,
+                                        int *exponent);
+static int kiln_c99_shortest_digits(double value, char *mantissa, size_t capacity, int *exponent);
+static int kiln_c99_exponential_text(kiln_value *out, int negative, const char *mantissa,
+                                     int exponent);
+static int kiln_c99_precision_text(kiln_value *out, int negative, const char *mantissa,
+                                   size_t digits, int exponent);
 static int kiln_c99_hex_digit(char character);
 static int kiln_c99_append_hex(kiln_text *text, unsigned value, int width);
 static int kiln_c99_valid_utf8(const char *bytes, size_t len);
@@ -3417,6 +3430,9 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown);
+static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
+                                           kiln_value receiver, const kiln_value *args,
+                                           size_t argc, int depth, kiln_value *thrown);
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
                                kiln_value receiver, const kiln_value *args, size_t argc,
                                int depth, kiln_value *thrown);
@@ -5141,6 +5157,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_DECODE_URI_COMPONENT: return "decodeURIComponent";
     case KILN_C99_METHOD_NUMBER_TO_STRING: return "toString";
     case KILN_C99_METHOD_NUMBER_TO_FIXED: return "toFixed";
+    case KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL: return "toExponential";
+    case KILN_C99_METHOD_NUMBER_TO_PRECISION: return "toPrecision";
     case KILN_C99_METHOD_NUMBER_VALUE_OF: return "valueOf";
     case KILN_C99_METHOD_PARSE_INT: return "parseInt";
     case KILN_C99_METHOD_PARSE_FLOAT: return "parseFloat";
@@ -5634,26 +5652,27 @@ static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *ar
  * a decimal digit array can hold, and repeated multiplication by five is the whole of the
  * arithmetic. 5^1074 is 751 digits, `m` adds sixteen, and values at or above 1e21 are handed back
  * to `ToString` by the specification, so the array is bounded and so is the loop. */
-static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
-    /* Little-endian decimal digits: `digits[0]` is the least significant. */
-    unsigned char digits[1200];
+/* The exact decimal expansion of `value`'s magnitude, little-endian: `digits[0]` is the least
+ * significant, and `*fractional` of them sit below the decimal point. Returns the digit count.
+ *
+ * Shared by the three renderings that have to round -- `toFixed`, `toExponential`,
+ * `toPrecision` -- because all three must round on the value's *own* digits. That is the whole
+ * argument of the comment above: scale by a power of ten first and the deciding digit is gone
+ * before the language ever looks at it. Writing the expansion once means the three cannot come
+ * to different conclusions about the same double.
+ *
+ * `value` must be finite; the callers answer the infinities and NaN from `ToString` instead. */
+static size_t kiln_c99_exact_digits(double value, unsigned char *digits, size_t capacity,
+                                    size_t *fractional) {
     size_t count = 0;
-    size_t fractional;
     size_t index;
-    kiln_text text = {NULL, 0, 0};
     double mantissa;
     uint64_t scaled;
     int exponent;
-    int negative = value < 0.0;
-    int round_up;
-    if (!isfinite(value) || fabs(value) >= 1e21) {
-        *out = kiln_c99_text(kiln_c99_number(value));
-        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
-    }
     mantissa = frexp(fabs(value), &exponent);
     scaled = (uint64_t)ldexp(mantissa, 53);
     exponent -= 53;
-    while (scaled != 0 && count < sizeof digits) {
+    while (scaled != 0 && count < capacity) {
         digits[count++] = (unsigned char)(scaled % 10u);
         scaled /= 10u;
     }
@@ -5669,12 +5688,12 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
                 digits[index] = (unsigned char)(product % 10u);
                 carry = product / 10u;
             }
-            while (carry != 0 && count < sizeof digits) {
+            while (carry != 0 && count < capacity) {
                 digits[count++] = (unsigned char)(carry % 10u);
                 carry /= 10u;
             }
         }
-        fractional = 0;
+        *fractional = 0;
     } else {
         int step;
         for (step = 0; step < -exponent; ++step) {
@@ -5684,17 +5703,34 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
                 digits[index] = (unsigned char)(product % 10u);
                 carry = product / 10u;
             }
-            while (carry != 0 && count < sizeof digits) {
+            while (carry != 0 && count < capacity) {
                 digits[count++] = (unsigned char)(carry % 10u);
                 carry /= 10u;
             }
         }
-        fractional = (size_t)(-exponent);
+        *fractional = (size_t)(-exponent);
     }
     /* Pad so there is a digit at every place the answer names, above the point and below it. */
-    while (count < fractional + 1 && count < sizeof digits) {
+    while (count < *fractional + 1 && count < capacity) {
         digits[count++] = 0;
     }
+    return count;
+}
+
+static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
+    /* Little-endian decimal digits: `digits[0]` is the least significant. */
+    unsigned char digits[1200];
+    size_t count;
+    size_t fractional;
+    size_t index;
+    kiln_text text = {NULL, 0, 0};
+    int negative = value < 0.0;
+    int round_up;
+    if (!isfinite(value) || fabs(value) >= 1e21) {
+        *out = kiln_c99_text(kiln_c99_number(value));
+        return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+    }
+    count = kiln_c99_exact_digits(value, digits, sizeof digits, &fractional);
     if (fractional <= (size_t)places) {
         round_up = 0;
     } else {
@@ -5751,6 +5787,232 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
             free(text.bytes);
             return KILN_C99_OUT_OF_MEMORY;
         }
+    }
+    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return KILN_C99_OK;
+}
+
+/* The `n` and `e` the specification's exponential formats name, for a finite value.
+ *
+ * `count` significant digits of the *exact* expansion of the magnitude, rounded half up -- "if
+ * there are two such sets, pick the larger n" -- written most significant first into `mantissa`
+ * and NUL terminated, and the decimal exponent of the first of them in `*exponent`. `mantissa`
+ * must have room for `count + 1` bytes. */
+static void kiln_c99_significant_digits(double value, size_t count, char *mantissa,
+                                        int *exponent) {
+    unsigned char digits[1200];
+    size_t total;
+    size_t fractional;
+    size_t point;
+    size_t first;
+    size_t index;
+    size_t carry_at;
+    total = kiln_c99_exact_digits(value, digits, sizeof digits, &fractional);
+    /* `digits` is little-endian, so big-endian position `i` is `digits[total - 1 - i]`, and
+     * `point` of those sit above the decimal point. */
+    point = total - fractional;
+    for (first = 0; first < total && digits[total - 1 - first] == 0; ++first) {
+    }
+    if (first == total) {
+        /* Zero has no significant digit: the specification names its mantissa as zeros and its
+         * exponent as zero. */
+        for (index = 0; index < count; ++index) {
+            mantissa[index] = '0';
+        }
+        mantissa[count] = '\0';
+        *exponent = 0;
+        return;
+    }
+    /* The digit at `first` sits in the place worth 10^(point - 1 - first). */
+    *exponent = (int)point - 1 - (int)first;
+    for (index = 0; index < count; ++index) {
+        size_t at = first + index;
+        mantissa[index] = at < total ? (char)('0' + digits[total - 1 - at]) : '0';
+    }
+    mantissa[count] = '\0';
+    /* Only the deciding digit is consulted: at or above five the answer rounds up whatever
+     * follows it. A place past the end of the exact expansion is a zero and decides nothing. */
+    if (first + count < total && digits[total - 1 - (first + count)] >= 5) {
+        carry_at = count;
+        for (;;) {
+            if (carry_at == 0) {
+                /* The carry ran off the front: every digit was a nine, so the mantissa is a one
+                 * followed by zeros and the exponent moved up one. */
+                mantissa[0] = '1';
+                for (index = 1; index < count; ++index) {
+                    mantissa[index] = '0';
+                }
+                *exponent += 1;
+                break;
+            }
+            carry_at -= 1;
+            if (mantissa[carry_at] == '9') {
+                mantissa[carry_at] = '0';
+                continue;
+            }
+            mantissa[carry_at] += 1;
+            break;
+        }
+    }
+}
+
+/* The *shortest* mantissa and decimal exponent that name a finite non-negative value exactly,
+ * which is what `toExponential` with no argument asks for.
+ *
+ * Read off the number provider's own shortest spelling rather than decided again here. That
+ * spelling is already the fewest digits that round-trip (ADR 0018), so reading it is the only
+ * way `(1234.5678).toExponential()` and `String(1234.5678)` cannot come to disagree about how
+ * many digits the value needs. */
+static int kiln_c99_shortest_digits(double value, char *mantissa, size_t capacity, int *exponent) {
+    kiln_value spelled = kiln_c99_text(kiln_c99_number(value));
+    const char *bytes;
+    size_t len;
+    size_t body;
+    size_t index;
+    size_t produced = 0;
+    size_t point;
+    size_t first;
+    size_t last;
+    char raw[64];
+    int suffix = 0;
+    int suffix_sign = 1;
+    if (spelled.tag != KILN_VALUE_STRING) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    bytes = (const char *)spelled.ptr;
+    len = spelled.len;
+    /* `1e+21` and above, and `1e-7` and below, are spelled with an exponent already; everything
+     * between is spelled positionally. Both forms reduce to the same digits-and-a-place. */
+    body = len;
+    for (index = 0; index < len; ++index) {
+        if (bytes[index] == 'e' || bytes[index] == 'E') {
+            size_t at = index + 1;
+            body = index;
+            if (at < len && (bytes[at] == '+' || bytes[at] == '-')) {
+                suffix_sign = bytes[at] == '-' ? -1 : 1;
+                at += 1;
+            }
+            for (; at < len; ++at) {
+                if (bytes[at] < '0' || bytes[at] > '9') {
+                    break;
+                }
+                suffix = suffix * 10 + (bytes[at] - '0');
+            }
+            suffix *= suffix_sign;
+            break;
+        }
+    }
+    point = (size_t)-1;
+    for (index = 0; index < body && produced < sizeof raw; ++index) {
+        if (bytes[index] == '.') {
+            point = produced;
+            continue;
+        }
+        if (bytes[index] < '0' || bytes[index] > '9') {
+            /* A sign; the caller asked about a magnitude. */
+            continue;
+        }
+        raw[produced++] = bytes[index];
+    }
+    if (point == (size_t)-1) {
+        point = produced;
+    }
+    for (first = 0; first < produced && raw[first] == '0'; ++first) {
+    }
+    if (first == produced) {
+        if (capacity < 2) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        mantissa[0] = '0';
+        mantissa[1] = '\0';
+        *exponent = 0;
+        return KILN_C99_OK;
+    }
+    /* Trailing zeros are place-holding, not significant: `100` is `1e+2`, not `100e+0`. */
+    for (last = produced; last > first + 1 && raw[last - 1] == '0'; --last) {
+    }
+    if (last - first + 1 > capacity) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    for (index = first; index < last; ++index) {
+        mantissa[index - first] = raw[index];
+    }
+    mantissa[last - first] = '\0';
+    *exponent = (int)point - 1 - (int)first + suffix;
+    return KILN_C99_OK;
+}
+
+/* One mantissa and exponent as both exponential formats write them: `1.25e+2`. */
+static int kiln_c99_exponential_text(kiln_value *out, int negative, const char *mantissa,
+                                     int exponent) {
+    kiln_text text = {NULL, 0, 0};
+    char rendered[16];
+    size_t length = strlen(mantissa);
+    unsigned magnitude = exponent < 0 ? (unsigned)-(long)exponent : (unsigned)exponent;
+    size_t at = sizeof rendered;
+    int failed = 0;
+    if (negative) {
+        failed = failed || kiln_c99_text_append_c(&text, "-") != KILN_C99_OK;
+    }
+    failed = failed || kiln_c99_text_append(&text, mantissa, 1) != KILN_C99_OK;
+    if (length > 1) {
+        failed = failed || kiln_c99_text_append_c(&text, ".") != KILN_C99_OK;
+        failed = failed || kiln_c99_text_append(&text, mantissa + 1, length - 1) != KILN_C99_OK;
+    }
+    failed = failed || kiln_c99_text_append_c(&text, "e") != KILN_C99_OK;
+    /* The sign is always written, which is the whole difference from `String(n)`'s own
+     * exponential form for a positive exponent. */
+    failed = failed || kiln_c99_text_append_c(&text, exponent < 0 ? "-" : "+") != KILN_C99_OK;
+    do {
+        rendered[--at] = (char)('0' + magnitude % 10u);
+        magnitude /= 10u;
+    } while (magnitude != 0 && at > 0);
+    failed = failed ||
+             kiln_c99_text_append(&text, rendered + at, sizeof rendered - at) != KILN_C99_OK;
+    if (failed) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return KILN_C99_OK;
+}
+
+/* `toPrecision`'s positional form, and its own window for when to give up on one.
+ *
+ * The switch to the exponential form is the specification's, and it is what keeps
+ * `(0.0000001).toPrecision(2)` from being a string of zeros with no digits in it. */
+static int kiln_c99_precision_text(kiln_value *out, int negative, const char *mantissa,
+                                   size_t digits, int exponent) {
+    kiln_text text = {NULL, 0, 0};
+    size_t length = strlen(mantissa);
+    size_t split;
+    int index;
+    int failed = 0;
+    if (exponent < -6 || exponent >= (int)digits) {
+        return kiln_c99_exponential_text(out, negative, mantissa, exponent);
+    }
+    if (negative) {
+        failed = failed || kiln_c99_text_append_c(&text, "-") != KILN_C99_OK;
+    }
+    if (exponent == (int)digits - 1) {
+        /* Every significant digit is above the point, so there is no point. */
+        failed = failed || kiln_c99_text_append(&text, mantissa, length) != KILN_C99_OK;
+    } else if (exponent >= 0) {
+        split = (size_t)exponent + 1;
+        failed = failed || kiln_c99_text_append(&text, mantissa, split) != KILN_C99_OK;
+        failed = failed || kiln_c99_text_append_c(&text, ".") != KILN_C99_OK;
+        failed = failed ||
+                 kiln_c99_text_append(&text, mantissa + split, length - split) != KILN_C99_OK;
+    } else {
+        failed = failed || kiln_c99_text_append_c(&text, "0.") != KILN_C99_OK;
+        for (index = 0; index < -exponent - 1; ++index) {
+            failed = failed || kiln_c99_text_append_c(&text, "0") != KILN_C99_OK;
+        }
+        failed = failed || kiln_c99_text_append(&text, mantissa, length) != KILN_C99_OK;
+    }
+    if (failed) {
+        free(text.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
     }
     *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
     return KILN_C99_OK;
@@ -10598,6 +10860,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_FIXED);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name(key, key_len, "toExponential")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "toPrecision")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_TO_PRECISION);
+            return KILN_C99_OK;
+        }
         if (kiln_c99_same_name(key, key_len, "valueOf")) {
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
             return KILN_C99_OK;
@@ -11564,14 +11834,34 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
                                : kiln_c99_from_units(units + start, end - start);
         break;
     }
+    /* All five of these take a *position* as their second argument, and all five used to
+     * ignore it -- so `"abcabc".indexOf("c", 3)` answered 2, which is not merely the wrong
+     * number but a number from before the search was asked to start. */
     case KILN_C99_METHOD_STRING_INDEX_OF:
-        *result = kiln_c99_number(kiln_c99_units_find(units, count, needle, needle_count, 0));
+        *result = kiln_c99_number(kiln_c99_units_find(
+            units, count, needle, needle_count,
+            kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), count, 0, 0)));
         break;
     case KILN_C99_METHOD_LAST_INDEX_OF: {
         double found = -1.0;
         double at;
         size_t from = 0;
+        /* The one position argument in the language where NaN means the *end* of the string
+         * rather than the start: `lastIndexOf` is specified as `+Infinity` for a NaN, which is
+         * also what a missing argument gives, so both search the whole string. */
+        double requested = argc > 1 ? kiln_c99_as_number(args[1]) : 0.0 / 0.0;
+        size_t limit;
+        if (argc <= 1 || isnan(requested)) {
+            limit = count;
+        } else if (requested < 0.0) {
+            limit = 0;
+        } else {
+            limit = requested > (double)count ? count : (size_t)requested;
+        }
         while ((at = kiln_c99_units_find(units, count, needle, needle_count, from)) >= 0.0) {
+            if (at > (double)limit) {
+                break;
+            }
             found = at;
             from = (size_t)at + 1;
         }
@@ -11580,17 +11870,29 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
     }
     case KILN_C99_METHOD_STRING_INCLUDES:
         *result = kiln_c99_boolean(
-            kiln_c99_units_find(units, count, needle, needle_count, 0) >= 0.0);
+            kiln_c99_units_find(
+                units, count, needle, needle_count,
+                kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), count, 0, 0)) >=
+            0.0);
         break;
-    case KILN_C99_METHOD_STARTS_WITH:
-        *result = kiln_c99_boolean(needle_count <= count &&
-                                   memcmp(units, needle, needle_count * sizeof *units) == 0);
-        break;
-    case KILN_C99_METHOD_ENDS_WITH:
-        *result = kiln_c99_boolean(needle_count <= count &&
-                                   memcmp(units + count - needle_count, needle,
+    case KILN_C99_METHOD_STARTS_WITH: {
+        size_t start = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), count, 0,
+                                              0);
+        *result = kiln_c99_boolean(needle_count <= count - start &&
+                                   memcmp(units + start, needle,
                                           needle_count * sizeof *units) == 0);
         break;
+    }
+    case KILN_C99_METHOD_ENDS_WITH: {
+        /* `endsWith`'s position is where the string is treated as *ending*, so it defaults to
+         * the whole length rather than to zero. */
+        size_t end = kiln_c99_unit_position(argc > 1 ? args[1] : kiln_c99_undefined(), count,
+                                            count, 0);
+        *result = kiln_c99_boolean(needle_count <= end &&
+                                   memcmp(units + end - needle_count, needle,
+                                          needle_count * sizeof *units) == 0);
+        break;
+    }
     case KILN_C99_METHOD_CHAR_AT:
     case KILN_C99_METHOD_CHAR_CODE_AT:
     case KILN_C99_METHOD_STRING_AT: {
@@ -11634,7 +11936,13 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
         break;
     }
     case KILN_C99_METHOD_STRING_CODE_POINT_AT: {
+        /* `ToIntegerOrInfinity`, which maps NaN to zero. Without it every comparison below is
+         * false for a NaN -- that is what NaN does -- and the position fell through to a cast
+         * that has no value to produce, which on this target aborts the process rather than
+         * answering anything. `"abc".codePointAt(NaN)` is `"abc".codePointAt(0)`. */
         double position = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
+        if (position != position) position = 0.0;
+        position = trunc(position);
         if (position < 0.0 || position >= (double)count) {
             *result = kiln_c99_undefined();
             break;
@@ -11655,9 +11963,13 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
         break;
     }
     case KILN_C99_METHOD_STRING_SUBSTR: {
+        /* `ToIntegerOrInfinity` for the same reason `codePointAt` needs one: a NaN start
+         * satisfies neither comparison below and reached a cast that cannot represent it. */
         double relative = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
         size_t start;
         size_t taken;
+        if (relative != relative) relative = 0.0;
+        relative = trunc(relative);
         /* A negative start counts from the end, which is the one thing `substr` does that
          * `substring` does not. */
         if (relative < 0.0) {
@@ -14879,9 +15191,228 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
     return KILN_C99_CONTROL_ERROR;
 }
 
+/* Which of a built-in's arguments name a *number*, as a bitmask over argument positions.
+ *
+ * The C twin of the interpreter's `numeric_arguments`, and deliberately the same list written
+ * twice: the two engines run the same bytecode, so a position coerced in one and not in the
+ * other is a divergence by construction -- which is exactly how
+ * `(5.5).toFixed({valueOf: () => 2})` came to answer `"6"` here and `"5.50"` there, with the
+ * program's own `valueOf` never called at all.
+ *
+ * Only positions that really are numbers are listed. `fill`'s value and `indexOf`'s needle are
+ * any value at all, and converting either would be wrong. */
+static uint32_t kiln_c99_numeric_arguments(uint64_t code) {
+    switch (code) {
+    /* `(start, end)`. */
+    case KILN_C99_METHOD_SLICE:
+    case KILN_C99_METHOD_ARRAY_SPLICE:
+    case KILN_C99_METHOD_STRING_SLICE:
+    case KILN_C99_METHOD_SUBSTRING:
+    case KILN_C99_METHOD_STRING_SUBSTR:
+    case KILN_C99_METHOD_TYPED_SUBARRAY:
+        return UINT32_C(0x3);
+    /* `(target, start, end)`. */
+    case KILN_C99_METHOD_ARRAY_COPY_WITHIN:
+        return UINT32_C(0x7);
+    /* `(value, start, end)`: the value is any value at all, the two bounds are numbers. */
+    case KILN_C99_METHOD_ARRAY_FILL:
+        return UINT32_C(0x6);
+    /* `(searched, from)`: the needle is any value at all, the position is a number. */
+    case KILN_C99_METHOD_INDEX_OF:
+    case KILN_C99_METHOD_ARRAY_LAST_INDEX_OF:
+    case KILN_C99_METHOD_INCLUDES:
+    case KILN_C99_METHOD_STRING_INDEX_OF:
+    case KILN_C99_METHOD_LAST_INDEX_OF:
+    case KILN_C99_METHOD_STRING_INCLUDES:
+    case KILN_C99_METHOD_STARTS_WITH:
+    case KILN_C99_METHOD_ENDS_WITH:
+    case KILN_C99_METHOD_TYPED_SET:
+        return UINT32_C(0x2);
+    /* One number, in the first position. */
+    case KILN_C99_METHOD_ARRAY_AT:
+    case KILN_C99_METHOD_STRING_AT:
+    case KILN_C99_METHOD_CHAR_AT:
+    case KILN_C99_METHOD_CHAR_CODE_AT:
+    case KILN_C99_METHOD_STRING_CODE_POINT_AT:
+    case KILN_C99_METHOD_PAD_START:
+    case KILN_C99_METHOD_PAD_END:
+    case KILN_C99_METHOD_REPEAT:
+    case KILN_C99_METHOD_NUMBER_TO_FIXED:
+    case KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL:
+    case KILN_C99_METHOD_NUMBER_TO_PRECISION:
+    case KILN_C99_METHOD_NUMBER_TO_STRING:
+        return UINT32_C(0x1);
+    default:
+        return UINT32_C(0);
+    }
+}
+
+/* Which of a built-in's arguments it reads as *text*, on the same terms as the table above.
+ *
+ * The C twin of the interpreter's `textual_arguments`. The four `CreateHTML` wrappers that take
+ * an attribute belong here too and are absent only because this backend does not carry them --
+ * it refuses them by name, which is an answer, where a wrong string would not be. */
+static uint32_t kiln_c99_textual_arguments(uint64_t code) {
+    switch (code) {
+    case KILN_C99_METHOD_ESCAPE:
+    case KILN_C99_METHOD_UNESCAPE:
+        return UINT32_C(0x1);
+    default:
+        return UINT32_C(0);
+    }
+}
+
+/* Whether a numeric argument still has to go through `ToNumber` to become one.
+ *
+ * `undefined` is left alone: it is not a missing number but a *meaningful* one, and each built-in
+ * says for itself what it means -- `slice(1, undefined)` runs to the end, where
+ * `ToNumber(undefined)` is NaN. A symbol and a BigInt are converted rather than skipped, because
+ * converting either is the `TypeError` the language requires and the pure `kiln_c99_as_number`
+ * answered an ordinary number for both. */
+static int kiln_c99_needs_number_conversion(kiln_value value) {
+    if (value.tag == KILN_VALUE_UNDEFINED || value.tag == KILN_VALUE_NUMBER) {
+        return 0;
+    }
+    if (value.tag == KILN_VALUE_SYMBOL || value.tag == KILN_VALUE_BIGINT) {
+        return 1;
+    }
+    /* Every remaining primitive spells its own number; everything else is a call away from one. */
+    return !(value.tag == KILN_VALUE_NULL || value.tag == KILN_VALUE_BOOLEAN ||
+             value.tag == KILN_VALUE_STRING);
+}
+
+/* Whether a textual argument still has to go through `ToString`.
+ *
+ * A symbol, because `ToString` is the step that refuses one; and anything that is not a primitive,
+ * because the conversion is a method the program may have written. */
+static int kiln_c99_needs_text_conversion(kiln_value value) {
+    if (value.tag == KILN_VALUE_SYMBOL) {
+        return 1;
+    }
+    return !(value.tag == KILN_VALUE_UNDEFINED || value.tag == KILN_VALUE_NULL ||
+             value.tag == KILN_VALUE_BOOLEAN || value.tag == KILN_VALUE_NUMBER ||
+             value.tag == KILN_VALUE_STRING || value.tag == KILN_VALUE_BIGINT);
+}
+
+/* `ToNumber` of one argument, answered as a value rather than as a double so that the built-in
+ * behind it goes on reading its arguments exactly the way it already does. */
+static int kiln_c99_to_number_argument(kiln_host *host, kiln_value value, kiln_value *out,
+                                       int depth, kiln_value *thrown) {
+    kiln_value reduced = value;
+    if (kiln_c99_is_reference(value)) {
+        int status = kiln_c99_to_primitive(host, value, 0, &reduced, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    if (reduced.tag == KILN_VALUE_SYMBOL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a Symbol value to a number");
+    }
+    if (reduced.tag == KILN_VALUE_BIGINT) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a BigInt value to a number");
+    }
+    *out = kiln_c99_number(kiln_c99_as_number(reduced));
+    return KILN_C99_OK;
+}
+
+/* `ToString` of one argument, on the same terms. */
+static int kiln_c99_to_text_argument(kiln_host *host, kiln_value value, kiln_value *out,
+                                     int depth, kiln_value *thrown) {
+    kiln_value reduced = value;
+    if (kiln_c99_is_reference(value)) {
+        int status = kiln_c99_to_primitive(host, value, 1, &reduced, depth, thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+    }
+    if (reduced.tag == KILN_VALUE_SYMBOL) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Cannot convert a Symbol value to a string");
+    }
+    *out = kiln_c99_text(reduced);
+    return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+}
+
+/* How many arguments a call may carry before the coercion pass has to borrow memory for its
+ * copy. Nothing in either table names a position above the third; the room is for the *tail*,
+ * which a program is free to make as long as it likes. */
+#define KILN_C99_COERCED_INLINE 8
+
+/* `ToNumber` and `ToString` for every argument a built-in reads as one, run once on the way in.
+ *
+ * The same place and the same reason as the interpreter's pass: these conversions are the
+ * program's own `Symbol.toPrimitive`, `valueOf` or `toString` -- calls, which can be counted and
+ * can throw -- and the several dozen built-ins behind this function have no machine to run one
+ * with. `kiln_c99_as_number` is pure, so every object was silently read as NaN and every
+ * `valueOf` the program wrote was never called at all: `[1,2,3,4].slice({valueOf: () => 1})`
+ * answered the whole array, and `"ab".repeat({valueOf() { throw x; }})` never threw.
+ *
+ * After the receiver, because that is the order a `valueOf` counting its own calls can observe,
+ * and left to right, because two arguments that both throw must throw the leftmost first.
+ *
+ * The hand-on cannot loop: what it passes down is a Number or a String. */
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown) {
+    uint32_t numeric = kiln_c99_numeric_arguments(code);
+    uint32_t textual = kiln_c99_textual_arguments(code);
+    kiln_value inline_storage[KILN_C99_COERCED_INLINE];
+    kiln_value *coerced = NULL;
+    size_t index;
+    int status = KILN_C99_OK;
+    if ((numeric | textual) == 0 || argc == 0) {
+        return kiln_c99_invoke_method_dispatch(host, result, code, receiver, args, argc, depth,
+                                               thrown);
+    }
+    for (index = 0; index < argc && index < 32; ++index) {
+        int is_numeric = (numeric & (UINT32_C(1) << index)) != 0;
+        int is_textual = (textual & (UINT32_C(1) << index)) != 0;
+        const kiln_value *reading = coerced == NULL ? args : coerced;
+        if (!is_numeric && !is_textual) {
+            continue;
+        }
+        if (is_numeric ? !kiln_c99_needs_number_conversion(reading[index])
+                       : !kiln_c99_needs_text_conversion(reading[index])) {
+            continue;
+        }
+        /* An argument that already spells itself is the ordinary case and must not pay for a
+         * copy; the copy is made the first time one does not. */
+        if (coerced == NULL) {
+            size_t copy;
+            coerced = argc <= KILN_C99_COERCED_INLINE
+                          ? inline_storage
+                          : (kiln_value *)malloc(argc * sizeof *coerced);
+            if (coerced == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (copy = 0; copy < argc; ++copy) {
+                coerced[copy] = args[copy];
+            }
+        }
+        status = is_numeric ? kiln_c99_to_number_argument(host, coerced[index], &coerced[index],
+                                                          depth, thrown)
+                            : kiln_c99_to_text_argument(host, coerced[index], &coerced[index],
+                                                        depth, thrown);
+        if (status != KILN_C99_OK) {
+            break;
+        }
+    }
+    if (status == KILN_C99_OK) {
+        status = kiln_c99_invoke_method_dispatch(host, result, code, receiver,
+                                                 coerced == NULL ? args : coerced, argc, depth,
+                                                 thrown);
+    }
+    if (coerced != NULL && coerced != inline_storage) {
+        free(coerced);
+    }
+    return status;
+}
+
+static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, uint64_t code,
+                                           kiln_value receiver, const kiln_value *args,
+                                           size_t argc, int depth, kiln_value *thrown) {
     kiln_array *array;
     size_t index;
     int status;
@@ -15442,6 +15973,65 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             }
             return kiln_c99_to_fixed(result, kiln_c99_as_number(receiver), (int)digits);
         }
+        case KILN_C99_METHOD_NUMBER_TO_EXPONENTIAL: {
+            double subject = kiln_c99_as_number(receiver);
+            char mantissa[128];
+            int exponent;
+            int given = argc > 0 && args[0].tag != KILN_VALUE_UNDEFINED;
+            double requested = 0.0;
+            if (given) {
+                /* `ToIntegerOrInfinity`, so NaN means zero digits rather than a refusal. */
+                requested = first;
+                if (requested != requested) requested = 0.0;
+                requested = trunc(requested);
+                /* The range check runs even for a value that is not finite, which is why an
+                 * infinite receiver is answered *after* it rather than before it. */
+                if (!(requested >= 0.0 && requested <= 100.0) && isfinite(subject)) {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                "toString() radix must be between 2 and 36");
+                }
+                if (requested < 0.0) requested = 0.0;
+                if (requested > 100.0) requested = 100.0;
+            }
+            if (!isfinite(subject)) {
+                *result = kiln_c99_text(kiln_c99_number(subject));
+                return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+            }
+            if (given) {
+                kiln_c99_significant_digits(fabs(subject), (size_t)requested + 1, mantissa,
+                                            &exponent);
+            } else {
+                /* With no digit count the specification asks for the fewest digits that name the
+                 * value exactly, which the number provider's shortest spelling already is. */
+                status = kiln_c99_shortest_digits(fabs(subject), mantissa, sizeof mantissa,
+                                                  &exponent);
+                if (status != KILN_C99_OK) return status;
+            }
+            return kiln_c99_exponential_text(result, subject < 0.0, mantissa, exponent);
+        }
+        case KILN_C99_METHOD_NUMBER_TO_PRECISION: {
+            double subject = kiln_c99_as_number(receiver);
+            char mantissa[128];
+            int exponent;
+            double requested;
+            /* With no argument at all this is `toString`, not a one-digit rendering. */
+            if (argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED || !isfinite(subject)) {
+                *result = kiln_c99_text(kiln_c99_number(subject));
+                return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+            }
+            requested = first;
+            if (requested != requested) requested = 0.0;
+            requested = trunc(requested);
+            /* One digit is the fewest a significant-digit rendering can have, which is why this
+             * range starts at one where `toExponential`'s starts at zero. */
+            if (!(requested >= 1.0 && requested <= 100.0)) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                            "toString() radix must be between 2 and 36");
+            }
+            kiln_c99_significant_digits(fabs(subject), (size_t)requested, mantissa, &exponent);
+            return kiln_c99_precision_text(result, subject < 0.0, mantissa, (size_t)requested,
+                                           exponent);
+        }
         case KILN_C99_METHOD_ABORT_CONTROLLER_ABORT: {
             kiln_value signal;
             status = kiln_c99_get(host, receiver, "signal", 6, &signal, depth, thrown);
@@ -15678,28 +16268,15 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
              * per code unit. They work in code units rather than scalars, which is exactly why
              * they were replaced and exactly why they cannot be written in terms of the four
              * below. */
-            kiln_value argument = argc > 0 ? args[0] : kiln_c99_undefined();
-            kiln_value subject;
+            /* `ToString` of the argument -- for an object a call the program wrote, and one
+             * that may therefore throw -- has already run in the coercion pass on the way in,
+             * which is where every other built-in's text argument is converted too. */
+            kiln_value subject = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
             kiln_text built = {NULL, 0, 0};
             uint16_t *units = NULL;
             size_t count = 0;
             size_t at = 0;
             int failed = 0;
-            /* `ToString` of the argument, which for an object is a call the program wrote and
-             * may therefore throw -- `escape({toString() { throw e; }})` raises `e`.
-             * `kiln_c99_text` is pure, so on its own it read every object as
-             * "[object Object]" and swallowed the throw. */
-            if (kiln_c99_is_reference(argument)) {
-                int reduced = kiln_c99_to_primitive(host, argument, 1, &argument, depth, thrown);
-                if (reduced != KILN_C99_OK) {
-                    return reduced;
-                }
-            }
-            if (argument.tag == KILN_VALUE_SYMBOL) {
-                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                            "Cannot convert a Symbol value to a string");
-            }
-            subject = kiln_c99_text(argument);
             if (subject.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -18886,8 +19463,13 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     case KILN_C99_METHOD_INDEX_OF:
     case KILN_C99_METHOD_INCLUDES: {
         kiln_value needle = argc > 0 ? args[0] : kiln_c99_undefined();
+        /* Where the walk starts, counting from the end when negative. Ignoring it answered
+         * `[1,2,3,4].indexOf(3, 3)` with 2 -- a position before the one the caller asked to
+         * start from, which reads as a find rather than as a miss. */
+        size_t start = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
+                                               array->count, 0);
         int found = 0;
-        for (index = 0; index < array->count; ++index) {
+        for (index = start; index < array->count; ++index) {
             if (kiln_c99_is_hole(array->elements[index])) {
                 /* The only place `indexOf` and `includes` disagree, and the reason `includes`
                  * exists: one skips a hole and the other reads it as undefined. */
@@ -19171,7 +19753,16 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         /* A negative index counts from the end, which is the whole reason `at` exists alongside
          * indexing; out of range is undefined rather than clamped. */
         double relative = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
-        double position = relative < 0.0 ? (double)array->count + relative : relative;
+        double position;
+        /* `ToIntegerOrInfinity` first, so a NaN index is zero and not out of range: `[1].at(NaN)`
+         * is `[1].at(0)`. Without it every comparison below is false for a NaN and the answer
+         * came back undefined -- the spelling of "there is nothing there", for an index that
+         * names the first element. The string `at` beside this one already had the check. */
+        if (relative != relative) {
+            relative = 0.0;
+        }
+        relative = trunc(relative);
+        position = relative < 0.0 ? (double)array->count + relative : relative;
         *result = position >= 0.0 && position < (double)array->count &&
                           !kiln_c99_is_hole(array->elements[(size_t)position])
                       ? array->elements[(size_t)position]
@@ -19181,7 +19772,28 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
     case KILN_C99_METHOD_ARRAY_LAST_INDEX_OF: {
         kiln_value needle = argc > 0 ? args[0] : kiln_c99_undefined();
         double found = -1.0;
-        for (index = array->count; index > 0; --index) {
+        /* `fromIndex` is where the *backwards* walk starts, counting from the end when
+         * negative -- and a negative that runs off the front leaves nowhere to start, which is
+         * -1 rather than the whole array. That last case is why this cannot use
+         * `kiln_c99_relative_index`, which clamps such a position to zero and would go on to
+         * report a match at the very element the caller excluded. */
+        size_t limit = array->count;
+        if (argc > 1 && args[1].tag != KILN_VALUE_UNDEFINED) {
+            double from = kiln_c99_as_number(args[1]);
+            if (from != from) {
+                from = 0.0;
+            }
+            from = trunc(from);
+            if (from < 0.0) {
+                from += (double)array->count;
+            }
+            if (from < 0.0) {
+                *result = kiln_c99_number(-1.0);
+                return KILN_C99_OK;
+            }
+            limit = from >= (double)array->count ? array->count : (size_t)from + 1;
+        }
+        for (index = limit; index > 0; --index) {
             if (kiln_c99_is_hole(array->elements[index - 1])) {
                 continue;
             }
@@ -26641,9 +27253,25 @@ fn emit_instruction(
         Instruction::Call { argc } => {
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
+            // The fast path below skips `kiln_c99_call` and invokes the body directly, which is
+            // only sound while it can supply the same receiver the dispatcher would have. It
+            // supplies two: an arrow's captured `this`, and `undefined` for everything else.
+            //
+            // `undefined` stopped being the whole of the second case when the dispatcher learned
+            // `OrdinaryCallBindThis` -- sloppy code never sees `undefined` as `this`, it sees the
+            // global object -- so a sloppy non-arrow function taking this path got `undefined`
+            // where the interpreter gave it `globalThis`, and a UMD header's `this || global`
+            // silently picked the wrong branch. Neither side was written wrong: the fast path
+            // replicated a tail that later grew a rule, and the two only met at a merge.
+            //
+            // So the guard names the condition rather than the rule: take the fast path only when
+            // the receiver it already knows how to supply is the right one. The substitution
+            // itself stays in `kiln_c99_call` and stays written once, because a rule with two
+            // implementations is what drifted here in the first place. Modules are strict, so
+            // this costs nothing outside CommonJS.
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
