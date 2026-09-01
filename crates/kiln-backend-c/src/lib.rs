@@ -5385,7 +5385,14 @@ static double kiln_c99_key_index(const char *key, size_t key_len) {
     char buffer[64];
     double number;
     int length;
-    if (key_len == 0 || key_len > 20) {
+    /* Every canonical index spelling is one to ten ASCII digits with no sign and no leading
+     * space: the largest index is 4294967294, and a number that round-trips cannot begin with
+     * anything but a digit.  Both are *necessary* conditions, so failing either is a decision
+     * this can make without the provider -- which matters because the provider call is a
+     * cross-crate FFI hop and every property write on every object makes one.  Nothing about
+     * `a["01"]` or `a["1"]` moves: the round-trip below still decides those. */
+    if (key_len == 0 || key_len > 10 ||
+        (unsigned char)(key[0] - '0') > 9u) {
         return -1.0;
     }
     number = kiln_string_to_number(key, key_len);
