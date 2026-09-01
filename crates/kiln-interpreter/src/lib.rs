@@ -10180,6 +10180,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     stream.closed = true;
                 }
                 if let Some(socket) = socket {
+                    // Node exposes the terminal stream state from inside the `close` listener.
+                    // Event dispatch is synchronous, so projecting it after this branch returns
+                    // lets user code observe the previous half-open state.
+                    sync_node_socket_ready_state(server, resource);
                     self.dispatch_node_event(
                         Native::NodeEventEmit,
                         &socket,
