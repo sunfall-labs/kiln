@@ -1090,6 +1090,13 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             // timeout races the first poll and made progress depend on executor polling details.
             // A small fixed drain advances no clock and keeps the checkpoint reproducible while
             // allowing each already-runnable layer to hand work to the next.
+            //
+            // Each yield here is a park_yield, a reactor turn. The interpreter's Node loop
+            // depends on those turns: with fewer than four, or with direct LocalSet polls in
+            // their place, it parks in `next_turn` and never wakes, which the conformance
+            // coordinator reproduces on every server probe. The native drive has no such
+            // dependency and uses `poll_http_tasks_after_wake`, which polls directly; why the two
+            // loops differ here is not yet established and is worth its own measurement.
             for _ in 0..4 {
                 tokio::task::yield_now().await;
             }
@@ -1099,9 +1106,22 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// Advance protocol tasks after the caller has just delivered a completion or command that
     /// woke them. Unlike [`Self::poll_http_tasks`], this path may await one scheduler yield: the
     /// concrete wake guarantees progress and the adapter immediately drains the resulting events.
+    /// The native drive's checkpoint after a host completion: the four cooperative turns
+    /// without a reactor turn.
+    ///
+    /// The drive reaches this from `next_turn`'s own park, which just delivered every readiness
+    /// the kernel had, so there is nothing for a reactor turn to find. Not paying for one is the
+    /// difference between a server whose throughput is flat from one connection to sixty-four
+    /// and one whose throughput rises with concurrency: measured 2.1x / 7.4x / 4.9x at
+    /// concurrency 1 / 16 / 64 on `bench/server` (2026-09-01).
     #[doc(hidden)]
     pub fn poll_http_tasks_after_wake(&mut self) {
-        self.poll_http_tasks();
+        if self.is_shutdown() {
+            return;
+        }
+        for _ in 0..4 {
+            self.poll_http_tasks_once();
+        }
     }
 
     /// Drives `realm` until it has no microtasks or timers left.
