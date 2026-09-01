@@ -8027,6 +8027,53 @@ console.log(direct === via, via.answer);
     }
 
     #[test]
+    fn native_named_reexport_of_commonjs_default_keeps_slot_zero() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping CommonJS re-export integration: no C compiler found");
+            return;
+        };
+        let root = TestDirectory::new("kiln-native-commonjs-named-reexport");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write root package");
+        fs::create_dir(root.path.join("pkg")).expect("create CommonJS package");
+        fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write CommonJS package metadata");
+        fs::write(root.path.join("pkg/index.js"), "module.exports = 42;\n")
+            .expect("write CommonJS provider");
+        fs::write(
+            root.path.join("barrel.mjs"),
+            "export { default as answer } from './pkg/index.js';\n",
+        )
+        .expect("write ESM barrel");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            "import { answer } from './barrel.mjs'; console.log(answer);\n",
+        )
+        .expect("write ESM consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("CommonJS re-export graph compiles");
+        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("CommonJS re-export graph builds and runs");
+        assert_eq!(report.stdout, b"42\n");
+    }
+
+    #[test]
     fn a_second_build_reuses_every_material_artifact_and_runs() {
         let Some(toolchain) = Toolchain::discover().ok() else {
             eprintln!("skipping native integration: no C compiler found");
