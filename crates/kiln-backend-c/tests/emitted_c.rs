@@ -28,7 +28,7 @@
 //! claim directly rather than assuming it; running the suite twice checks it across processes,
 //! where a hash seed differs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use kiln_backend_c::{
     CModule, EmitError, emit, emit_c, emit_module, emit_module_with_logical_path,
@@ -335,6 +335,142 @@ fn assert_numeric_id_invariants(prelude: &str) {
     );
 }
 
+/// Every method code a name lookup can walk over must have a name.
+///
+/// `kiln_c99_lookup_method(key, key_len, FIRST, LAST)` resolves a property name by walking the
+/// codes from `FIRST` to `LAST` and comparing `kiln_c99_method_name(code)` to the key. A code in
+/// that span with no `case` in the name function returns `NULL`, is skipped, and becomes a method
+/// that exists in every dispatch table but that no program can ever call. Nothing fails: the C
+/// compiles, the tests that invoke the method by code still pass, and the method is simply
+/// invisible from JavaScript.
+///
+/// This is the same hazard as a `case` naming a `#define` that does not exist -- the C lives in a
+/// Rust string literal, so only a C compiler would notice, and here not even that -- one layer up.
+#[test]
+fn every_method_a_name_lookup_walks_over_has_a_name() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+
+    let values: BTreeMap<String, u64> = parse_numeric_id_defines(prelude)
+        .expect("numeric ID declarations parse")
+        .into_iter()
+        .map(|define| (define.name, define.value))
+        .collect();
+
+    // Anchor on the *definition*, not the forward declaration: the two differ only by `{` versus
+    // `;`, and a guard that matched the declaration would read an empty body and pass no matter
+    // what. Assert the declaration exists too, so this stays true if the two ever swap order.
+    const SIGNATURE: &str = "static const char *kiln_c99_method_name(uint64_t code)";
+    assert!(
+        prelude.contains(&format!("{SIGNATURE};")),
+        "expected a forward declaration of kiln_c99_method_name; the prelude's shape has changed \
+         and this guard's anchors need rechecking"
+    );
+    let opening = format!("{SIGNATURE} {{");
+    let start = prelude
+        .find(&opening)
+        .expect("kiln_c99_method_name must be defined in the prelude");
+    let definition = &prelude[start..];
+    let end = definition
+        .find("default: return NULL;")
+        .expect("the name function ends in a NULL default");
+    let definition = &definition[..end];
+
+    let mut named: BTreeSet<u64> = BTreeSet::new();
+    for line in definition.lines() {
+        let Some(rest) = line.trim().strip_prefix("case ") else {
+            continue;
+        };
+        let Some((name, _)) = rest.split_once(':') else {
+            continue;
+        };
+        if let Some(&value) = values.get(name.trim()) {
+            named.insert(value);
+        }
+    }
+    assert!(
+        named.len() > 200,
+        "parsed only {} name cases out of kiln_c99_method_name, so this guard has stopped reading \
+         the real function body",
+        named.len(),
+    );
+
+    // Two families are answered by table-driven helpers above the switch rather than by a `case`
+    // each, so their codes are named without appearing here.
+    let mut delegated: BTreeSet<u64> = BTreeSet::new();
+    for (first, last) in [
+        (
+            "KILN_C99_METHOD_TEMPORAL_OP",
+            "KILN_C99_METHOD_TEMPORAL_OP_LAST",
+        ),
+        (
+            "KILN_C99_METHOD_TEMPORAL_NOW_READ",
+            "KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST",
+        ),
+    ] {
+        if let (Some(&first), Some(&last)) = (values.get(first), values.get(last)) {
+            delegated.extend(first..=last);
+        }
+    }
+
+    // Every code that some `#define` gives a name to, so a gap in a range is not mistaken for a
+    // method: only codes that actually exist are required to be nameable.
+    let defined: BTreeSet<u64> = values
+        .iter()
+        .filter(|(name, _)| name.starts_with("KILN_C99_METHOD_"))
+        .map(|(_, &value)| value)
+        .collect();
+
+    let flattened: String = prelude.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut spans = Vec::new();
+    // The emitted C wraps these calls at varying widths, so parse the argument list rather than
+    // matching one spelling of the whitespace between the arguments.
+    for call in flattened.split("kiln_c99_lookup_method(").skip(1) {
+        let Some((arguments, _)) = call.split_once(')') else {
+            continue;
+        };
+        let bounds: Vec<&str> = arguments.split(',').map(str::trim).collect();
+        if let [_key, _key_len, first, last] = bounds.as_slice()
+            && let (Some(&first), Some(&last)) = (values.get(*first), values.get(*last))
+        {
+            spans.push((first.min(last), first.max(last)));
+        }
+    }
+    assert!(
+        spans.len() > 10,
+        "found only {} name-lookup ranges in the prelude, so this guard is no longer reading the \
+         call sites it exists to cover",
+        spans.len(),
+    );
+
+    let mut unreachable = BTreeSet::new();
+    for (first, last) in spans {
+        for code in first..=last {
+            if defined.contains(&code) && !named.contains(&code) && !delegated.contains(&code) {
+                unreachable.insert(code);
+            }
+        }
+    }
+
+    let mut report = String::new();
+    for code in &unreachable {
+        let names: Vec<&str> = values
+            .iter()
+            .filter(|(name, value)| *value == code && name.starts_with("KILN_C99_METHOD_"))
+            .map(|(name, _)| name.as_str())
+            .collect();
+        report.push_str(&format!("\n  {code} ({})", names.join(", ")));
+    }
+    assert!(
+        unreachable.is_empty(),
+        "these method codes sit inside a kiln_c99_lookup_method range but have no case in \
+         kiln_c99_method_name, so kiln_c99_method_name returns NULL for them and the lookup skips \
+         them -- the method is dispatchable by code and unreachable by name from JavaScript:{report}\
+         \n\nAdd `case <NAME>: return \"<jsName>\";` to kiln_c99_method_name, spelled exactly as \
+         the JavaScript property is."
+    );
+}
+
 #[test]
 fn runtime_prelude_abi_surface() {
     let unit = emit(&minimal_program()).expect("minimal program emits");
@@ -453,14 +589,32 @@ fn set_encoding_is_routed_by_receiver_before_any_dispatch_group() {
 fn runtime_prelude_size() {
     // A guard on the half that is not snapshotted verbatim: the surface above would not notice a
     // rewritten function body, and this notices that something moved without pretending to say
-    // what. Update it deliberately.
+    // what.
+    //
+    // This was an exact `insta` snapshot of the line and byte counts, and an exact count of a file
+    // everybody appends to conflicts on *every* merge. It never survived one: the resolution was
+    // always to regenerate, because the number carries no meaning a reviewer can check -- nobody
+    // has ever looked at "1077518" and known whether it was right. Worse, it never fired alone.
+    // Every time it went red, the verbatim body snapshots went red beside it and said what had
+    // actually changed, so the exact number contributed a merge conflict and no information.
+    //
+    // A band keeps the signal that is genuinely worth having -- the prelude has not halved, and
+    // has not run away by an order of magnitude -- and only needs editing when the prelude really
+    // does change scale, which is the moment somebody should look anyway.
+    const FLOOR_LINES: usize = 15_000;
+    const CEILING_LINES: usize = 30_000;
+
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
-    insta::assert_snapshot!(format!(
-        "prelude lines: {}\nprelude bytes: {}",
-        prelude.lines().count(),
-        prelude.len()
-    ));
+    let lines = prelude.lines().count();
+    assert!(
+        (FLOOR_LINES..=CEILING_LINES).contains(&lines),
+        "the runtime prelude is {lines} lines, outside the expected {FLOOR_LINES}..={CEILING_LINES}.\
+         \n\nThat is a change of scale rather than an ordinary edit: either a large block stopped \
+         being emitted, or one is being emitted repeatedly. Check the emitted unit before widening \
+         this band -- the band is meant to move when the prelude legitimately grows, but only after \
+         somebody has looked at why."
+    );
 }
 
 #[test]
