@@ -4,7 +4,7 @@
 //! accepts ordinary strings and returns [`kiln_hir`] values, so an Oxc upgrade cannot leak AST
 //! types or arena lifetimes into the query database, interpreter, or backends.
 
-use std::{collections::HashSet, path::Path};
+use std::{collections::HashSet, path::Path, sync::Arc};
 
 use kiln_hir::{
     AssignmentOperator as HirAssignmentOperator, BinaryOperator as HirBinaryOperator, Diagnostic,
@@ -128,7 +128,7 @@ fn parse_source_with_commonjs_requires(
             .filter_map(|(_, value)| seen.insert(value.clone()).then_some(value))
             .collect()
     };
-    (lower_parsed(&parsed, source_type), requires)
+    (lower_parsed(&parsed, source, source_type), requires)
 }
 
 fn parse_source(source: &str, source_type: SourceType) -> Module {
@@ -146,10 +146,14 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         })
         .parse();
 
-    lower_parsed(&parsed, source_type)
+    lower_parsed(&parsed, source, source_type)
 }
 
-fn lower_parsed(parsed: &oxc_parser::ParserReturn<'_>, source_type: SourceType) -> Module {
+fn lower_parsed(
+    parsed: &oxc_parser::ParserReturn<'_>,
+    source: &str,
+    source_type: SourceType,
+) -> Module {
     let mut requested_modules = parsed
         .module_record
         .requested_modules
@@ -217,10 +221,12 @@ fn lower_parsed(parsed: &oxc_parser::ParserReturn<'_>, source_type: SourceType) 
         .map(lower_diagnostic)
         .collect::<Vec<_>>();
     diagnostics.extend(early_errors(parsed));
-    let mut lowerer = Lowerer;
+    let mut lowerer = Lowerer { text: source };
     let body = lowerer.statements(&parsed.program.body);
 
     Module {
+        // The one copy of the text every span in this module points into.
+        source: Arc::from(source),
         source_kind: source_kind(source_type),
         source_goal: if source_type.is_module() {
             SourceGoal::Module
@@ -323,9 +329,45 @@ fn bigint_digits(raw: &str) -> Option<String> {
     Some(num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)?.to_string())
 }
 
-struct Lowerer;
+struct Lowerer<'a> {
+    /// The source being lowered, so a span can be *read* and not merely recorded.
+    ///
+    /// Only one thing needs this, and it needs it for a reason no span arithmetic can supply: a
+    /// static class member's `ClassElement` span starts at `static`, and the `MethodDefinition`
+    /// that `Function.prototype.toString` must answer with does not include it. Finding where the
+    /// keyword ends means looking at the text.
+    text: &'a str,
+}
 
-impl Lowerer {
+impl Lowerer<'_> {
+    /// A class member's definition span, which for a static member starts after the `static`.
+    ///
+    /// `class C { static s() {} }` answers `"s() {}"`: `static` belongs to the `ClassElement`,
+    /// not to the `MethodDefinition` the specification says to reproduce. A member *named*
+    /// `static` is unaffected -- `static static() {}` drops the first word and keeps the second,
+    /// which is the same rule applied once.
+    ///
+    /// Whitespace between the keyword and the key is skipped; a comment there is not, and would
+    /// be reproduced. That is a wrong answer in a place no program looks, and it is visibly the
+    /// text that was written rather than an invented one.
+    fn method_definition_span(&self, span: HirSpan, is_static: bool) -> HirSpan {
+        if !is_static {
+            return span;
+        }
+        let Some(text) = self
+            .text
+            .get(span.start as usize..span.end as usize)
+            .and_then(|text| text.strip_prefix("static"))
+        else {
+            return span;
+        };
+        let skipped = text.len() - text.trim_start().len();
+        HirSpan::new(
+            span.start + "static".len() as u32 + skipped as u32,
+            span.end,
+        )
+    }
+
     /// Lower a list of statements into one vector, sized for the source list up front.
     ///
     /// Nothing here needs the capacity to be exact -- `statement` erases a type-only declaration
@@ -1674,7 +1716,10 @@ impl Lowerer {
                 }
             };
             let lowered = self
-                .function(&method.value, span(method.span))
+                .function(
+                    &method.value,
+                    self.method_definition_span(span(method.span), method.r#static),
+                )
                 .ok_or("class method without a body")?;
             match method.kind {
                 MethodDefinitionKind::Constructor => constructor = Some(lowered),
@@ -1967,7 +2012,10 @@ impl Lowerer {
                 let Expression::FunctionExpression(function) = &property.value else {
                     return self.unsupported_expression("accessor body", expression_span);
                 };
-                let Some(function) = self.function(function, expression_span) else {
+                // The property's span, not the object's: `Function.prototype.toString` on an
+                // accessor answers `"get p() {}"` -- the keyword and the key are part of the
+                // definition, and the object literal around it is not.
+                let Some(function) = self.function(function, span(property.span)) else {
                     return self.unsupported_expression("accessor body", expression_span);
                 };
                 members.push(kiln_hir::ObjectMember::Accessor {
@@ -2003,6 +2051,14 @@ impl Lowerer {
                 kiln_hir::PropertyForm::KeyValue
             };
             let mut value = self.expression(&property.value);
+            // A shorthand method's definition starts at its key: `({ m(x) {} }).m.toString()` is
+            // `"m(x) {}"`. Oxc spans the function expression alone, which starts at the
+            // parenthesis, so the property's span is the one that matches what was written.
+            if property.method
+                && let HirExpressionKind::Function(function) = &mut value.kind
+            {
+                function.span = span(property.span);
+            }
             // `{ handle: () => {} }` names the function `handle`, for the same reason a
             // variable initialiser does. A prototype setter is the exception: it never reaches
             // the specification's named evaluation, so `{ __proto__: function () {} }` leaves

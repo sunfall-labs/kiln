@@ -5,14 +5,18 @@
 //! backend can be added without coupling it to Oxc (or to any other parser).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use kiln_hir::{
     AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
     Expression, ExpressionKind, Function, ImportName, ListElement, Literal, LogicalOperator,
-    Module, ObjectKey, ObjectMember, Pattern, PatternKey, Span, Statement, StatementKind,
-    SwitchCase, UnaryOperator, VariableKind,
+    Module, ObjectKey, ObjectMember, Pattern, PatternKey, Statement, StatementKind, SwitchCase,
+    UnaryOperator, VariableKind,
 };
 
+/// Re-exported because [`FunctionProto::span`] is one: a consumer of a `Program` has to be able
+/// to name the type of a field it can read.
+pub use kiln_hir::Span;
 /// Host operation identifiers are shared with the runtime through the stable ABI crate.
 pub use kiln_host_abi::HostOp;
 
@@ -435,6 +439,17 @@ pub struct Program {
     /// a function is not: it becomes one only when `MakeFunction` runs, and once closures land
     /// the same proto will produce different callables on different evaluations.
     pub functions: Vec<FunctionProto>,
+    /// The text this program was compiled from, which [`FunctionProto::span`] indexes into.
+    ///
+    /// `Function.prototype.toString` is specified to answer with the source text the function was
+    /// written as, so the text has to outlive the parse. One shared buffer per program rather
+    /// than a copy per function: function spans nest, and copying would store an outer body once
+    /// for every function written inside it -- quadratic in nesting depth on exactly the deeply
+    /// wrapped bundles where it would hurt.
+    ///
+    /// Shared with the [`Module`] it was compiled from rather than copied out of it, so a program
+    /// and its HIR cost one buffer between them and not two.
+    pub source: Arc<str>,
 }
 
 /// One compiled function body.
@@ -479,6 +494,13 @@ pub struct FunctionProto {
     pub code: Vec<Instruction>,
     /// Where each captured cell comes from, resolved against the frame creating the closure.
     pub upvalues: Vec<Upvalue>,
+    /// This function's own text within [`Program::source`], as
+    /// `Function.prototype.toString` must answer it.
+    ///
+    /// The whole definition, not the body: `toString` answers with what the program wrote, which
+    /// for a method is its key and parameter list too -- `({ m(x) {} }).m.toString()` is
+    /// `"m(x) {}"`, and for a getter it keeps the `get`.
+    pub span: Span,
 }
 
 /// A global the compiler resolves by name and the runtime provides.
@@ -1505,6 +1527,9 @@ impl ClassBody<'_> {
 }
 
 struct Compiler {
+    /// The text being compiled, handed to the [`Program`] so a function can answer with its own
+    /// definition. Shared, never copied: see [`Program::source`].
+    source: Arc<str>,
     constants: Vec<Constant>,
     functions: Vec<FunctionProto>,
     /// Whether `functions[i]` was compiled as strict code, in the same order.
@@ -1693,6 +1718,7 @@ impl Compiler {
 
     fn new(module: &Module) -> Self {
         let mut compiler = Self {
+            source: Arc::clone(&module.source),
             constants: Vec::new(),
             code: Vec::new(),
             functions: Vec::new(),
@@ -1810,6 +1836,7 @@ impl Compiler {
                     code: self.code,
                     local_count: self.local_count,
                     functions: self.functions,
+                    source: self.source,
                 },
                 Strictness {
                     body: self.strict,
@@ -5208,6 +5235,11 @@ impl Compiler {
             // what `new.target.name` and a console's `C {}` both read.
             Some(constructor) => Function {
                 name: Some(written_name.clone()),
+                // The class's span, not the constructor's. The constructor *is* the class as a
+                // value, and `Function.prototype.toString` on a class answers with the whole
+                // `class C { ... }` text -- the methods included -- never with the one member
+                // that happens to back it.
+                span: class.span,
                 ..constructor.clone()
             },
             // A class with no constructor gets an empty one, so `new` needs no special case for
@@ -5876,6 +5908,7 @@ impl Compiler {
             prologue_end,
             code: std::mem::replace(&mut self.code, restored.code),
             upvalues: std::mem::replace(&mut self.upvalues, restored.upvalues),
+            span: function.span,
         };
         self.scopes = restored.scopes;
         self.function_finalizer_depth = outer_finalizer_depth;
@@ -7980,6 +8013,10 @@ mod tests {
 
     fn module(body: Vec<Statement>) -> Module {
         Module {
+            // These modules are built as HIR rather than parsed, so there is no text their spans
+            // point into. A function compiled from one answers `toString` with the empty string,
+            // which is what "no source" means here.
+            source: "".into(),
             strict: false,
             source_kind: kiln_hir::SourceKind::JavaScript,
             source_goal: kiln_hir::SourceGoal::Module,

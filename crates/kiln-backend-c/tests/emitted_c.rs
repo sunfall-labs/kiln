@@ -46,6 +46,7 @@ fn number(value: f64) -> Constant {
 
 fn program(constants: Vec<Constant>, code: Vec<Instruction>, local_count: u32) -> Program {
     Program {
+        source: "".into(),
         version: BYTECODE_VERSION,
         constants,
         code,
@@ -62,6 +63,7 @@ fn function(
     upvalues: Vec<Upvalue>,
 ) -> FunctionProto {
     FunctionProto {
+        span: kiln_ir::Span::default(),
         prologue_end: 0,
         asynchronous: false,
         name: Some(name.to_owned()),
@@ -809,6 +811,7 @@ fn typed_array_borrowed_generic_methods() {
         ..function("receiver", 0, 0, Vec::new(), Vec::new())
     };
     let unit = emit(&Program {
+        source: "".into(),
         version: BYTECODE_VERSION,
         constants: vec![
             number(1.0),

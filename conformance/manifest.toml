@@ -712,7 +712,7 @@ diffing - but committed so that benchmarks need neither a network nor a Node too
 # machine, stdout and stderr merged, recorded verbatim. All four exit 0 and write nothing to
 # stderr.
 [regress]
-tests = 7
+tests = 8
 authored = "2026-08-29"
 expected_output_method = """
 Ran `node <probe>.js` and recorded the bytes it printed. One trap, which r07 fell into and which \
@@ -908,6 +908,54 @@ true
 #
 # Requests are issued sequentially, never concurrently, so the recorded output does not depend
 # on the order two responses happen to complete in.
+[[test]]
+id = "regress/r08-node-async-context"
+group = "regress"
+source = "regress/r08-node-async-context.js"
+status = "runnable"
+features = ["node-util", "node-async-hooks", "async-local-storage", "promise-jobs", "timers", "text-encoding"]
+catches = """
+An async store that is only correct synchronously, which is worse than not having one: it \
+answers on the near side of an `await` and answers `undefined` on the far side, which is exactly \
+the shape a request-scoped trace id is used in. The store has to be captured where work is \
+*queued* and restored where it runs.
+
+Two captures, and the second is the one that is easy to get wrong. A timer captures where it was \
+set. A promise reaction captures where it was *attached*, not where the promise settled -- a \
+promise is very often settled by unrelated code with a context of its own, and `Promise.all` \
+resolves inside whichever input finished last, so a handler that inherited the settler's context \
+saw a store belonging to another task. The last line here is the whole point: after two \
+concurrent `run`s, the code that awaited them is back outside both and must see no store at all. \
+Stamping reactions at settle time answered `Y`.
+
+This is also what blocked `react-dom/server`, which constructs `new util.TextEncoder()` and `new \
+async_hooks.AsyncLocalStorage()` in its top-level `var` list. Both were missing, so both read \
+`undefined`, and "undefined is not a constructor" named neither the module nor the property.\
+"""
+expected_stdout = """
+encoder 104,105
+outside undefined
+sync 1
+restored undefined
+args 10
+threw boom undefined
+two a b
+inner a undefined
+exit undefined back a
+A entered A
+A past await A
+A past timer A
+then B
+timer T
+X entered X
+Y entered Y
+X past await X
+Y past await Y
+X past timer X
+Y past timer Y
+done undefined
+"""
+
 [server]
 tests = 4
 authored = "2026-08-30"

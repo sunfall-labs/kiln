@@ -3,8 +3,8 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 assertion_line: 730
 expression: body(&unit)
 ---
-/* Program hash: 5ae889b54ed1c7db; bytecode version: 2. */
-int kiln_module_5ae889b54ed1c7dbd2283341fc81d90c(kiln_host *host, kiln_value *result) {
+/* Program hash: 7feec9b2f42ca2a8; bytecode version: 2. */
+int kiln_module_7feec9b2f42ca2a8d33e06ae7d59cd3d(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
     kiln_value stack[2];
     kiln_value locals[1];

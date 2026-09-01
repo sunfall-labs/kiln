@@ -504,6 +504,12 @@ pub enum Native {
     NodeAsyncResource,
     NodeAsyncResourceBind,
     NodeAsyncResourceEmitDestroy,
+    NodeAsyncLocalStorage,
+    NodeAsyncLocalStorageRun,
+    NodeAsyncLocalStorageGetStore,
+    NodeAsyncLocalStorageEnterWith,
+    NodeAsyncLocalStorageExit,
+    NodeAsyncLocalStorageDisable,
     NodeCrypto,
     NodeCryptoRandomUuid,
     NodeCryptoCreateHash,
@@ -1488,6 +1494,12 @@ impl Native {
                 WellKnown::NodeInspectCustom,
             ))),
             (Self::NodeUtil, "format") => Some(Value::Native(Self::NodeUtilFormat)),
+            // The same two constructors the global scope already has. `node:util` is where they
+            // were before they were global and where library code still reaches for them:
+            // `react-dom/server` opens with `new (require("util").TextEncoder)()`, and finding
+            // `undefined` there stopped the module while it was still loading.
+            (Self::NodeUtil, "TextEncoder") => Some(Value::Native(Self::TextEncoderConstructor)),
+            (Self::NodeUtil, "TextDecoder") => Some(Value::Native(Self::TextDecoderConstructor)),
             // `default` binds to the module namespace unless an arm below overrides it, and an
             // override is only correct where node's own default is callable. Measured against
             // node v25.9.0, exactly four are: `assert`, `events`, `module` and `stream`.
@@ -1498,6 +1510,9 @@ impl Native {
                 Some(Value::Native(Self::NodeAssertOk))
             }
             (Self::NodeAsyncHooks, "AsyncResource") => Some(Value::Native(Self::NodeAsyncResource)),
+            (Self::NodeAsyncHooks, "AsyncLocalStorage") => {
+                Some(Value::Native(Self::NodeAsyncLocalStorage))
+            }
             (Self::NodeCrypto, "randomUUID") => Some(Value::Native(Self::NodeCryptoRandomUuid)),
             (Self::NodeCrypto, "createHash") => Some(Value::Native(Self::NodeCryptoCreateHash)),
             (Self::NodeStringDecoder, "StringDecoder") => {
@@ -2226,6 +2241,7 @@ enum NodeObject {
     UrlSearchParams(Rc<UrlState>),
     Hash(Rc<RefCell<HashState>>),
     StringDecoder(Rc<RefCell<StringDecoderState>>),
+    AsyncLocalStorage(Rc<AsyncStorage>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5138,6 +5154,26 @@ impl Closure {
     pub fn is_strict(&self) -> bool {
         self.strictness.function(self.function)
     }
+
+    /// The text this function was written as, which is what `Function.prototype.toString` answers.
+    ///
+    /// A borrow into the program's one copy of its source, so asking costs nothing and asking
+    /// twice costs nothing twice. The closure already carries the program for the reason
+    /// documented on `program` -- a function value that crossed a module boundary must be read
+    /// against its own tables -- and that is exactly what makes the span resolvable here.
+    ///
+    /// An empty answer where the span does not resolve. Every proto the compiler emits has a real
+    /// span, so this is unreachable in practice; it is written as an empty string rather than a
+    /// panic because a `toString` is not worth ending a program over.
+    pub fn source_text(&self) -> &str {
+        let Some(proto) = self.program.functions.get(self.function as usize) else {
+            return "";
+        };
+        self.program
+            .source
+            .get(proto.span.start as usize..proto.span.end as usize)
+            .unwrap_or("")
+    }
 }
 
 /// Two closures are equal when they are the same object, which is what `===` asks.
@@ -5941,28 +5977,29 @@ impl Value {
             Self::Boolean(value) => value.to_string(),
             Self::Number(value) => number_string(*value),
             Self::String(value) => value.clone(),
-            // Not `Function.prototype.toString`, which returns the source text. Producing that
-            // needs the span and the original source, neither of which reaches the VM; naming
-            // the function is more useful here than an invented body would be.
-            // Not `Function.prototype.toString`, which returns source text the VM never sees.
-            // The proto index is stable and useful when reading a trace; a made-up body is not.
-            Self::Function(closure) => format!("[Function {}]", closure.function),
+            // `Function.prototype.toString`: the text the program wrote. The span and the source
+            // both travel on the program the closure already carries, so this is a slice rather
+            // than a reconstruction -- there is no spelling to invent and none to get wrong.
+            Self::Function(closure) => closure.source_text().to_owned(),
             // What `String({})` produces. `console.log` in a real console prints the contents
             // instead, which needs a formatter the host side does not have yet.
             Self::Object(_) => "[object Object]".to_owned(),
             // The same name a console shows. `String(f)` in node is the source text, which a
             // backend does not have; naming the function beats an invented body, and naming it
             // the way the program does beats naming it the way the implementation does.
+            // A built-in has no source text to answer with, and the specification says so: it
+            // must produce the NativeFunction form instead. Getting this backwards is worse than
+            // saying nothing, because feature detection is written as
+            // `/native code/.test(String(x))` -- a built-in that reported a body would be read as
+            // a polyfill, and a user function that reported `[native code]` as already-native.
             Self::Native(native) => match namespace_name(native) {
                 // A namespace is an object that happens to hold functions, and `String` of an
                 // object is its `toString` tag. `typeof Math` already answered `"object"`; this
                 // is the same fact reaching the other conversion.
                 Some(name) => format!("[object {name}]"),
-                None => format!("[Function: {}]", native_js_name(native)),
+                None => native_code_source(&native_js_name(native)),
             },
-            Self::Callback(method) => {
-                format!("[Function: {}]", builtin_js_name(&format!("{method:?}")))
-            }
+            Self::Callback(method) => native_code_source(&builtin_js_name(&format!("{method:?}"))),
             Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
@@ -6380,7 +6417,7 @@ pub struct ModuleRealmSession {
 }
 
 struct ModuleRealmShared {
-    realm: Realm<Job, Timer>,
+    realm: Realm<Scheduled, Timer>,
     pending_host: Vec<PendingHostRequest>,
     pending_node: Vec<PendingNodeRequest>,
     node_servers: Vec<Rc<RefCell<NodeServerState>>>,
@@ -8046,7 +8083,42 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
 struct Timer {
     callback: Value,
     arguments: Vec<Value>,
+    /// The async context in force when the timer was *set*, restored while its callback runs.
+    ///
+    /// Captured at scheduling rather than read at firing, which is the whole of what makes an
+    /// `AsyncLocalStorage` work: `als.run(store, () => setTimeout(f))` has long returned by the
+    /// time `f` runs, and `f` must still see the store.
+    context: AsyncContext,
 }
+
+/// One `AsyncLocalStorage`, whose identity is the whole of it.
+///
+/// Two storages are different because they are different allocations -- there is no name, index
+/// or serial to compare, and `Rc::ptr_eq` is the question the language actually asks. `disabled`
+/// is the one piece of state a storage carries: `disable()` is permanent in Node, and a disabled
+/// storage reads as empty everywhere rather than being removed from contexts already captured.
+#[derive(Debug)]
+struct AsyncStorage {
+    disabled: std::cell::Cell<bool>,
+}
+
+/// Two storages are equal only when they are the same one.
+///
+/// Written out rather than derived for the reason [`Closure`]'s is: `disabled` is state, not
+/// identity, and a derive over it would make any two untouched storages compare equal.
+impl PartialEq for AsyncStorage {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+/// Every `AsyncLocalStorage` that currently holds a store, and what it holds.
+///
+/// Shared rather than copied: this is captured every time a job is queued -- once per promise
+/// reaction, which is the hottest scheduling path there is -- and is empty in every program that
+/// never asks for a storage, which is nearly all of them. A `Vec` rather than a map because it
+/// is searched by pointer identity and is almost always empty or a single entry.
+type AsyncContext = Rc<Vec<(Rc<AsyncStorage>, Value)>>;
 
 /// A promise: a value that is not there yet, and the reactions waiting for it.
 ///
@@ -8079,6 +8151,15 @@ struct Reaction {
     /// the handler's result. That is the whole difference from `then(f, f)`, which would replace
     /// a rejection with a fulfilment.
     passthrough: bool,
+    /// The async context in force where this reaction was *attached*.
+    ///
+    /// Attached, not settled, and the difference is the whole of what makes an
+    /// `AsyncLocalStorage` usable. A promise is very often settled by code with a context of its
+    /// own -- `Promise.all` resolves inside whichever input finished last -- and a handler that
+    /// inherited *that* would see a store belonging to some unrelated task. `p.then(f)` captures
+    /// where `then` was written, and an `await` captures where it suspended, which is the same
+    /// rule stated twice.
+    context: AsyncContext,
 }
 
 /// Where a settled outcome goes.
@@ -8278,6 +8359,18 @@ enum Job {
     Import(Rc<PromiseData>, String),
 }
 
+/// A queued job together with the async context it was queued in.
+///
+/// The context travels *with* the work rather than being read when the work runs, because by
+/// then whatever scheduled it has returned: `als.run(store, () => p.then(f))` is finished long
+/// before `f` is called, and `f` must still see the store. Capturing at the queue and restoring
+/// at the drain is the whole of how a store crosses an `await`.
+#[derive(Debug)]
+struct Scheduled {
+    context: AsyncContext,
+    job: Job,
+}
+
 /// How a suspended generator is resumed.
 ///
 /// One enum rather than a pair of flags, because the three are mutually exclusive and each is a
@@ -8431,7 +8524,7 @@ struct Vm<'host, H: HostOps + ?Sized> {
     global_base: usize,
     instruction: usize,
     /// The explicit language queues and virtual clock owned by the shared Realm Runtime seam.
-    realm: Realm<Job, Timer>,
+    realm: Realm<Scheduled, Timer>,
     /// Policy for APIs that expose civil time. The scheduler clock remains `realm`'s virtual
     /// clock regardless of this setting.
     clock_capability: ClockCapability,
@@ -8462,6 +8555,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     http_runtime: Option<*mut dyn ActiveHttpRuntime>,
     /// Graph-owned lazy CommonJS loader, installed only while evaluating a module graph.
     commonjs_loader: Option<*mut (dyn CommonJsModuleLoader + 'host)>,
+    /// Which `AsyncLocalStorage`s hold a store right here.
+    ///
+    /// Realm state that follows *control*, not the frame: it is captured whenever work is queued
+    /// and restored whenever that work runs, which is what carries a store across an `await`.
+    async_context: AsyncContext,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
     /// A rejection that reached the end of the run with nothing attached to it.
@@ -8596,6 +8694,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             handlers: Vec::new(),
             arguments: Vec::new(),
             error_prototypes: [const { None }; ErrorKind::ALL.len()],
+            async_context: AsyncContext::default(),
             this_value: Value::Undefined,
             new_target: Value::Undefined,
             suspended_awaiting: false,
@@ -8741,14 +8840,25 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
 }
 
 impl<H: HostOps + ?Sized> Vm<'_, H> {
-    fn with_realm<R>(&self, operation: impl FnOnce(&Realm<Job, Timer>) -> R) -> R {
+    /// Stamp a job with the context it is being queued in.
+    fn scheduled(&self, job: Job) -> Scheduled {
+        Scheduled {
+            context: Rc::clone(&self.async_context),
+            job,
+        }
+    }
+
+    fn with_realm<R>(&self, operation: impl FnOnce(&Realm<Scheduled, Timer>) -> R) -> R {
         match &self.module_realm {
             Some(shared) => operation(&shared.borrow().realm),
             None => operation(&self.realm),
         }
     }
 
-    fn with_realm_mut<R>(&mut self, operation: impl FnOnce(&mut Realm<Job, Timer>) -> R) -> R {
+    fn with_realm_mut<R>(
+        &mut self,
+        operation: impl FnOnce(&mut Realm<Scheduled, Timer>) -> R,
+    ) -> R {
         match &self.module_realm {
             Some(shared) => operation(&mut shared.borrow_mut().realm),
             None => operation(&mut self.realm),
@@ -9023,6 +9133,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "node:http request lost its stream".into(),
                 })?;
+            if connection.runtime_http {
+                // Hyper owns socket reads for runtime HTTP. Node readable pause/resume only
+                // changes delivery from the already-decoded IncomingMessage buffer; driving the
+                // legacy StreamDriver here would start a second raw TcpRead beside Hyper's and
+                // break completion ownership.
+                return Ok(result);
+            }
             match native {
                 Native::NodeReadablePause => {
                     connection.driver.pause_reading();
@@ -12050,6 +12167,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     });
                 }
                 RuntimeTurn::Timer(WorkItem::Timer { work: timer, .. }) => {
+                    // As for a microtask: the context is the one the timer was *set* in.
+                    self.async_context = timer.context;
                     runtime.enter(|| {
                         self.call_value(
                             &timer.callback,
@@ -12786,9 +12905,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // was given, so `import({ toString() { throw x } })` is a rejection and not
                     // an exception at the call site.
                     match self.import_specifier(&specifier, current)? {
-                        Ok(text) => self
-                            .realm
-                            .queue_microtask(Job::Import(Rc::clone(&promise), text)),
+                        Ok(text) => {
+                            let scheduled = self.scheduled(Job::Import(Rc::clone(&promise), text));
+                            self.realm.queue_microtask(scheduled);
+                        }
                         Err(thrown) => self.settle(&promise, &Settled::Rejected(thrown)),
                     }
                     self.stack.push(Value::Promise(promise));
@@ -15198,6 +15318,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         properties: RefCell::new(ObjectData::default()),
                     })),
                     arguments: Vec::new(),
+                    context: Rc::clone(&self.async_context),
                 };
                 let delay = duration_from_milliseconds(milliseconds.max(0.0));
                 self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
@@ -15968,6 +16089,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Everything after the delay is handed to the callback, which is how a
                     // timer carries state without a closure.
                     arguments: arguments.get(2..).unwrap_or_default().to_vec(),
+                    // Captured where the timer was set, not where it fires.
+                    context: Rc::clone(&self.async_context),
                 };
                 let delay = duration_from_milliseconds(delay);
                 let id = self.with_realm_mut(|realm| {
@@ -17157,12 +17280,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Ok(Value::Array(ArrayData::new(results)))
             }
             Native::QueueMicrotask => {
-                self.with_realm_mut(|realm| {
-                    realm.queue_microtask(Job::Callback(
-                        arguments.first().cloned().unwrap_or(Value::Undefined),
-                        Vec::new(),
-                    ))
-                });
+                let scheduled = self.scheduled(Job::Callback(
+                    arguments.first().cloned().unwrap_or(Value::Undefined),
+                    Vec::new(),
+                ));
+                self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                 Ok(Value::Undefined)
             }
             Native::ProcessNextTick => {
@@ -17173,12 +17295,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: callback.type_name(),
                     });
                 }
-                self.with_realm_mut(|realm| {
-                    realm.queue_next_tick(Job::NextTick(
-                        callback,
-                        arguments.get(1..).unwrap_or_default().to_vec(),
-                    ))
-                });
+                let scheduled = self.scheduled(Job::NextTick(
+                    callback,
+                    arguments.get(1..).unwrap_or_default().to_vec(),
+                ));
+                self.with_realm_mut(|realm| realm.queue_next_tick(scheduled));
                 Ok(Value::Undefined)
             }
             // Every call has to produce a symbol distinct from every other, so this needs the
@@ -17194,7 +17315,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // entered as a frame and run -- so neither can live in `call_native`, which is a
             // free function with no VM to enter one on.
             Native::Eval => self.indirect_eval(arguments),
-            Native::FunctionConstructor => self.function_from_source(arguments),
+            Native::FunctionConstructor => self.function_from_source(arguments, instruction),
+            // `run` and `exit` call the program's own function, so they need the machine for the
+            // same reason those two do. The other three are here to keep one storage's five
+            // methods in one place rather than splitting them across two dispatchers.
+            Native::NodeAsyncLocalStorage
+            | Native::NodeAsyncLocalStorageRun
+            | Native::NodeAsyncLocalStorageGetStore
+            | Native::NodeAsyncLocalStorageEnterWith
+            | Native::NodeAsyncLocalStorageExit
+            | Native::NodeAsyncLocalStorageDisable => {
+                self.async_local_storage(native, receiver, arguments, instruction)
+            }
             _ => call_native(&self.intrinsics, native, receiver, arguments),
         }
     }
@@ -21732,9 +21864,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.unhandled = Some(reason.clone());
         }
         for reaction in reactions {
-            self.with_realm_mut(|realm| {
-                realm.queue_microtask(Job::React(outcome.clone(), reaction))
-            });
+            // The reaction's own context, not this one: whatever settled the promise may be an
+            // unrelated task, and the handler belongs to wherever it was attached.
+            let scheduled = Scheduled {
+                context: Rc::clone(&reaction.context),
+                job: Job::React(outcome.clone(), reaction),
+            };
+            self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
         }
     }
 
@@ -21757,9 +21893,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // resolution has already been decided by the time anyone could catch it.
                     Err(reason) => self.settle(promise, &Settled::Rejected(reason)),
                     Ok(then) if is_callable(&then) => {
-                        self.with_realm_mut(|realm| {
-                            realm.queue_microtask(Job::Thenable(Rc::clone(promise), value, then))
-                        });
+                        let scheduled =
+                            self.scheduled(Job::Thenable(Rc::clone(promise), value, then));
+                        self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
                     }
                     Ok(_) => self.settle(promise, &Settled::Fulfilled(value)),
                 }
@@ -21779,9 +21915,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             self.settle(promise, &Settled::Rejected(error));
             return;
         }
-        self.with_realm_mut(|realm| {
-            realm.queue_microtask(Job::Adopt(Rc::clone(promise), Rc::clone(inner)))
-        });
+        let scheduled = self.scheduled(Job::Adopt(Rc::clone(promise), Rc::clone(inner)));
+        self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
     }
 
     /// Attach a reaction to a promise, queueing it immediately if the promise has already settled.
@@ -21802,6 +21937,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             on_rejected,
             sink,
             passthrough,
+            context: Rc::clone(&self.async_context),
         };
         let settled = {
             let mut state = promise.state.borrow_mut();
@@ -21815,7 +21951,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         match settled {
             Some(outcome) => {
-                self.with_realm_mut(|realm| realm.queue_microtask(Job::React(outcome, reaction)))
+                let scheduled = Scheduled {
+                    context: Rc::clone(&reaction.context),
+                    job: Job::React(outcome, reaction),
+                };
+                self.with_realm_mut(|realm| realm.queue_microtask(scheduled));
             }
             None => promise.state.borrow_mut().reactions.push(reaction),
         }
@@ -22229,9 +22369,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// The ECMAScript microtask checkpoint, independent of which infrastructure turn reached it.
     /// Tokio owns polling; this queue owns language ordering.
     fn drain_microtask_jobs(&mut self) -> Result<(), ExecutionError> {
-        while let Some(job) =
+        while let Some(Scheduled { context, job }) =
             self.with_realm_mut(|realm| realm.pop_next_tick().or_else(|| realm.pop_microtask()))
         {
+            // The context this job was queued in, in force for exactly as long as it runs. A
+            // drain is a flat loop rather than a stack, so the previous one is whatever the last
+            // job left and is replaced rather than restored.
+            self.async_context = context;
             match job {
                 Job::NextTick(callback, arguments) => self
                     .call_value(&callback, Value::Undefined, arguments, self.instruction)
@@ -24532,7 +24676,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             Native::DataViewConstructor => self.construct_data_view(arguments, current)?,
             Native::PromiseConstructor => self.construct_promise(arguments, current)?,
-            Native::FunctionConstructor => self.function_from_source(arguments)?,
+            Native::FunctionConstructor => self.function_from_source(arguments, current)?,
             Native::UrlConstructor => self.dispatch_native(
                 Native::UrlConstructor,
                 &Value::Undefined,
@@ -24672,6 +24816,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?;
                 self.stack.push(built);
             }
+            Value::Native(Native::NodeAsyncLocalStorage) => {
+                self.stack.push(node_async_local_storage());
+            }
             Value::Native(Native::NodeAsyncResource) => {
                 self.stack.push(ordinary_object([
                     (
@@ -24796,7 +24943,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // specification routes both through the same steps and differs only in a `NewTarget`
             // that decides which prototype the result inherits, which this realm does not model.
             Value::Native(Native::FunctionConstructor) => {
-                let built = self.function_from_source(&arguments)?;
+                let built = self.function_from_source(&arguments, current)?;
                 self.stack.push(built);
             }
             Value::Native(Native::ArrayBufferConstructor) => {
@@ -29397,6 +29544,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // timer carries its state in its arguments rather than in a closure.
                     callback: Value::Settler(Rc::clone(&promise), false),
                     arguments: vec![Value::String("timed-out".to_owned())],
+                    context: Rc::clone(&self.async_context),
                 };
                 let delay = duration_from_milliseconds(if timeout.is_finite() {
                     timeout
@@ -30034,6 +30182,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.call_with_this(closure, argc, instruction, Value::Undefined, None)
     }
 
+    /// The receiver sloppy code actually gets, which is never a primitive.
+    ///
+    /// Modern output rarely reaches this -- a module is strict, and TypeScript emits `"use
+    /// strict"` -- but a CommonJS bundle is sloppy from its first line, and the idiom
+    /// `var root = this;` at the top of a UMD wrapper is *reading the global* through exactly
+    /// this rule.
+    fn bind_sloppy_this(&mut self, receiver: Value) -> Value {
+        match receiver {
+            Value::Undefined | Value::Null => self.global_object(),
+            // The five boxable primitives, listed rather than derived: everything else -- a
+            // function, an array, a proxy, a date, a typed array -- is already an object in the
+            // specification's sense and `ToObject` hands it straight back.
+            primitive @ (Value::String(_)
+            | Value::Number(_)
+            | Value::Boolean(_)
+            | Value::Symbol(_)
+            | Value::BigInt(_)) => wrap_primitive(primitive),
+            other => other,
+        }
+    }
+
     /// Enter a closure with an explicit receiver.
     fn call_with_this(
         &mut self,
@@ -30071,6 +30240,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(captured) => captured.clone(),
             None => this_value,
         };
+        // `OrdinaryCallBindThis`: sloppy code never sees a primitive `this`.
+        //
+        // The specification substitutes the global object for `undefined` and `null` and
+        // `ToObject`s everything else, so a sloppy `f.call(7)` receives a `Number` wrapper it can
+        // write a property on and `f()` receives the global. Strict code receives exactly what it
+        // was passed, which is what makes `this` `undefined` in a bare strict call.
+        //
+        // Skipped while constructing, where `this` is the new instance and already an object, and
+        // for an arrow, which has no `this` of its own to bind -- both are settled above and
+        // neither is a receiver this call chose.
+        let entering =
+            if closure.captured_this.is_none() && constructing.is_none() && !closure.is_strict() {
+                self.bind_sloppy_this(entering)
+            } else {
+                entering
+            };
         let target = match &closure.captured_new_target {
             Some(captured) => captured.clone(),
             None if constructing.is_some() => {
@@ -30520,20 +30705,155 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Global scope, never the caller's: `Function` is reached as a value, and a value carries
     /// no scope. That is the difference between it and a direct `eval`, and it is why a function
     /// built this way cannot see the locals around the call that built it.
-    fn function_from_source(&mut self, arguments: &[Value]) -> Result<Value, ExecutionError> {
-        let (body, parameters) = match arguments.split_last() {
-            Some((body, parameters)) => (body.to_display_string(), parameters),
-            None => (String::new(), &[] as &[Value]),
+    fn function_from_source(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Some((body, parameters)) = arguments.split_last() else {
+            return self.drive_eval("(function anonymous(\n) {\n\n})", None);
         };
-        let parameters = parameters
-            .iter()
-            .map(Value::to_display_string)
-            .collect::<Vec<_>>()
-            .join(",");
+        // Every parameter first, in order, and only then the body. That order is the
+        // specification's and it is observable: when both a parameter's `toString` and the
+        // body's throw, the parameter's throw is the one the program sees.
+        let mut joined = String::new();
+        for parameter in parameters {
+            if !joined.is_empty() {
+                joined.push(',');
+            }
+            joined.push_str(&self.as_string(parameter, instruction)?);
+        }
+        let body = self.as_string(body, instruction)?;
         // The newlines are the specification's own: they stop a `//` comment in the parameter
         // list from swallowing the brace, and one in the body from swallowing the close.
-        let source = format!("(function anonymous({parameters}\n) {{\n{body}\n}})");
+        let source = format!("(function anonymous({joined}\n) {{\n{body}\n}})");
         self.drive_eval(&source, None)
+    }
+
+    /// `ToString`: the conversion the *program* defines, which runs its code and can throw.
+    ///
+    /// Named `as_` rather than `to_` for the reason [`Vm::as_primitive`] is: it takes `&mut self`
+    /// because converting an object *calls* one of its methods.
+    ///
+    /// This is not [`Value::to_display_string`], and the distinction is not cosmetic. That one is
+    /// the host's own spelling of a value -- what the console prints -- and it answers
+    /// `"[object Object]"` for any plain object without consulting it. Where the specification
+    /// says `ToString`, using it silently skips the program's `toString`: `new Function` built
+    /// `function anonymous([object Object]) {}` and died on a parse error inside a string the
+    /// program never wrote, instead of either calling the `toString` that was there or
+    /// propagating what it threw.
+    fn as_string(&mut self, value: &Value, instruction: usize) -> Result<String, ExecutionError> {
+        if let Value::String(text) = value {
+            return Ok(text.clone());
+        }
+        let primitive = self.as_primitive(value, true, instruction)?;
+        // A symbol is the one primitive `ToString` refuses: it has a description, not a
+        // spelling, and reading one as text is the mistake `String(symbol)` exists for.
+        if matches!(primitive, Value::Symbol(_)) {
+            return Err(ExecutionError::SymbolIsNotAString);
+        }
+        Ok(primitive.to_display_string())
+    }
+
+    /// The five `AsyncLocalStorage` methods, which share a receiver and a context.
+    ///
+    /// The store is not held on the storage. It is held in the *context*, which is realm state
+    /// that follows control rather than the frame -- captured when work is queued and restored
+    /// when that work runs. That is the whole mechanism, and it is why `als.run(store, f)` where
+    /// `f` awaits still sees the store on the far side of the await: the reaction that resumes
+    /// `f` was queued while the store was in force and carries a copy of the context that had it.
+    fn async_local_storage(
+        &mut self,
+        native: Native,
+        receiver: &Value,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        // The constructor reaches here when it is called without `new`, which Node refuses.
+        if matches!(native, Native::NodeAsyncLocalStorage) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Class constructor AsyncLocalStorage cannot be invoked without 'new'"
+                    .into(),
+            });
+        }
+        let storage = node_async_storage(receiver)?;
+        match native {
+            Native::NodeAsyncLocalStorageGetStore => Ok(self.current_store(&storage)),
+            Native::NodeAsyncLocalStorageDisable => {
+                // Permanent, as Node's is. A disabled storage reads as empty even from a context
+                // captured while it still held a store, which is why this is a flag on the
+                // storage and not a removal from a context nothing can reach any more.
+                storage.disabled.set(true);
+                Ok(Value::Undefined)
+            }
+            Native::NodeAsyncLocalStorageEnterWith => {
+                // No matching exit: the store stays in force for the rest of *this* job, and
+                // every job queued from here carries it. That is what distinguishes it from
+                // `run`, which restores what it displaced.
+                let store = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.async_context = bind_store(&self.async_context, &storage, Some(store));
+                Ok(Value::Undefined)
+            }
+            // Both run a callback under a modified context and put back exactly what was there,
+            // whether the callback returned or threw. `run` binds a store; `exit` removes one.
+            Native::NodeAsyncLocalStorageRun | Native::NodeAsyncLocalStorageExit => {
+                let exiting = matches!(native, Native::NodeAsyncLocalStorageExit);
+                let (callback, rest) = if exiting {
+                    (arguments.first(), arguments.get(1..))
+                } else {
+                    (arguments.get(1), arguments.get(2..))
+                };
+                let callback = callback.cloned().unwrap_or(Value::Undefined);
+                if !is_callable(&callback) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "AsyncLocalStorage callback is not a function".into(),
+                    });
+                }
+                let store = if exiting {
+                    None
+                } else {
+                    Some(arguments.first().cloned().unwrap_or(Value::Undefined))
+                };
+                // Only *this* storage's binding is saved and put back. Restoring the whole
+                // context would undo an `enterWith` the callback did on some *other* storage,
+                // which node keeps: each storage's stack is its own, and one storage's `run`
+                // has no opinion about another's.
+                let displaced = self.held_store(&storage);
+                self.async_context = bind_store(&self.async_context, &storage, store);
+                let outcome = self.call_value(
+                    &callback,
+                    Value::Undefined,
+                    rest.unwrap_or_default().to_vec(),
+                    instruction,
+                );
+                // On both paths: a callback that throws must not leave its store in force for
+                // whatever catches it.
+                self.async_context = bind_store(&self.async_context, &storage, displaced);
+                outcome
+            }
+            _ => unreachable!("every AsyncLocalStorage method is answered above"),
+        }
+    }
+
+    /// What `getStore` answers: the held store, or `undefined` when there is none or the storage
+    /// has been disabled.
+    fn current_store(&self, storage: &Rc<AsyncStorage>) -> Value {
+        if storage.disabled.get() {
+            return Value::Undefined;
+        }
+        self.held_store(storage).unwrap_or(Value::Undefined)
+    }
+
+    /// The binding itself, which is not the same question as `getStore`.
+    ///
+    /// A disabled storage still *has* whatever binding it had -- `disable` stops it being read,
+    /// not being restored -- and `run` has to put back the binding it displaced rather than the
+    /// answer a read would have given.
+    fn held_store(&self, storage: &Rc<AsyncStorage>) -> Option<Value> {
+        self.async_context
+            .iter()
+            .find(|(held, _)| Rc::ptr_eq(held, storage))
+            .map(|(_, store)| store.clone())
     }
 
     fn pop(&mut self, instruction: usize) -> Result<Value, ExecutionError> {
@@ -31081,6 +31401,66 @@ fn node_hash_digest(algorithm: HashAlgorithm, bytes: &[u8]) -> Vec<u8> {
         HashAlgorithm::Sha256 => sha2::Sha256::digest(bytes).to_vec(),
         HashAlgorithm::Sha512 => sha2::Sha512::digest(bytes).to_vec(),
     }
+}
+
+/// `new AsyncLocalStorage()`.
+///
+/// The instance is an ordinary object carrying its own identity in `node_object`; the methods are
+/// shared natives that read that identity off their receiver, exactly as `StringDecoder`'s do.
+fn node_async_local_storage() -> Value {
+    let mut data = ObjectData {
+        node_object: Some(NodeObject::AsyncLocalStorage(Rc::new(AsyncStorage {
+            disabled: std::cell::Cell::new(false),
+        }))),
+        ..Default::default()
+    };
+    data.set("run", Value::Native(Native::NodeAsyncLocalStorageRun));
+    data.set(
+        "getStore",
+        Value::Native(Native::NodeAsyncLocalStorageGetStore),
+    );
+    data.set(
+        "enterWith",
+        Value::Native(Native::NodeAsyncLocalStorageEnterWith),
+    );
+    data.set("exit", Value::Native(Native::NodeAsyncLocalStorageExit));
+    data.set(
+        "disable",
+        Value::Native(Native::NodeAsyncLocalStorageDisable),
+    );
+    Value::Object(Rc::new(RefCell::new(data)))
+}
+
+/// A context with one storage's binding replaced, or removed when `store` is `None`.
+///
+/// A fresh context rather than a mutation, because contexts already captured by queued work must
+/// not change underneath it: that captured copy *is* the store those jobs will see.
+fn bind_store(
+    context: &AsyncContext,
+    storage: &Rc<AsyncStorage>,
+    store: Option<Value>,
+) -> AsyncContext {
+    let mut bindings: Vec<(Rc<AsyncStorage>, Value)> = context
+        .iter()
+        .filter(|(held, _)| !Rc::ptr_eq(held, storage))
+        .cloned()
+        .collect();
+    if let Some(store) = store {
+        bindings.push((Rc::clone(storage), store));
+    }
+    Rc::new(bindings)
+}
+
+/// The storage a method was called on, or a `TypeError` naming the mistake.
+fn node_async_storage(receiver: &Value) -> Result<Rc<AsyncStorage>, ExecutionError> {
+    if let Value::Object(object) = receiver
+        && let Some(NodeObject::AsyncLocalStorage(storage)) = &object.borrow().node_object
+    {
+        return Ok(Rc::clone(storage));
+    }
+    Err(ExecutionError::TypeErrorMessage {
+        message: "AsyncLocalStorage method called on an incompatible receiver".into(),
+    })
 }
 
 fn node_string_decoder() -> Value {
@@ -32506,7 +32886,21 @@ fn call_native(
         // exception, and it is opened before this arm is reached.
         Native::ObjectValueOf => receiver.clone(),
         Native::PrimitiveToString => Value::String(receiver.to_display_string()),
-        Native::FunctionToString => Value::String(receiver.to_display_string()),
+        // `Function.prototype.toString` is one of the few built-ins that checks what it was
+        // called on: the specification throws for a receiver that is not callable rather than
+        // describing it. `Function.prototype.toString.call({})` is a TypeError, and answering
+        // `"[object Object]"` let a program that probes with it read an object as a function.
+        Native::FunctionToString => {
+            if !is_callable(receiver) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "Function.prototype.toString called on {}",
+                        receiver.to_display_string()
+                    ),
+                });
+            }
+            Value::String(receiver.to_display_string())
+        }
         // Both build a program from source, which needs the machine: a compilation has to be
         // entered as a frame and run. `Vm::dispatch_native` intercepts them before this, and
         // every call of a built-in goes through it -- so reaching here means a caller found a
@@ -32782,6 +33176,14 @@ fn call_native(
         // under needs the realm's registry, which a free function has no way to reach.
         Native::ObjectGetOwnPropertySymbols => {
             unreachable!("`Object.getOwnPropertySymbols` is dispatched by the interpreter")
+        }
+        Native::NodeAsyncLocalStorage
+        | Native::NodeAsyncLocalStorageRun
+        | Native::NodeAsyncLocalStorageGetStore
+        | Native::NodeAsyncLocalStorageEnterWith
+        | Native::NodeAsyncLocalStorageExit
+        | Native::NodeAsyncLocalStorageDisable => {
+            unreachable!("`AsyncLocalStorage` is dispatched by the interpreter")
         }
         Native::ObjectGetOwnPropertyDescriptor => {
             let target = arguments.first().unwrap_or(&Value::Undefined);
@@ -41719,6 +42121,16 @@ fn empty_items(count: usize) -> String {
 /// implementation, and the payload is spelled `Type` where the language spells it `TypeError` --
 /// so it is answered from the same table that binds the global, not from the variant. Every other
 /// name is derived, for the reason [`builtin_js_name`] gives.
+/// The `NativeFunction` form: what `Function.prototype.toString` must answer for a built-in.
+///
+/// The specification allows an implementation-defined string here but requires this *shape*, and
+/// the shape is what programs read. Feature detection across the ecosystem is written as
+/// `/\{\s*\[native code\]/.test(String(fn))` to tell a real built-in from a polyfill that
+/// replaced it, so this is not decoration -- it is the answer to a question real code asks.
+fn native_code_source(name: &str) -> String {
+    format!("function {name}() {{ [native code] }}")
+}
+
 fn native_js_name(native: &Native) -> String {
     match native {
         // Derivation cannot reach these: the payload is the whole of the name.
@@ -41854,13 +42266,18 @@ fn builtin_js_name(variant: &str) -> String {
         return "toString".to_owned();
     }
     // Longest first, so `ArrayBuffer` is not read as `Array` followed by `Buffer`.
-    const TYPES: [&str; 26] = [
+    const TYPES: [&str; 27] = [
         "AsyncGenerator",
         "ArrayBuffer",
         "TypedArray",
         "Collection",
         "Generator",
         "Primitive",
+        // `Function.prototype.toString` is called `toString`, not `functionToString` -- and it is
+        // the one whose name a program is most likely to read, because it is the one whose own
+        // answer now names it. `FunctionConstructor` is not caught here: the suffix rule above
+        // has already turned it into `Function`.
+        "Function",
         "Promise",
         "Boolean",
         "Reflect",
@@ -42298,6 +42715,7 @@ mod tests {
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
@@ -42409,6 +42827,7 @@ mod tests {
         };
         let mut vm = Vm::with_entropy_seed(
             Rc::new(Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 constants: Vec::new(),
                 code: vec![Instruction::Return],
@@ -42490,11 +42909,13 @@ mod tests {
         code.push(Instruction::Call { argc });
         code.push(Instruction::Return);
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0), number(2.0), number(3.0)],
             code,
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: Some("second".to_owned()),
@@ -42516,6 +42937,7 @@ mod tests {
     /// they would index is irrelevant and an empty one says so.
     fn no_program() -> Rc<Program> {
         Rc::new(Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42555,6 +42977,7 @@ mod tests {
     #[test]
     fn host_clock_is_explicit_and_does_not_replace_the_monotonic_clock() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42612,6 +43035,7 @@ mod tests {
     #[test]
     fn virtual_clock_never_calls_the_host() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42637,6 +43061,7 @@ mod tests {
     #[test]
     fn realm_timezone_and_locale_are_resolved_once_at_entry() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42676,6 +43101,7 @@ mod tests {
     #[test]
     fn named_timezone_and_locale_never_call_the_host() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42712,6 +43138,7 @@ mod tests {
     #[test]
     fn host_entropy_is_one_explicit_word_per_draw() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42767,6 +43194,7 @@ mod tests {
     #[test]
     fn seeded_entropy_reproduces_without_calling_the_host() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42810,6 +43238,7 @@ mod tests {
     #[test]
     fn date_methods_stay_on_the_machine_dispatch_path() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42835,6 +43264,7 @@ mod tests {
     #[test]
     fn array_species_definition_observes_a_proxy_define_property_trap() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42868,6 +43298,7 @@ mod tests {
     #[test]
     fn array_species_definition_writes_typed_array_elements() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42906,6 +43337,7 @@ mod tests {
     #[test]
     fn node_events_builtin_exposes_event_emitter() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -42986,6 +43418,7 @@ mod tests {
     #[test]
     fn node_http_exports_a_server_constructor_with_coded_option_errors() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -43034,6 +43467,7 @@ mod tests {
     #[test]
     fn node_event_emitter_stores_listeners_and_methods_are_chainable() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -43087,6 +43521,7 @@ mod tests {
     #[test]
     fn node_event_once_is_removed_before_reentrant_emit() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -43134,6 +43569,7 @@ mod tests {
     #[test]
     fn node_event_new_listener_runs_before_registration() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: Vec::new(),
@@ -43206,6 +43642,7 @@ mod tests {
         assert_eq!(request.outer[0].name, "x");
         Ok((
             Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 // `x = 2; x` against the cell installed in slot 0.
                 constants: vec![Constant::Number(2.0f64.to_bits())],
@@ -43574,6 +44011,7 @@ mod tests {
     #[test]
     fn new_on_a_non_constructor_is_rejected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0)],
             code: vec![
@@ -43755,6 +44193,7 @@ mod tests {
     #[test]
     fn an_uncaught_throw_names_what_was_thrown() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![Constant::String("boom".to_owned())],
             code: vec![Instruction::Const(0), Instruction::Throw],
@@ -43772,6 +44211,7 @@ mod tests {
     #[test]
     fn unwinding_restores_the_stack_the_handler_expected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0), number(2.0), Constant::String("x".to_owned())],
             code: vec![
@@ -43933,6 +44373,7 @@ mod tests {
     #[test]
     fn setting_a_property_on_a_primitive_is_rejected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![Constant::String("x".to_owned()), number(1.0)],
             code: vec![
@@ -43955,6 +44396,7 @@ mod tests {
     fn closures_from_separate_calls_capture_separate_cells() {
         // outer(): let c = <cell>; return closure(inner) -- inner increments and returns c.
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0)],
             code: vec![
@@ -43969,6 +44411,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("outer".to_owned()),
@@ -43988,6 +44431,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("inner".to_owned()),
@@ -44018,6 +44462,7 @@ mod tests {
     #[test]
     fn a_captured_cell_outlives_the_frame_that_created_it() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(5.0)],
             code: vec![
@@ -44029,6 +44474,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("outer".to_owned()),
@@ -44048,6 +44494,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("read".to_owned()),
@@ -44068,11 +44515,13 @@ mod tests {
     #[test]
     fn capturing_a_slot_that_was_never_boxed_is_rejected() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![Instruction::MakeFunction(0), Instruction::Return],
             local_count: 1,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: None,
@@ -44134,6 +44583,7 @@ mod tests {
     #[test]
     fn calling_a_non_function_is_an_error_rather_than_a_coercion() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(1.0)],
             code: vec![
@@ -44158,6 +44608,7 @@ mod tests {
     #[test]
     fn runaway_recursion_is_bounded_by_call_depth() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
@@ -44167,6 +44618,7 @@ mod tests {
             ],
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: Some("forever".to_owned()),
@@ -44211,6 +44663,7 @@ mod tests {
     #[test]
     fn module_slots_are_shared_across_frames() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![number(7.0)],
             code: vec![
@@ -44224,6 +44677,7 @@ mod tests {
             local_count: 1,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("write".to_owned()),
@@ -44242,6 +44696,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("read".to_owned()),
@@ -44262,6 +44717,7 @@ mod tests {
     #[test]
     fn an_unknown_function_index_is_rejected_rather_than_indexed() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![Instruction::MakeFunction(3), Instruction::Return],
@@ -44280,6 +44736,7 @@ mod tests {
 
     fn program(constants: Vec<Constant>, code: Vec<Instruction>) -> Program {
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants,
             code,
@@ -44346,6 +44803,7 @@ mod tests {
         // reduced first (or both operands are reduced before the numeric check), its `valueOf`
         // throws "called" and hides the required Symbol TypeError.
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![
                 Constant::String("valueOf".to_owned()),
@@ -44362,6 +44820,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("right".to_owned()),
@@ -44380,6 +44839,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: Some("valueOf".to_owned()),
@@ -44452,6 +44912,7 @@ mod tests {
         // like a captured cell does. This is deliberately hand-written bytecode: it catches a
         // regression where `LoadLocal` silently returned the marker as `undefined`.
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: Vec::new(),
             code: vec![
@@ -44595,6 +45056,7 @@ mod tests {
     fn module_execution_initializes_import_slots_and_publishes_exports() {
         let module = ModuleProgram {
             program: Program {
+                source: "".into(),
                 version: kiln_ir::BYTECODE_VERSION,
                 constants: vec![number(2.0)],
                 // An import slot holds a cell and an exported slot must too, which is what the
@@ -45240,6 +45702,7 @@ mod tests {
             code.push(Instruction::Call { argc: 2 });
             code.push(Instruction::Pop);
             functions.push(kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: None,
@@ -45262,6 +45725,7 @@ mod tests {
         }
         code.push(Instruction::Return);
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants,
             code,
@@ -45281,6 +45745,7 @@ mod tests {
             Constant::String("value".to_owned()),
         ];
         Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants,
             code: vec![
@@ -45300,6 +45765,7 @@ mod tests {
             ],
             local_count: 0,
             functions: vec![kiln_ir::FunctionProto {
+                span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
                 name: None,
@@ -45349,6 +45815,7 @@ mod tests {
     #[test]
     fn node_next_tick_runs_before_promise_reactions() {
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![
                 Constant::String("nextTick".into()),
@@ -45373,6 +45840,7 @@ mod tests {
             local_count: 0,
             functions: vec![
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: None,
@@ -45393,6 +45861,7 @@ mod tests {
                     upvalues: Vec::new(),
                 },
                 kiln_ir::FunctionProto {
+                    span: kiln_ir::Span::default(),
                     prologue_end: 0,
                     asynchronous: false,
                     name: None,
@@ -45428,6 +45897,7 @@ mod tests {
     #[test]
     fn an_async_arrow_captures_its_defining_receiver() {
         let maker = kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
             name: None,
@@ -45441,6 +45911,7 @@ mod tests {
             upvalues: Vec::new(),
         };
         let arrow = kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: true,
             name: None,
@@ -45458,6 +45929,7 @@ mod tests {
             upvalues: Vec::new(),
         };
         let report = kiln_ir::FunctionProto {
+            span: kiln_ir::Span::default(),
             prologue_end: 0,
             asynchronous: false,
             name: None,
@@ -45478,6 +45950,7 @@ mod tests {
             upvalues: Vec::new(),
         };
         let program = Program {
+            source: "".into(),
             version: kiln_ir::BYTECODE_VERSION,
             constants: vec![
                 Constant::String("make".into()),

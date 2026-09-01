@@ -5,6 +5,8 @@
 //! particular parser. This crate is the ownership boundary: frontends lower into these values,
 //! and no Oxc type or lifetime crosses it.
 
+use std::sync::Arc;
+
 /// A byte range in UTF-8 source text, with an exclusive end.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Span {
@@ -48,6 +50,18 @@ pub struct Diagnostic {
 // compiler passes to diagnose it without confusing syntax checking with backend coverage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
+    /// The text every [`Span`] in this module indexes into.
+    ///
+    /// A span is a byte range and nothing else, so without the text beside it it names a
+    /// position in something already dropped. Diagnostics got away with that by re-reading the
+    /// file; `Function.prototype.toString` cannot, because the source it must answer with may
+    /// have come from an `eval` or the `Function` constructor and was never a file at all.
+    ///
+    /// Shared rather than copied: a nested function's span lies inside its enclosing function's,
+    /// so retaining text per function would store the outermost body once per function inside
+    /// it. One buffer per module and a span per function is the same information at a fraction
+    /// of the size.
+    pub source: Arc<str>,
     pub source_kind: SourceKind,
     pub source_goal: SourceGoal,
     /// The body opened with a `"use strict"` directive prologue.
@@ -1084,6 +1098,7 @@ mod tests {
     #[test]
     fn runtime_names_exclude_types_and_unresolved_stars() {
         let module = Module {
+            source: "".into(),
             strict: false,
             source_kind: SourceKind::TypeScript,
             source_goal: SourceGoal::Module,
