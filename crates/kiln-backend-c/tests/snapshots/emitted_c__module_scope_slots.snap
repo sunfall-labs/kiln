@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 1078
 expression: body(&unit)
 ---
 /* Program hash: 27fa8b6597e5ef7e; bytecode version: 2. */
@@ -48,6 +49,7 @@ kiln_label_2:;
         int status;
         status = kiln_c99_make_closure(&stack[sp], kiln_module_27fa8b6597e5ef7e31f23509c9a5d6af_fn_0, kiln_module_27fa8b6597e5ef7e31f23509c9a5d6af_name_0, 4, NULL, 0, "kiln_module_27fa8b6597e5ef7e31f23509c9a5d6af", UINT32_C(0), UINT32_C(0), 0, 0, 0, 0, kiln_c99_undefined(), kiln_c99_new_target, UINT32_C(1), UINT32_C(1), UINT32_C(2), UINT32_C(0), NULL, 0);
         if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_27fa8b6597e5ef7e31f23509c9a5d6af", (size_t)2, "MakeFunction", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status;
+        kiln_c99_closure_of(stack[sp])->publishes_frame = 0;
         ++sp;
     }
 kiln_label_3:;
