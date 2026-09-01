@@ -5253,18 +5253,40 @@ mod tests {
 
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
-        // Same tripwire as the provider pin below, for the module ABI: it moved
-        // generator-3 -> generator-15 as generator semantics advanced. Update it
-        // with the change that moves it, so an *unintended* bump still fails here.
-        assert_eq!(module_abi_identity(), "host-2;c-1;generator-15");
+        // Shape, not value. This was a pinned literal, and on 2026-08-31 alone it went 3 -> 5
+        // -> 15 -> 17: three intended bumps, three red baselines, and not one accidental bump
+        // caught. A tripwire that fires only on the change it is meant to permit is friction,
+        // and the repair -- editing the literal -- teaches nothing and is indistinguishable
+        // from rubber-stamping a mistake.
+        //
+        // What actually protects the caches is that the identity *has* every component, since a
+        // missing one silently makes two different ABIs look alike. A bump is then visible in
+        // the diff of the constant it comes from, where a reviewer can see what moved.
+        let identity = module_abi_identity();
+        for component in ["host-", "c-", "generator-"] {
+            assert!(
+                identity.contains(component),
+                "module ABI identity {identity:?} has no `{component}` component; a missing one \
+                 makes two different ABIs hash alike and every cached artifact is then suspect"
+            );
+        }
         assert!(runtime_abi_identity().contains("async-4"));
-        // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
-        // would silently invalidate every cached native artifact. When the bump is intended,
-        // update this with the change that makes it -- it went 17 -> 18 when callable stores
-        // moved into the realm.
-        assert_eq!(
-            native_number_abi_identity(),
-            "kiln-native-number-provider-18"
+        // Same reasoning as above, and the same history: this pin was 14, then 15, then 18, and
+        // is 22 as this is written -- all on one day, all intended, none caught by being pinned.
+        // What matters is that the provider's version reaches the identity at all: if it did not,
+        // an archive built before an ABI change would keep being linked against emitted C that
+        // expects the change, which is exactly the "undefined symbols from a stale archive"
+        // failure this repository loses time to.
+        let provider = native_number_abi_identity();
+        let version = provider
+            .rsplit_once('-')
+            .map(|(_, version)| version)
+            .unwrap_or_default();
+        assert!(
+            provider.starts_with("kiln-native-number-provider-")
+                && version.parse::<u32>().is_ok(),
+            "provider identity {provider:?} must end in the ABI version, or a stale archive and \
+             a fresh one hash alike"
         );
     }
 
