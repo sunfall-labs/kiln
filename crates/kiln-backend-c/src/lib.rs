@@ -11409,16 +11409,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 /* `prototype` exists in the language and is not here, so it says which rather
                  * than reading as undefined.
                  *
-                 * It stays a refusal on purpose rather than for want of effort. In the language it
-                 * is an ordinary object with a property store, and neither engine has one for it:
-                 * the interpreter answers a `Native::Temporal(Op::Prototype(kind))`, which carries
-                 * `constructor`, the tag and the methods but cannot hold a name a program writes,
-                 * and which reports `typeof` as "function" where the specification and `deno` say
-                 * "object". Reproducing that here would make the two engines agree on a wrong
-                 * answer, which is the one outcome this arrangement exists to prevent; answering
-                 * correctly instead would diverge from the interpreter until it gives `Temporal`
-                 * the property store the other exotic objects already have. Either way the move is
-                 * the interpreter's, so this names the missing member and waits for it. */
+                 * It stays a refusal on purpose rather than for want of effort, but ONE OF THE TWO
+                 * REASONS IT USED TO CARRY IS GONE. The interpreter answers a
+                 * `Native::Temporal(Op::Prototype(kind))`, and that value now reports `typeof` as
+                 * "object" and links to `Object.prototype`, as the specification and `deno` say --
+                 * so an instance's chain is real and `d instanceof Temporal.PlainDate` is true on
+                 * that side. What is still missing is the property store: the method table carries
+                 * `constructor`, the tag and the methods, and cannot hold a name a program writes.
+                 * Until it can, answering here would diverge from the interpreter on the first
+                 * program that writes one, and reproducing the interpreter's shape would make the
+                 * two engines agree on an incomplete object. The move is still the interpreter's,
+                 * so this names the missing member and waits for it. */
                 if (kiln_c99_same_name(key, key_len, "prototype")) {
                     const char *owner = kiln_c99_temporal_builtin_name(target.bits);
                     return kiln_c99_temporal_unsupported(thrown, owner == NULL ? "Temporal" : owner,
@@ -25110,9 +25111,27 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
                       kiln_c99_collection_of(value)->is_weak;
             return KILN_C99_OK;
         case KILN_C99_BUILTIN_OBJECT:
-            *answer = value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_ARRAY ||
-                      value.tag == KILN_VALUE_DATE || value.tag == KILN_VALUE_COLLECTION ||
-                      value.tag == KILN_VALUE_ARRAY_BUFFER || value.tag == KILN_VALUE_TYPED_ARRAY;
+            /* `x instanceof Object` is true of every value that is not one of the seven
+             * primitive types, so the test is the complement -- the list of things that are
+             * *not* objects is the short and closed one, and it is the shape the interpreter's
+             * own `is_an_object` uses.
+             *
+             * Enumerating the positive side instead is what left a function, a regexp, a
+             * promise, a generator, a bound function and every `Temporal` value answering
+             * `false` about a value the program is holding in its hand. That was a silent wrong
+             * answer rather than a refusal, and no probe asked, so the two engines had drifted
+             * apart here without the gate noticing.
+             *
+             * A proxy never arrives: `instanceof` refuses one at the top of this function,
+             * because the answer is its handler's rather than its target's. The three internal
+             * tags below are not program-visible values -- a cell lives only in a captured slot,
+             * a hole only in an array's storage, and an uninitialized slot throws on read -- so
+             * they are excluded rather than silently counted as objects. */
+            *answer = value.tag != KILN_VALUE_UNDEFINED && value.tag != KILN_VALUE_NULL &&
+                      value.tag != KILN_VALUE_BOOLEAN && value.tag != KILN_VALUE_NUMBER &&
+                      value.tag != KILN_VALUE_STRING && value.tag != KILN_VALUE_SYMBOL &&
+                      value.tag != KILN_VALUE_BIGINT && value.tag != KILN_VALUE_CELL &&
+                      value.tag != KILN_VALUE_HOLE && value.tag != KILN_VALUE_UNINITIALIZED;
             return KILN_C99_OK;
         default: return KILN_C99_CONTROL_ERROR;
         }
