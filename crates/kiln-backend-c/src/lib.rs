@@ -27933,6 +27933,25 @@ int main(void) {
     }
 
     #[test]
+    #[ignore = "ADR 0036 migration gate: value-kernel state still ships in every module"]
+    fn emitted_modules_do_not_own_realm_value_kernel_state() {
+        let generated =
+            emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+        for declaration in [
+            "static kiln_value kiln_c99_globals;",
+            "static kiln_value kiln_c99_process;",
+            "static kiln_value *kiln_c99_symbols;",
+            "static kiln_method_store *kiln_c99_method_stores;",
+            "static kiln_native_constructor kiln_c99_native_constructors[]",
+        ] {
+            assert!(
+                !generated.source.contains(declaration),
+                "realm state remains private to one generated translation unit: {declaration}"
+            );
+        }
+    }
+
+    #[test]
     fn structural_instruction_refusals_always_name_their_owner() {
         let generated = emit(&program(vec![], vec![Instruction::Return], 0))
             .expect("structural refusal probe emits");
