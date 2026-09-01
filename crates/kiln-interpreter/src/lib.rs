@@ -9133,6 +9133,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "node:http request lost its stream".into(),
                 })?;
+            if connection.runtime_http {
+                // Hyper owns socket reads for runtime HTTP. Node readable pause/resume only
+                // changes delivery from the already-decoded IncomingMessage buffer; driving the
+                // legacy StreamDriver here would start a second raw TcpRead beside Hyper's and
+                // break completion ownership.
+                return Ok(result);
+            }
             match native {
                 Native::NodeReadablePause => {
                     connection.driver.pause_reading();
@@ -29731,7 +29738,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             };
             let handler = held.get_own("onabort").cloned();
             handler
-                .filter(|handler| is_callable(handler))
+                .filter(is_callable)
                 .into_iter()
                 .chain(listeners)
                 .collect::<Vec<_>>()

@@ -1986,6 +1986,7 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Assert => &["default", "ok", "strict"],
         NodeBuiltin::WorkerThreads => &["Worker", "default"],
         NodeBuiltin::Module => &["createRequire", "default"],
+        NodeBuiltin::QueryString => &["decode", "default", "parse"],
         NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
         NodeBuiltin::Buffer => &["Buffer", "constants", "default"],
         NodeBuiltin::AsyncHooks => &["AsyncResource", "default"],
@@ -2374,6 +2375,19 @@ status = kiln_c99_put(host, namespace, "createRequire", 13, create_require, 0, N
 if (status != KILN_C99_OK) return status;
 exports[0] = create_require;
 exports[1] = namespace;"#,
+        ),
+        NodeBuiltin::QueryString => Some(
+            r#"kiln_value parse = kiln_c99_method(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE);
+kiln_value namespace;
+int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "decode", 6, parse, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "parse", 5, parse, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = parse;
+exports[1] = namespace;
+exports[2] = parse;"#,
         ),
         NodeBuiltin::Url => Some(
             r#"kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_URL);
@@ -5323,7 +5337,7 @@ mod tests {
     }
 
     #[test]
-    fn typed_node_builtins_fail_before_native_emission_without_a_materializer() {
+    fn typed_node_querystring_has_a_native_materializer() {
         use kiln_module_resolver::{NodeBuiltin, NodeRequestKind, PinnedPackageResolver};
 
         let project = TestDirectory::new("native-node-builtin-gate");
@@ -5375,17 +5389,61 @@ mod tests {
         )
         .expect("typed node graph");
 
+        validate_native_node_builtins(&graph).expect("querystring materializes");
+        let body = native_builtin_body(NodeBuiltin::QueryString).expect("materializer body");
+        assert!(body.contains("KILN_C99_METHOD_NODE_QUERYSTRING_PARSE"));
+        for export in ["decode", "default", "parse"] {
+            assert!(native_builtin_supports_export(
+                NodeBuiltin::QueryString,
+                export
+            ));
+        }
+    }
+
+    #[test]
+    fn native_node_querystring_parses_form_data_and_preserves_namespace_identity() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-querystring");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import querystring, { decode, parse } from "node:querystring";
+const query = parse("hello=world&foo=b==ar&repeat=1&repeat=2&a+b=c+d&check=%E2%9C%93&bad=%ZZ&__proto__=safe");
+const edges = decode("&&missing&=empty-key&empty-value=&short=%&half=%A&invalid=%C0&broken=%E2%28%A1");
+console.log(parse === decode, querystring.parse === parse, query.hello, query.foo, query.repeat.join(","), query["a b"], query.check, query.bad, query.__proto__);
+console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.short, edges.half, edges.invalid, edges.broken);"#,
+        )
+        .expect("write querystring consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build querystring graph");
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native querystring integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let run = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native querystring graph builds and runs");
         assert_eq!(
-            validate_native_node_builtins(&graph)
-                .expect_err("unmaterialized builtin must fail")
-                .to_string(),
-            "native Node execution does not yet materialize the `node:querystring` builtin"
+            run.stdout,
+            "true true world b==ar 1,2 c d ✓ %ZZ safe\ntrue empty-key true % %A � �(�\n".as_bytes()
         );
-        assert!(native_builtin_body(NodeBuiltin::QueryString).is_none());
-        assert!(!native_builtin_supports_export(
-            NodeBuiltin::QueryString,
-            "parse"
-        ));
     }
 
     #[test]

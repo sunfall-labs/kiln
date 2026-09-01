@@ -32,8 +32,8 @@ use std::time::{Duration, Instant};
 use notify::RecursiveMode;
 use notify_debouncer_full::{DebounceEventResult, DebouncedEvent, new_debouncer};
 
-use crate::backend::NativeBuildAtRevision;
 use crate::backend::{Backend, SourceUpdate};
+use crate::backend::{NativeBuildAtRevision, NativeBuildAtRevisionParams};
 use crate::commands;
 use crate::error::{Error, Result};
 use crate::sources;
@@ -46,6 +46,7 @@ pub fn run(
     path: &Path,
     project_root: &Path,
     debounce: Duration,
+    node: bool,
     out: &mut dyn Write,
     notes: &mut dyn Write,
 ) -> Result<()> {
@@ -110,6 +111,7 @@ pub fn run(
                 out,
                 notes,
                 &mut source_view,
+                node,
             )
             .map_err(view_error_to_error)?;
             project_synced = true;
@@ -117,6 +119,7 @@ pub fn run(
                 expectation,
                 target.canonical.clone(),
                 project_root.to_string_lossy().into_owned(),
+                node,
             );
             text = Some(current);
         }
@@ -258,6 +261,7 @@ pub fn run(
                                 out,
                                 notes,
                                 &mut source_view,
+                                node,
                             ) {
                                 Ok(expectation) => expectation,
                                 Err(commands::ViewError::Stale(_)) => {
@@ -279,6 +283,7 @@ pub fn run(
                                         out,
                                         notes,
                                         &mut source_view,
+                                        node,
                                     )
                                     .map_err(view_error_to_error)?
                                 }
@@ -289,6 +294,7 @@ pub fn run(
                                 expectation,
                                 target.canonical.clone(),
                                 project_root.to_string_lossy().into_owned(),
+                                node,
                             );
                             text = Some(current);
                         }
@@ -422,6 +428,7 @@ fn run_once(
     out: &mut dyn Write,
     notes: &mut dyn Write,
     source_view: &mut SourceView,
+    node: bool,
 ) -> std::result::Result<Option<RefreshExpectation>, commands::ViewError> {
     // Seed the daemon with one authoritative project view. Once seeded, recursive events upload
     // changed dependencies and this sends the already-read target directly; repeating the whole
@@ -438,7 +445,7 @@ fn run_once(
                     project_root,
                     source.canonical,
                     source.text,
-                    false,
+                    node,
                     kiln_proto::StepBudget::Unmetered,
                 )?;
             *manifest = current_manifest;
@@ -453,6 +460,7 @@ fn run_once(
                 project_root,
                 source.canonical,
                 source.text,
+                node,
                 *source_view,
             )?;
             *source_view = view;
@@ -498,6 +506,7 @@ struct RefreshJob {
     project_root: String,
     expected_stdout: String,
     expected_value: ScalarValueSummary,
+    node: bool,
 }
 
 struct RefreshResult {
@@ -733,14 +742,15 @@ impl Refresher {
                     let private_output = watch_native_output(&job.project_root, job.generation);
                     let private_result = watch_native_result(&private_output);
                     let result = backend
-                        .native_build_at_revision_at_view(
-                            job.path.clone(),
-                            job.project_root.clone(),
-                            Some(private_output.to_string_lossy().into_owned()),
-                            NativeProfile::Dev,
-                            job.source_view,
-                            job.revision,
-                        )
+                        .native_build_at_revision_at_view(NativeBuildAtRevisionParams {
+                            path: job.path.clone(),
+                            project_root: job.project_root.clone(),
+                            output: Some(private_output.to_string_lossy().into_owned()),
+                            profile: NativeProfile::Dev,
+                            node: job.node,
+                            source_view: job.source_view,
+                            expected_revision: job.revision,
+                        })
                         .and_then(|build| match build {
                             NativeBuildAtRevision::Built(summary) => {
                                 let launched = worker_jobs.launch_if_current(
@@ -826,6 +836,7 @@ impl Refresher {
         expectation: Option<RefreshExpectation>,
         path: String,
         project_root: String,
+        node: bool,
     ) {
         self.generation += 1;
         if let Some(jobs) = &self.jobs {
@@ -838,6 +849,7 @@ impl Refresher {
                     project_root,
                     expected_stdout: expectation.stdout,
                     expected_value: expectation.value,
+                    node,
                 }),
                 None => jobs.invalidate(self.generation),
             }
@@ -1202,11 +1214,14 @@ mod tests {
         staged: HashMap<kiln_proto::SyncId, Vec<(String, String)>>,
         stale_update: bool,
         requests: Option<Sender<Request>>,
+        native_requests: Option<Sender<Request>>,
     }
 
     impl Backend for Fake {
         fn peer(&self) -> Result<Box<dyn Backend>> {
-            Ok(Box::new(NativeFake))
+            Ok(Box::new(NativeFake {
+                requests: self.native_requests.clone(),
+            }))
         }
 
         fn request(&mut self, request: Request) -> Result<Response> {
@@ -1282,10 +1297,15 @@ mod tests {
         }
     }
 
-    struct NativeFake;
+    struct NativeFake {
+        requests: Option<Sender<Request>>,
+    }
 
     impl Backend for NativeFake {
         fn request(&mut self, request: Request) -> Result<Response> {
+            if let Some(requests) = &self.requests {
+                let _ = requests.send(request.clone());
+            }
             Ok(match request {
                 Request::NativeBuildAtRevision {
                     expected_revision, ..
@@ -1395,12 +1415,24 @@ mod tests {
         mpsc::Receiver<String>,
         mpsc::Receiver<Request>,
     ) {
-        watch_in_background_observed_configured(path, false)
+        watch_in_background_observed_configured_with_mode(path, false, false)
     }
 
     fn watch_in_background_observed_configured(
         path: &Path,
         stale_update: bool,
+    ) -> (
+        mpsc::Receiver<String>,
+        mpsc::Receiver<String>,
+        mpsc::Receiver<Request>,
+    ) {
+        watch_in_background_observed_configured_with_mode(path, stale_update, false)
+    }
+
+    fn watch_in_background_observed_configured_with_mode(
+        path: &Path,
+        stale_update: bool,
+        node: bool,
     ) -> (
         mpsc::Receiver<String>,
         mpsc::Receiver<String>,
@@ -1416,6 +1448,7 @@ mod tests {
                 sources: HashMap::new(),
                 staged: HashMap::new(),
                 stale_update,
+                native_requests: if node { Some(request_tx.clone()) } else { None },
                 requests: Some(request_tx),
             };
             let _ = run(
@@ -1423,6 +1456,7 @@ mod tests {
                 &watched,
                 watched.parent().expect("watch path has a parent"),
                 Duration::from_millis(50),
+                node,
                 &mut Tap(checks),
                 &mut NoteTap {
                     sender: messages,
@@ -1431,6 +1465,57 @@ mod tests {
             );
         });
         (printed, notes, requests)
+    }
+
+    #[test]
+    fn node_mode_reaches_foreground_and_native_refresh_runs() {
+        let dir = scratch("node-mode");
+        let path = dir.join("main.js");
+        std::fs::write(&path, "export const value = 1;\n").expect("write entry");
+        let (printed, _, requests) =
+            watch_in_background_observed_configured_with_mode(&path, false, true);
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("initial run");
+        std::fs::write(&path, "export const value = 2;\n").expect("edit entry");
+        printed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("incremental run");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match requests.recv_timeout(Duration::from_millis(50)) {
+                Ok(request) => seen.push(request),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+            let run_count = seen
+                .iter()
+                .filter(|request| matches!(request, Request::Run { node: true, .. }))
+                .count();
+            let native_seen = seen.iter().any(|request| {
+                matches!(request, Request::NativeBuildAtRevision { node: true, .. })
+            });
+            if run_count >= 2 && native_seen {
+                break;
+            }
+        }
+        let runs = seen
+            .iter()
+            .filter_map(|request| match request {
+                Request::Run { node, .. } => Some(*node),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(runs.len() >= 2, "initial and incremental runs: {seen:?}");
+        assert!(runs.iter().all(|node| *node), "run requests: {runs:?}");
+        assert!(
+            seen.iter().any(|request| matches!(
+                request,
+                Request::NativeBuildAtRevision { node: true, .. }
+            ))
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -1853,6 +1938,7 @@ mod tests {
             }),
             "/project/main.js".into(),
             "/project".into(),
+            false,
         );
         let first = request_rx
             .recv_timeout(Duration::from_secs(1))
@@ -1881,6 +1967,7 @@ mod tests {
             }),
             "/project/main.js".into(),
             "/project".into(),
+            false,
         );
         refresher.submit(
             Some(RefreshExpectation {
@@ -1891,6 +1978,7 @@ mod tests {
             }),
             "/project/main.js".into(),
             "/project".into(),
+            false,
         );
         response_tx
             .send(Response::NativeBuilt(native_summary(&first_output)))
@@ -1946,6 +2034,7 @@ mod tests {
             project_root: "/project".into(),
             expected_stdout: "revision 1\n".into(),
             expected_value: ScalarValueSummary::Undefined,
+            node: false,
         });
         assert_eq!(queue.next().expect("first job").generation, 1);
         queue.replace(RefreshJob {
@@ -1956,6 +2045,7 @@ mod tests {
             project_root: "/project".into(),
             expected_stdout: "revision 2\n".into(),
             expected_value: ScalarValueSummary::Undefined,
+            node: false,
         });
 
         let launches = Arc::new(AtomicUsize::new(0));
@@ -2035,6 +2125,7 @@ mod tests {
             }),
             "/project/main.js".into(),
             "/project".into(),
+            false,
         );
         let Request::NativeBuildAtRevision {
             output: Some(first_output),
@@ -2061,6 +2152,7 @@ mod tests {
             }),
             "/project/main.js".into(),
             "/project".into(),
+            false,
         );
         let Request::NativeBuildAtRevision {
             output: Some(latest_output),
@@ -2124,6 +2216,7 @@ mod tests {
             }),
             "/project/main.js".into(),
             "/project".into(),
+            false,
         );
         let request = request_rx
             .recv_timeout(Duration::from_secs(1))
@@ -2135,7 +2228,7 @@ mod tests {
         else {
             panic!("native request must target a private output");
         };
-        refresher.submit(None, "/project/main.js".into(), "/project".into());
+        refresher.submit(None, "/project/main.js".into(), "/project".into(), false);
         response_tx
             .send(Response::NativeBuilt(native_summary(&private_output)))
             .expect("finish obsolete build");
