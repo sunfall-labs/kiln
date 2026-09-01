@@ -1521,6 +1521,7 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_WEAK_SET 67
 #define KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE 68
 #define KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE 69
+#define KILN_C99_BUILTIN_PROMISE_PROTOTYPE 70
 /* The error kind that reports several failures as one. Reachable only through `Promise.any` for
  * now -- the emitter still refuses the `AggregateError` global, because constructing one iterates
  * its first argument and this runtime has no `IterableToList` to do it with. A refusal is the
@@ -6538,6 +6539,7 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_DATE_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_NUMBER_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_PROMISE_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
            (builtin >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
             builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
@@ -6864,6 +6866,10 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
                                       KILN_C99_METHOD_NUMBER_VALUE_OF);
     case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE:
         return kiln_c99_callable_method(key, key_len);
+    case KILN_C99_BUILTIN_PROMISE_PROTOTYPE:
+        if (kiln_c99_same_name(key, key_len, "constructor")) return 0;
+        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
+                                      KILN_C99_METHOD_FINALLY);
     case KILN_C99_BUILTIN_PROMISE:
         if (kiln_c99_same_name(key, key_len, "withResolvers")) {
             return KILN_C99_METHOD_PROMISE_WITH_RESOLVERS;
@@ -9636,7 +9642,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                           {KILN_C99_BUILTIN_REGEXP_PROTOTYPE, KILN_C99_BUILTIN_REGEXP},
                           {KILN_C99_BUILTIN_DATE_PROTOTYPE, KILN_C99_BUILTIN_DATE},
                           {KILN_C99_BUILTIN_NUMBER_PROTOTYPE, KILN_C99_BUILTIN_NUMBER},
-                          {KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, KILN_C99_BUILTIN_FUNCTION}};
+                          {KILN_C99_BUILTIN_FUNCTION_PROTOTYPE, KILN_C99_BUILTIN_FUNCTION},
+                          {KILN_C99_BUILTIN_PROMISE_PROTOTYPE, KILN_C99_BUILTIN_PROMISE}};
             size_t owner;
             for (owner = 0; owner < sizeof owners / sizeof *owners; ++owner) {
                 if (target.bits == owners[owner].table) {
@@ -9739,6 +9746,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
             if (target.bits == KILN_C99_BUILTIN_FUNCTION) {
                 *out = kiln_c99_builtin(KILN_C99_BUILTIN_FUNCTION_PROTOTYPE);
+                return KILN_C99_OK;
+            }
+            if (target.bits == KILN_C99_BUILTIN_PROMISE) {
+                *out = kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE_PROTOTYPE);
                 return KILN_C99_OK;
             }
             {
@@ -16892,6 +16903,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                     return KILN_C99_OK;
                 }
                 if (subject.bits == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE) {
+                    *result = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
+                    return KILN_C99_OK;
+                }
+                if (subject.bits == KILN_C99_BUILTIN_PROMISE_PROTOTYPE) {
                     *result = kiln_c99_builtin(KILN_C99_BUILTIN_OBJECT_PROTOTYPE);
                     return KILN_C99_OK;
                 }
@@ -27095,6 +27110,38 @@ int main(void) {
         assert!(
             run.status.success(),
             "intrinsic prototype relink failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_promise_constructor_exposes_a_distinct_prototype_table() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE);
+    kiln_value prototype;
+    kiln_value method;
+    kiln_value owner;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_get(NULL, constructor, "prototype", 9, &prototype, 0, &thrown) != KILN_C99_OK)
+        return 1;
+    if (prototype.tag != KILN_VALUE_BUILTIN ||
+        prototype.bits != KILN_C99_BUILTIN_PROMISE_PROTOTYPE) return 2;
+    if (prototype.bits == constructor.bits) return 3;
+    if (kiln_c99_get(NULL, prototype, "then", 4, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_THEN) return 4;
+    if (kiln_c99_get(NULL, prototype, "constructor", 11, &owner, 0, &thrown) != KILN_C99_OK ||
+        owner.tag != KILN_VALUE_BUILTIN || owner.bits != KILN_C99_BUILTIN_PROMISE) return 5;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "promise-prototype-table");
+        assert!(
+            run.status.success(),
+            "Promise prototype table failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
         );
