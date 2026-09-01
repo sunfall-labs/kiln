@@ -980,7 +980,6 @@ fn native_dependency_program(value: u64) -> ModuleProgram {
             ],
             local_count: 1,
             functions: Vec::new(),
-            source: "".into(),
         },
         dependencies: Vec::new(),
         imports: Vec::new(),
@@ -1008,7 +1007,6 @@ fn native_entry_program() -> ModuleProgram {
             ],
             local_count: 1,
             functions: Vec::new(),
-            source: "".into(),
         },
         dependencies: vec!["./dep.js".to_owned()],
         imports: vec![ImportBinding {
