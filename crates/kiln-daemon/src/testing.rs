@@ -1,6 +1,7 @@
 //! Resident conformance coordination: discover once, select deterministically, then run the
 //! selected batch without launching a compiler process per test.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
@@ -8,7 +9,8 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Instant;
 
 use kiln_conformance::{
-    CaseResult, ConformanceTest, Outcome, Provenance, ReasonReport, RunMode, VariantResult,
+    CaseResult, ConformanceTest, InterpreterWorker, Outcome, Provenance, ReasonReport, RunMode,
+    VariantResult,
 };
 use kiln_proto::{
     Diagnostic, TestCaseSummary, TestMode, TestOutcome, TestReasonSummary, TestSummary,
@@ -19,6 +21,15 @@ use rayon::prelude::*;
 const MODULE_GRAPH_FEATURES: &[&str] = &["modules", "module-graph"];
 const MODULE_RESOLVER_FEATURES: &[&str] = &["builtin-modules", "node-packages", "node-resolution"];
 const MAX_CACHED_CORPORA: usize = 8;
+
+thread_local! {
+    /// One non-`Send` runtime per persistent Rayon thread.
+    ///
+    /// Rayon owns work stealing and the process-lifetime threads; this slot owns only the
+    /// current-thread interpreter scheduler. A case never enters this slot with another case's
+    /// VM, globals, host capture, or values.
+    static INTERPRETER_WORKER: RefCell<Option<InterpreterWorker>> = const { RefCell::new(None) };
+}
 
 /// Process-lifetime conformance inventory and per-corpus singleflight owned by one resident daemon.
 ///
@@ -396,19 +407,74 @@ fn run_discovered(
 
 /// Run every selected test, returning each one's variants in the caller's order.
 ///
-/// Rayon's indexed iterator steals uneven work while collecting results in selection order. Each
-/// task builds and drops the interpreter's `Rc` graph locally; only owned results cross threads.
+/// Rayon's indexed iterator steals uneven work while collecting results in selection order. Pure
+/// interpreter cases reuse scheduler infrastructure attached to the Rayon thread, but build and
+/// reclaim a fresh VM, realm, global object, host capture, and `Rc` graph for every case. Parse and
+/// Node modes retain their existing execution paths; Node resource reset is a separate lifecycle
+/// contract and must not be inferred from the safe pure-interpreter reuse here.
 fn execute(
     pending: &[(String, &ConformanceTest)],
     mode: RunMode,
 ) -> Result<Vec<Vec<VariantResult>>, String> {
-    pending
-        .par_iter()
-        .map(|(_, test)| {
-            catch_unwind(AssertUnwindSafe(|| test.run(mode)))
-                .map_err(|_| "conformance worker panicked".to_owned())
-        })
-        .collect()
+    match mode {
+        RunMode::Interpreter => pending
+            .par_iter()
+            .map(|(_, test)| {
+                with_interpreter_worker(|worker| test.run_with_interpreter_worker(worker))
+            })
+            .collect(),
+        RunMode::Parse | RunMode::Node => pending
+            .par_iter()
+            .map(|(_, test)| {
+                catch_unwind(AssertUnwindSafe(|| test.run(mode)))
+                    .map_err(|_| "conformance worker panicked".to_owned())
+            })
+            .collect(),
+    }
+}
+
+/// Run one operation on this thread's resident interpreter scheduler.
+///
+/// Construction happens inside the Rayon thread because the runtime is intentionally non-`Send`.
+/// A panic drops the scheduler before the thread accepts another case. The conformance runner also
+/// catches per-case panics to preserve a result; `is_reusable` carries interpreter-side unwinds
+/// across that catch boundary so those cases retire the worker just as reliably.
+fn with_interpreter_worker<T>(
+    operation: impl FnOnce(&mut InterpreterWorker) -> T,
+) -> Result<T, String> {
+    INTERPRETER_WORKER.with(|slot| {
+        let outcome = catch_unwind(AssertUnwindSafe(|| {
+            let mut worker = slot.borrow_mut();
+            if worker.is_none() {
+                *worker = Some(
+                    InterpreterWorker::new()
+                        .map_err(|error| format!("building conformance worker: {error}"))?,
+                );
+            }
+            Ok(operation(
+                worker
+                    .as_mut()
+                    .expect("interpreter worker is initialized above"),
+            ))
+        }));
+
+        match outcome {
+            Ok(result) => {
+                if slot
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|worker| !worker.is_reusable())
+                {
+                    slot.borrow_mut().take();
+                }
+                result
+            }
+            Err(_) => {
+                slot.borrow_mut().take();
+                Err("conformance worker panicked".to_owned())
+            }
+        }
+    })
 }
 
 /// Group every non-passing result by reason, so the summary carries the backlog and not only its
@@ -741,6 +807,74 @@ expected_stdout = "bundle\n"
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    struct RawFrontmatterCorpus {
+        path: PathBuf,
+    }
+
+    impl RawFrontmatterCorpus {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "kiln-resident-worker-test-{}-{}",
+                std::process::id(),
+                TEMP_CORPUS_COUNTER.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).expect("create raw frontmatter corpus");
+            fs::write(
+                path.join("case.js"),
+                "/*---\nflags: [raw]\n---*/\nconsole.log('resident');\n",
+            )
+            .expect("write raw frontmatter case");
+            Self { path }
+        }
+    }
+
+    impl Drop for RawFrontmatterCorpus {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    #[test]
+    fn resident_interpreter_thread_reuses_its_runtime_and_recovers_after_a_panic() {
+        let corpus = RawFrontmatterCorpus::new();
+        let discovered = kiln_conformance::discover(&corpus.path).expect("discover raw case");
+        let test = discovered.first().expect("one discovered case");
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .thread_name(|_| "kiln-resident-worker-test".to_owned())
+            .build()
+            .expect("build one-thread worker pool");
+
+        let first = pool
+            .install(|| with_interpreter_worker(|worker| test.run_with_interpreter_worker(worker)))
+            .expect("first worker invocation");
+        assert_eq!(first[0].result.outcome, Outcome::Pass);
+        assert_eq!(first[0].result.stdout, "resident\n");
+        assert_eq!(
+            pool.install(|| { with_interpreter_worker(|worker| worker.completed_executions()) }),
+            Ok(1),
+            "the same thread retains its scheduler between jobs"
+        );
+
+        let panicked =
+            pool.install(|| with_interpreter_worker::<()>(|_| panic!("injected worker failure")));
+        assert_eq!(panicked, Err("conformance worker panicked".to_owned()));
+        assert_eq!(
+            pool.install(|| { with_interpreter_worker(|worker| worker.completed_executions()) }),
+            Ok(0),
+            "a panic retires the old runtime before the thread accepts more work"
+        );
+
+        let recovered = pool
+            .install(|| with_interpreter_worker(|worker| test.run_with_interpreter_worker(worker)))
+            .expect("replacement worker invocation");
+        assert_eq!(recovered[0].result.outcome, Outcome::Pass);
+        assert_eq!(
+            pool.install(|| { with_interpreter_worker(|worker| worker.completed_executions()) }),
+            Ok(1)
+        );
     }
 
     #[test]
