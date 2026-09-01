@@ -8076,6 +8076,59 @@ console.log(written === read, read.realmMarker.answer);"#,
     }
 
     #[test]
+    fn native_realm_singletons_are_shared_across_generated_modules() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-realm-singletons");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
+        fs::write(
+            root.path.join("writer.mjs"),
+            r#"globalThis.realmMarker = 41;
+process.realmMarker = 42;
+Atomics.realmMarker = 43;
+export const ready = true;"#,
+        )
+        .expect("write singleton producer");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { ready } from "./writer.mjs";
+console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMarker);"#,
+        )
+        .expect("write singleton consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build realm-singleton graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping realm-singleton integration: no C compiler found");
+            return;
+        };
+        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native realm-singleton graph builds and runs");
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&report.stdout),
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(report.stdout, b"true 41 42 43\n");
+    }
+
+    #[test]
     fn native_commonjs_real_package_callable_executes_after_require() {
         use kiln_module_resolver::NodeRuntimeResolver;
 

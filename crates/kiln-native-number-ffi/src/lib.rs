@@ -584,6 +584,7 @@ mod realm {
         symbols: RefCell<HashMap<Vec<u8>, u64>>,
         symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
+        value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
         heap_allocations: RefCell<Vec<OwnedHeapAllocation>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
@@ -642,6 +643,7 @@ mod realm {
                 symbols: RefCell::new(HashMap::new()),
                 symbol_keys: RefCell::new(HashMap::new()),
                 callable_stores: RefCell::new(HashMap::new()),
+                value_slots: RefCell::new(HashMap::new()),
                 // Server graphs create hundreds of objects and closures during bootstrap.
                 // Reserve one compact pointer/destructor slab so the common path does not keep
                 // reallocating; unlike the former leaks, every entry is released at teardown.
@@ -1752,6 +1754,28 @@ mod realm {
         })
     }
 
+    /// Returns one zero-initialized, realm-owned slot for a private generated-C value.
+    ///
+    /// Rust deliberately treats the slot as four opaque machine words: it owns identity and
+    /// lifetime, while the generated C kernel remains the sole authority for `kiln_value`'s
+    /// private layout. Stable numeric keys are assigned by that kernel to realm singletons such
+    /// as `globalThis`, `process`, and `Atomics`.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_value_slot(key: u32, out_slot: *mut *mut c_void) -> i32 {
+        ffi(|| {
+            if out_slot.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let mut slots = realm.value_slots.borrow_mut();
+            let slot = slots.entry(key).or_insert_with(|| Box::new([0; 4]));
+            unsafe { out_slot.write(slot.as_mut_ptr().cast()) };
+            0
+        })
+    }
+
     /// Transfers one generated-C closure to the active realm for exact-once destruction.
     ///
     /// The provider never dereferences the pointer. This is the ownership seam used while
@@ -2647,6 +2671,57 @@ mod realm {
         use std::sync::atomic::{AtomicU64, Ordering};
 
         static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+        unsafe extern "C" fn exercises_realm_value_slots(context: *mut c_void) -> i32 {
+            let slots = unsafe { &mut *context.cast::<[*mut c_void; 3]>() };
+            if unsafe { kiln_realm_value_slot(1, &raw mut slots[0]) } != 0
+                || unsafe { kiln_realm_value_slot(1, &raw mut slots[1]) } != 0
+                || unsafe { kiln_realm_value_slot(2, &raw mut slots[2]) } != 0
+            {
+                return RUNTIME_ERROR;
+            }
+            unsafe { slots[0].cast::<u64>().write(37) };
+            i32::from(unsafe { slots[1].cast::<u64>().read() } != 37)
+        }
+
+        #[test]
+        fn opaque_value_slots_are_stable_distinct_and_realm_owned() {
+            let mut first_realm = 0;
+            let mut second_realm = 0;
+            let mut first: [*mut c_void; 3] = [ptr::null_mut(); 3];
+            let mut second: [*mut c_void; 3] = [ptr::null_mut(); 3];
+            assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
+            assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        first_realm,
+                        Some(exercises_realm_value_slots),
+                        (&raw mut first).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        second_realm,
+                        Some(exercises_realm_value_slots),
+                        (&raw mut second).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(first[0], first[1]);
+            assert_ne!(first[0], first[2]);
+            assert_ne!(first[0], second[0]);
+            assert_eq!(
+                unsafe { kiln_realm_value_slot(1, ptr::null_mut()) },
+                INVALID_ARGUMENT
+            );
+            assert_eq!(kiln_realm_destroy(first_realm), 0);
+            assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
 
         unsafe extern "C" fn records_and_renders_diagnostic(context: *mut c_void) -> i32 {
             let site = b"node_modules/provider/index.js";
@@ -4603,6 +4678,9 @@ mod realm {
         };
         (realm, kiln_realm_callable_store, realm_callable_store) => {
             const _: unsafe extern "C" fn(u32, u64, *mut c_void, Option<DropWork>, *mut *mut c_void) -> i32 = kiln_realm_callable_store;
+        };
+        (realm, kiln_realm_value_slot, realm_value_slot) => {
+            const _: unsafe extern "C" fn(u32, *mut *mut c_void) -> i32 = kiln_realm_value_slot;
         };
         (realm, kiln_realm_own_closure, realm_own_closure) => {
             const _: unsafe extern "C" fn(*mut c_void, Option<DropWork>) -> i32 = kiln_realm_own_closure;

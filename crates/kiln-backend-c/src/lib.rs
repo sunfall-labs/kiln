@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 15;
+pub const C_GENERATOR_VERSION: u32 = 16;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -2139,6 +2139,7 @@ typedef struct kiln_host {
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
+extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
 extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
 
@@ -2776,6 +2777,7 @@ int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t 
 int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
+int kiln_realm_value_slot(uint32_t key, void **out_slot);
 int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
  * portable 128-bit integer. `Temporal` measures instants in nanoseconds, and rounding the realm's
@@ -5980,43 +5982,57 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
  * are non-enumerable, which is what node does and what stops `Object.keys(globalThis)` from being
  * a list of the realm's furniture -- a program's own additions are enumerable, which is the
  * distinction that makes the question worth asking. */
-static kiln_value kiln_c99_globals;
-static kiln_value kiln_c99_process;
-static kiln_value kiln_c99_atomics;
+#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
+#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
+#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+
+static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
+    void *slot = NULL;
+    int status;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_realm_value_slot(key, &slot);
+    if (status != KILN_C99_OK || slot == NULL) return status;
+    *out = (kiln_value *)slot;
+    return KILN_C99_OK;
+}
 
 static int kiln_c99_atomics_object(kiln_value *out) {
     static const char *const names[] = {
         "add", "and", "compareExchange", "exchange", "isLockFree", "load", "notify",
         "or", "pause", "store", "sub", "wait", "waitAsync", "xor",
     };
+    kiln_value *atomics;
     size_t index;
-    int status;
-    if (kiln_c99_atomics.tag == KILN_VALUE_OBJECT) {
-        *out = kiln_c99_atomics;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_ATOMICS, &atomics);
+    if (status != KILN_C99_OK) return status;
+    if (atomics->tag == KILN_VALUE_OBJECT) {
+        *out = *atomics;
         return KILN_C99_OK;
     }
-    status = kiln_c99_new_object(&kiln_c99_atomics);
+    status = kiln_c99_new_object(atomics);
     for (index = 0; status == KILN_C99_OK && index < sizeof names / sizeof *names; ++index)
         status = kiln_c99_define_method(
-            kiln_c99_atomics, names[index], strlen(names[index]),
+            *atomics, names[index], strlen(names[index]),
             kiln_c99_method(KILN_C99_METHOD_ATOMICS_UNAVAILABLE));
     if (status != KILN_C99_OK) return status;
-    *out = kiln_c99_atomics;
+    *out = *atomics;
     return KILN_C99_OK;
 }
 
 static int kiln_c99_process_object(kiln_value *out) {
+    kiln_value *process;
     kiln_value env;
     kiln_value argv;
     kiln_value exec_argv;
     kiln_value versions;
     kiln_value stream;
-    int status;
-    if (kiln_c99_process.tag == KILN_VALUE_OBJECT) {
-        *out = kiln_c99_process;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
+    if (status != KILN_C99_OK) return status;
+    if (process->tag == KILN_VALUE_OBJECT) {
+        *out = *process;
         return KILN_C99_OK;
     }
-    status = kiln_c99_new_object(&kiln_c99_process);
+    status = kiln_c99_new_object(process);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&argv);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&exec_argv);
@@ -6025,58 +6041,59 @@ static int kiln_c99_process_object(kiln_value *out) {
         status = kiln_c99_put(NULL, versions, "node", 4,
                               kiln_c99_copy_text("22.0.0", 6), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "env", 3, env, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "env", 3, env, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "argv", 4, argv, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "argv", 4, argv, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "execArgv", 8, exec_argv, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "execArgv", 8, exec_argv, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "platform", 8,
+        status = kiln_c99_put(NULL, *process, "platform", 8,
                               kiln_c99_copy_text("kiln", 4), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "version", 7,
+        status = kiln_c99_put(NULL, *process, "version", 7,
                               kiln_c99_copy_text("kiln", 4), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "versions", 8, versions, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "versions", 8, versions, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "pid", 3,
+        status = kiln_c99_put(NULL, *process, "pid", 3,
                               kiln_c99_number(1.0), 0, NULL);
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(0.0), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, kiln_c99_process, "stdin", 5, stream, 0, NULL);
+            status = kiln_c99_put(NULL, *process, "stdin", 5, stream, 0, NULL);
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(1.0), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, kiln_c99_process, "stdout", 6, stream, 0, NULL);
+            status = kiln_c99_put(NULL, *process, "stdout", 6, stream, 0, NULL);
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(2.0), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, kiln_c99_process, "stderr", 6, stream, 0, NULL);
+            status = kiln_c99_put(NULL, *process, "stderr", 6, stream, 0, NULL);
     }
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(kiln_c99_process, "nextTick", 8,
+        status = kiln_c99_define_method(*process, "nextTick", 8,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_NEXT_TICK));
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(kiln_c99_process, "hrtime", 6,
+        status = kiln_c99_define_method(*process, "hrtime", 6,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME));
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(kiln_c99_process, "cwd", 3,
+        status = kiln_c99_define_method(*process, "cwd", 3,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD));
     if (status != KILN_C99_OK) return status;
-    *out = kiln_c99_process;
+    *out = *process;
     return KILN_C99_OK;
 }
 
 static int kiln_c99_global_object(kiln_value *out) {
+    kiln_value *globals;
     static const struct {
         const char *name;
         uint64_t builtin;
@@ -6126,59 +6143,60 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"clearTimeout", KILN_C99_METHOD_CLEAR_TIMEOUT},
                      {"clearInterval", KILN_C99_METHOD_CLEAR_INTERVAL}};
     size_t index;
-    int status;
-    if (kiln_c99_globals.tag == KILN_VALUE_OBJECT) {
-        *out = kiln_c99_globals;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
+    if (status != KILN_C99_OK) return status;
+    if (globals->tag == KILN_VALUE_OBJECT) {
+        *out = *globals;
         return KILN_C99_OK;
     }
-    status = kiln_c99_new_object(&kiln_c99_globals);
+    status = kiln_c99_new_object(globals);
     if (status != KILN_C99_OK) {
         return status;
     }
     for (index = 0; index < sizeof constructors / sizeof *constructors && status == KILN_C99_OK;
          ++index) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, constructors[index].name,
+        status = kiln_c99_put(NULL, *globals, constructors[index].name,
                               strlen(constructors[index].name),
                               kiln_c99_builtin(constructors[index].builtin), 0, NULL);
     }
     for (index = 0; index < sizeof functions / sizeof *functions && status == KILN_C99_OK;
          ++index) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, functions[index].name,
+        status = kiln_c99_put(NULL, *globals, functions[index].name,
                               strlen(functions[index].name),
                               kiln_c99_method(functions[index].code), 0, NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "NaN", 3, kiln_c99_number(0.0 / 0.0), 0,
+        status = kiln_c99_put(NULL, *globals, "NaN", 3, kiln_c99_number(0.0 / 0.0), 0,
                               NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "Infinity", 8, kiln_c99_number(1.0 / 0.0), 0,
+        status = kiln_c99_put(NULL, *globals, "Infinity", 8, kiln_c99_number(1.0 / 0.0), 0,
                               NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "undefined", 9, kiln_c99_undefined(), 0,
+        status = kiln_c99_put(NULL, *globals, "undefined", 9, kiln_c99_undefined(), 0,
                               NULL);
     }
     /* It holds itself under both of its names, which is how a program reaches it without a
      * keyword: `global.Object === Object` is the standard test for "am I in a realm that has
      * one". */
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "globalThis", 10, kiln_c99_globals, 0, NULL);
+        status = kiln_c99_put(NULL, *globals, "globalThis", 10, *globals, 0, NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "global", 6, kiln_c99_globals, 0, NULL);
+        status = kiln_c99_put(NULL, *globals, "global", 6, *globals, 0, NULL);
     }
     if (status != KILN_C99_OK) {
         return status;
     }
     {
-        kiln_object *object = kiln_c99_object_of(kiln_c99_globals);
+        kiln_object *object = kiln_c99_object_of(*globals);
         size_t slot;
         for (slot = 0; slot < object->count; ++slot) {
             object->properties[slot].enumerable = 0;
         }
     }
-    *out = kiln_c99_globals;
+    *out = *globals;
     return KILN_C99_OK;
 }
 
@@ -23666,6 +23684,7 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
 /// This is the migration manifest for ADR 0036. Adding a new mutable `kiln_c99_*` static without
 /// naming its owner fails the architecture test below. Realm entries move into the shared value
 /// kernel; frame entries remain save/restore state local to one synchronous generated-body call.
+#[cfg(test)]
 const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_diagnostic_site", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_operation", C99StateOwner::Realm),
@@ -23686,9 +23705,6 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_frame_argc", C99StateOwner::Frame),
     ("kiln_c99_captured_arguments", C99StateOwner::Frame),
     ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
-    ("kiln_c99_globals", C99StateOwner::Realm),
-    ("kiln_c99_process", C99StateOwner::Realm),
-    ("kiln_c99_atomics", C99StateOwner::Realm),
     ("kiln_c99_symbols", C99StateOwner::Realm),
     ("kiln_c99_symbol_count", C99StateOwner::Realm),
     ("kiln_c99_symbol_capacity", C99StateOwner::Realm),
@@ -23696,6 +23712,7 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
 enum C99StateOwner {
     Realm,
     Frame,
@@ -28098,6 +28115,7 @@ int main(void) {
         for declaration in [
             "static kiln_value kiln_c99_globals;",
             "static kiln_value kiln_c99_process;",
+            "static kiln_value kiln_c99_atomics;",
             "static kiln_value *kiln_c99_symbols;",
             "static kiln_method_store *kiln_c99_fixture_method_stores;",
             "static kiln_native_constructor kiln_c99_native_constructors[]",
@@ -28153,9 +28171,14 @@ int main(void) {
             "mutable generated-C state must say whether the realm, dynamic frame, or test fixture owns it"
         );
         assert!(
-            C99_MUTABLE_STATE_OWNERS
-                .iter()
-                .any(|(name, owner)| *name == "kiln_c99_globals" && *owner == C99StateOwner::Realm)
+            !generated
+                .source
+                .contains("static kiln_value kiln_c99_globals;"),
+            "globalThis identity must live in the active realm slot, not one module"
+        );
+        assert!(
+            generated.source.contains("kiln_realm_value_slot("),
+            "generated value operations must reach realm singleton identity through the typed slot ABI"
         );
     }
 
