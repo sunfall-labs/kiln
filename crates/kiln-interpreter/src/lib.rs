@@ -25413,8 +25413,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// is a fresh set of intrinsics, not a fresh set of powers.
     fn construct_shadow_realm(&mut self) -> Result<Value, ExecutionError> {
         let realm = self.allocate_realm()?;
-        let mut instance = ObjectData::default();
-        instance.shadow_realm = Some(realm);
+        let mut instance = ObjectData {
+            shadow_realm: Some(realm),
+            ..ObjectData::default()
+        };
         // `ShadowRealm.prototype` *of the realm doing the constructing*, which is what makes
         // `Reflect.construct(other.ShadowRealm, [])` produce an instance of `other`'s.
         instance.set_prototype(Value::Native(
