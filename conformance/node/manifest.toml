@@ -7,6 +7,7 @@ adaptation = "Harness-only rewrites are documented in UPSTREAM.md; API assertion
 
 [[test]]
 id = "node-v24.7.0/fs-promises-readfile-empty/buffer"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-readfile-empty-buffer.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
@@ -14,6 +15,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-readfile-empty/utf8-string"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-readfile-empty-utf8-string.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "utf8"]
@@ -21,6 +23,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-readfile-empty/utf8-options"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-readfile-empty-utf8-options.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "utf8", "options-objects"]
@@ -28,6 +31,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-writefile/string"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-writefile-string.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "strings"]
@@ -35,6 +39,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-writefile/uint8array"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-writefile-uint8array.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
@@ -42,6 +47,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-writefile/uint16array"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-writefile-uint16array.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
@@ -49,6 +55,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-writefile/uint32array"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-writefile-uint32array.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
@@ -56,6 +63,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-stat/file"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-stat-file.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "stats"]
@@ -63,6 +71,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-stat/directory"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-stat-directory.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "stats"]
@@ -70,6 +79,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-errors/enoent"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-errors-enoent.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "node-errors"]
@@ -77,6 +87,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises/same-namespace"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-same-namespace.js"
 status = "runnable"
 features = ["node-fs-promises", "builtin-modules"]
@@ -84,6 +95,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises/concurrent-read-order"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-concurrent-read-order.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop", "concurrency"]
@@ -91,6 +103,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-readfile-text/buffer"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-readfile-text-buffer.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "typed-arrays"]
@@ -98,6 +111,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-readfile-text/utf8-options"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-readfile-text-utf8-options.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "utf8", "options-objects"]
@@ -105,6 +119,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-writefile/overwrite-truncate"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-writefile-overwrite.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "overwrite", "truncate"]
@@ -112,6 +127,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises-stat/errors-enoent"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-stat-errors-enoent.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "node-errors"]
@@ -119,6 +135,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises/concurrent-write-order"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-concurrent-write-order.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop", "concurrency"]
@@ -126,6 +143,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/fs-promises/promise-chain"
+requires_host = "node"
 source = "upstream-adapted/fs-promises-promise-chain.js"
 status = "runnable"
 features = ["node-fs-promises", "tokio-fs", "promise-jobs", "event-loop"]
@@ -133,6 +151,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/events/add-listeners"
+requires_host = "node"
 source = "upstream-adapted/event-emitter-add-listeners.mjs"
 status = "runnable"
 features = ["node:events", "event-emitter", "module-graph"]
@@ -140,6 +159,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/stream/readable-event"
+requires_host = "node"
 source = "upstream-adapted/stream-readable-event.mjs"
 status = "runnable"
 features = ["node:stream", "event-emitter", "readable-state", "next-tick", "timers"]
@@ -147,6 +167,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/net/listen-close-server"
+requires_host = "node"
 source = "upstream-adapted/net-listen-close-server.mjs"
 status = "runnable"
 features = ["node:net", "tokio-net", "resource-lifecycle", "module-graph"]
@@ -154,6 +175,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/net/socket-set-encoding"
+requires_host = "node"
 source = "upstream-adapted/net-socket-set-encoding.mjs"
 status = "runnable"
 features = ["node:net", "tokio-net", "readable", "utf8", "resource-lifecycle", "module-graph"]
@@ -161,6 +183,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/http/tokio-owned-server-client"
+requires_host = "node"
 source = "upstream-adapted/http-server-tokio-owned.mjs"
 status = "runnable"
 features = ["node:http", "node:net", "tokio-net", "streams", "timers", "module-graph"]
@@ -168,6 +191,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/http/server-invalid-options"
+requires_host = "node"
 source = "upstream-adapted/http-server-invalid-options.mjs"
 status = "runnable"
 features = ["node:http", "node-errors", "module-graph"]
@@ -175,6 +199,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/http/server-allow-half-open"
+requires_host = "node"
 source = "upstream-adapted/http-server-allow-half-open.mjs"
 status = "runnable"
 features = ["node:http", "node:net", "tokio-net", "half-close", "timers", "resource-lifecycle", "module-graph"]
@@ -182,6 +207,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/http/legacy-url-querystring"
+requires_host = "node"
 source = "upstream-adapted/http-legacy-url-querystring.mjs"
 status = "runnable"
 features = ["node:url", "node:querystring", "commonjs-compatible-builtins", "module-graph"]
@@ -189,6 +215,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/http/client-server-roundtrip"
+requires_host = "node"
 source = "../server/s01-http-hello.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "http-client", "http-server", "streams", "set-encoding", "resource-lifecycle", "module-graph"]
@@ -196,6 +223,7 @@ expected_stdout = "200 text/plain kiln\n"
 
 [[test]]
 id = "node-v24.7.0/http/request-end"
+requires_host = "node"
 source = "upstream-adapted/http-request-end.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "http-client", "request-stream", "set-encoding", "resource-lifecycle"]
@@ -203,6 +231,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/http/sequential-request-identity"
+requires_host = "node"
 source = "upstream-adapted/http-sequential-request-identity.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "http-client", "request-identity", "resource-lifecycle", "module-graph"]
@@ -210,6 +239,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/http/pipelined-request-identity"
+requires_host = "node"
 source = "upstream-adapted/http-pipelined-request-identity.mjs"
 status = "runnable"
 features = ["node:http", "node:net", "tokio-net", "hyper", "pipelining", "request-identity", "timers", "resource-lifecycle", "module-graph"]
@@ -217,6 +247,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/buffer/concat-core"
+requires_host = "node"
 source = "upstream-adapted/buffer-concat-core.mjs"
 status = "runnable"
 features = ["buffer", "typed-arrays", "utf8", "concat"]
@@ -224,6 +255,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "server/s03-request-body-streams"
+requires_host = "node"
 source = "../server/s03-request-body-streams.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "buffer", "request-stream", "response-stream", "module-graph"]
@@ -231,6 +263,7 @@ expected_stdout = "200 {\"method\":\"POST\",\"bytes\":12,\"text\":\"kiln streams
 
 [[test]]
 id = "web/url-server-routing"
+requires_host = "node"
 source = "upstream-adapted/url-server-routing.mjs"
 status = "runnable"
 features = ["url", "url-search-params", "form-url-encoding", "server-routing"]
@@ -238,6 +271,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "server/s02-routing-json"
+requires_host = "node"
 source = "../server/s02-routing-json.mjs"
 status = "runnable"
 features = ["node:http", "tokio-net", "url", "url-search-params", "async-await", "microtask-checkpoint", "json", "routing"]
@@ -245,6 +279,7 @@ expected_stdout = "200 {\"ok\":true}\n200 {\"path\":\"/echo\",\"q\":\"1\"}\n404 
 
 [[test]]
 id = "node-v24.7.0/builtins/server-support"
+requires_host = "node"
 source = "upstream-adapted/node-builtins-server-support.mjs"
 status = "runnable"
 features = ["node:diagnostics_channel", "node:util", "module-graph"]
@@ -252,6 +287,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/commonjs/extensionless-require"
+requires_host = "node"
 source = "upstream-adapted/commonjs-extensionless-entry.cjs"
 status = "runnable"
 features = ["commonjs", "node-resolution", "extension-search"]
@@ -259,6 +295,7 @@ expected_stdout = "pass\n"
 
 [[test]]
 id = "node-v24.7.0/crypto/random-uuid-url"
+requires_host = "node"
 source = "upstream-adapted/crypto-random-uuid-url.mjs"
 status = "runnable"
 features = ["node:crypto", "randomUUID", "realm-entropy", "node:url", "module-graph"]
@@ -266,6 +303,7 @@ expected_stdout = "6e789e6a-a1b9-45f4-86c4-5d188009454f\n"
 
 [[test]]
 id = "node-v24.7.0/modules/json-default-and-require"
+requires_host = "node"
 source = "upstream-adapted/json-module-entry.mjs"
 status = "runnable"
 features = ["json-modules", "commonjs", "esm", "module-cache", "module-graph"]
