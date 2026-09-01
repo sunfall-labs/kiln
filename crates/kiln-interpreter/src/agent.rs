@@ -33,10 +33,11 @@
 //! therefore costs no wall-clock second, an `Atomics.wait` timeout is a *position* rather than a
 //! duration, and the whole 218-variant subtree runs in the time its instructions take.
 //!
-//! The one extension is [`SPIN_QUANTA`]: an agent that spins while every other agent is asleep
-//! would otherwise hold the baton for ever, because a spinning agent is runnable and the rule
-//! above never fires. After that many consecutive quanta the clock is allowed to move anyway.
-//! The bound is a constant, so this stays a function of the program.
+//! The one extension is [`SPIN_QUANTA`]: agents that spin while another is asleep would otherwise
+//! stop the clock for ever, because a spinning agent is *progressing* by the rule above and the
+//! rule never fires. After that many consecutive quanta in which no agent blocked, woke or left,
+//! the clock is allowed to move anyway. The bound is a constant, so this stays a function of the
+//! program.
 //!
 //! # Why `std` and not `parking_lot` or `crossbeam` (ADR 0029, ADR 0038)
 //!
@@ -956,4 +957,147 @@ pub(crate) fn adopt_broadcast(payload: &Broadcast) -> Value {
 /// The identity `Atomics.wait` and `Atomics.notify` agree on for one cell.
 pub(crate) fn address(store: &SharedStore, byte_offset: usize) -> (usize, usize) {
     (Arc::as_ptr(store).cast::<()>() as usize, byte_offset)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A group of `count` agents, all runnable, holding the baton at agent zero.
+    fn sched(count: usize) -> Sched {
+        Sched {
+            now_us: 0,
+            turn: 0,
+            states: vec![State::Runnable; count],
+            outcomes: vec![WaitOutcome::Woken; count],
+            waiters: VecDeque::new(),
+            async_waits: Vec::new(),
+            async_ready: vec![VecDeque::new(); count],
+            next_ticket: 1,
+            reports: VecDeque::new(),
+            mailboxes: vec![None; count],
+            spun: 0,
+            terminating: false,
+        }
+    }
+
+    #[test]
+    fn a_wait_nothing_can_end_is_released_rather_than_held() {
+        // Both agents waiting with no timeout, on a cell neither will ever write. A real engine
+        // hangs here and so would this if `schedule` looked only for a deadline -- and a hang in
+        // a corpus sweep is not one failing test, it is a chunk stopped by a timeout.
+        let mut sched = sched(2);
+        for id in 0..2 {
+            sched.states[id] = State::Waiting {
+                address: (1, 0),
+                until: None,
+            };
+            sched.outcomes[id] = WaitOutcome::Woken;
+            sched.waiters.push_back(Waiter::Sync(id));
+        }
+        sched.schedule(0);
+        assert_eq!(sched.states, [State::Runnable, State::Runnable]);
+        assert_eq!(
+            sched.outcomes,
+            [WaitOutcome::TimedOut, WaitOutcome::TimedOut],
+            "a wait that was released rather than woken must say `timed-out`"
+        );
+        assert!(sched.waiters.is_empty());
+        assert!(!sched.terminating, "the program is not over, only unstuck");
+    }
+
+    #[test]
+    fn the_clock_does_not_move_while_an_agent_can_still_run() {
+        // ADR 0012's rule, which is the default and the one that matters most: an agent with work
+        // to do is work that must happen before any deadline does.
+        let mut sched = sched(2);
+        sched.states[1] = State::Sleeping { until: 500 };
+        sched.schedule(0);
+        assert_eq!(sched.now_us, 0);
+        assert_eq!(
+            sched.turn, 0,
+            "nobody else is runnable, so the spinner keeps going"
+        );
+    }
+
+    #[test]
+    fn the_clock_moves_under_a_spinner_after_bounded_patience() {
+        // The extension. Agent 0 spins on a cell only the sleeping agent 1 will ever write, so by
+        // the rule above the clock would stop for good. `notify-in-order.js` is that program.
+        let mut sched = sched(2);
+        sched.states[1] = State::Sleeping { until: 500 };
+        for _ in 0..=SPIN_QUANTA {
+            sched.spun += 1;
+            sched.schedule(0);
+        }
+        assert_eq!(sched.now_us, 500, "the sleeper's deadline arrived");
+        assert_eq!(sched.states[1], State::Runnable);
+        assert_eq!(sched.turn, 1, "and the baton went to it");
+    }
+
+    #[test]
+    fn notify_takes_the_oldest_waiters_and_answers_how_many() {
+        // One waiter list in arrival order, which is what `waiterlist-order-of-operations-is-fifo`
+        // checks -- and the count `notify` answers is exactly what it took, which is the
+        // assertion `notify-one.js` makes and the one a wall-clock race would fail.
+        let group = AgentGroup::new(ExecutionCapabilities::default(), ExecutionLimits::default());
+        let here = (7, 0);
+        let elsewhere = (7, 4);
+        let first = group.wait_async(0, here, f64::INFINITY);
+        let second = group.wait_async(0, here, f64::INFINITY);
+        let other = group.wait_async(0, elsewhere, f64::INFINITY);
+        let third = group.wait_async(0, here, f64::INFINITY);
+
+        assert_eq!(group.notify(here, 2), 2);
+        assert_eq!(
+            group.take_async_settled(0),
+            [(first, WaitOutcome::Woken), (second, WaitOutcome::Woken)]
+        );
+
+        // The waiter on the neighbouring cell is untouched: an address is a cell, not a buffer.
+        assert_eq!(group.notify(here, usize::MAX), 1);
+        assert_eq!(group.take_async_settled(0), [(third, WaitOutcome::Woken)]);
+        assert_eq!(group.notify(elsewhere, usize::MAX), 1);
+        assert_eq!(group.take_async_settled(0), [(other, WaitOutcome::Woken)]);
+        assert_eq!(group.notify(here, usize::MAX), 0, "nobody is left to wake");
+    }
+
+    #[test]
+    fn an_async_wait_settles_on_its_deadline_and_moves_the_clock_to_it() {
+        let group = AgentGroup::new(ExecutionCapabilities::default(), ExecutionLimits::default());
+        let ticket = group.wait_async(0, (9, 0), 250.0);
+        // The lone agent parks because its realm has nothing left; the clock then has to move,
+        // and only as far as this wait's own deadline.
+        group.await_async(0).expect("not terminating");
+        assert_eq!(
+            group.take_async_settled(0),
+            [(ticket, WaitOutcome::TimedOut)]
+        );
+        assert!(
+            (group.now_ms() - 250.0).abs() < f64::EPSILON,
+            "the clock stopped at the deadline, not past it: {}",
+            group.now_ms()
+        );
+    }
+
+    #[test]
+    fn starting_more_agents_than_the_cap_is_refused_by_name() {
+        // A program that asked for ten thousand agents would take the machine down rather than
+        // fail, which ADR 0020 counts as worse than refusing.
+        let group = AgentGroup::new(ExecutionCapabilities::default(), ExecutionLimits::default());
+        {
+            let mut guard = lock(&group.sched);
+            for _ in 1..MAX_AGENTS {
+                guard.states.push(State::Finished);
+                guard.outcomes.push(WaitOutcome::TimedOut);
+                guard.async_ready.push(VecDeque::new());
+                guard.mailboxes.push(None);
+            }
+        }
+        let refused = group.start("$262.agent.leaving();".to_owned());
+        let Err(ExecutionError::TypeErrorMessage { message }) = refused else {
+            panic!("the cap must refuse rather than start a ninth agent");
+        };
+        assert!(message.contains("at most"), "{message}");
+    }
 }
