@@ -3231,7 +3231,7 @@ fn native_c_string(value: &str) -> String {
     output
 }
 
-fn write_graph_commonjs_launcher_setup(
+fn write_graph_commonjs_realm_setup(
     output: &mut String,
     index: usize,
     module_symbol: &str,
@@ -3241,7 +3241,7 @@ fn write_graph_commonjs_launcher_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -3348,6 +3348,7 @@ fn graph_launcher_source(
     }
     let namespace_plans = graph_namespace_plans(graph, modules, &indices)?;
     let mut output = String::with_capacity(2048 + modules.len() * 512);
+    let mut evaluation = String::with_capacity(modules.len() * 512);
     output.push_str(
         r#"/* Kiln native graph launcher. */
 #include <locale.h>
@@ -3580,35 +3581,21 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
     }
     output.push_str(
         r#"
-static int kiln_graph_enter_module(void *opaque) {
-    kiln_graph_entry_context *context = (kiln_graph_entry_context *)opaque;
-    if (context == NULL || context->module == NULL) return -1;
-    return context->module(context->host, context->result, context->imports,
-                           context->import_count, context->exports,
-                           context->export_count);
-}
-
-int main(void) {
+typedef struct kiln_graph_context {
     kiln_host host;
-    kiln_value result = { KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
-    kiln_value entry_result = { KILN_VALUE_UNDEFINED, 0, 0, NULL, 0 };
+    kiln_value result;
+    kiln_value entry_result;
+} kiln_graph_context;
+
+static int kiln_graph_enter(void *opaque) {
+    kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
-    uint64_t realm = 0;
-    int status;
-    int destroy_status;
-"#,
-    );
-    output.push_str(
-        r#"    if (setlocale(LC_NUMERIC, "C") == NULL) {
-        return 1;
-    }
-    host.call = kiln_cli_host_call;
-    host.context = NULL;
-    status = kiln_realm_create(&realm);
-    if (status != 0) {
-        kiln_cli_report_failure(status, result);
-        return 1;
-    }
+    kiln_host *host;
+    kiln_value *result;
+    int status = 0;
+    if (graph == NULL) return -1;
+    host = &graph->host;
+    result = &graph->result;
 "#,
     );
     // CommonJS cache identities and wrapper locals exist before any module body runs, so cycles
@@ -3621,8 +3608,8 @@ int main(void) {
             // interpreter. A CommonJS launcher is therefore intentionally checkout-specific
             // while its module objects remain reusable across roots.
             let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
-            write_graph_commonjs_launcher_setup(
-                &mut output,
+            write_graph_commonjs_realm_setup(
+                &mut evaluation,
                 index,
                 &module.symbol,
                 &paths.filename,
@@ -3641,20 +3628,20 @@ int main(void) {
                 } => {
                     if modules[provider_index].0.source == ModuleSource::CommonJs {
                         writeln!(
-                            output,
-                            "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, &result, &result);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}"
+                            evaluation,
+                            "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n    if (status != 0) return status;"
                         )
                         .unwrap();
                     }
                     writeln!(
-                        output,
+                        evaluation,
                         "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
                     )
                     .unwrap();
                 }
                 NativeGraphImport::Namespace { provider_index } => {
                     writeln!(
-                        output,
+                        evaluation,
                         "    kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];"
                     )
                     .unwrap();
@@ -3674,43 +3661,44 @@ int main(void) {
         };
         if node.source == ModuleSource::CommonJs {
             writeln!(
-                output,
-                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &result, &result);\n    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                evaluation,
+                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
             if node.path == graph.entry() {
-                output.push_str("    entry_result = result;\n");
+                evaluation.push_str("    graph->entry_result = *result;\n");
             }
             if let Some(plan) = &namespace_plans[index] {
-                write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
                 writeln!(
-                    output,
-                    "    if (status != 0) {{ result = kiln_graph_diagnostic(\"namespace\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                    evaluation,
+                    "    if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                     native_c_string(&logical_paths[index])
                 )
                 .unwrap();
             }
             continue;
         }
-        writeln!(output, "    context.module = {};", module.symbol).unwrap();
-        output.push_str("    context.host = &host;\n    context.result = &result;\n");
-        writeln!(output, "    context.imports = {imports};").unwrap();
+        writeln!(evaluation, "    context.module = {};", module.symbol).unwrap();
+        evaluation.push_str("    context.host = host;\n    context.result = result;\n");
+        writeln!(evaluation, "    context.imports = {imports};").unwrap();
         writeln!(
-            output,
+            evaluation,
             "    context.import_count = (size_t){};",
             node.program.imports.len()
         )
         .unwrap();
-        writeln!(output, "    context.exports = {exports};").unwrap();
+        writeln!(evaluation, "    context.exports = {exports};").unwrap();
         writeln!(
-            output,
+            evaluation,
             "    context.export_count = (size_t){};",
             export_count
         )
         .unwrap();
-        output
-            .push_str("    status = kiln_realm_enter(realm, kiln_graph_enter_module, &context);\n");
+        evaluation.push_str(
+            "    status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
+        );
         // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
         // reference cannot cross the boundary and printing it is the only thing left to do with
         // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
@@ -3721,29 +3709,27 @@ int main(void) {
         // sibling root the launcher object it should have reused, and it puts the builder's home
         // directory inside the shipped executable.
         writeln!(
-            output,
-            "    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"module-enter\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+            evaluation,
+            "    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"module-enter\", {}); return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
         if node.path == graph.entry() {
-            output.push_str("    entry_result = result;\n");
+            evaluation.push_str("    graph->entry_result = *result;\n");
         }
         if let Some(plan) = &namespace_plans[index] {
-            write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+            write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
             writeln!(
-                output,
-                "    if (status != 0) {{ result = kiln_graph_diagnostic(\"namespace\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                evaluation,
+                "    if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
         }
     }
+    output.push_str(&evaluation);
     output.push_str(
-        "    status = kiln_realm_drive(realm, &host, &result);\n    if (status != 0) { kiln_cli_report_failure(status, result); goto cleanup; }\n    if (kiln_cli_write_result(entry_result) != 0) { status = 1; goto cleanup; }\n",
-    );
-    output.push_str(
-        "cleanup:\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
+        "    return 0;\n}\n\nint main(void) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
     );
     Ok(output)
 }
@@ -7681,10 +7667,11 @@ int main(void) {{
         assert_eq!(launcher.matches("kiln_realm_destroy(realm)").count(), 1);
         assert_eq!(
             launcher
-                .matches("kiln_realm_enter(realm, kiln_graph_enter_module, &context)")
+                .matches("kiln_realm_enter(realm, kiln_graph_enter, &graph)")
                 .count(),
-            modules.len()
+            1
         );
+        assert!(!launcher.contains("kiln_graph_enter_module"));
         let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_star_graph")
             .expect("shared wrapper emits");
         assert!(wrapper.contains("import_arrays[2][0] = export_arrays[0][0];"));

@@ -584,6 +584,7 @@ mod realm {
         symbols: RefCell<HashMap<Vec<u8>, u64>>,
         symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
+        closures: RefCell<Vec<OwnedClosure>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
     }
@@ -604,6 +605,19 @@ mod realm {
     struct CallableStore {
         pointer: *mut c_void,
         drop: DropWork,
+    }
+
+    struct OwnedClosure {
+        pointer: *mut c_void,
+        drop: DropWork,
+    }
+
+    impl Drop for OwnedClosure {
+        fn drop(&mut self) {
+            // SAFETY: registration transfers one live allocation and its matching destructor to
+            // the realm. The entry is never cloned or removed and realm teardown drops it once.
+            unsafe { (self.drop)(self.pointer) };
+        }
     }
 
     impl Drop for CallableStore {
@@ -628,6 +642,10 @@ mod realm {
                 symbols: RefCell::new(HashMap::new()),
                 symbol_keys: RefCell::new(HashMap::new()),
                 callable_stores: RefCell::new(HashMap::new()),
+                // Most server graphs create hundreds of closures during bootstrap. Reserve one
+                // compact pointer/destructor slab up front so the common path never reallocates;
+                // unlike the former leak, the slab and every closure are released at teardown.
+                closures: RefCell::new(Vec::with_capacity(512)),
                 entered: Cell::new(false),
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
             })
@@ -1695,6 +1713,35 @@ mod realm {
                 },
             );
             unsafe { out_store.write(candidate) };
+            0
+        })
+    }
+
+    /// Transfers one generated-C closure to the active realm for exact-once destruction.
+    ///
+    /// The provider never dereferences the pointer. This is the ownership seam used while
+    /// generated-C closure bodies still keep their private metadata layout: the realm owns the
+    /// allocation lifetime without making that layout part of the Rust ABI.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_own_closure(
+        pointer: *mut c_void,
+        drop_pointer: Option<DropWork>,
+    ) -> i32 {
+        ffi(|| {
+            if pointer.is_null() || drop_pointer.is_none() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let mut closures = realm.closures.borrow_mut();
+            if closures.try_reserve(1).is_err() {
+                return RUNTIME_ERROR;
+            }
+            closures.push(OwnedClosure {
+                pointer,
+                drop: drop_pointer.expect("checked above"),
+            });
             0
         })
     }
@@ -2789,6 +2836,43 @@ mod realm {
             assert_eq!(kiln_realm_destroy(first_realm), 0);
             assert_eq!(kiln_realm_destroy(second_realm), 0);
             assert_eq!(CALLABLE_STORE_DROPS.load(AtomicOrdering::SeqCst), 3);
+        }
+
+        #[test]
+        fn generated_closures_are_realm_owned_and_dropped_exactly_once() {
+            unsafe extern "C" fn register(context: *mut c_void) -> i32 {
+                // SAFETY: the test passes a live counter for the duration of realm entry.
+                let counter = unsafe { &mut *context.cast::<usize>() };
+                let allocation = Box::into_raw(Box::new(counter as *mut usize)).cast::<c_void>();
+                // SAFETY: `allocation` is a unique Box allocation paired with its destructor.
+                let status = unsafe { kiln_realm_own_closure(allocation, Some(drop_counter)) };
+                if status != 0 {
+                    // SAFETY: ownership did not transfer on failure.
+                    unsafe { drop_counter(allocation) };
+                }
+                status
+            }
+
+            unsafe extern "C" fn drop_counter(pointer: *mut c_void) {
+                // SAFETY: `register` created this exact Box and transfers it at most once.
+                let counter = unsafe { Box::from_raw(pointer.cast::<*mut usize>()) };
+                // SAFETY: the pointed-to test counter outlives realm destruction.
+                unsafe { **counter += 1 };
+            }
+
+            let mut handle = 0;
+            let mut drops = 0_usize;
+            // SAFETY: both output and callback context stay live through the calls.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(handle, Some(register), (&raw mut drops).cast::<c_void>())
+                },
+                0
+            );
+            assert_eq!(drops, 0);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(drops, 1);
         }
 
         struct RecordedWork {
@@ -4430,6 +4514,9 @@ mod realm {
         };
         (realm, kiln_realm_callable_store, realm_callable_store) => {
             const _: unsafe extern "C" fn(u32, u64, *mut c_void, Option<DropWork>, *mut *mut c_void) -> i32 = kiln_realm_callable_store;
+        };
+        (realm, kiln_realm_own_closure, realm_own_closure) => {
+            const _: unsafe extern "C" fn(*mut c_void, Option<DropWork>) -> i32 = kiln_realm_own_closure;
         };
         (realm, kiln_realm_now, realm_now) => {
             const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_now;
