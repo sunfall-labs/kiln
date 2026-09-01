@@ -8169,6 +8169,18 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             .canonicalize()
             .expect("workspace root");
         let package_root = workspace.join("conformance/server/packages");
+        // The probe imports a real package off disk, so it needs the conformance server's
+        // dependencies installed. A fresh clone has no node_modules there and the resolver
+        // raises a bare "cannot resolve" that reads like an engine bug; say what is missing.
+        if !package_root.join("node_modules/safe-regex2").is_dir() {
+            eprintln!(
+                "skipping real CommonJS package integration: {} is missing. \
+                 Run `npm ci` in {} to enable it.",
+                package_root.join("node_modules/safe-regex2").display(),
+                package_root.display()
+            );
+            return;
+        }
         let entry = package_root.join(format!(
             ".kiln-native-safe-regex2-{}.mjs",
             std::process::id()
