@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 16;
+pub const C_GENERATOR_VERSION: u32 = 17;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -2140,6 +2140,7 @@ typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
+extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
 extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
 
@@ -2160,6 +2161,11 @@ typedef struct kiln_closure {
     /* An arrow captures `new.target` where it was written, for the same reason it captures
      * `this`: it has none of its own. */
     int arrow;
+    /* Whether this body is strict code, which is a property of the text it was written in and
+     * not of the call. It decides one thing here: `OrdinaryCallBindThis`. A sloppy body called
+     * with no receiver runs with the global object as `this`, which is how `var root = this ||
+     * global` finds the realm; a strict one runs with the `undefined` it was passed. */
+    int strict;
     kiln_value captured_this;
     kiln_value captured_new_target;
     /* ...and its `arguments`, which is the enclosing function's list rather than its own. */
@@ -2778,6 +2784,7 @@ int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);
+int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
  * portable 128-bit integer. `Temporal` measures instants in nanoseconds, and rounding the realm's
@@ -5215,7 +5222,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     }
 }
 
-/* The state `Math.random` advances, and the constants that advance it.
+/* The state `Math.random` advances belongs to the active realm, while generated C retains the
+ * exact SplitMix64 policy seed and the conversion from one word to an ECMAScript number.
  *
  * SplitMix64: a full-period generator with good statistical properties in five lines, which is
  * what a language builtin needs. Seeded from a constant rather than from the environment, so the
@@ -5224,8 +5232,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
 #ifndef KILN_REALM_ENTROPY_SEED
 #define KILN_REALM_ENTROPY_SEED UINT64_C(0x9E3779B97F4A7C15)
 #endif
-static uint64_t kiln_c99_random_state = KILN_REALM_ENTROPY_SEED;
-
 static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
 #if KILN_REALM_HOST_ENTROPY
     kiln_value answer;
@@ -5237,16 +5243,8 @@ static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
     *out = answer.bits;
     return KILN_C99_OK;
 #else
-    uint64_t mixed;
     (void)host;
-    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
-    kiln_c99_random_state += UINT64_C(0x9E3779B97F4A7C15);
-    mixed = kiln_c99_random_state;
-    mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
-    mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94D049BB133111EB);
-    mixed = mixed ^ (mixed >> 31);
-    *out = mixed;
-    return KILN_C99_OK;
+    return kiln_realm_entropy_word(KILN_REALM_ENTROPY_SEED, out);
 #endif
 }
 
@@ -7203,7 +7201,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
                                  const char *diagnostic_source,
                                  uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
-                                 int async_generator, int arrow, kiln_value receiver,
+                                 int async_generator, int arrow, int strict, kiln_value receiver,
                                  kiln_value new_target, uint32_t local_count,
                                  uint32_t stack_size,
                                  uint32_t handler_depth, uint32_t prologue_resume,
@@ -7232,6 +7230,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->stack_size = stack_size;
     closure->handler_depth = handler_depth;
     closure->arrow = arrow;
+    closure->strict = strict;
     closure->captured_this = arrow ? receiver : kiln_c99_undefined();
     closure->async_generator = async_generator;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
@@ -7590,6 +7589,23 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     closure = kiln_c99_closure_of(callee);
     if (closure->arrow) {
         receiver = closure->captured_this;
+    } else if (!closure->strict &&
+               (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL)) {
+        /* `OrdinaryCallBindThis`: sloppy code never sees `undefined` or `null` as `this`. The
+         * specification substitutes the global object for both, which is what a UMD header reads
+         * when it writes `var root = this || global`.
+         *
+         * The specification also `ToObject`s a *primitive* receiver, and that half is not here:
+         * this backend has no wrapper objects to make one out of, so `f.call(7)` still sees 7.
+         * That is a gap this rule shares with every other primitive-wrapper site in the C
+         * runtime, not a decision taken here -- and it is unreachable from the substitution
+         * above, which is the case a real program actually depends on. Constructing does not
+         * reach this at all: `new C()` enters the body through `kiln_c99_construct` with the new
+         * instance as its receiver, which is already an object. */
+        int global_status = kiln_c99_global_object(&receiver);
+        if (global_status != KILN_C99_OK) {
+            return global_status;
+        }
     }
     if (closure->generator) {
         /* Calling a generator function does not run it: it builds the object that will. An
@@ -23697,7 +23713,6 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_diagnostic_function", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_function_len", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
-    ("kiln_c99_random_state", C99StateOwner::Realm),
     ("kiln_c99_new_target", C99StateOwner::Frame),
     ("kiln_c99_inheriting_new_target", C99StateOwner::Frame),
     ("kiln_c99_adopted_this", C99StateOwner::Frame),
@@ -24074,6 +24089,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PopHandler
         | Instruction::Throw
         | Instruction::ThrowReference(_)
+        | Instruction::StoreGlobalBinding(_)
         | Instruction::GetPrivate(_)
         | Instruction::SetPrivate(_)
         | Instruction::Dup2
@@ -24432,6 +24448,16 @@ fn stack_effect(
         // expecting that value. Modelling it as terminal would leave those instructions verified
         // at a height one short of the one the machine actually runs them at.
         Instruction::ThrowReference(_) => Ok((height + 1, false)),
+        // A sloppy assignment to an unbound name. The value is consumed and the property lands on
+        // the global object, so nothing is left behind: the compound and expression-valued forms
+        // duplicate the value themselves before the store.
+        Instruction::StoreGlobalBinding(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
         // A literal produces a fresh object, so it only ever grows the stack.
         Instruction::NewRegExp { .. } => Ok((height + 1, false)),
         Instruction::LoadNewTarget => Ok((height + 1, false)),
@@ -24728,6 +24754,7 @@ fn render_functions(
     plan: &StackPlan,
     symbol: &str,
     diagnostic_site: &str,
+    strict_functions: &[bool],
 ) {
     for index in 0..program.functions.len() {
         writeln!(
@@ -24767,6 +24794,7 @@ fn render_functions(
             index,
             symbol,
             diagnostic_site,
+            strict_functions,
         );
     }
 }
@@ -24843,6 +24871,7 @@ fn render_function(
     index: usize,
     symbol: &str,
     diagnostic_site: &str,
+    strict_functions: &[bool],
 ) {
     let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
@@ -24954,6 +24983,7 @@ fn render_function(
         constants: &program.constants,
         frame_stacks,
         functions: &program.functions,
+        strict_functions,
         source: &program.source,
         symbol,
         diagnostic_site,
@@ -25288,6 +25318,10 @@ fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
 
 fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionPolicy) -> String {
     let plan = validate_program(program).expect("render called after validation");
+    // A bare `Program` arrives with no goal and no strictness table: it is a scalar unit, and
+    // every one this backend is handed came from a Module goal. Strict throughout keeps its
+    // emitted bytes exactly what they were.
+    let strict_functions = vec![true; program.functions.len()];
     let callables = produces_references(program);
     let entry_symbol = if callables {
         format!("{symbol}_body")
@@ -25316,7 +25350,14 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol, symbol);
+    render_functions(
+        &mut output,
+        program,
+        &plan,
+        symbol,
+        symbol,
+        &strict_functions,
+    );
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result) {{",
@@ -25362,6 +25403,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         constants: &program.constants,
         frame_stacks: &plan.functions,
         functions: &program.functions,
+        strict_functions: &strict_functions,
         source: &program.source,
         symbol,
         diagnostic_site: symbol,
@@ -25399,6 +25441,19 @@ fn render_module(
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program);
+    // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
+    // -- a builtin's export shape, a fixture -- carries no table, and reading its absence as
+    // strict is what keeps every unit that is really ESM emitting the bytes it emitted before.
+    let strict_functions: Vec<bool> = (0..program.functions.len())
+        .map(|index| {
+            module
+                .strictness
+                .functions
+                .get(index)
+                .copied()
+                .unwrap_or(true)
+        })
+        .collect();
     let entry_symbol = if callables {
         format!("{symbol}_body")
     } else {
@@ -25428,7 +25483,14 @@ fn render_module(
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol, diagnostic_site);
+    render_functions(
+        &mut output,
+        program,
+        &plan,
+        symbol,
+        diagnostic_site,
+        &strict_functions,
+    );
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{",
@@ -25502,6 +25564,7 @@ fn render_module(
         constants: &program.constants,
         frame_stacks: &plan.functions,
         functions: &program.functions,
+        strict_functions: &strict_functions,
         source: &program.source,
         symbol,
         diagnostic_site,
@@ -25603,6 +25666,15 @@ struct Emitter<'a> {
     /// catches nothing propagates a throw by returning it, which needs no machinery at all.
     handlers: Vec<u32>,
     functions: &'a [FunctionProto],
+    /// Whether `functions[i]` is strict code, in the same order.
+    ///
+    /// The native backend needs this for exactly one rule: `OrdinaryCallBindThis`, where a
+    /// sloppy body called with no receiver gets the global object and a strict one gets what it
+    /// was passed. The interpreter reads the same answer off its `Strictness` table; a closure
+    /// this backend builds carries the bit instead, because a C function has no table to consult.
+    /// A short table -- a fixture with no strictness of its own -- reads strict, which is the
+    /// answer every ESM unit has and so leaves the emitted bytes of one unchanged.
+    strict_functions: &'a [bool],
     /// The unit's source text, which each proto's span slices to give a function its `toString`.
     source: &'a str,
     symbol: &'a str,
@@ -25634,6 +25706,7 @@ fn emit_instruction(
         constants,
         frame_stacks,
         functions,
+        strict_functions,
         source,
         symbol,
         diagnostic_site,
@@ -25771,6 +25844,22 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::StoreGlobalBinding(name) => {
+            // Sloppy code settles an unresolvable assignment against the global object, which
+            // creates the property. The interpreter does the same thing through its own global
+            // object; both engines have to, or a UMD header installs itself under one and throws
+            // under the other -- a divergence worse than the shared refusal it replaced.
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {}, member, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                text.len()
+            )
+            .unwrap();
+        }
         Instruction::Const(constant) => match &constants[*constant as usize] {
             Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
             Constant::Null => output.push_str("    stack[sp++] = kiln_c99_null();\n"),
@@ -25869,6 +25958,14 @@ fn emit_instruction(
             let asynchronous = i32::from(target.asynchronous);
             let arrow = i32::from(target.arrow);
             let async_generator = i32::from(target.async_generator);
+            // The one thing this backend does with strictness beyond the flags already baked
+            // into `SetPropertyStrict` and friends: it decides the receiver a bare call gets.
+            let strict = i32::from(
+                strict_functions
+                    .get(*proto as usize)
+                    .copied()
+                    .unwrap_or(true),
+            );
             // `f.length` is how many arguments a caller *must* supply, which is the parameters
             // before the first default and before a rest -- not how many slots the frame has.
             // `(a, b = 1) => a` has two slots and a length of one, and reporting two said the
@@ -25899,7 +25996,7 @@ fn emit_instruction(
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -25919,7 +26016,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -26868,7 +26965,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::SuperApply => byte(&mut hash, 61),
-            // 62: the next free tag. Never reuse one -- two programs hashing alike would serve
+            // 75: the next free tag. Never reuse one -- two programs hashing alike would serve
             // one's object file for the other.
             Instruction::DirectEval(_) => byte(&mut hash, 62),
             Instruction::DynamicImport => byte(&mut hash, 63),
@@ -26881,6 +26978,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::PushHole => byte(&mut hash, 55),
             Instruction::ThrowReference(value) => {
                 byte(&mut hash, 57);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::StoreGlobalBinding(value) => {
+                byte(&mut hash, 74);
                 word(&mut hash, u64::from(*value));
             }
             Instruction::NewRegExp { pattern, flags } => {
@@ -27244,6 +27345,27 @@ fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
         text(&mut hash, &binding.exported);
         word(&mut hash, u64::from(binding.local_slot));
     }
+    // Appended last, after every byte that was already a persisted cache key -- the same rule
+    // the source text follows in `hash_program_with_seed`. Strictness changes the emitted C: a
+    // sloppy body's closure carries the bit that gives a bare call the global object as `this`.
+    // Two modules with identical bytecode and different strictness are not interchangeable, and
+    // a key without this would serve one's object file for the other. The padding matches the
+    // emitter's: a table shorter than the function list reads strict.
+    byte(&mut hash, 0x43);
+    word(&mut hash, module.program.functions.len() as u64);
+    for index in 0..module.program.functions.len() {
+        byte(
+            &mut hash,
+            u8::from(
+                module
+                    .strictness
+                    .functions
+                    .get(index)
+                    .copied()
+                    .unwrap_or(true),
+            ),
+        );
+    }
     hash
 }
 
@@ -27371,6 +27493,7 @@ mod tests {
                 exported: "probe".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let emitted = emit_runtime_module_with_logical_path(
             &module,
@@ -27403,6 +27526,7 @@ mod tests {
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated = emit_module_with_logical_path(&module, "src/namespace.js")
             .expect("namespace helper module emits");
@@ -27535,6 +27659,7 @@ int main(void) {{
                 exported: "EventEmitter".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated = emit_runtime_module_with_logical_path(
             &module,
@@ -27577,7 +27702,7 @@ int main(void) {{
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
     if (kiln_c99_construct(NULL, &emitter, exports[0], NULL, 0, 0,
@@ -27588,7 +27713,7 @@ int main(void) {{
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
     if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
     if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_INHERITS, args, 2, 0,
@@ -27669,7 +27794,7 @@ int main(void) {
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
     if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
     arguments[1] = readable;
@@ -28010,6 +28135,7 @@ int main(void) {
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated =
             emit_module_with_logical_path(&module, "node_modules/@fastify/error/index.js")
@@ -28292,7 +28418,7 @@ int main(void) {
     kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
                               NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if (kiln_c99_call(NULL, &result, function, kiln_c99_undefined(), NULL, 0, 0,
                       &thrown) != KILN_C99_CONTROL_ERROR) return 2;
@@ -28368,6 +28494,7 @@ int main(void) {
             dependencies: Vec::new(),
             imports,
             exports,
+            strictness: kiln_ir::Strictness::default(),
         }
     }
 
@@ -31132,7 +31259,7 @@ int main(void) {
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;
     args[0] = kiln_c99_copy_text("%s:%d", 5);

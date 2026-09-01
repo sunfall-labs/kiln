@@ -1026,6 +1026,7 @@ fn linked_module() -> ModuleProgram {
             exported: "total".to_owned(),
             local_slot: 2,
         }],
+        strictness: kiln_ir::Strictness::default(),
     }
 }
 

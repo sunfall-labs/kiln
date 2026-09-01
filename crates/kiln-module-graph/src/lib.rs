@@ -1759,6 +1759,13 @@ fn builtin_module_program(builtin: NodeBuiltin) -> ModuleProgram {
                 local_slot: slot as u32,
             })
             .collect(),
+        // A builtin is a module, and a module is strict. The body is one `Return`, so this
+        // decides nothing that runs; saying it anyway keeps the answer the same whether the
+        // node came from the compiler or from here.
+        strictness: kiln_ir::Strictness {
+            body: true,
+            functions: vec![],
+        },
     }
 }
 
@@ -1782,6 +1789,10 @@ fn json_module_program() -> ModuleProgram {
             exported: "default".to_owned(),
             local_slot: 0,
         }],
+        strictness: kiln_ir::Strictness {
+            body: true,
+            functions: vec![],
+        },
     }
 }
 
@@ -4655,6 +4666,7 @@ mod tests {
                 dependencies,
                 imports: Vec::new(),
                 exports: Vec::new(),
+                strictness: kiln_ir::Strictness::default(),
             }
         })
         .expect("deep graph builds without recursion");
@@ -4691,6 +4703,7 @@ mod tests {
                     .collect(),
                 imports: Vec::new(),
                 exports: Vec::new(),
+                strictness: kiln_ir::Strictness::default(),
             }
         })
         .expect("build graph");
