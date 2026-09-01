@@ -80,6 +80,7 @@ pub enum Command {
     Watch {
         path: PathBuf,
         interval: Duration,
+        node: bool,
     },
     Daemon(DaemonAction),
     Cache(CacheAction),
@@ -222,9 +223,9 @@ where
             "--out cannot be combined with `kiln test --parse-only`: results must be from an interpreter run",
         ));
     }
-    if node && name != "test" && name != "run" && name != "build" {
+    if node && name != "test" && name != "run" && name != "build" && name != "watch" {
         return Err(Error::usage(
-            "--node only applies to `kiln run`, `kiln build`, or `kiln test`",
+            "--node only applies to `kiln run`, `kiln build`, `kiln test`, or `kiln watch`",
         ));
     }
     if node && shared {
@@ -289,6 +290,7 @@ where
         "watch" => Command::Watch {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
             interval: interval.unwrap_or(DEFAULT_WATCH_INTERVAL),
+            node,
         },
         "daemon" => {
             let action = one_operand(&name, &mut positional)?;
@@ -587,6 +589,18 @@ mod tests {
             panic!("expected watch");
         };
         assert_eq!(interval, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn watch_accepts_node_mode() {
+        assert_eq!(
+            run(&["watch", "app.mjs", "--node"]).command,
+            Command::Watch {
+                path: PathBuf::from("app.mjs"),
+                interval: DEFAULT_WATCH_INTERVAL,
+                node: true,
+            }
+        );
     }
 
     #[test]
