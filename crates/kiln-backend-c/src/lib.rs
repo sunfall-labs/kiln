@@ -1265,6 +1265,17 @@ const HOST_AGENT_HOOKS: [&str; 8] = [
 fn refused_host_hook(name: &str) -> bool {
     name == HOST_CREATE_REALM || name == HOST_EVAL_SCRIPT || HOST_AGENT_HOOKS.contains(&name)
 }
+/// The constructor a program reaches for when it wants a realm it can evaluate in.
+///
+/// Refused for the same reason the two above are, and it matters more here because
+/// `ShadowRealm` is a *language* built-in rather than a host hook: a program can name it without
+/// asking anyone's permission. This backend builds one global object, once, in C. A compiled
+/// `new ShadowRealm()` would therefore hand back a realm whose intrinsics were secretly this
+/// one's -- so `r.evaluate("Array") === Array` would be true, every wrapped function would be
+/// the function it wrapped, and the boundary the whole feature exists to enforce would not
+/// exist. Refusing by name says which construct is missing; answering would be a confident
+/// wrong answer about object identity.
+const SHADOW_REALM: &str = "ShadowRealm";
 
 const NATIVE_CONSTRUCTORS: &[NativeConstructor] = &[
     native_constructor!(KILN_C99_METHOD_NODE_EVENT_EMITTER, None, EventEmitter),
@@ -24189,11 +24200,26 @@ fn validate_code(
             // granted the capability.
             Instruction::RequireGlobalBinding(name)
             | Instruction::LoadGlobalBindingOrUndefined(name)
+            // A name this backend has no global for never reaches the two above: the compiler
+            // emits the lookup and then `ThrowReference` for the miss, so refusing only the
+            // lookup let `new ShadowRealm()` compile and answer `ReferenceError` at run time --
+            // which reads to a program as "this engine does not have it" rather than "this
+            // backend cannot do it", and is the difference between a refusal and a wrong answer
+            // about what the language provides.
+            | Instruction::ThrowReference(name)
+            | Instruction::StoreGlobalBinding(name)
+            | Instruction::StoreGlobalBindingStrict(name)
+            | Instruction::DeleteGlobalBinding(name)
+            | Instruction::DeclareGlobalBinding { name, .. }
             | Instruction::GetProperty(name)
             | Instruction::CallMethod { name, .. }
                 if matches!(
                     program.constants.get(*name as usize),
-                    Some(Constant::String(text)) if refused_host_hook(text)
+                    Some(Constant::String(text))
+                        if refused_host_hook(text)
+                            || text == HOST_CREATE_REALM
+                            || text == HOST_EVAL_SCRIPT
+                            || text == SHADOW_REALM
                 ) =>
             {
                 let hook = match program.constants.get(*name as usize) {
@@ -30110,6 +30136,44 @@ int main(void) {{
                     "the refusal must name what it refused, got {feature}"
                 );
             }
+            // `ShadowRealm` is refused for a sharper reason than the two hooks above: it is a
+            // language built-in a program may name without any host granting it, and this
+            // backend has one global object. Compiling it would answer `new ShadowRealm()` with
+            // a realm whose intrinsics were secretly this one's.
+            let refused_shadow = emit(&program(
+                vec![Constant::String(SHADOW_REALM.to_owned())],
+                vec![
+                    Instruction::LoadGlobalBindingOrUndefined(0),
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                0,
+            ));
+            let Err(EmitError::Unsupported { feature }) = refused_shadow else {
+                panic!("the backend must refuse {SHADOW_REALM}, not compile it");
+            };
+            assert!(
+                feature.contains(SHADOW_REALM),
+                "the refusal must name what it refused, got {feature}"
+            );
+            // The instruction that actually carries `ShadowRealm` in a compiled program. A name
+            // this backend has no global for never reaches the lookup arms above: the compiler
+            // emits the miss as `ThrowReference`, so refusing only the lookup let
+            // `new ShadowRealm()` compile and answer `ReferenceError` at run time. That is a
+            // claim about the *language* rather than about this backend, and the two engines
+            // diverged on it.
+            let refused_reference = emit(&program(
+                vec![Constant::String(SHADOW_REALM.to_owned())],
+                vec![Instruction::ThrowReference(0), Instruction::Return],
+                0,
+            ));
+            let Err(EmitError::Unsupported { feature }) = refused_reference else {
+                panic!("the backend must refuse a {SHADOW_REALM} reference, not compile it");
+            };
+            assert!(
+                feature.contains(SHADOW_REALM),
+                "the refusal must name what it refused, got {feature}"
+            );
         }
         // An ordinary global of another name is untouched: this refuses one hook, not a class of
         // instruction the backend already supports.
