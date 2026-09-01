@@ -38,17 +38,28 @@ diverged=0
 declare -a REFUSALS=()
 declare -a DIVERGENCES=()
 
+# A `.cjs` probe is here for one reason: it is the only way sloppy code reaches either engine.
+# `kiln run` compiles a `.ts` or `.js` entry as ESM, which is strict by definition, so every probe
+# in this corpus was strict and the whole sloppy half of the language was invisible to the one
+# gate that compares the two engines. That is how `OrdinaryCallBindThis` came to be implemented in
+# the interpreter alone: the corpus could not have told anyone. The Node Adapter is what classifies
+# a `.cjs` entry as CommonJS, so those probes get `--node` -- on *both* sides, so the comparison
+# stays what it says it is.
 shopt -s nullglob
-for probe in "$PROBES"/*.ts "$PROBES"/*.js; do
+for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
 	name="$(basename -- "$probe")"
+	adapter=""
+	if [[ $name == *.cjs ]]; then
+		adapter="--node"
+	fi
 	name="${name%.*}"
 	# --one-shot so a stale daemon can never answer for a build that no longer exists.
-	if ! interpreted="$("$KILN" --one-shot run "$probe" 2>&1)"; then
+	if ! interpreted="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$probe" 2>&1)"; then
 		kiln_say "FAILED: the interpreter cannot run $name, so there is nothing to compare:"
 		kiln_say "$interpreted"
 		exit 1
 	fi
-	native="$("$KILN" --one-shot run --native "$probe" 2>&1 || true)"
+	native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1 || true)"
 
 	if [[ $native == "$interpreted" ]]; then
 		matched=$((matched + 1))
