@@ -183,13 +183,15 @@ expected_stdout = "source\n"
 fn a_program_the_compiler_refuses_fails_with_the_refusal_as_its_reason() {
     // The construct here only has to be one the compiler still refuses. It has moved five times
     // as coverage grew, most recently off `with`. What is being tested is that a refusal is
-    // reported as a refusal, never as a pass, so when a class static block lands, move it again.
+    // reported as a refusal, never as a pass, so when a *private* class accessor property lands,
+    // move it again. (The static block that stood here first lowers, and so does the public
+    // `accessor x` that replaced it.)
     let root = corpus(
         "refused",
         &entry("refused", "refused.js", "unreachable\n"),
         &[(
             "refused.js",
-            "class C { static { console.log('unreachable'); } }",
+            "class C { accessor #x = console.log('unreachable'); }",
         )],
     );
 

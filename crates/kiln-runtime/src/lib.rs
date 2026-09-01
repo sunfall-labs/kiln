@@ -384,6 +384,9 @@ pub struct ScriptedHost {
     pending: BTreeMap<RequestId, (u64, bool, Result<AsyncHostValue, AsyncHostError>)>,
     next_request: u64,
     next_sequence: u64,
+    shutdown: bool,
+    #[cfg(test)]
+    shutdown_observer: Option<Rc<std::cell::Cell<usize>>>,
 }
 
 /// The provider boundary owned by [`RealmRuntime`].
@@ -407,6 +410,13 @@ pub trait RealmHostProvider: AsyncHostOps {
     fn cancel_on_realm(&mut self, request: RequestId) -> bool {
         AsyncHostOps::cancel(self, request)
     }
+
+    /// Stop admitting work, cancel every outstanding request, and close every owned resource.
+    ///
+    /// This operation is terminal and idempotent. Requiring it on the provider trait makes realm
+    /// teardown a compile-time obligation for every provider rather than relying on executor or
+    /// field-drop order as an accidental cancellation protocol.
+    fn shutdown_on_realm(&mut self);
 
     /// Update provider-owned resource liveness synchronously.
     ///
@@ -437,6 +447,9 @@ impl ScriptedHost {
             pending: BTreeMap::new(),
             next_request: 1,
             next_sequence: 0,
+            shutdown: false,
+            #[cfg(test)]
+            shutdown_observer: None,
         }
     }
 
@@ -453,6 +466,7 @@ impl ScriptedHost {
 
 impl AsyncHostOps for ScriptedHost {
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        assert!(!self.shutdown, "a shut down realm cannot start host work");
         let request = RequestId::new(self.next_request.max(1));
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let sequence = self.next_sequence;
@@ -499,6 +513,18 @@ impl AsyncHostOps for ScriptedHost {
 }
 
 impl RealmHostProvider for ScriptedHost {
+    fn shutdown_on_realm(&mut self) {
+        if self.shutdown {
+            return;
+        }
+        self.shutdown = true;
+        self.pending.clear();
+        #[cfg(test)]
+        if let Some(observer) = &self.shutdown_observer {
+            observer.set(observer.get() + 1);
+        }
+    }
+
     fn has_pending_work(&self) -> bool {
         !self.pending.is_empty()
     }
@@ -602,9 +628,10 @@ pub struct RealmState<H> {
     capabilities: RealmCapabilities,
     http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
     http_agent: HttpAgent,
+    lifecycle: RealmRuntimeLifecycle,
 }
 
-pub struct RealmRuntime<H = TokioHost> {
+pub struct RealmRuntime<H: RealmHostProvider = TokioHost> {
     executor: Executor,
     state: RealmState<H>,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
@@ -612,11 +639,19 @@ pub struct RealmRuntime<H = TokioHost> {
     _not_send: PhantomData<Rc<()>>,
 }
 
-impl<H> std::fmt::Debug for RealmRuntime<H> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealmRuntimeLifecycle {
+    Open,
+    Closing,
+    Closed,
+}
+
+impl<H: RealmHostProvider> std::fmt::Debug for RealmRuntime<H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RealmRuntime")
             .field("time_paused", &self.state.time_paused)
+            .field("lifecycle", &self.state.lifecycle)
             .finish_non_exhaustive()
     }
 }
@@ -666,6 +701,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 capabilities,
                 http_connections: BTreeMap::new(),
                 http_agent: HttpAgent::default(),
+                lifecycle: RealmRuntimeLifecycle::Open,
             },
             _not_send: PhantomData,
         })
@@ -685,11 +721,24 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         (&self.executor, &mut self.state)
     }
 
+    /// Try to start one host operation, rejecting admission after teardown begins.
+    pub fn try_start_host_op(
+        &mut self,
+        operation: AsyncHostOp,
+        referenced: bool,
+    ) -> Option<RequestId> {
+        if self.is_shutdown() {
+            return None;
+        }
+        Some(self.executor.local.block_on(&self.executor.runtime, async {
+            RealmHostProvider::start_on_realm(&mut self.state.host, operation, referenced)
+        }))
+    }
+
     /// Starts one asynchronous host operation on this realm's Tokio runtime.
     pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
-        self.executor.local.block_on(&self.executor.runtime, async {
-            RealmHostProvider::start_on_realm(&mut self.state.host, operation, referenced)
-        })
+        self.try_start_host_op(operation, referenced)
+            .expect("a shut down realm cannot start host work")
     }
 
     /// Starts a host operation while the caller is already executing inside this realm runtime.
@@ -701,6 +750,10 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         operation: AsyncHostOp,
         referenced: bool,
     ) -> RequestId {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot start host work"
+        );
         RealmHostProvider::start_on_realm(&mut self.state.host, operation, referenced)
     }
 
@@ -728,6 +781,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     where
         T: Clone,
     {
+        if self.is_shutdown() {
+            return None;
+        }
         if !self.state.time_paused {
             self.executor.local.block_on(&self.executor.runtime, async {
                 tokio::time::pause();
@@ -784,6 +840,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     where
         T: Clone,
     {
+        if self.is_shutdown() {
+            return None;
+        }
         if let Some(failure) = self.state.host.runtime_failure() {
             return Some(RuntimeTurn::Failure(failure.clone()));
         }
@@ -802,6 +861,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     where
         F: FnOnce() -> R,
     {
+        assert!(!self.is_shutdown(), "a shut down realm cannot be entered");
         self.executor
             .local
             .block_on(&self.executor.runtime, async move { operation() })
@@ -817,6 +877,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         resource: ResourceId,
         allow_half_close: bool,
     ) -> Vec<HttpStreamAction> {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot start an HTTP connection"
+        );
+        assert!(
+            !self.state.http_connections.contains_key(&resource),
+            "an HTTP connection is already registered for resource {resource:?}"
+        );
         // The listening server is the Node-visible resource that keeps the realm alive. Accepted
         // HTTP keep-alive sockets are Hyper-owned implementation resources; their reads remain
         // registered for reuse but must not outlive `server.close()` merely because they inherited
@@ -859,6 +927,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     }
 
     pub fn start_http1_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot start an HTTP connection"
+        );
+        assert!(
+            !self.state.http_connections.contains_key(&resource),
+            "an HTTP connection is already registered for resource {resource:?}"
+        );
         let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
         let (request_sender, request_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
@@ -999,6 +1075,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     }
 
     pub fn poll_http_tasks(&mut self) {
+        if self.is_shutdown() {
+            return;
+        }
         self.executor.local.block_on(&self.executor.runtime, async {
             // Hyper commonly needs more than one cooperative turn: a body wake schedules the
             // connection, which schedules transport output or a service response. A zero-length
@@ -1035,6 +1114,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         F: FnMut(&mut Realm<M, T>, WorkItem<M, T>) -> Result<(), E>,
         C: FnMut(&mut Realm<M, T>) -> Result<(), E>,
     {
+        assert!(!self.is_shutdown(), "a shut down realm cannot be driven");
         if !self.state.time_paused {
             self.executor.local.block_on(&self.executor.runtime, async {
                 tokio::time::pause();
@@ -1057,6 +1137,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     where
         T: Clone,
     {
+        if self.is_shutdown() {
+            return None;
+        }
         if !self.state.time_paused {
             self.executor.local.block_on(&self.executor.runtime, async {
                 tokio::time::pause();
@@ -1075,6 +1158,38 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 /// check: a drive holding `&mut RealmState` cannot name a method that would park the
 /// thread, because those live on [`RealmRuntime`] and need its executor. See ADR 0037.
 impl<H: RealmHostProvider> RealmState<H> {
+    /// Returns whether terminal realm teardown has begun.
+    pub fn is_shutdown(&self) -> bool {
+        self.lifecycle != RealmRuntimeLifecycle::Open
+    }
+
+    /// Tear down this realm's asynchronous infrastructure exactly once.
+    ///
+    /// Admission closes first. HTTP transports then select and retire their correlated
+    /// cancellation identities before the provider aborts remaining work and drops its resource
+    /// table. Hyper tasks and Agent state are discarded only after those protocol transitions.
+    pub fn shutdown(&mut self) -> bool {
+        if self.lifecycle != RealmRuntimeLifecycle::Open {
+            return false;
+        }
+        self.lifecycle = RealmRuntimeLifecycle::Closing;
+
+        let mut connections = std::mem::take(&mut self.http_connections);
+        for connection in connections.values_mut() {
+            connection.task.abort();
+            for action in connection.transport.abort() {
+                if let HttpStreamAction::Cancel(request) = action {
+                    RealmHostProvider::cancel_on_realm(&mut self.host, request);
+                }
+            }
+        }
+        drop(connections);
+        self.http_agent = HttpAgent::default();
+        RealmHostProvider::shutdown_on_realm(&mut self.host);
+        self.lifecycle = RealmRuntimeLifecycle::Closed;
+        true
+    }
+
     pub fn capabilities(&self) -> &RealmCapabilities {
         &self.capabilities
     }
@@ -1099,12 +1214,8 @@ impl<H: RealmHostProvider> RealmState<H> {
         }
     }
 
-    /// Returns the asynchronous host owned by this realm runtime.
-    ///
-    /// Host requests are spawned by [`Self::start_host_op`] so their futures always run on this
-    /// runtime. Keeping the request table separately borrowable lets the interpreter settle a
-    /// completion without exposing Tokio handles or constructing a second executor.
-    pub fn host(&mut self) -> &mut H {
+    #[cfg(test)]
+    fn host(&mut self) -> &mut H {
         &mut self.host
     }
 
@@ -1130,11 +1241,8 @@ impl<H: RealmHostProvider> RealmState<H> {
         RealmHostProvider::cancel_on_realm(&mut self.host, request)
     }
 
-    /// Gives a caller exclusive access to the realm-owned host state between Tokio polls.
-    ///
-    /// This is useful for installing the host into a synchronous realm machine whose lifetime
-    /// spans several calls to [`Self::enter`] and [`Self::next_host_completion`].
-    pub fn host_mut(&mut self) -> &mut H {
+    #[cfg(test)]
+    fn host_mut(&mut self) -> &mut H {
         &mut self.host
     }
 
@@ -1557,6 +1665,10 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     }
 
     fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot acquire an HTTP connection"
+        );
         let decision = self.state.http_agent.acquire(origin, request);
         if let AgentDecision::Reuse(resource) = decision {
             let _ = self.state.host.set_resource_referenced_now(resource, true);
@@ -1570,10 +1682,16 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         resource: ResourceId,
         request: u64,
     ) -> bool {
+        if self.is_shutdown() {
+            return false;
+        }
         self.state.http_agent.connected(origin, resource, request)
     }
 
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease {
+        if self.is_shutdown() {
+            return AgentRelease::Retire;
+        }
         let release = self.state.http_agent.release(resource, reusable);
         if release == AgentRelease::Idle {
             let _ = self.state.host.set_resource_referenced_now(resource, false);
@@ -1582,10 +1700,16 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     }
 
     fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure {
+        if self.is_shutdown() {
+            return AgentFailure::Empty;
+        }
         self.state.http_agent.connect_failed(origin)
     }
 
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64> {
+        if self.is_shutdown() {
+            return None;
+        }
         self.state.http_agent.closed(resource)
     }
 
@@ -1720,6 +1844,12 @@ impl Drop for RuntimeHttpConnection {
     }
 }
 
+impl<H: RealmHostProvider> Drop for RealmRuntime<H> {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
 impl<H: RealmHostProvider> ActiveAsyncHostOps for RealmRuntime<H> {
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         self.start_host_op_in_context(operation, referenced)
@@ -1755,6 +1885,7 @@ pub struct TokioHost {
     ready: BTreeMap<u64, Completion>,
     tasks: JoinMap<RequestId, HostCompletion>,
     failure: Option<RuntimeFailure>,
+    shutdown: bool,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -1827,6 +1958,7 @@ impl TokioHost {
             ready: BTreeMap::new(),
             tasks: JoinMap::new(),
             failure: None,
+            shutdown: false,
             _not_send: PhantomData,
         }
     }
@@ -1847,6 +1979,7 @@ impl TokioHost {
     }
 
     fn start_on(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        assert!(!self.shutdown, "a shut down realm cannot start host work");
         let request = RequestId::new(self.next_request);
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let sequence = self.next_sequence;
@@ -2321,6 +2454,7 @@ impl TokioHost {
 
 impl AsyncHostOps for TokioHost {
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        assert!(!self.shutdown, "a shut down realm cannot start host work");
         let request = RequestId::new(self.next_request);
         self.next_request = self.next_request.wrapping_add(1).max(1);
         let sequence = self.next_sequence;
@@ -2363,6 +2497,18 @@ impl AsyncHostOps for TokioHost {
 }
 
 impl RealmHostProvider for TokioHost {
+    fn shutdown_on_realm(&mut self) {
+        if self.shutdown {
+            return;
+        }
+        self.shutdown = true;
+        self.tasks.abort_all();
+        self.tasks = JoinMap::new();
+        self.pending.clear();
+        self.ready.clear();
+        self.resources.clear();
+    }
+
     fn start_on_realm(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         self.start_on(operation, referenced)
     }
@@ -3969,6 +4115,93 @@ mod tests {
     }
 
     #[test]
+    fn realm_shutdown_aborts_http_transport_and_rejects_new_admission() {
+        let resource = ResourceId::new(47);
+        let read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: node_stream::DEFAULT_HIGH_WATER_MARK,
+        };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([ScriptedHostStep {
+            operation: read,
+            result: Ok(AsyncHostValue::Bytes(b"late".to_vec())),
+        }]))
+        .expect("scripted runtime builds");
+
+        let start = runtime.start_http1_connection(resource);
+        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
+            panic!("HTTP connection starts one scripted read");
+        };
+        start_http_test_operation(&mut runtime, resource, read_operation, true);
+        assert!(runtime.has_pending_host_work());
+        assert_eq!(runtime.http_connections.len(), 1);
+        let duplicate = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.start_http1_client_connection(resource)
+        }));
+        assert!(
+            duplicate.is_err(),
+            "duplicate resource ownership is rejected"
+        );
+        assert_eq!(runtime.http_connections.len(), 1);
+        assert_eq!(runtime.host_mut().pending.len(), 1);
+
+        assert!(runtime.shutdown());
+        assert!(runtime.is_shutdown());
+        assert!(!runtime.shutdown(), "terminal teardown is idempotent");
+        assert!(!runtime.has_pending_host_work());
+        assert!(!runtime.has_referenced_host_work());
+        assert!(runtime.http_connections.is_empty());
+        assert!(runtime.host_mut().is_exhausted());
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("shutdown provider remains healthy"),
+            None
+        );
+        assert_eq!(
+            runtime.try_start_host_op(
+                AsyncHostOp::ReadFile {
+                    path: "must-not-start".into(),
+                },
+                true,
+            ),
+            None
+        );
+        let origin = HttpOrigin::http("closed.example", 80);
+        assert!(!runtime.client_connection_connected(origin.clone(), resource, 1));
+        assert_eq!(
+            runtime.release_client_connection(resource, true),
+            AgentRelease::Retire
+        );
+        assert_eq!(
+            runtime.client_connection_failed(&origin),
+            AgentFailure::Empty
+        );
+        assert_eq!(runtime.client_connection_closed(resource), None);
+    }
+
+    #[test]
+    fn dropping_realm_runtime_uses_the_idempotent_shutdown_protocol() {
+        let observer = Rc::new(std::cell::Cell::new(0));
+        let host = ScriptedHost {
+            shutdown_observer: Some(Rc::clone(&observer)),
+            ..ScriptedHost::default()
+        };
+        {
+            let mut runtime = RealmRuntime::with_host(host).expect("scripted runtime builds");
+            assert!(runtime.shutdown());
+            assert!(!runtime.shutdown());
+        }
+        assert_eq!(observer.get(), 1, "Drop must reuse, not repeat, shutdown");
+
+        let host = ScriptedHost {
+            shutdown_observer: Some(Rc::clone(&observer)),
+            ..ScriptedHost::default()
+        };
+        drop(RealmRuntime::with_host(host).expect("scripted runtime builds"));
+        assert_eq!(observer.get(), 2, "Drop must initiate shutdown when needed");
+    }
+
+    #[test]
     fn scripted_provider_dispatches_buffered_http1_pipeline_after_first_response() {
         use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
 
@@ -4637,6 +4870,93 @@ mod tests {
             runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
             next_host_completion(&mut runtime).expect("stream close completes");
         }
+    }
+
+    #[test]
+    fn realm_shutdown_cancels_pending_tcp_work_before_closing_resources() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            true,
+        );
+        let listener = match next_host_completion(&mut runtime)
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+
+        let accept_request = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            true,
+        );
+        let connect_request = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: listener.port.expect("ephemeral port assigned"),
+            },
+            true,
+        );
+        let mut accepted = None;
+        let mut client = None;
+        while accepted.is_none() || client.is_none() {
+            let completion = next_host_completion(&mut runtime).expect("connection completes");
+            if completion.request == accept_request {
+                accepted = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(stream) => stream.resource.id,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else {
+                assert_eq!(completion.request, connect_request);
+                client = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource.id,
+                    other => panic!("expected client stream, got {other:?}"),
+                });
+            }
+        }
+
+        let pending_accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            true,
+        );
+        let pending_read = runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: accepted.expect("accepted resource"),
+                max_bytes: 16,
+            },
+            true,
+        );
+        assert_ne!(pending_accept, pending_read);
+        assert_eq!(runtime.host.pending.len(), 2);
+        assert_eq!(runtime.host.resources.len(), 3);
+
+        assert!(runtime.shutdown());
+        assert!(runtime.host.shutdown);
+        assert!(runtime.host.pending.is_empty());
+        assert!(runtime.host.ready.is_empty());
+        assert!(runtime.host.resources.is_empty());
+        assert!(runtime.host.tasks.is_empty());
+
+        runtime.local.block_on(&runtime.runtime, async {
+            tokio::task::yield_now().await;
+        });
+        assert_eq!(
+            runtime
+                .next_host_completion()
+                .expect("late task exits are discarded"),
+            None
+        );
+        assert!(!runtime.shutdown());
+        let _ = client;
     }
 
     #[test]

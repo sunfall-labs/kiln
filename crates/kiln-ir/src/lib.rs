@@ -8,10 +8,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use kiln_hir::{
-    AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
-    Expression, ExpressionKind, Function, ImportName, ListElement, Literal, LogicalOperator,
-    Module, ObjectKey, ObjectMember, Pattern, PatternKey, Statement, StatementKind, SwitchCase,
-    UnaryOperator, VariableKind,
+    AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ClassInitialiser,
+    ExportName, ExportOrigin, Expression, ExpressionKind, Function, ImportName, ListElement,
+    Literal, LogicalOperator, Module, ObjectKey, ObjectMember, Pattern, PatternKey, SourceGoal,
+    Statement, StatementKind, SwitchCase, UnaryOperator, VariableKind,
 };
 
 /// Re-exported because [`FunctionProto::span`] is one: a consumer of a `Program` has to be able
@@ -327,6 +327,77 @@ pub enum Instruction {
     /// runs is not an error in JavaScript, and real bundles are full of them: feature detection
     /// mentions globals the host may not have. The name is kept so the message can say which.
     ThrowReference(u32),
+    /// Sloppy assignment to a name nothing bound: create or overwrite it on the global object.
+    ///
+    /// `undeclaredGlobal = 1` in sloppy code does not throw -- the unresolvable reference is
+    /// settled against the global object environment record, which creates the property. That is
+    /// how a UMD header installs itself, and it is the one place where an *assignment* to an
+    /// unresolved name is not the `ReferenceError` a *read* of the same name is. Strict code
+    /// never emits this; it keeps [`Instruction::ThrowReference`].
+    ///
+    /// The operand is the name constant. Stack: `[value] -> []`.
+    StoreGlobalBinding(u32),
+    /// The same assignment written in strict code: the global object's `SetMutableBinding` with
+    /// `S` true, which writes an existing property and throws a `ReferenceError` for a name the
+    /// realm does not have.
+    ///
+    /// Strict mode refuses to *create* a global by assignment; it does not refuse to write one.
+    /// The difference can only be settled at run time, because a global the program installed a
+    /// line earlier -- or that global code declared with `var` -- is a perfectly resolvable
+    /// reference the compiler cannot see. Deciding it at compile time made `"use strict"` code
+    /// throw on a write to a name that was plainly there.
+    ///
+    /// The operand is the name constant. Stack: `[value] -> []`.
+    StoreGlobalBindingStrict(u32),
+    /// Throw a `ReferenceError` now if the global object has no property `name`.
+    ///
+    /// Emitted where strict code *resolves* an assignment target no scope bound, which is before
+    /// the right-hand side runs: `ResolveBinding` decides then whether the reference is
+    /// unresolvable, and `PutValue` refuses an unresolvable one in strict mode however the value
+    /// was produced.
+    ///
+    /// The operand is the name constant. Stack: `[] -> []`.
+    RequireGlobalBinding(u32),
+    /// The global object's property `name`, or `undefined` when it has none.
+    ///
+    /// `typeof neverDeclared` is `"undefined"` rather than a throw -- the one place a name may be
+    /// read without existing, and the whole reason feature detection works. That answer cannot be
+    /// folded at compile time, though: `globalThis.x = 1` a line above, a `var` in global code,
+    /// or an `eval` anywhere makes the same name a perfectly ordinary global, and folding said
+    /// `"undefined"` for one that was plainly there.
+    ///
+    /// The operand is the name constant. Stack: `[] -> [value]`.
+    LoadGlobalBindingOrUndefined(u32),
+    /// `delete name` in sloppy code, where no scope declared `name`.
+    ///
+    /// The last environment record an unqualified reference reaches is the global object's, so
+    /// this is that object's `[[Delete]]`: `true` when the property is gone or was never there,
+    /// `false` when it is non-configurable.  `x = 1; delete x` is therefore `true` and really
+    /// removes the property, while `delete NaN` is `false`.
+    ///
+    /// Only emitted for a name the compiler could not place.  A binding some scope *did* declare
+    /// is `false` without asking anything at run time, and strict code never reaches here at all
+    /// -- an unqualified `delete` is an early SyntaxError.
+    ///
+    /// The operand is the name constant. Stack: `[] -> [boolean]`.
+    DeleteGlobalBinding(u32),
+    /// `CreateGlobalVarBinding`/`CreateGlobalFunctionBinding`: declare `name` on the global
+    /// object, leaving an existing property alone.
+    ///
+    /// Global code's variable environment *is* the global object, so `var x` at the top of a
+    /// script is a property of it and not a slot -- which is why `globalThis.x` finds it, why an
+    /// indirect `eval` can read it, and why `delete x` is decided by the property's own
+    /// attributes.
+    ///
+    /// It creates rather than assigns: `var x;` over an `x` the realm already has keeps the value
+    /// it had, which is the difference between declaring a binding and writing one.
+    /// `configurable` is the specification's `D`, false for a script and true for an `eval`.
+    ///
+    /// Stack: `[] -> []`.
+    DeclareGlobalBinding {
+        name: u32,
+        configurable: bool,
+    },
     /// Push the marker that fills a hole in an array literal.
     ///
     /// Not `undefined`: a hole is *absent*, and `in`, `Object.keys` and every array method that
@@ -471,6 +542,14 @@ pub struct FunctionProto {
     /// pair cannot say which of the three shapes this is. This is the third bit.
     pub async_generator: bool,
     pub parameter_count: u32,
+    /// Whether this function's `arguments` is the *mapped* kind: the code is sloppy and
+    /// `IsSimpleParameterList` is true.
+    ///
+    /// A fact about the function rather than about the mention, which is why it is here beside
+    /// `arrow` rather than on `LoadArguments`. An arrow captures the enclosing call's object
+    /// where it is created, which can be before anything has mentioned `arguments` -- so the
+    /// answer has to be reachable from the frame, not only from the instruction that asks.
+    pub mapped_arguments: bool,
     /// What `f.length` reports: the parameters before the first one with an initializer, and
     /// before a rest.
     ///
@@ -812,6 +891,43 @@ pub enum EvalDeclaration {
     Const,
 }
 
+/// One class's private names, as a direct `eval` written inside that class has to see them.
+///
+/// The names alone would not do. A private element is stored under a key built from the class's
+/// *identity* -- `class A { #v } class B { #v }` declare two different fields -- and that
+/// identity is a counter belonging to the compiler that compiled the class. An eval'd source is
+/// compiled by a second compiler whose counter starts at zero, so a name resolved there against a
+/// fresh identity would name a slot no object of the enclosing class carries, and the brand check
+/// would report the class as not having declared its own field. The identity travels with the
+/// names for that reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrivateScope {
+    pub scope: u32,
+    /// Sorted, because the bytecode is a cache key and a hash set has no order to promise.
+    pub names: Vec<String>,
+}
+
+/// What `new.target` means at a direct `eval` call site.
+///
+/// Three answers rather than a flag, because "not allowed" and "allowed, and always `undefined`"
+/// are different things and the second is not the caller's `new.target`: a class field
+/// initialiser is its own function boundary for this one question, even though Kiln emits its
+/// code straight into the constructor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EvalNewTarget {
+    /// The call is at the top level of a script, or in an arrow written there. `new.target` in
+    /// the eval'd source is a `SyntaxError`, which is what the language says and what
+    /// `eval('new.target')` at top level is written to observe.
+    #[default]
+    Forbidden,
+    /// The call is inside a function, so `new.target` names whatever that call was constructed
+    /// with -- `undefined` for an ordinary call.
+    Caller,
+    /// The call is inside a class field initialiser or a `static {}` block, where `new.target`
+    /// is legal and is always `undefined`.
+    Undefined,
+}
+
 /// One name a direct `eval` can see, and how the machine reaches it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalBinding {
@@ -836,6 +952,25 @@ pub struct EvalSite {
     pub strict: bool,
     /// Arguments on the stack above the call, or `None` when a spread put them in one array.
     pub argc: Option<u16>,
+    /// Whether the calling code's variable environment *is* the global environment record.
+    ///
+    /// True for a direct `eval` written at the top level of a script, and it is what decides
+    /// where the eval's own `var` and function declarations go: onto the global object, where
+    /// the script and every later `eval` can see them, rather than into slots that die with the
+    /// eval's frame. An indirect `eval` never carries a site at all and is global by definition.
+    pub global_var_scope: bool,
+    /// The hidden home-object binding in scope here, when `super.x` is legal at this call.
+    ///
+    /// `Some` only inside a method, an accessor, a class field initialiser or a `static {}`
+    /// block, and inside arrows written in one -- not inside an ordinary function nested in a
+    /// method, where the language makes `super.x` a `SyntaxError` however close the home object
+    /// is. The binding itself is handed over among `bindings` like any other, because it is an
+    /// ordinary celled local that happens to carry a name no source can write.
+    pub home: Option<String>,
+    /// What `new.target` means here, including whether it may be written at all.
+    pub new_target: EvalNewTarget,
+    /// The private names in scope, outermost class first.
+    pub private_scopes: Vec<PrivateScope>,
 }
 
 /// A runtime import lowered to a local slot. The graph linker initializes the slot from the
@@ -886,6 +1021,13 @@ pub struct ModuleProgram {
     pub dependencies: Vec<String>,
     pub imports: Vec<ImportBinding>,
     pub exports: Vec<ExportBinding>,
+    /// Which of this module's bodies run as strict code.
+    ///
+    /// An ESM module is strict throughout and reports [`Strictness::always`]. A CommonJS module
+    /// is *not*: node runs it as a sloppy function body, so `this` in a bare call is the global
+    /// object and a write refused by a frozen object is discarded. The linker cannot infer this
+    /// from the bytecode, so the compiler that knew the goal has to say it here.
+    pub strictness: Strictness,
 }
 
 /// What a pattern walk does when it reaches a name.
@@ -934,6 +1076,15 @@ pub struct CompileDiagnostic {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompileOptions {
     pub strict: bool,
+    /// Whether this program is *global* code, whose variable environment is the global
+    /// environment record.
+    ///
+    /// It is not the same question as which grammar goal parsed the source, which is why the
+    /// caller has to say. Kiln parses a CommonJS body with the script grammar too, and a CommonJS
+    /// body has a variable environment of its own -- Node wraps it in a function -- so its
+    /// top-level `var`s must stay slots. Only a real script has the global object for a variable
+    /// environment, and only its `var`s and function declarations become properties of it.
+    pub global_code: bool,
 }
 
 /// Which compiled bodies run as strict code.
@@ -1002,8 +1153,19 @@ pub fn compile_with_strictness(
 ) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
     // Either the caller knows -- a Test262 strict variant, a `Function` body -- or the source
-    // opened with the directive itself.
-    compiler.strict = options.strict || module.strict;
+    // opened with the directive itself, or the goal settles it: a Module is strict whatever its
+    // text says. Without the goal this entry point was the one place a module body could be
+    // compiled sloppy, which now decides more than a refused write -- it decides whether an
+    // assignment to an unbound name creates a global.
+    compiler.strict =
+        options.strict || module.strict || matches!(module.source_goal, SourceGoal::Module);
+    // A script's `CreateGlobalVarBinding` is called with `D` false, so `var x` at the top of a
+    // script cannot be deleted afterwards. Strict global code still puts its `var`s on the
+    // object -- strictness decides what an *unresolvable* assignment does, not where a
+    // declaration lives.
+    compiler.global_var_scope =
+        options.global_code && !matches!(module.source_goal, SourceGoal::Module);
+    compiler.global_bindings_configurable = false;
     // The module body has nested functions too, so its own block bindings can be captured.
 
     for requested in module.runtime_requested_modules() {
@@ -1059,6 +1221,29 @@ pub struct EvalOptions {
     pub outer: Vec<EvalOuter>,
     /// Strict either because the caller is, or because the eval'd source says so itself.
     pub strict: bool,
+    /// Whether the variable environment this eval's declarations belong to is the global one.
+    ///
+    /// Always true for an indirect eval, which *is* global code. True for a direct one only when
+    /// the call is written at the top level of a script.
+    pub global_var_scope: bool,
+    /// Whether this source is a *Script* rather than eval code.
+    ///
+    /// Two things separate the two, and both are visible to a program. A script's `var`s go on
+    /// the global object even in strict code -- strictness decides what an unresolvable
+    /// assignment does, not where a declaration lives -- while a strict eval gets a variable
+    /// environment of its own. And `CreateGlobalVarBinding` is called with `D` false for a
+    /// script and true for an eval, so one written in a script cannot afterwards be deleted and
+    /// one written in an `eval` can.
+    ///
+    /// This is what Test262's `$262.evalScript` asks for, and the reason it is not spelled
+    /// `eval`: a host that answered it with `eval` would report every binding it made as
+    /// configurable, which is the one thing those tests are checking.
+    pub script: bool,
+    /// The name of the caller's home-object binding, when `super.x` is legal at the call site.
+    /// The binding arrives among `outer`; this says which of those names is the home object.
+    pub home: Option<String>,
+    /// The private names the call site can see, outermost class first.
+    pub private_scopes: Vec<PrivateScope>,
 }
 
 /// Compile source that arrived at run time, as `eval` and the `Function` constructor do.
@@ -1082,6 +1267,13 @@ pub fn compile_eval_with_strictness(
     let mut compiler = Compiler::new(module);
     compiler.strict = options.strict || module.strict;
     compiler.eval_program = true;
+    // `EvalDeclarationInstantiation` puts an eval's `var`s in the calling context's variable
+    // environment, and when that *is* the global environment record they become properties of
+    // the global object -- created with `D` true, which is why one written inside an `eval` can
+    // be deleted and one written in a script cannot. Strict eval code gets a variable
+    // environment of its own and never reaches here.
+    compiler.global_var_scope = options.global_var_scope && (options.script || !compiler.strict);
+    compiler.global_bindings_configurable = !options.script;
     // Unconditional, unlike an ordinary program, and it is what makes the eval'd code reachable
     // from itself. A module-scope binding that is *not* boxed is read from a nested function
     // through `LoadGlobal`, which finds the frame of whichever module is running -- and for an
@@ -1108,6 +1300,23 @@ pub fn compile_eval_with_strictness(
                 celled: true,
             },
         );
+    }
+    // The enclosing classes' private names, so `eval("this.#m")` resolves `#m` to the element
+    // the class actually declared rather than to a key of its own. The identities come with them
+    // for the reason `PrivateScope` records, and the counter is advanced past every one: a class
+    // declared *inside* this eval must not be handed an identity the caller is already using, or
+    // its brand check would accept the caller's instances.
+    for scope in &options.private_scopes {
+        compiler.private_scopes.push(scope.scope);
+        compiler
+            .private_declarations
+            .push(scope.names.iter().cloned().collect());
+        compiler.next_private_scope = compiler.next_private_scope.max(scope.scope + 1);
+    }
+    // `super.x` in the eval'd source reads through the caller's home binding, which arrived as
+    // one of the outer names above and so is already a slot of scope 0.
+    if let Some(home) = &options.home {
+        compiler.home_bindings.push(home.clone());
     }
     compiler.compile_eval_body(module);
     compiler.finish_with_strictness()
@@ -1267,12 +1476,15 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         }
     }
 
-    compiler.finish().map(|program| ModuleProgram {
-        program,
-        dependencies,
-        imports,
-        exports,
-    })
+    compiler
+        .finish_with_strictness()
+        .map(|(program, strictness)| ModuleProgram {
+            program,
+            dependencies,
+            imports,
+            exports,
+            strictness,
+        })
 }
 
 /// One parameter's share of `FunctionDeclarationInstantiation`, in declaration order.
@@ -1297,6 +1509,12 @@ enum ParameterStep<'a> {
 pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
     const WRAPPER: [&str; 5] = ["exports", "require", "module", "__filename", "__dirname"];
     let mut compiler = Compiler::new(module);
+    // Node wraps a CommonJS file in an ordinary function, so the body is *sloppy* unless its own
+    // text opens with the directive. That is not a detail: it decides whether `undeclaredGlobal =
+    // 1` installs a global -- which is how a UMD header attaches itself -- and whether `this` in a
+    // bare call inside the module is the global object. A Module goal would be strict whatever
+    // its text said; this goal is the other one, and this is where the difference is recorded.
+    compiler.strict = module.strict;
     // A CommonJS module's values routinely leave their defining module through `module.exports`
     // and are invoked by importers. Module-slot instructions are caller-relative in the VM, so
     // no CommonJS function may depend on one: its defining bindings have to travel as cells.
@@ -1330,12 +1548,15 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
         });
     }
     compiler.compile_body(module);
-    compiler.finish().map(|program| ModuleProgram {
-        program,
-        dependencies: Vec::new(),
-        imports,
-        exports: Vec::new(),
-    })
+    compiler
+        .finish_with_strictness()
+        .map(|(program, strictness)| ModuleProgram {
+            program,
+            dependencies: Vec::new(),
+            imports,
+            exports: Vec::new(),
+            strictness,
+        })
 }
 
 /// Unpatched exits from one loop.
@@ -1477,6 +1698,14 @@ enum Resolution {
     /// in it. Refused until upvalues exist.
     /// A binding in an enclosing function, reached through this closure's captured cells.
     Upvalue(u32),
+    /// A `var` or function declaration at the top level of *global* code, which the
+    /// specification puts on the global object rather than in an environment slot.
+    ///
+    /// It is reached by name, because the object is where it lives: `var x = 1` at the top of a
+    /// script and `globalThis.x = 1` are two spellings of one property, and every later read --
+    /// from the script, from a function it declares, from an `eval` written anywhere -- has to
+    /// find the same one.
+    GlobalObject,
     Unresolved,
 }
 
@@ -1580,6 +1809,32 @@ struct Compiler {
     /// tell a borrowed binding from one of its own: a sloppy `var` takes the caller's over, and
     /// everything else shadows it.
     outer_names: HashSet<String>,
+    /// Names of the block-level function declarations Annex B B.3.2.1/B.3.3.2 gives a var-scoped
+    /// binding in the body being compiled.
+    ///
+    /// `{ function f() {} }` is two bindings, not one: a block-scoped one, which is all the main
+    /// grammar creates, and -- in sloppy code -- a var-scoped one in the enclosing function or
+    /// script, which the declaration writes to as it is evaluated. Legacy, and load-bearing:
+    /// bundled JavaScript still relies on it. Names that are blocked -- by a lexical declaration
+    /// between here and the block, by a formal parameter, or by being `arguments` -- are never in
+    /// this set, so the write is emitted only where the specification asks for it.
+    annexb_var_functions: HashSet<String>,
+    /// Names this program declared on the global object rather than in a slot.
+    ///
+    /// Non-empty only for *global* code: a script and an `eval` whose variable environment is the
+    /// global one. A module body and a CommonJS body each have a variable environment of their
+    /// own, and their top-level `var`s stay slots -- which is the difference between the two
+    /// things kiln parses with the script grammar.
+    global_bindings: HashSet<String>,
+    /// Whether this program's variable environment *is* the global environment record, so that a
+    /// top-level `var` or function declaration is a property of the global object.
+    global_var_scope: bool,
+    /// Whether a binding this program creates on the global object may be deleted afterwards.
+    ///
+    /// `false` for a script, whose `CreateGlobalVarBinding` is called with `D` false, and `true`
+    /// for an `eval`, whose is called with `D` true. It is the whole reason `var x` at the top of
+    /// a script survives `delete x` and one written inside an `eval` does not.
+    global_bindings_configurable: bool,
     /// Box every binding of the function being compiled, not only the ones a nested function
     /// names.
     ///
@@ -1595,6 +1850,12 @@ struct Compiler {
     loops: Vec<LoopContext>,
     /// Counter for compiler-introduced bindings, so two in one scope never collide.
     hidden_bindings: usize,
+    /// Whether the function being compiled would be given a *mapped* `arguments` object:
+    /// `IsSimpleParameterList` is true and the code is sloppy.
+    ///
+    /// Recorded here because the mention of `arguments` is compiled far from the parameter list
+    /// that decides it, and only [`Instruction::LoadArguments`] reads it.
+    mapped_arguments: bool,
     /// Whether the function being compiled is an async generator.
     ///
     /// `yield*` is the only thing that reads it, and it needs it because the two generator kinds
@@ -1679,6 +1940,47 @@ struct Compiler {
     home_bindings: Vec<String>,
     /// Monotonic, for the reason `super_binding_count` is.
     home_binding_count: usize,
+    /// Whether the code being compiled sits inside a function body at all.
+    ///
+    /// Not `!enclosing.is_empty()`: an arrow written at the top level of a script pushes an
+    /// enclosing state and is still outside every function for the one question this answers,
+    /// which is whether `new.target` may be written. An arrow inherits this from where it was
+    /// written; every other function sets it.
+    in_function: bool,
+    /// Whether `super.x` is legal at the point being compiled.
+    ///
+    /// `home_bindings` cannot answer this on its own: it is a compiler-wide stack, so an
+    /// ordinary function nested in a method still sees the method's home object even though the
+    /// language makes `super.x` inside it a `SyntaxError`. This is set from
+    /// [`Compiler::next_is_method`] at each function boundary and inherited by arrows.
+    super_property: bool,
+    /// Set by a caller immediately before it compiles a method's body, and taken by that body.
+    ///
+    /// One-shot rather than a stack because it is read exactly once, at the function boundary it
+    /// was set for: everything nested inside then reads `super_property` instead.
+    next_is_method: bool,
+    /// The hidden binding holding `this` while a *derived* constructor runs, if that is what is
+    /// being compiled.
+    ///
+    /// A derived constructor's `this` does not exist until `super()` returns -- reading it before
+    /// then is a `ReferenceError`, and so is returning without having called `super()` at all.
+    /// Kiln allocates the instance up front, so there was no moment at which `this` was absent
+    /// and every one of those reads answered with a half-built object instead.
+    ///
+    /// A binding rather than a flag on the frame, because the check it needs is exactly the
+    /// temporal dead zone every `let` already has: an uninitialised cell, read through
+    /// `LoadCell`. That costs no new instruction, and -- what matters more -- the C backend
+    /// refuses nothing and implements nothing new, so the two cannot disagree about it.
+    this_binding: Option<String>,
+    /// Monotonic, for the reason `home_binding_count` is.
+    this_binding_count: usize,
+    /// Whether the code being compiled is a class field initialiser or a `static {}` block.
+    ///
+    /// Kiln emits an instance field's initialiser straight into the constructor and a static
+    /// field's into the class definition, so neither has a function boundary of its own -- but
+    /// the language gives both one for `new.target`, which is `undefined` in an initialiser
+    /// whatever the constructor was called with.
+    field_initialiser: bool,
     code: Vec<Instruction>,
     /// Lexical scopes of the function being compiled, innermost last. At module level the first
     /// entry is module scope itself.
@@ -1735,6 +2037,10 @@ impl Compiler {
             module_body: false,
             parameter_dead_zone: false,
             outer_names: HashSet::new(),
+            annexb_var_functions: HashSet::new(),
+            global_bindings: HashSet::new(),
+            global_var_scope: false,
+            global_bindings_configurable: false,
             // Module scope is boxed too when the module contains a direct eval: a script's
             // top-level bindings are exactly the ones an eval written there can see.
             cell_everything: body_contains_direct_eval(&module.body),
@@ -1742,6 +2048,8 @@ impl Compiler {
             hidden_bindings: 0,
             resource_scopes: Vec::new(),
             async_generator: false,
+            // The module body has no parameters and no `arguments`; the flag is a function's.
+            mapped_arguments: false,
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
             next_private_scope: 0,
@@ -1757,6 +2065,12 @@ impl Compiler {
             super_binding_count: 0,
             home_bindings: Vec::new(),
             home_binding_count: 0,
+            in_function: false,
+            super_property: false,
+            this_binding: None,
+            this_binding_count: 0,
+            next_is_method: false,
+            field_initialiser: false,
             scopes: vec![HashMap::new()],
             local_count: 0,
             diagnostics: Vec::new(),
@@ -1777,6 +2091,9 @@ impl Compiler {
         // A module body is a variable environment like a function's, so its `var`s are hoisted
         // to the top of it rather than to the top of whichever block they were written in.
         self.hoist_var_names(&module.body);
+        // Script code, so B.3.3.2 rather than B.3.2.1: there are no parameters to decline for.
+        // A module body is strict and `hoist_annexb_function_names` returns immediately for it.
+        self.hoist_annexb_function_names(&module.body, &HashSet::new());
         self.plain_statements(&module.body);
         self.push_constant(Constant::Undefined);
         self.code.push(Instruction::Return);
@@ -1801,6 +2118,7 @@ impl Compiler {
         // The same three passes `statements` makes -- names, then hoisted function values, then
         // the rest -- with the expression statements diverted into the completion slot.
         self.hoist_var_names(&module.body);
+        self.hoist_annexb_function_names(&module.body, &HashSet::new());
         for statement in &module.body {
             self.hoist_names(statement);
         }
@@ -1821,10 +2139,6 @@ impl Compiler {
         }
         self.code.push(Instruction::LoadLocal(completion));
         self.code.push(Instruction::Return);
-    }
-
-    fn finish(self) -> Result<Program, Vec<CompileDiagnostic>> {
-        Ok(self.finish_with_strictness()?.0)
     }
 
     fn finish_with_strictness(self) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
@@ -2592,6 +2906,30 @@ impl Compiler {
         } else {
             self.scopes.len() - 1
         };
+        // A `var` at the top of global code is a property of the global object, and declaration
+        // instantiation already created it. All that is left is the initializer.
+        // `global_var_scope` and not merely the name being in `global_bindings`: a function
+        // written in a script whose top level declares `var x` still has its own `var x`, and
+        // that one is a slot of the call's.
+        if self.global_var_scope
+            && kind == VariableKind::Var
+            && scope_index == 0
+            && self.global_bindings.contains(name)
+        {
+            if bound_from_stack {
+                // The value is on the stack and `declare_bound` emits the store, because only it
+                // knows which instruction the binding needs.
+                return;
+            }
+            // `var x;` with no initializer keeps whatever the binding already holds -- which is
+            // the same rule a slot-backed `var` follows, and the reason a second `var x;` does
+            // not reset it to `undefined`.
+            if let Some(initializer) = initializer {
+                self.expression(initializer);
+                self.store_global_object_binding(name);
+            }
+            return;
+        }
         if let Some(existing) = self.scopes[scope_index].get(name).copied() {
             // A `var` re-declaration is an assignment, and the hoisting pass has already created
             // the slot for every declaration in the block -- so reaching an existing binding is
@@ -2833,6 +3171,7 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::GlobalObject => self.load_global_object_binding(name),
             Resolution::Unresolved if name == "this" => self.code.push(Instruction::LoadThis),
             // `arguments` is not a declared binding, so it only resolves when nothing else
             // bound the name -- a parameter or local called `arguments` shadows it, as it
@@ -2936,7 +3275,8 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-            Resolution::Unresolved => {
+            // A hidden binding, never a name a program could have declared on the object.
+            Resolution::GlobalObject | Resolution::Unresolved => {
                 self.error(None, "a `with` object went out of scope");
                 self.push_constant(Constant::Undefined);
             }
@@ -2947,6 +3287,68 @@ impl Compiler {
     ///
     /// `fallback` emits the read for the case no object has it -- the ordinary lexical one, or
     /// the `"undefined"` that a `typeof` of an unbound name produces.
+    /// `delete name` where `name` is an unqualified identifier, which sloppy code alone can
+    /// write.
+    ///
+    /// A `with` object is asked first, exactly as a *read* of the same name asks it: the name may
+    /// be absent from every binding around the statement and still be a property of the object,
+    /// and it is that property `delete` removes.
+    fn delete_binding(&mut self, name: &str) {
+        let scopes = self.with_scopes_for(name);
+        if scopes.is_empty() {
+            self.delete_binding_lexically(name);
+            return;
+        }
+        let key = self.constant_index(Constant::String(name.to_owned()));
+        let mut found = Vec::with_capacity(scopes.len());
+        for with in &scopes {
+            self.load_with_object(with);
+            self.code.push(Instruction::WithHas(key));
+            let miss = self.emit_jump(Instruction::JumpIfFalse(0));
+            self.load_with_object(with);
+            self.code.push(Instruction::DeleteProperty(key));
+            found.push(self.emit_jump(Instruction::Jump(0)));
+            self.patch_jump(miss);
+        }
+        self.delete_binding_lexically(name);
+        for jump in found {
+            self.patch_jump(jump);
+        }
+    }
+
+    fn delete_binding_lexically(&mut self, name: &str) {
+        match self.resolve(name) {
+            // Anything a scope declared is undeletable -- `var`, `let`, a parameter, a
+            // function declaration, an import -- so the answer is known here and nothing
+            // needs to run.
+            Resolution::Local(_) | Resolution::Upvalue(_) | Resolution::Global(_) => {
+                self.push_constant(Constant::Boolean(false));
+            }
+            // A global `var` is a property like any other: whether it can be deleted is the
+            // property's own business, and a script's is non-configurable while an `eval`'s is
+            // not. So the object is asked, exactly as it is for a name nothing declared.
+            Resolution::GlobalObject => {
+                let name = self.constant_index(Constant::String(name.to_owned()));
+                self.code.push(Instruction::DeleteGlobalBinding(name));
+            }
+            // Nothing placed it, so the global object's environment record is the last one
+            // an unqualified reference reaches and its `[[Delete]]` is the answer.  That is
+            // also right for the names the compiler otherwise short-circuits -- `undefined`
+            // and the intrinsics -- because the realm registers those as properties whose
+            // attributes are exactly what decides `delete`.
+            // `arguments` inside a function is a binding the call created, not a global: it is
+            // undeletable like any other, and asking the global object would answer `true` for a
+            // name that is right there.
+            Resolution::Unresolved if name == "arguments" && self.compiling_function() => {
+                self.push_constant(Constant::Boolean(false));
+            }
+            Resolution::Unresolved => {
+                let name = self.constant_index(Constant::String(name.to_owned()));
+                self.code.push(Instruction::DeleteGlobalBinding(name));
+            }
+        }
+    }
+
     fn with_scoped_load(&mut self, name: &str, fallback: impl FnOnce(&mut Self)) {
         let scopes = self.with_scopes_for(name);
         if scopes.is_empty() {
@@ -2977,7 +3379,15 @@ impl Compiler {
             // difference between the two for hoisting purposes.
             StatementKind::Function(function) => {
                 if let Some(name) = &function.name {
-                    self.predeclare(VariableKind::Let, name, true);
+                    // At the top of global code a function declaration is a *var*-scoped
+                    // binding -- `CreateGlobalFunctionBinding` -- and so a property of the
+                    // global object. Anywhere else it is block-scoped like a `let`.
+                    let kind = if self.global_var_scope && self.scopes.len() == 1 {
+                        VariableKind::Var
+                    } else {
+                        VariableKind::Let
+                    };
+                    self.predeclare(kind, name, true);
                 }
             }
             StatementKind::Class(class) => {
@@ -3103,6 +3513,77 @@ impl Compiler {
         }
     }
 
+    /// Give every block-level function declaration the var-scoped binding Annex B promises it.
+    ///
+    /// B.3.2.1 for a function body and B.3.3.2 for a script: in sloppy code a `FunctionDeclaration`
+    /// directly inside a `Block`, a `CaseClause`, a `DefaultClause` or an `if` branch also
+    /// declares a `var` of the same name in the enclosing variable environment, initialised to
+    /// `undefined` and written when the declaration is evaluated. It is the reason
+    /// `{ function f() {} } typeof f` is `"function"` in a browser and `"undefined"` under a
+    /// reading of the main grammar alone, and bundlers still emit code that depends on it.
+    ///
+    /// A name is skipped when replacing the declaration with a `var` would be an early error --
+    /// a `let`, `const`, `class` or `using` of the same name anywhere between the variable
+    /// environment and the block, a destructured catch parameter -- and, in a function, when it
+    /// is a formal parameter or `arguments`. `blocked` carries exactly those names down.
+    fn hoist_annexb_function_names(&mut self, body: &[Statement], parameters: &HashSet<String>) {
+        if self.strict {
+            return;
+        }
+        let mut blocked: Vec<String> = parameters.iter().cloned().collect();
+        let mut names = Vec::new();
+        collect_annexb_function_names(body, false, &mut blocked, &mut names);
+        for name in names {
+            if self.annexb_var_functions.contains(&name) {
+                continue;
+            }
+            // A `var` or a top-level function declaration of the same name already owns the
+            // binding; Annex B only adds the write, never a second slot.
+            self.predeclare(VariableKind::Var, &name, true);
+            self.annexb_var_functions.insert(name);
+        }
+    }
+
+    /// The var-scoped write Annex B adds to a block-level function declaration's evaluation.
+    ///
+    /// Emitted after the block-scoped binding has been given its value, and reading that binding
+    /// rather than rebuilding the closure: the specification copies what the block holds, so the
+    /// two bindings start as the same function object and diverge from there --
+    /// `{ function f() {} f = 123; }` leaves the outer `f` a function.
+    fn emit_annexb_var_write(&mut self, name: &str, block: Local) {
+        if !self.annexb_var_functions.contains(name) {
+            return;
+        }
+        let Some(target) = self.scopes[0].get(name).copied() else {
+            // The var-scoped binding is a property of the global object, so the copy is a write
+            // to it rather than to a slot.
+            if self.global_var_scope && self.global_bindings.contains(name) {
+                self.code.push(if block.celled {
+                    Instruction::LoadCell(block.slot)
+                } else {
+                    Instruction::LoadLocal(block.slot)
+                });
+                self.store_global_object_binding(name);
+            }
+            return;
+        };
+        // The declaration is at the top level of the variable environment after all, so the
+        // binding it just wrote *is* the var-scoped one.
+        if target.slot == block.slot {
+            return;
+        }
+        self.code.push(if block.celled {
+            Instruction::LoadCell(block.slot)
+        } else {
+            Instruction::LoadLocal(block.slot)
+        });
+        self.code.push(if target.celled {
+            Instruction::StoreCell(target.slot)
+        } else {
+            Instruction::StoreLocal(target.slot)
+        });
+    }
+
     /// Allocate a slot for a name the block declares, leaving its value for the declaration.
     ///
     /// Silent when the name is already there: a genuine redeclaration is reported by the
@@ -3131,6 +3612,20 @@ impl Compiler {
             self.scopes[0].remove(name);
         }
         if self.scopes[scope_index].contains_key(name) {
+            return;
+        }
+        // Global code's variable environment is the global object, so a `var` or a function
+        // declaration at the top of it is a property rather than a slot. Lexical declarations
+        // are not: `let` and `const` at the top of a script go in the global *declarative*
+        // record, where `globalThis` cannot see them, and they keep their slots.
+        if self.global_var_scope && scope_index == 0 && kind == VariableKind::Var {
+            if self.global_bindings.insert(name.to_owned()) {
+                let index = self.constant_index(Constant::String(name.to_owned()));
+                self.code.push(Instruction::DeclareGlobalBinding {
+                    name: index,
+                    configurable: self.global_bindings_configurable,
+                });
+            }
             return;
         }
         let slot = self.local_count;
@@ -3195,15 +3690,33 @@ impl Compiler {
     ) {
         self.expression(test);
         let false_jump = self.emit_jump(Instruction::JumpIfFalse(0));
-        self.statement(consequent);
+        self.branch_statement(consequent);
         if let Some(alternate) = alternate {
             let end_jump = self.emit_jump(Instruction::Jump(0));
             self.patch_jump(false_jump);
-            self.statement(alternate);
+            self.branch_statement(alternate);
             self.patch_jump(end_jump);
         } else {
             self.patch_jump(false_jump);
         }
+    }
+
+    /// One arm of an `if`, which is a statement rather than a block -- except when it is a
+    /// function declaration, which Annex B B.3.4 says to read as though a block were written
+    /// around it.
+    ///
+    /// The block matters: without it the declaration binds in whatever scope encloses the `if`,
+    /// so `function(f) { if (true) function f() {} }` overwrote the *parameter* instead of
+    /// creating a binding of its own and leaving the parameter alone, which is what B.3.2.1
+    /// declines to do for a formal.
+    fn branch_statement(&mut self, statement: &Statement) {
+        if !matches!(statement.kind, StatementKind::Function(_)) {
+            self.statement(statement);
+            return;
+        }
+        self.scopes.push(HashMap::new());
+        self.statement(statement);
+        self.scopes.pop().expect("branch scope was just pushed");
     }
 
     /// `try`/`catch`/`finally`.
@@ -3927,6 +4440,7 @@ impl Compiler {
                 self.code.push(Instruction::StoreCell(local.slot))
             }
             Resolution::Local(local) => self.code.push(Instruction::StoreLocal(local.slot)),
+            Resolution::GlobalObject => self.store_global_object_binding(name),
             _ => self.error(Some(span), format!("could not bind `{name}`")),
         }
     }
@@ -4282,10 +4796,15 @@ impl Compiler {
                     && name != "undefined"
                     && !(name == "arguments" && self.compiling_function());
                 self.with_scoped_load(name, |compiler| {
-                    // The *value* `undefined`, not the string: the `typeof` below is what turns
-                    // it into one, and pushing the answer here would report `"string"`.
+                    // The *value*, not the string: the `typeof` below is what turns it into one,
+                    // and pushing an answer here would report `"string"`. A name no scope bound
+                    // is asked of the global object at run time rather than answered now,
+                    // because the realm may have gained it since this was compiled.
                     if unbound {
-                        compiler.push_constant(Constant::Undefined);
+                        let name = compiler.constant_index(Constant::String(name.to_owned()));
+                        compiler
+                            .code
+                            .push(Instruction::LoadGlobalBindingOrUndefined(name));
                     } else {
                         compiler.load_lexically(name);
                     }
@@ -4307,7 +4826,16 @@ impl Compiler {
                         && !(name == "arguments" && self.compiling_function())
             ) =>
             {
-                self.push_constant(Constant::String("undefined".to_owned()));
+                let ExpressionKind::Identifier(name) = &argument.kind else {
+                    unreachable!("the guard above matched an identifier")
+                };
+                // Asked of the global object rather than folded: `typeof x` where a `var` in
+                // global code, an `eval`, or a plain `globalThis.x = 1` created `x` is not
+                // `"undefined"`, and only the running realm knows.
+                let name = self.constant_index(Constant::String(name.to_owned()));
+                self.code
+                    .push(Instruction::LoadGlobalBindingOrUndefined(name));
+                self.code.push(Instruction::Unary(UnaryOp::TypeOf));
             }
             ExpressionKind::Unary { operator, argument } => {
                 self.expression(argument);
@@ -4387,8 +4915,18 @@ impl Compiler {
                 arguments,
                 optional,
             } => self.call(callee, arguments, *optional, expression.span),
-            ExpressionKind::This => self.code.push(Instruction::LoadThis),
-            ExpressionKind::NewTarget => self.code.push(Instruction::LoadNewTarget),
+            ExpressionKind::This => self.load_this(),
+            // `undefined` in a field initialiser: the initialiser is its own function to the
+            // language, and reading the frame's `new.target` there answered `C` for
+            // `class C { x = new.target }` because Kiln emits the initialiser into the
+            // constructor.
+            ExpressionKind::NewTarget => {
+                if self.field_initialiser {
+                    self.push_constant(Constant::Undefined);
+                } else {
+                    self.code.push(Instruction::LoadNewTarget);
+                }
+            }
             ExpressionKind::Yield { delegate, value } if !*delegate => {
                 match value {
                     Some(value) => self.expression(value),
@@ -4420,6 +4958,7 @@ impl Compiler {
                     self.load_super();
                     self.array_literal(arguments, expression.span);
                     self.code.push(Instruction::SuperApply);
+                    self.store_this_binding();
                     self.emit_elements_after_super(expression.span);
                     return;
                 }
@@ -4439,6 +4978,7 @@ impl Compiler {
                 self.code.push(Instruction::SuperCall {
                     argc: arguments.len() as u16,
                 });
+                self.store_this_binding();
                 self.emit_elements_after_super(expression.span);
             }
             // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
@@ -4450,7 +4990,9 @@ impl Compiler {
             }
             ExpressionKind::SuperMember { property } => {
                 // `super.m` resolves on the prototype of the object this method was defined on,
-                // not on `this` and not on the parent constructor.
+                // not on `this` and not on the parent constructor -- but it is still a reference
+                // *with* a `this`, so writing one before `super()` is the same ReferenceError.
+                self.require_this_binding();
                 self.load_home_prototype();
                 let name = self.constant_index(Constant::String(property.clone()));
                 self.code.push(Instruction::LoadSuperProperty(name));
@@ -4458,6 +5000,7 @@ impl Compiler {
             ExpressionKind::SuperComputedMember { property } => {
                 // The key first, then the prototype: `super[f()]` runs `f` before it asks the
                 // home object what it inherits from.
+                self.require_this_binding();
                 self.expression(property);
                 self.load_home_prototype();
                 self.code.push(Instruction::LoadSuperElement);
@@ -4695,6 +5238,14 @@ impl Compiler {
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.code.push(Instruction::GetPrivate(name));
             }
+            ExpressionKind::DeleteValue { argument } => {
+                // The operand is evaluated and discarded: `delete f()` calls `f`, and the
+                // answer is `true` whatever it returned.
+                self.expression(argument);
+                self.code.push(Instruction::Pop);
+                self.push_constant(Constant::Boolean(true));
+            }
+            ExpressionKind::DeleteBinding { name } => self.delete_binding(name),
             ExpressionKind::Delete { object, property } => {
                 self.expression(object);
                 match property.as_ref() {
@@ -4837,6 +5388,8 @@ impl Compiler {
                     if method && let Some(home) = &home {
                         self.home_bindings.push(home.clone());
                     }
+                    // The body about to be compiled is a method, so `super.x` is legal in it.
+                    self.next_is_method = method && home.is_some();
                     self.expression(&property.value);
                     if method && home.is_some() {
                         self.home_bindings.pop();
@@ -4872,6 +5425,7 @@ impl Compiler {
                     if let Some(home) = &home {
                         self.home_bindings.push(home.clone());
                     }
+                    self.next_is_method = home.is_some();
                     let compiled = self.compile_function(function, span);
                     if home.is_some() {
                         self.home_bindings.pop();
@@ -5076,13 +5630,44 @@ impl Compiler {
                     .expect("Global resolution just found this name in module scope");
                 (Place::Global(slot), local.kind, local.imported)
             }
+            // A `var` this program declared on the global object. `ThrowReference` reads it and
+            // `StoreGlobalBinding` writes it, exactly as for a name nothing declared -- the
+            // difference is that declaration instantiation already created the property, so the
+            // read cannot throw and the write cannot be the one that creates it.
+            Resolution::GlobalObject => {
+                let name = self.constant_index(Constant::String(target.to_owned()));
+                return Some((
+                    Instruction::ThrowReference(name),
+                    Instruction::StoreGlobalBinding(name),
+                ));
+            }
             Resolution::Unresolved => {
-                // Assigning to a name that does not exist is a `ReferenceError` in a module,
-                // raised where the assignment happens rather than when it is compiled.
                 let _ = span;
                 let name = self.constant_index(Constant::String(target.to_owned()));
-                self.code.push(Instruction::ThrowReference(name));
-                return None;
+                // Sloppy code settles an unresolvable reference against the global object, which
+                // creates the property rather than refusing the write. Strict code raises the
+                // `ReferenceError` where the assignment happens rather than when it is compiled.
+                //
+                // Only the *store* differs. A compound assignment reads first, and reading a name
+                // nothing bound is still a `ReferenceError` in both modes -- `undeclared += 1`
+                // throws in sloppy code too -- so the load stays `ThrowReference`, which is also
+                // the instruction that finds a global the program installed earlier.
+                if self.strict {
+                    // Where the reference is *resolved*, which is before the right-hand side is
+                    // evaluated. Strict mode refuses to create a global by assignment, and
+                    // whether this name is one it would have to create can only be answered at
+                    // run time -- a `var` in global code, or a `globalThis.x = 1` a line above,
+                    // makes it a perfectly ordinary write.
+                    self.code.push(Instruction::RequireGlobalBinding(name));
+                }
+                return Some((
+                    Instruction::ThrowReference(name),
+                    if self.strict {
+                        Instruction::StoreGlobalBindingStrict(name)
+                    } else {
+                        Instruction::StoreGlobalBinding(name)
+                    },
+                ));
             }
         };
         let (load, store): (Instruction, Instruction) = match place {
@@ -5181,8 +5766,9 @@ impl Compiler {
         self.next_private_scope += 1;
         self.private_declarations.push(
             class
-                .fields
+                .initialisers
                 .iter()
+                .filter_map(ClassInitialiser::as_field)
                 .map(|field| &field.key)
                 .chain(class.methods.iter().map(|method| &method.key))
                 .filter_map(|key| match key {
@@ -5282,11 +5868,13 @@ impl Compiler {
             })
             .collect();
         let instance_fields: Vec<&ClassField> = class
-            .fields
+            .initialisers
             .iter()
+            .filter_map(ClassInitialiser::as_field)
             .filter(|field| !field.is_static)
             .collect();
         self.home_bindings.push(instance_home.clone());
+        self.next_is_method = true;
         let compiled = self.compile_constructor(
             &constructor,
             class.span,
@@ -5343,9 +5931,32 @@ impl Compiler {
         self.code.push(Instruction::GetProperty(prototype));
         self.store_home_binding(&instance_home);
 
-        // Static fields are ordinary properties of the constructor, assigned once here.
+        // Static fields are ordinary properties of the constructor, assigned once here, and a
+        // `static { }` block is a body run once, here, with `this` bound to the constructor.
+        // One loop over one list because the two interleave and the order is observable.
         self.home_bindings.push(static_home.clone());
-        for field in class.fields.iter().filter(|field| field.is_static) {
+        for initialiser in &class.initialisers {
+            let field = match initialiser {
+                ClassInitialiser::Field(field) if field.is_static => field,
+                ClassInitialiser::Field(_) => continue,
+                // Compiled as the function it is and called immediately with the constructor as
+                // its receiver -- which is the whole of the block's semantics: `this` is the
+                // class, `var` stays inside, and `super.x` reads through the same home binding a
+                // static method does.
+                ClassInitialiser::StaticBlock(body) => {
+                    self.next_is_method = true;
+                    let Some(block) = self.compile_function(body, class.span) else {
+                        self.home_bindings.pop();
+                        return;
+                    };
+                    self.load_local_or_cell(local);
+                    self.code.push(Instruction::MakeFunction(block));
+                    self.code.push(Instruction::NewArray { count: 0 });
+                    self.code.push(Instruction::Apply);
+                    self.code.push(Instruction::Pop);
+                    continue;
+                }
+            };
             self.load_local_or_cell(local);
             match &field.key {
                 ObjectKey::Private(name) => {
@@ -5374,6 +5985,7 @@ impl Compiler {
             } else {
                 instance_home.clone()
             });
+            self.next_is_method = true;
             let compiled = self.compile_function(&method.function, class.span);
             self.home_bindings.pop();
             let Some(body) = compiled else {
@@ -5468,7 +6080,7 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-            Resolution::Unresolved => {
+            Resolution::GlobalObject | Resolution::Unresolved => {
                 self.error(None, "`super` outside of a method");
                 self.push_constant(Constant::Undefined);
                 return;
@@ -5482,6 +6094,89 @@ impl Compiler {
     /// The value is stored later, by [`Compiler::store_home_binding`], because the object it
     /// names does not exist yet when the methods that capture it are compiled -- a method
     /// closes over the *binding*, and reads it when it runs.
+    /// Reserve the hidden binding a derived constructor's `this` lives in, in its dead zone.
+    ///
+    /// Not `variable`, which would store `undefined` into it and so take it straight back out of
+    /// the zone. The cell is created and marked uninitialised and nothing else: the only thing
+    /// that fills it is the `super()` that brings the instance into existence.
+    fn declare_this_binding(&mut self) -> String {
+        let binding = format!("%this{}", self.this_binding_count);
+        self.this_binding_count += 1;
+        self.captured.insert(binding.clone());
+        let slot = self.local_count;
+        self.local_count += 1;
+        let scope = self.scopes.len() - 1;
+        self.scopes[scope].insert(
+            binding.clone(),
+            Local {
+                slot,
+                kind: VariableKind::Let,
+                imported: false,
+                // Initialised as far as *resolution* is concerned: the check is the cell's, at
+                // run time, because `super()` may be written in a branch or in an arrow and no
+                // compile-time flag can say whether it ran.
+                initialized: true,
+                celled: true,
+            },
+        );
+        self.code.push(Instruction::NewCell(slot));
+        self.code.push(Instruction::MarkUninitialized(slot));
+        binding
+    }
+
+    /// Push `this` from the hidden binding, raising the dead zone's `ReferenceError` if `super()`
+    /// has not run.
+    fn load_this_binding(&mut self, binding: &str) {
+        match self.resolve_or_capture(binding) {
+            Resolution::Local(local) => self.code.push(Instruction::LoadCell(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            _ => {
+                self.error(None, "a derived constructor's `this` binding lost its cell");
+                self.code.push(Instruction::LoadThis);
+            }
+        }
+    }
+
+    /// Record that `super()` has returned, so `this` may be read from here on.
+    ///
+    /// A second `super()` therefore does *not* raise -- the binding is simply written again.
+    /// That is a narrower fix than the specification's, which makes the second call a
+    /// `ReferenceError`, and it is named rather than hidden: what is fixed here is reading `this`
+    /// too early, not calling `super()` twice.
+    fn store_this_binding(&mut self) {
+        let Some(binding) = self.this_binding.clone() else {
+            return;
+        };
+        self.code.push(Instruction::LoadThis);
+        match self.resolve_or_capture(&binding) {
+            Resolution::Local(local) => self.code.push(Instruction::StoreCell(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::StoreUpvalue(index)),
+            _ => {
+                self.error(None, "a derived constructor's `this` binding lost its cell");
+                self.code.push(Instruction::Pop);
+            }
+        }
+    }
+
+    /// Push `this`, from wherever this context keeps it.
+    fn load_this(&mut self) {
+        match self.this_binding.clone() {
+            Some(binding) => self.load_this_binding(&binding),
+            None => self.code.push(Instruction::LoadThis),
+        }
+    }
+
+    /// `GetThisBinding()`, for its effect only.
+    ///
+    /// `super.x` resolves against `this` even though it does not read it, so writing one before
+    /// `super()` in a derived constructor is a `ReferenceError` just as writing `this` is.
+    fn require_this_binding(&mut self) {
+        if self.this_binding.is_some() {
+            self.load_this();
+            self.code.push(Instruction::Pop);
+        }
+    }
+
     fn declare_home_binding(&mut self, span: Span) -> String {
         let binding = format!("%home{}", self.home_binding_count);
         self.home_binding_count += 1;
@@ -5519,7 +6214,7 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-            Resolution::Unresolved => {
+            Resolution::GlobalObject | Resolution::Unresolved => {
                 self.error(None, "`super` outside of a derived class");
                 self.push_constant(Constant::Undefined);
             }
@@ -5527,11 +6222,27 @@ impl Compiler {
     }
 
     /// A field with no initialiser is `undefined`, not absent: the property exists.
+    /// Emit a field's initialiser, in the context the language gives it.
+    ///
+    /// An initialiser is a function of its own to the specification even though Kiln emits it
+    /// inline: `super.x` reads through the class's home object -- which the caller has already
+    /// pushed -- and `new.target` is `undefined` rather than whatever constructed the instance.
+    /// Both are restored afterwards, because the code around the initialiser is not in one.
     fn emit_field_value(&mut self, field: &ClassField) {
+        let outer_super_property = std::mem::replace(&mut self.super_property, true);
+        let outer_field_initialiser = std::mem::replace(&mut self.field_initialiser, true);
+        // An initialiser is its own function to the language, so its `this` is the instance
+        // being built rather than any enclosing constructor's dead-zoned binding. An instance
+        // field only runs after `super()` anyway; a *static* one is emitted where the class is
+        // defined, which may be inside a derived constructor that has not called it yet.
+        let outer_this_binding = self.this_binding.take();
         match &field.value {
             Some(value) => self.expression(value),
             None => self.push_constant(Constant::Undefined),
         }
+        self.super_property = outer_super_property;
+        self.field_initialiser = outer_field_initialiser;
+        self.this_binding = outer_this_binding;
     }
 
     fn load_local_or_cell(&mut self, local: Local) {
@@ -5562,7 +6273,16 @@ impl Compiler {
         // Normally created by the hoisting pass. A function declaration can also appear where a
         // single statement is expected -- `if (x) function f() {}` -- and there is no block to
         // have hoisted it.
-        if !matches!(self.resolve(&name), Resolution::Local(_)) {
+        //
+        // The test is the *innermost* scope rather than resolution, and the difference is the
+        // whole of Annex B B.3.4: an `if` arm is read as though a block were written around it,
+        // so `function (f) { if (true) function f() {} }` declares a binding of its own there.
+        // Asking `resolve` instead found the enclosing parameter and overwrote it, which is
+        // exactly what B.3.2.1 declines to do for a formal.
+        let innermost = self.scopes.len() - 1;
+        let global_here =
+            self.global_var_scope && innermost == 0 && self.global_bindings.contains(&name);
+        if !self.scopes[innermost].contains_key(&name) && !global_here {
             self.predeclare(VariableKind::Let, &name, true);
         }
 
@@ -5578,6 +6298,14 @@ impl Compiler {
                 } else {
                     Instruction::StoreLocal(local.slot)
                 });
+                self.emit_annexb_var_write(&name, local);
+            }
+            // A function declaration at the top of global code: the binding is a property of the
+            // global object, created by `DeclareGlobalBinding` when the scope was entered and
+            // given its value here.
+            Resolution::GlobalObject => {
+                self.code.push(Instruction::MakeFunction(index));
+                self.store_global_object_binding(&name);
             }
             // The binding was just created in the current function's innermost scope, so any
             // other resolution means the scope bookkeeping is inconsistent.
@@ -5608,6 +6336,8 @@ impl Compiler {
         for (name, kind, function) in private_elements {
             let key = self.private_key(name);
             let name = self.constant_index(Constant::String(key));
+            // A private method is a method: its home object is the one already on the stack.
+            self.next_is_method = true;
             let body = self.compile_function(function, span)?;
             self.code.push(Instruction::LoadThis);
             self.code.push(Instruction::MakeFunction(body));
@@ -5763,6 +6493,19 @@ impl Compiler {
         }
 
         let parameter_count = function.parameters.len() as u32;
+        // Annex B declines to give a block-level function declaration a var-scoped binding when
+        // the name is a formal parameter or `arguments`: the call already owns that binding, and
+        // the block's function must not take it over. `arguments` is here even when the function
+        // never mentions it, because the object exists whether or not it is named.
+        let mut parameter_names: HashSet<String> = parameters.keys().cloned().collect();
+        if let Some(rest) = &function.rest {
+            let mut rest_names = Vec::new();
+            pattern_names_in_order(rest, &mut rest_names);
+            parameter_names.extend(rest_names);
+        }
+        if !function.arrow {
+            parameter_names.insert("arguments".to_owned());
+        }
         // A rest parameter is already excluded: it lives in `function.rest` rather than among
         // the positional ones, so counting stops at the first default on its own.
         let declared_length = function
@@ -5787,6 +6530,49 @@ impl Compiler {
         // written after a strict function is not strict because of it.
         let inherited_strict = self.strict || function.strict;
         let outer_strict = std::mem::replace(&mut self.strict, inherited_strict);
+        // `IsSimpleParameterList`, and the strictness beside it: together they are the
+        // specification's own test for which of the two `arguments` objects this function gets.
+        //
+        // An arrow inherits rather than deciding, because the `arguments` it sees is not its
+        // own: it is the enclosing call's, and so is the kind.
+        let mapped_arguments = if function.arrow {
+            self.mapped_arguments
+        } else {
+            !inherited_strict
+                && function.rest.is_none()
+                && function
+                    .parameters
+                    .iter()
+                    .all(|parameter| matches!(parameter.pattern, Pattern::Identifier(_)))
+        };
+        let outer_mapped_arguments =
+            std::mem::replace(&mut self.mapped_arguments, mapped_arguments);
+        // An arrow has no boundary of its own for any of these: `super.x`, `new.target` and a
+        // field initialiser's `undefined` new.target all reach through it to where it was
+        // written. Every other function is a boundary, and `next_is_method` -- set by whichever
+        // caller is compiling a method body -- is what says whether this one carries a home
+        // object. It is taken either way, so it cannot leak into the next function compiled.
+        let method = std::mem::take(&mut self.next_is_method);
+        let outer_in_function = self.in_function;
+        let outer_super_property = self.super_property;
+        let outer_field_initialiser = self.field_initialiser;
+        let outer_this_binding = self.this_binding.take();
+        if !function.arrow {
+            self.in_function = true;
+            self.super_property = method;
+            self.field_initialiser = false;
+        } else {
+            // An arrow has no `this` of its own, so it reads the enclosing one -- including a
+            // derived constructor's, which is what makes `constructor() { const go = () =>
+            // super(); go(); }` legal and its `this` still dead until `go` runs.
+            self.this_binding.clone_from(&outer_this_binding);
+        }
+        // A function body has a variable environment of its own, whatever encloses it: `var i`
+        // inside a function written at the top of a script is that call's binding and not a
+        // property of the global object. `global_bindings` stays, because the names the *program*
+        // put on the object are still resolvable from in here -- it is only new declarations that
+        // stop going there.
+        let outer_global_var_scope = std::mem::replace(&mut self.global_var_scope, false);
         let outer = FunctionState {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
@@ -5797,6 +6583,36 @@ impl Compiler {
             cell_everything: std::mem::replace(&mut self.cell_everything, cell_everything),
         };
         self.enclosing.push(outer);
+
+        // A class constructor is not callable. `[[Call]]` on one throws before it looks at an
+        // argument, which is why this is the first thing in the body rather than part of the
+        // parameter prologue: `Derived.apply(obj, new Array(100))` must throw without binding a
+        // hundred parameters, and `C()` on a class whose constructor has a default must throw
+        // without running it.
+        //
+        // Emitted as ordinary bytecode rather than a flag on the proto, because `new.target` is
+        // exactly the question being asked and every backend already answers it -- so the C
+        // backend gets the same refusal from the same instructions rather than a second
+        // implementation that could disagree with this one.
+        if class.is_some() {
+            self.code.push(Instruction::LoadNewTarget);
+            let constructed = self.emit_jump(Instruction::JumpIfNotNullish(0));
+            self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+            self.push_constant(Constant::String(match &function.name {
+                Some(name) if !name.is_empty() => {
+                    format!("Class constructor {name} cannot be invoked without 'new'")
+                }
+                _ => "Class constructor cannot be invoked without 'new'".to_owned(),
+            }));
+            self.code.push(Instruction::New { argc: 1 });
+            self.code.push(Instruction::Throw);
+            self.patch_jump(constructed);
+        }
+
+        // A derived constructor's `this` starts in a dead zone that only `super()` ends.
+        if class.as_ref().is_some_and(|class| class.derived) {
+            self.this_binding = Some(self.declare_this_binding());
+        }
 
         // A captured parameter arrives as a plain value in its slot, so the cell has to be
         // created and seeded before the body can read it.
@@ -5853,6 +6669,9 @@ impl Compiler {
         // are established here rather than wherever the block containing it happens to be
         // compiled.
         self.hoist_var_names(&function.body);
+        // After the `var`s, because Annex B only adds a binding a `var` did not already make --
+        // and after the parameters, whose names it must not take over.
+        self.hoist_annexb_function_names(&function.body, &parameter_names);
         if let Some(class) = &class {
             if class.forwards_to_super {
                 // `super(...arguments)`, and nothing else can run before it -- so by the line
@@ -5860,6 +6679,7 @@ impl Compiler {
                 self.load_super();
                 self.code.push(Instruction::SuperForward);
                 self.code.push(Instruction::Pop);
+                self.store_this_binding();
             }
             // A derived class with a constructor of its own installs its elements when *that*
             // constructor's `super()` returns, which is a place only the body knows. Anywhere
@@ -5882,17 +6702,28 @@ impl Compiler {
         if class.is_some() {
             self.pending_elements.pop();
         }
-        // Falling off the end of a function returns undefined. Emitted unconditionally rather
-        // than only when the body cannot fall through: proving that needs flow analysis, and an
-        // unreachable epilogue costs two instructions.
-        self.push_constant(Constant::Undefined);
+        // Falling off the end of a function returns undefined -- except a derived constructor,
+        // which returns `this`, and so raises the dead zone's ReferenceError when it reaches
+        // here without having called `super()`. Emitted unconditionally rather than only when
+        // the body cannot fall through: proving that needs flow analysis, and an unreachable
+        // epilogue costs two instructions.
+        match self.this_binding.clone() {
+            Some(binding) => self.load_this_binding(&binding),
+            None => self.push_constant(Constant::Undefined),
+        }
         self.code.push(Instruction::Return);
 
         let restored = self
             .enclosing
             .pop()
             .expect("this function pushed its own enclosing state");
+        self.global_var_scope = outer_global_var_scope;
         let strict = std::mem::replace(&mut self.strict, outer_strict);
+        self.mapped_arguments = outer_mapped_arguments;
+        self.in_function = outer_in_function;
+        self.super_property = outer_super_property;
+        self.field_initialiser = outer_field_initialiser;
+        self.this_binding = outer_this_binding;
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
@@ -5903,6 +6734,7 @@ impl Compiler {
             generator: function.generator || function.asynchronous,
             async_generator: function.generator && function.asynchronous,
             parameter_count,
+            mapped_arguments,
             declared_length,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             prologue_end,
@@ -5929,20 +6761,40 @@ impl Compiler {
             self.error(Some(span), "`return` outside of a function");
             return;
         }
+        // `return;` in a derived constructor yields `this`, and reading it is what makes
+        // returning before `super()` a ReferenceError. But the read happens where `[[Construct]]`
+        // does it -- *after* the cleanups -- because a `finally` is allowed to be where `super()`
+        // is called: `constructor() { try { return; } finally { super(); } }` constructs, and
+        // reading `this` at the `return` would have refused it.
+        let deferred_this = value.is_none() && self.this_binding.is_some();
         match value {
             Some(value) => self.expression(value),
+            None if deferred_this => {}
+            // Anywhere else a bare `return` is `undefined`, and reaching for `this` there would
+            // have made every one of them answer with the receiver.
             None => self.push_constant(Constant::Undefined),
         }
         if !self.finalizers.is_empty() {
-            // The value is computed before the cleanups run -- that is the observable order --
-            // but the cleanups may use the stack, so it is parked in a local across them.
-            let slot = format!("%ret{}", self.hidden_bindings);
-            self.hidden_bindings += 1;
-            self.scopes.push(HashMap::new());
-            self.declare_bound(VariableKind::Let, &slot, span);
-            self.unwind_finalizers(self.function_finalizer_depth);
-            self.load_hidden(&slot);
-            self.scopes.pop().expect("return scope was just pushed");
+            if deferred_this {
+                self.unwind_finalizers(self.function_finalizer_depth);
+            } else {
+                // The value is computed before the cleanups run -- that is the observable order
+                // -- but the cleanups may use the stack, so it is parked in a local across them.
+                let slot = format!("%ret{}", self.hidden_bindings);
+                self.hidden_bindings += 1;
+                self.scopes.push(HashMap::new());
+                self.declare_bound(VariableKind::Let, &slot, span);
+                self.unwind_finalizers(self.function_finalizer_depth);
+                self.load_hidden(&slot);
+                self.scopes.pop().expect("return scope was just pushed");
+            }
+        }
+        if deferred_this {
+            let binding = self
+                .this_binding
+                .clone()
+                .expect("a deferred `this` has a binding to read");
+            self.load_this_binding(&binding);
         }
         self.code.push(Instruction::Return);
     }
@@ -6032,18 +6884,29 @@ impl Compiler {
                 Instruction::LoadGlobal(slot),
                 Instruction::StoreGlobal(slot),
             ),
+            Resolution::GlobalObject => {
+                let name = self.constant_index(Constant::String(target.to_owned()));
+                (
+                    Instruction::ThrowReference(name),
+                    Instruction::StoreGlobalBinding(name),
+                )
+            }
+            // `x++` on a name nothing bound is settled against the global object, exactly as a
+            // read and a write of it separately would be. The read comes first and is
+            // `ThrowReference`, so an unresolvable name is the `ReferenceError` the language
+            // promises without the compiler having to decide it -- which it cannot: a global the
+            // program installed earlier, or one global code declared with `var`, is resolvable.
             Resolution::Unresolved => {
-                // Inside a `with` the name may be a property of the object and only fail to be
-                // one at run time, so the refusal has to wait until then. Outside one the
-                // compiler already knows, and says so where the mistake is written.
-                if self.with_scopes.is_empty() {
-                    self.error(Some(span), format!("unresolved identifier `{target}`"));
-                    self.push_constant(Constant::Undefined);
-                } else {
-                    let name = self.constant_index(Constant::String(target.to_owned()));
-                    self.code.push(Instruction::ThrowReference(name));
-                }
-                return;
+                let _ = span;
+                let name = self.constant_index(Constant::String(target.to_owned()));
+                (
+                    Instruction::ThrowReference(name),
+                    if self.strict {
+                        Instruction::StoreGlobalBindingStrict(name)
+                    } else {
+                        Instruction::StoreGlobalBinding(name)
+                    },
+                )
             }
         };
 
@@ -6584,7 +7447,56 @@ impl Compiler {
             && name == "eval"
             && self.names_nothing("eval")
         {
-            let bindings = self.eval_site_bindings(span);
+            let mut bindings = self.eval_site_bindings(span);
+            // The home object travels as an ordinary binding. `eval_site_bindings` skips every
+            // name beginning with `%` -- none of them can be written by the eval'd source -- so
+            // this is added afterwards rather than found there, and only where the language
+            // allows `super.x` to be written at all.
+            let home = self
+                .super_property
+                .then(|| self.home_bindings.last().cloned())
+                .flatten();
+            if let Some(name) = &home {
+                match self.resolve_or_capture(name) {
+                    Resolution::Local(local) if local.celled => bindings.push(EvalBinding {
+                        name: name.clone(),
+                        access: EvalAccess::Cell(local.slot),
+                        declaration: EvalDeclaration::Const,
+                    }),
+                    Resolution::Upvalue(index) => bindings.push(EvalBinding {
+                        name: name.clone(),
+                        access: EvalAccess::Upvalue(index),
+                        declaration: EvalDeclaration::Const,
+                    }),
+                    // Unreachable: a home binding is declared captured, and `cell_everything`
+                    // boxes every binding of a function holding a direct eval. Reported rather
+                    // than dropped, because a dropped home would make `super.x` in the eval'd
+                    // source read some other slot by number.
+                    _ => self.error(Some(span), "a home object binding lost its cell"),
+                }
+            }
+            // A field initialiser is its own function boundary for `new.target` only; `super.x`
+            // there reads the class's home object, which is why the two are decided separately.
+            let new_target = if self.field_initialiser {
+                EvalNewTarget::Undefined
+            } else if self.in_function {
+                EvalNewTarget::Caller
+            } else {
+                EvalNewTarget::Forbidden
+            };
+            let private_scopes = self
+                .private_scopes
+                .iter()
+                .zip(&self.private_declarations)
+                .map(|(scope, names)| {
+                    let mut names: Vec<String> = names.iter().cloned().collect();
+                    names.sort();
+                    PrivateScope {
+                        scope: *scope,
+                        names,
+                    }
+                })
+                .collect();
             let argc = if spreading {
                 self.array_literal(arguments, span);
                 None
@@ -6595,6 +7507,10 @@ impl Compiler {
                 bindings,
                 strict: self.strict,
                 argc,
+                global_var_scope: self.global_var_scope && !self.compiling_function(),
+                home,
+                new_target,
+                private_scopes,
             })));
             return;
         }
@@ -6610,7 +7526,7 @@ impl Compiler {
             // `Object.prototype.toString` is not a constructor. `SuperCall` now means `super()`
             // and nothing else.
             ExpressionKind::SuperMember { .. } | ExpressionKind::SuperComputedMember { .. } => {
-                self.code.push(Instruction::LoadThis);
+                self.load_this();
                 self.expression(callee);
                 self.array_literal(arguments, span);
                 self.code.push(Instruction::Apply);
@@ -6778,14 +7694,28 @@ impl Compiler {
             return Resolution::Local(*local);
         }
         let Some(module) = self.enclosing.first() else {
-            // Compiling the module body: its scopes were searched above, so there is nowhere
-            // else a name could be.
-            return Resolution::Unresolved;
+            // Compiling the module body: its scopes were searched above, so the global object is
+            // the only place left, and only for a name this program declared there.
+            return self.global_object_binding(name);
         };
         if let Some(local) = module.scopes[0].get(name) {
             return Resolution::Global(local.slot);
         }
-        Resolution::Unresolved
+        self.global_object_binding(name)
+    }
+
+    /// Whether `name` is one this program declared on the global object.
+    ///
+    /// Checked last, after every scope: a `let` at the top of the script, a parameter, a block
+    /// binding all shadow it, exactly as they shadow any other global. Checked *before* the
+    /// built-in table, though, because `var Object = 1` at the top of a script is that script's
+    /// binding and not the intrinsic.
+    fn global_object_binding(&self, name: &str) -> Resolution {
+        if self.global_bindings.contains(name) {
+            Resolution::GlobalObject
+        } else {
+            Resolution::Unresolved
+        }
     }
 
     /// Resolve `name` and, if it lives in an enclosing function, capture it.
@@ -6829,6 +7759,22 @@ impl Compiler {
             return false;
         }
         matches!(self.resolve(name), Resolution::Unresolved)
+    }
+
+    /// Emit the read of a name this program put on the global object.
+    ///
+    /// `ThrowReference` is the whole of it: it looks the name up on the global object and only
+    /// throws when it is not there, which is what a read of a global `var` binding is -- the
+    /// property exists from declaration instantiation onwards, so the throw is unreachable for
+    /// as long as nothing deletes it, and correct the moment something does.
+    fn load_global_object_binding(&mut self, name: &str) {
+        let name = self.constant_index(Constant::String(name.to_owned()));
+        self.code.push(Instruction::ThrowReference(name));
+    }
+
+    fn store_global_object_binding(&mut self, name: &str) {
+        let name = self.constant_index(Constant::String(name.to_owned()));
+        self.code.push(Instruction::StoreGlobalBinding(name));
     }
 
     /// Thread a binding from the function that owns it down to the one being compiled.
@@ -7231,12 +8177,17 @@ fn class_contains_direct_eval(class: &Class) -> bool {
             .methods
             .iter()
             .any(|method| function_contains_direct_eval(&method.function))
-        || class.fields.iter().any(|field| {
-            matches!(&field.key, ObjectKey::Computed(key) if expression_contains_direct_eval(key))
-                || field
-                    .value
-                    .as_ref()
-                    .is_some_and(expression_contains_direct_eval)
+        || class.initialisers.iter().any(|initialiser| match initialiser {
+            ClassInitialiser::Field(field) => {
+                matches!(&field.key, ObjectKey::Computed(key) if expression_contains_direct_eval(key))
+                    || field
+                        .value
+                        .as_ref()
+                        .is_some_and(expression_contains_direct_eval)
+            }
+            // A static block is a body like any other, and a direct `eval` inside it sees the
+            // same scope the block does.
+            ClassInitialiser::StaticBlock(body) => function_contains_direct_eval(body),
         })
 }
 
@@ -7365,6 +8316,8 @@ fn expression_contains_direct_eval(expression: &Expression) -> bool {
             expression_contains_direct_eval(object)
                 || matches!(property.as_ref(), ObjectKey::Computed(key) if expression_contains_direct_eval(key))
         }
+        ExpressionKind::DeleteValue { argument } => expression_contains_direct_eval(argument),
+        ExpressionKind::DeleteBinding { .. } => false,
         ExpressionKind::Template { expressions, .. } => {
             expressions.iter().any(expression_contains_direct_eval)
         }
@@ -7664,7 +8617,14 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
     let bodies = class
         .constructor
         .iter()
-        .chain(class.methods.iter().map(|method| &method.function));
+        .chain(class.methods.iter().map(|method| &method.function))
+        // A static block closes over the class's surroundings exactly as a method body does.
+        .chain(
+            class
+                .initialisers
+                .iter()
+                .filter_map(ClassInitialiser::as_static_block),
+        );
     for function in bodies {
         for parameter in &function.parameters {
             collect_pattern_identifiers(&parameter.pattern, names);
@@ -7676,7 +8636,11 @@ fn collect_class_names(class: &Class, names: &mut HashSet<String>) {
             collect_nested_function_names(statement, names, true);
         }
     }
-    for field in &class.fields {
+    for field in class
+        .initialisers
+        .iter()
+        .filter_map(ClassInitialiser::as_field)
+    {
         if let ObjectKey::Computed(key) = &field.key {
             collect_identifiers(key, names, true);
         }
@@ -7974,6 +8938,16 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                 collect_identifiers(key, names, collecting);
             }
         }
+        ExpressionKind::DeleteValue { argument } => {
+            collect_identifiers(argument, names, collecting);
+        }
+        // The name is a reference like any other: an eval that writes `delete x` needs the outer
+        // `x` bound, or it would ask the global object about a binding a caller's scope holds.
+        ExpressionKind::DeleteBinding { name } => {
+            if collecting {
+                names.insert(name.clone());
+            }
+        }
         ExpressionKind::Object { members } => {
             for member in members {
                 match member {
@@ -8007,6 +8981,176 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
         }
     }
 }
+/// The block-level function declarations Annex B gives a var-scoped binding, in source order.
+///
+/// `nested` says whether this list is one the specification calls a `Block`, `CaseClause` or
+/// `DefaultClause` rather than the top level of the variable environment: a declaration written
+/// at the top level is already var-scoped by the main grammar and is not Annex B's business.
+///
+/// `blocked` is every name a lexical declaration between the variable environment and here has
+/// taken, because replacing the function declaration with a `var` of that name would be an early
+/// error and Annex B declines exactly when it would be.
+fn collect_annexb_function_names(
+    body: &[Statement],
+    nested: bool,
+    blocked: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
+    let depth = blocked.len();
+    for statement in body {
+        collect_lexical_names(statement, blocked);
+    }
+    for statement in body {
+        if nested
+            && let StatementKind::Function(function) = &statement.kind
+            && let Some(name) = &function.name
+            // Only a plain function declaration. A generator or an async function inside a block
+            // is block-scoped and nothing more; Annex B never mentions either.
+            && !function.generator
+            && !function.asynchronous
+            && !blocked.contains(name)
+            && !out.contains(name)
+        {
+            out.push(name.clone());
+        }
+        collect_annexb_in_statement(statement, blocked, out);
+    }
+    blocked.truncate(depth);
+}
+
+/// Walk one statement for the nested lists Annex B looks inside, without leaving this variable
+/// environment: a nested function owns its own, and so does a class body.
+fn collect_annexb_in_statement(
+    statement: &Statement,
+    blocked: &mut Vec<String>,
+    out: &mut Vec<String>,
+) {
+    match &statement.kind {
+        StatementKind::Block(body) => collect_annexb_function_names(body, true, blocked, out),
+        StatementKind::If {
+            consequent,
+            alternate,
+            ..
+        } => {
+            collect_annexb_branch(consequent, blocked, out);
+            if let Some(alternate) = alternate {
+                collect_annexb_branch(alternate, blocked, out);
+            }
+        }
+        StatementKind::While { body, .. } | StatementKind::DoWhile { body, .. } => {
+            collect_annexb_in_statement(body, blocked, out);
+        }
+        // A label does not open a scope, so a declaration under one is at whatever level the
+        // label is: `l: function f() {}` at the top of a body is var-scoped already.
+        StatementKind::Labelled { body, .. } => collect_annexb_in_statement(body, blocked, out),
+        StatementKind::With { body, .. } => collect_annexb_in_statement(body, blocked, out),
+        StatementKind::For { init, body, .. } => {
+            let depth = blocked.len();
+            if let Some(init) = init {
+                collect_lexical_names(init, blocked);
+            }
+            collect_annexb_in_statement(body, blocked, out);
+            blocked.truncate(depth);
+        }
+        StatementKind::ForIn {
+            kind, name, body, ..
+        } => {
+            let depth = blocked.len();
+            if *kind != VariableKind::Var {
+                blocked.push(name.clone());
+            }
+            collect_annexb_in_statement(body, blocked, out);
+            blocked.truncate(depth);
+        }
+        StatementKind::ForOf {
+            kind,
+            pattern,
+            body,
+            ..
+        } => {
+            let depth = blocked.len();
+            if *kind != VariableKind::Var {
+                pattern_names_in_order(pattern, blocked);
+            }
+            collect_annexb_in_statement(body, blocked, out);
+            blocked.truncate(depth);
+        }
+        // Every clause of a `switch` shares one lexical scope, so a `let` in any of them blocks
+        // a function declaration in all of them.
+        StatementKind::Switch { cases, .. } => {
+            let depth = blocked.len();
+            for case in cases {
+                for statement in &case.body {
+                    collect_lexical_names(statement, blocked);
+                }
+            }
+            for case in cases {
+                for statement in &case.body {
+                    if let StatementKind::Function(function) = &statement.kind
+                        && let Some(name) = &function.name
+                        && !function.generator
+                        && !function.asynchronous
+                        && !blocked.contains(name)
+                        && !out.contains(name)
+                    {
+                        out.push(name.clone());
+                    }
+                    collect_annexb_in_statement(statement, blocked, out);
+                }
+            }
+            blocked.truncate(depth);
+        }
+        StatementKind::Try {
+            block,
+            handler,
+            finalizer,
+        } => {
+            collect_annexb_function_names(block, true, blocked, out);
+            if let Some(handler) = handler {
+                // B.3.4 removes the early error for `catch (e) { var e; }`, so a catch parameter
+                // does not block -- and the HIR carries only the simple form, which is exactly
+                // the one the exemption is written for.
+                collect_annexb_function_names(&handler.body, true, blocked, out);
+            }
+            collect_annexb_function_names(finalizer, true, blocked, out);
+        }
+        _ => {}
+    }
+}
+
+/// An `if` branch is a statement rather than a list, and a function declaration written directly
+/// as one is the form Annex B B.3.4 exists for: `if (x) function f() {}`.
+fn collect_annexb_branch(statement: &Statement, blocked: &mut Vec<String>, out: &mut Vec<String>) {
+    if let StatementKind::Function(function) = &statement.kind
+        && let Some(name) = &function.name
+        && !function.generator
+        && !function.asynchronous
+        && !blocked.contains(name)
+        && !out.contains(name)
+    {
+        out.push(name.clone());
+    }
+    collect_annexb_in_statement(statement, blocked, out);
+}
+
+/// The names one statement declares lexically, which are the ones a `var` of the same name could
+/// not join.
+fn collect_lexical_names(statement: &Statement, names: &mut Vec<String>) {
+    match &statement.kind {
+        StatementKind::Variable { kind, declarations } if *kind != VariableKind::Var => {
+            for declaration in declarations {
+                pattern_names_in_order(&declaration.pattern, names);
+            }
+        }
+        StatementKind::Class(class) => {
+            if let Some(name) = &class.name {
+                names.push(name.clone());
+            }
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8019,7 +9163,10 @@ mod tests {
             source: "".into(),
             strict: false,
             source_kind: kiln_hir::SourceKind::JavaScript,
-            source_goal: kiln_hir::SourceGoal::Module,
+            // Script, because these fixtures are bodies rather than ESM: the goal now decides
+            // strictness, and calling them modules would compile every one of them strict and
+            // quietly stop the sloppy cases below from being sloppy cases.
+            source_goal: kiln_hir::SourceGoal::Script,
             items: Vec::new(),
             body,
             requested_modules: Vec::new(),
@@ -8159,6 +9306,9 @@ mod tests {
                     declaration: EvalDeclaration::Var,
                 }],
                 strict: false,
+                global_var_scope: false,
+                script: false,
+                ..EvalOptions::default()
             },
         )
         .expect("the eval source compiles");
@@ -8222,7 +9372,7 @@ mod tests {
                 is_static: false,
                 kind: kiln_hir::MethodKind::Normal,
             }],
-            fields: Vec::new(),
+            initialisers: Vec::new(),
             span: Span::default(),
         };
         let (_, strictness) = compile_with_strictness(
@@ -8301,6 +9451,9 @@ mod tests {
             &EvalOptions {
                 outer: outer(),
                 strict: false,
+                global_var_scope: false,
+                script: false,
+                ..EvalOptions::default()
             },
         )
         .expect("the sloppy eval compiles");
@@ -8314,6 +9467,9 @@ mod tests {
             &EvalOptions {
                 outer: outer(),
                 strict: true,
+                global_var_scope: false,
+                script: false,
+                ..EvalOptions::default()
             },
         )
         .expect("the strict eval compiles");
@@ -8935,7 +10091,7 @@ mod tests {
                     is_static: false,
                     kind: kiln_hir::MethodKind::Normal,
                 }],
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             }))),
         ]))
@@ -8988,7 +10144,7 @@ mod tests {
                 is_static: true,
                 kind: kiln_hir::MethodKind::Normal,
             }],
-            fields: Vec::new(),
+            initialisers: Vec::new(),
             span: Span::default(),
         };
         let make = kiln_hir::Function {
@@ -9015,11 +10171,11 @@ mod tests {
                     is_static: true,
                     kind: kiln_hir::MethodKind::Normal,
                 }],
-                fields: vec![ClassField {
+                initialisers: vec![ClassInitialiser::Field(ClassField {
                     key: ObjectKey::Private("x".to_owned()),
                     value: Some(number(1.0)),
                     is_static: true,
-                }],
+                })],
                 span: Span::default(),
             },
         )))]))
@@ -9086,7 +10242,7 @@ mod tests {
                 superclass: None,
                 constructor: Some(constructor),
                 methods: Vec::new(),
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             })))],
             span: Span::default(),
@@ -9128,7 +10284,7 @@ mod tests {
                 superclass: None,
                 constructor: None,
                 methods: Vec::new(),
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             }))),
             statement(StatementKind::Class(Box::new(kiln_hir::Class {
@@ -9153,7 +10309,7 @@ mod tests {
                     span: Span::default(),
                 }),
                 methods: Vec::new(),
-                fields: Vec::new(),
+                initialisers: Vec::new(),
                 span: Span::default(),
             }))),
         ]))
@@ -9274,7 +10430,7 @@ mod tests {
                     superclass: None,
                     constructor: None,
                     methods: Vec::new(),
-                    fields: Vec::new(),
+                    initialisers: Vec::new(),
                     span: Span::default(),
                 })),
                 span: Span::default(),

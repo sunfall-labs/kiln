@@ -28,6 +28,7 @@ use crate::harness::{
     ASYNC_COMPLETE, ASYNC_FAILURE, ASYNC_INCLUDE, HOST_CAPABILITY_MARKER, HOST_OBJECT_PRELUDE,
     Harness,
 };
+use crate::worker::InterpreterWorker;
 
 /// Execute one Test262 case in the requested mode, without an assertion harness.
 pub fn run_case(case: &TestCase, mode: RunMode) -> CaseResult {
@@ -58,13 +59,47 @@ pub fn run_case_variants_with_harness(
     mode: RunMode,
     harness: Option<&Harness>,
 ) -> Vec<VariantResult> {
-    variants(case)
-        .into_iter()
-        .map(|variant| VariantResult {
+    run_case_variants_with_harness_and_worker(case, mode, harness, None)
+}
+
+pub(crate) fn run_case_variants_with_harness_and_worker(
+    case: &TestCase,
+    mode: RunMode,
+    harness: Option<&Harness>,
+    mut worker: Option<&mut InterpreterWorker>,
+) -> Vec<VariantResult> {
+    let mut results = Vec::new();
+    for variant in variants(case) {
+        if let Some(worker) = worker.as_deref_mut()
+            && let Err(error) = worker.recover()
+        {
+            results.push(VariantResult {
+                variant,
+                result: CaseResult::new(
+                    Outcome::Fail,
+                    vec![Diagnostic::new(
+                        DiagnosticPhase::Runtime,
+                        format!("rebuilding conformance worker after a panic: {error}"),
+                        None,
+                    )],
+                    String::new(),
+                    Instant::now(),
+                ),
+            });
+            continue;
+        }
+        results.push(VariantResult {
             variant,
-            result: run_variant_with_harness(case, mode, variant, harness),
-        })
-        .collect()
+            result: run_variant_with_harness_and_worker(
+                case,
+                mode,
+                variant,
+                harness,
+                worker.as_deref_mut(),
+            ),
+        });
+    }
+    results
 }
 
 /// Run one explicit Test262 realm variant without an assertion harness.
@@ -80,16 +115,22 @@ pub fn run_variant_with_harness(
     variant: Variant,
     harness: Option<&Harness>,
 ) -> CaseResult {
+    run_variant_with_harness_and_worker(case, mode, variant, harness, None)
+}
+
+fn run_variant_with_harness_and_worker(
+    case: &TestCase,
+    mode: RunMode,
+    variant: Variant,
+    harness: Option<&Harness>,
+    worker: Option<&mut InterpreterWorker>,
+) -> CaseResult {
     let started = Instant::now();
-    // `eval` and `Function` compile source while a program is running, and the interpreter has no
-    // frontend of its own to do it with. Installing one here rather than at startup is what keeps
-    // this crate's execution path the same one the CLI takes -- a VM per case, nothing global.
-    crate::source_compiler::install();
-    // `import()` names its module at run time, so the linker has to be reachable from a running
+    // `import()` names its module at run time, so the loader has to be reachable from a running
     // program too. It is rooted at the test's own directory, which is where every fixture the
     // corpus imports lives.
     if let Some(directory) = case.path.parent() {
-        crate::module_loader::install(directory);
+        crate::module_loader::set_base(directory);
     }
     // A compiler or interpreter bug reached by one test must not take the run with it. Before
     // this, a single `unreachable!` in lowering aborted the process, and a sweep of
@@ -97,7 +138,7 @@ pub fn run_variant_with_harness(
     // corpus -- the one result a conformance run must never produce, because it looks like the
     // area was measured. A panic is a failure of that test, recorded like any other.
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_variant_uncaught(case, mode, variant, harness, started)
+        run_variant_uncaught(case, mode, variant, harness, worker, started)
     }));
     match outcome {
         Ok(result) => result,
@@ -126,6 +167,7 @@ fn run_variant_uncaught(
     mode: RunMode,
     variant: Variant,
     harness: Option<&Harness>,
+    worker: Option<&mut InterpreterWorker>,
     started: Instant,
 ) -> CaseResult {
     let mut diagnostics = Vec::new();
@@ -273,6 +315,7 @@ fn run_variant_uncaught(
             conformance_limits(case),
             diagnostics,
             prefix_len,
+            worker,
             started,
         );
     };
@@ -294,7 +337,7 @@ fn run_variant_uncaught(
     }
 
     let (program, strictness) =
-        match kiln_ir::compile_with_strictness(&module, kiln_ir::CompileOptions::default()) {
+        match kiln_ir::compile_with_strictness(&module, script_compile_options()) {
             Ok(compiled) => compiled,
             Err(compile_diagnostics) => {
                 let unsupported = compile_diagnostics
@@ -323,12 +366,23 @@ fn run_variant_uncaught(
         };
 
     let mut host = CaptureHost::new();
-    match execute_reclaiming_with_strictness(
-        std::rc::Rc::new(program),
-        std::rc::Rc::new(strictness),
-        &mut host,
-        conformance_limits(case),
-    ) {
+    let outcome = match worker {
+        Some(worker) => worker.execute_reclaiming(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            conformance_limits(case),
+            crate::source_compiler::capabilities(),
+        ),
+        None => execute_reclaiming_with_strictness(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            conformance_limits(case),
+            crate::source_compiler::capabilities(),
+        ),
+    };
+    match outcome {
         Ok(_) => {
             diagnostics.push(Diagnostic::new(
                 DiagnosticPhase::Runtime,
@@ -359,16 +413,30 @@ fn run_variant_uncaught(
     }
 }
 
+/// A Test262 case is *global code*, so its top-level `var` and function declarations belong to
+/// the global object and not to a frame of their own.
+///
+/// Said here rather than derived from the parse goal, because kiln parses a CommonJS body with
+/// the script grammar too and a CommonJS body has a variable environment of its own. The module
+/// flag is handled inside the compiler, which refuses global code for a Module goal.
+fn script_compile_options() -> kiln_ir::CompileOptions {
+    kiln_ir::CompileOptions {
+        global_code: true,
+        ..kiln_ir::CompileOptions::default()
+    }
+}
+
 fn execute_positive(
     is_async: bool,
     module: &kiln_hir::Module,
     limits: ExecutionLimits,
     diagnostics: Vec<Diagnostic>,
     prefix_len: usize,
+    worker: Option<&mut InterpreterWorker>,
     started: Instant,
 ) -> CaseResult {
     let (program, strictness) =
-        match kiln_ir::compile_with_strictness(module, kiln_ir::CompileOptions::default()) {
+        match kiln_ir::compile_with_strictness(module, script_compile_options()) {
             Ok(compiled) => compiled,
             Err(compile_diagnostics) => {
                 return compile_failure(compile_diagnostics, diagnostics, prefix_len, started);
@@ -376,12 +444,22 @@ fn execute_positive(
         };
 
     let mut host = CaptureHost::new();
-    let outcome = execute_reclaiming_with_strictness(
-        std::rc::Rc::new(program),
-        std::rc::Rc::new(strictness),
-        &mut host,
-        limits,
-    )
+    let outcome = match worker {
+        Some(worker) => worker.execute_reclaiming(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            limits,
+            crate::source_compiler::capabilities(),
+        ),
+        None => execute_reclaiming_with_strictness(
+            std::rc::Rc::new(program),
+            std::rc::Rc::new(strictness),
+            &mut host,
+            limits,
+            crate::source_compiler::capabilities(),
+        ),
+    }
     .map(|_| ());
     finish_run(outcome, host, is_async, diagnostics, started)
 }
@@ -409,8 +487,14 @@ fn execute_module_case(
     let is_async = has_flag(case, "async");
     let linked = if program.dependencies.is_empty() && program.imports.is_empty() {
         let mut host = CaptureHost::new();
-        let outcome =
-            execute_module(&program, &[], &mut host, conformance_limits(case)).map(|_| ());
+        let outcome = execute_module(
+            &program,
+            &[],
+            &mut host,
+            conformance_limits(case),
+            crate::source_compiler::capabilities(),
+        )
+        .map(|_| ());
         Ok((outcome, host))
     } else {
         link_and_execute(case, program)
@@ -548,7 +632,11 @@ fn link_and_execute(
 ) -> Result<(Result<(), ExecutionError>, CaptureHost), LinkFailure> {
     let graph = build_module_graph(case, entry_program)?;
     let mut host = CaptureHost::new();
-    match graph.execute(&mut host, conformance_limits(case)) {
+    match graph.execute(
+        &mut host,
+        conformance_limits(case),
+        crate::source_compiler::capabilities(),
+    ) {
         Ok(_) => Ok((Ok(()), host)),
         Err(ModuleGraphError::Execution { error, .. }) => Ok((Err(error), host)),
         Err(error) => Err(classify_graph_error(&error)),
@@ -687,9 +775,6 @@ fn classify_graph_error(error: &ModuleGraphError) -> LinkFailure {
         | ModuleGraphError::DuplicateExport { .. }
         | ModuleGraphError::UnresolvedImport { .. }
         | ModuleGraphError::Resolve { .. } => LinkFailure::Link(message),
-        // A cycle is legal JavaScript that this graph deliberately does not accept, so refusing it
-        // is a statement about the linker rather than about the test.
-        ModuleGraphError::Cycle { .. } => LinkFailure::OutOfReach(message),
         ModuleGraphError::Compile { diagnostics, .. } => {
             if diagnostics
                 .iter()
@@ -1033,8 +1118,11 @@ pub(crate) fn is_intentionally_unsupported(message: &str) -> bool {
 fn unsupported_case_requirement(case: &TestCase, harness: Option<&Harness>) -> Option<String> {
     // `[[CanBlock]]` is a property of the agent, and Test262 splits the pair of cases that turn
     // on it. `CanBlockIsFalse` describes a host whose main agent may not suspend -- a browser's
-    // main thread. This one may: `Atomics.wait` sleeps its timeout out. Running the case anyway
-    // would demand a `TypeError` this agent has no reason to raise.
+    // main thread. This one may, and the reason has changed: it used to be that `Atomics.wait`
+    // sleeps its timeout out, which is a weak sort of blocking. It now genuinely suspends the
+    // agent until another agent's `Atomics.notify` wakes it, so `[[CanBlock]]` is true of both
+    // the main agent and every agent `$262.agent.start` makes. Running these cases anyway would
+    // demand a `TypeError` no agent here has a reason to raise.
     if has_flag(case, "CanBlockIsFalse") {
         return Some("this agent's [[CanBlock]] is true".to_owned());
     }
@@ -1366,8 +1454,9 @@ mod tests {
         // test has moved five times as coverage grew -- `function f() {}`, `switch (0) {}`,
         // `async function f() {}`, `#private` and `with` all stopped refusing. That churn is the
         // signal working, though: a refused construct must never be scored as a negative test's
-        // expected failure. A class static block is what is left; when it lands, move this again.
-        let mut negative = case("class C { static { } }\n");
+        // expected failure. A *private* class accessor property is what is left; when it lands,
+        // move this again.
+        let mut negative = case("class C { accessor #x = 1; }\n");
         negative.metadata.flags.push("raw".to_owned());
         negative.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,
@@ -1465,7 +1554,12 @@ mod tests {
 
         // The host prelude deliberately throws an Error-shaped value for unavailable facilities;
         // this must remain Unsupported rather than satisfying a runtime-negative `Error` case.
-        let mut host_refusal = case("$262.agent.start();");
+        //
+        // The example has to be a facility this runner really does not provide, so it moves as
+        // the runner grows: it was `$262.agent.start` until agents arrived. `$262.gc` is the
+        // remaining one, and it is refused because a collector is not something a program may
+        // ask this engine to run rather than because nobody has written it.
+        let mut host_refusal = case("$262.gc();");
         host_refusal.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,
             type_name: "Error".to_owned(),
@@ -1505,6 +1599,104 @@ mod tests {
     }
 
     #[test]
+    fn a_second_realm_owns_its_intrinsics() {
+        // The whole of what a realm is, asked four ways. Each assertion is one a shared-intrinsic
+        // implementation would answer confidently and wrongly, which is why they are spelled out
+        // rather than summarised: `other.Array === Array` passing is not a smaller failure than
+        // the suite's, it is the same failure with nothing watching.
+        let mut probe = case(
+            "var other = $262CreateRealm();\n             if (other === globalThis) throw new Error('same global');\n             if (other.Array === Array) throw new Error('shared constructor');\n             if (other.Array.prototype === Array.prototype) throw new Error('shared prototype');\n             if (other.Array.prototype.constructor !== other.Array) throw new Error('constructor left its realm');\n             if (Array.prototype.constructor !== Array) throw new Error('constructor changed realm');\n             if (!Array.isArray(new other.Array())) throw new Error('a foreign array is not an array');\n             if (new other.Array() instanceof Array) throw new Error('a foreign array is this realm\\'s');\n             var C = new other.Function();\n             C.prototype = null;\n             var made = Reflect.construct(Object, [], C);\n             if (Object.getPrototypeOf(made) !== other.Object.prototype) throw new Error('prototype came from the wrong realm');\n             console.log('realms');",
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        let result = run_case(&probe, RunMode::Interpreter);
+        assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        assert_eq!(result.stdout, "realms\n");
+    }
+
+    #[test]
+    fn a_second_agent_shares_memory_and_answers_a_wait() {
+        // Spelled with the engine's own hooks rather than through `$262`, because a `raw` case
+        // gets no host prelude -- the same shape `a_second_realm_owns_its_intrinsics` uses. The
+        // agent's *own* source does get one, which is what its `$262.agent.report` reaches.
+        //
+        // The three things a second agent is, asked once each: it runs, it sees the *same* bytes
+        // through a broadcast `SharedArrayBuffer` rather than a copy, and an `Atomics.wait` in
+        // one agent is ended by an `Atomics.notify` in the other. Every one of them answers
+        // "timed-out" and 0 in an engine with a single agent, which is the state this replaces --
+        // so a regression here would look like nothing at all in the aggregate.
+        let mut probe = case(
+            "var i32a = new Int32Array(new SharedArrayBuffer(8));
+             $262AgentStart(`
+               $262.agent.receiveBroadcast(function (sab) {
+                 var view = new Int32Array(sab);
+                 Atomics.add(view, 1, 1);
+                 $262.agent.report(Atomics.wait(view, 0, 0));
+                 $262.agent.leaving();
+               });
+             `);
+             $262AgentBroadcast(i32a.buffer);
+             while (Atomics.load(i32a, 1) !== 1) { /* the agent is starting */ }
+             $262AgentSleep(10);
+             if (Atomics.notify(i32a, 0, 1) !== 1) throw new Error('notify woke nobody');
+             var report;
+             while ((report = $262AgentGetReport()) === null) { $262AgentSleep(1); }
+             console.log(report);",
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        let result = run_case(&probe, RunMode::Interpreter);
+        assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        assert_eq!(result.stdout, "ok\n");
+    }
+
+    #[test]
+    fn two_agents_interleave_the_same_way_every_time() {
+        // The property the whole design exists for. A wall-clock race between two OS threads
+        // would answer this differently on a loaded machine, and a conformance number that moves
+        // with the machine's load is not a measurement (ADR 0020). The schedule here is decided
+        // by an instruction quantum and a virtual clock, so ten runs give one answer -- and the
+        // program is the one Test262 writes: three agents wait, exactly one is woken.
+        let source = "var i32a = new Int32Array(new SharedArrayBuffer(16));
+             for (var i = 0; i < 3; i++) {
+               $262AgentStart(`
+                 $262.agent.receiveBroadcast(function (sab) {
+                   var view = new Int32Array(sab);
+                   Atomics.add(view, 1, 1);
+                   $262.agent.report(Atomics.wait(view, 0, 0, 1000));
+                   $262.agent.leaving();
+                 });
+               `);
+             }
+             $262AgentBroadcast(i32a.buffer);
+             while (Atomics.load(i32a, 1) !== 3) { /* the agents are starting */ }
+             $262AgentSleep(100);
+             console.log(Atomics.notify(i32a, 0, 1));
+             $262AgentSleep(2000);
+             var reports = [];
+             for (var i = 0; i < 3; i++) {
+               var report;
+               while ((report = $262AgentGetReport()) === null) { $262AgentSleep(1); }
+               reports.push(report);
+             }
+             reports.sort();
+             console.log(reports.join(','));";
+        let mut answers = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            let mut probe = case(source);
+            probe.metadata.flags.push("raw".to_owned());
+            let result = run_case(&probe, RunMode::Interpreter);
+            assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+            answers.insert(result.stdout);
+        }
+        assert_eq!(
+            answers,
+            ["1\nok,timed-out,timed-out\n".to_owned()]
+                .into_iter()
+                .collect(),
+            "the same program produced more than one interleaving"
+        );
+    }
+
+    #[test]
     fn each_interpreter_case_gets_fresh_host_state() {
         let mut first_case = case("console.log('one');");
         first_case.metadata.flags.push("raw".to_owned());
@@ -1516,6 +1708,45 @@ mod tests {
         assert_eq!(second.outcome, Outcome::Pass);
         assert_eq!(first.stdout, "one\n");
         assert_eq!(second.stdout, "two\n");
+    }
+
+    #[test]
+    fn a_resident_worker_reuses_its_scheduler_without_reusing_realm_state() {
+        let mut worker = InterpreterWorker::new().expect("build resident interpreter worker");
+        let mut first_case = case(
+            "globalThis.workerLeak = 1;\n\
+             Array.prototype.workerLeak = 2;\n\
+             console.log(Date.now());\n\
+             setTimeout(() => console.log('first timer'), 5);",
+        );
+        first_case.metadata.flags.push("raw".to_owned());
+        let first = run_case_variants_with_harness_and_worker(
+            &first_case,
+            RunMode::Interpreter,
+            None,
+            Some(&mut worker),
+        );
+        assert_eq!(first[0].result.outcome, Outcome::Pass);
+        assert_eq!(first[0].result.stdout, "0\nfirst timer\n");
+        assert_eq!(worker.completed_executions(), 1);
+
+        let mut second_case = case(
+            "if (globalThis.workerLeak !== undefined) throw new Error('global leaked');\n\
+             if ([].workerLeak !== undefined) throw new Error('prototype leaked');\n\
+             console.log(Date.now());\n\
+             setTimeout(() => console.log('second timer'), 0);",
+        );
+        second_case.metadata.flags.push("raw".to_owned());
+        let second = run_case_variants_with_harness_and_worker(
+            &second_case,
+            RunMode::Interpreter,
+            None,
+            Some(&mut worker),
+        );
+        assert_eq!(second[0].result.outcome, Outcome::Pass);
+        assert_eq!(second[0].result.stdout, "0\nsecond timer\n");
+        assert_eq!(worker.completed_executions(), 2);
+        assert!(worker.is_reusable());
     }
 
     #[test]

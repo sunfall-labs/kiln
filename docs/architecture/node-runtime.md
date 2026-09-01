@@ -135,6 +135,14 @@ Shutdown is structured and realm-owned: stop admitting work, cancel outstanding 
 resources, drain cancellation acknowledgements that affect language state, then drop the provider.
 Dropping a Tokio runtime is never used as the observable cancellation protocol.
 
+This ordering is enforced at the runtime/provider type boundary. Every `RealmHostProvider` must
+implement an idempotent terminal shutdown operation, and `RealmRuntime::shutdown` is the only
+orchestrator: it enters a closing state before aborting HTTP transports, retires their correlated
+request identities, asks the provider to cancel remaining work and release its resource table, and
+then becomes closed. `RealmRuntime::drop` invokes the same path. New provider implementations
+therefore fail to compile until they define teardown, and work submitted through a closed runtime
+is rejected rather than being left to Tokio field-drop order.
+
 ## Determinism
 
 Determinism is a realm configuration, not a second runtime. The default capability policy uses a

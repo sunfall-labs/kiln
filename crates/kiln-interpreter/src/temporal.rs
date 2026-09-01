@@ -16,7 +16,7 @@ use std::rc::Rc;
 use kiln_host_abi::HostOps;
 use kiln_temporal as engine;
 
-use crate::{ErrorKind, ExecutionError, Native, Value, Vm};
+use crate::{ErrorKind, ExecutionError, Native, RealmId, Value, Vm};
 
 /// What a `Native::Temporal` stands for.
 ///
@@ -148,45 +148,61 @@ const fn method_name(method: Method) -> &'static str {
 /// `Temporal.X` and `Temporal.X.from`: what a *static* read off one of these answers.
 pub fn static_property(op: Op, name: &str) -> Option<Value> {
     Some(match (op, name) {
-        (Op::Namespace, "Now") => Value::Native(Native::Temporal(Op::Now)),
-        (Op::Namespace, _) => Value::Native(Native::Temporal(Op::Constructor(named_kind(name)?))),
-        (Op::Now, "instant") => Value::Native(Native::Temporal(Op::NowRead(engine::Kind::Instant))),
-        (Op::Now, "plainDateISO") => {
-            Value::Native(Native::Temporal(Op::NowRead(engine::Kind::PlainDate)))
+        (Op::Namespace, "Now") => Value::Native(Native::Temporal(Op::Now), RealmId::PRIMARY),
+        (Op::Namespace, _) => Value::Native(
+            Native::Temporal(Op::Constructor(named_kind(name)?)),
+            RealmId::PRIMARY,
+        ),
+        (Op::Now, "instant") => Value::Native(
+            Native::Temporal(Op::NowRead(engine::Kind::Instant)),
+            RealmId::PRIMARY,
+        ),
+        (Op::Now, "plainDateISO") => Value::Native(
+            Native::Temporal(Op::NowRead(engine::Kind::PlainDate)),
+            RealmId::PRIMARY,
+        ),
+        (Op::Now, "plainTimeISO") => Value::Native(
+            Native::Temporal(Op::NowRead(engine::Kind::PlainTime)),
+            RealmId::PRIMARY,
+        ),
+        (Op::Now, "plainDateTimeISO") => Value::Native(
+            Native::Temporal(Op::NowRead(engine::Kind::PlainDateTime)),
+            RealmId::PRIMARY,
+        ),
+        (Op::Now, "zonedDateTimeISO") => Value::Native(
+            Native::Temporal(Op::NowRead(engine::Kind::ZonedDateTime)),
+            RealmId::PRIMARY,
+        ),
+        (Op::Now, "timeZoneId") => {
+            Value::Native(Native::Temporal(Op::NowTimeZoneId), RealmId::PRIMARY)
         }
-        (Op::Now, "plainTimeISO") => {
-            Value::Native(Native::Temporal(Op::NowRead(engine::Kind::PlainTime)))
-        }
-        (Op::Now, "plainDateTimeISO") => {
-            Value::Native(Native::Temporal(Op::NowRead(engine::Kind::PlainDateTime)))
-        }
-        (Op::Now, "zonedDateTimeISO") => {
-            Value::Native(Native::Temporal(Op::NowRead(engine::Kind::ZonedDateTime)))
-        }
-        (Op::Now, "timeZoneId") => Value::Native(Native::Temporal(Op::NowTimeZoneId)),
         (Op::Constructor(kind), "prototype") => {
-            Value::Native(Native::Temporal(Op::Prototype(kind)))
+            Value::Native(Native::Temporal(Op::Prototype(kind)), RealmId::PRIMARY)
         }
-        (Op::Constructor(kind), "from") => Value::Native(Native::Temporal(Op::From(kind))),
+        (Op::Constructor(kind), "from") => {
+            Value::Native(Native::Temporal(Op::From(kind)), RealmId::PRIMARY)
+        }
         // `Temporal.PlainMonthDay` has no ordering: two month-days in different calendars name no
         // point on any timeline, so the language does not offer a `compare` to get wrong.
         (Op::Constructor(kind), "compare") if kind != engine::Kind::PlainMonthDay => {
-            Value::Native(Native::Temporal(Op::Compare(kind)))
+            Value::Native(Native::Temporal(Op::Compare(kind)), RealmId::PRIMARY)
         }
-        (Op::Constructor(engine::Kind::Instant), "fromEpochMilliseconds") => {
-            Value::Native(Native::Temporal(Op::Method(Method::ToInstant)))
-        }
+        (Op::Constructor(engine::Kind::Instant), "fromEpochMilliseconds") => Value::Native(
+            Native::Temporal(Op::Method(Method::ToInstant)),
+            RealmId::PRIMARY,
+        ),
         (Op::Prototype(kind), "constructor") => {
-            Value::Native(Native::Temporal(Op::Constructor(kind)))
+            Value::Native(Native::Temporal(Op::Constructor(kind)), RealmId::PRIMARY)
         }
         // The tag lives on the prototype, which is where an instance reads it from and where a
         // program that borrows `Object.prototype.toString` finds it.
         (Op::Prototype(kind), name) if name == crate::WellKnown::ToStringTag.property_key() => {
             Value::String(kind.tag().to_owned())
         }
-        (Op::Prototype(kind), _) => {
-            Value::Native(Native::Temporal(Op::Method(prototype_method(kind, name)?)))
-        }
+        (Op::Prototype(kind), _) => Value::Native(
+            Native::Temporal(Op::Method(prototype_method(kind, name)?)),
+            RealmId::PRIMARY,
+        ),
         _ => return None,
     })
 }
@@ -227,9 +243,10 @@ pub fn instance_property(value: &engine::TemporalValue, name: &str) -> Option<Va
             engine::Field::Undefined => Value::Undefined,
         });
     }
-    Some(Value::Native(Native::Temporal(Op::Method(
-        prototype_method(value.kind(), name)?,
-    ))))
+    Some(Value::Native(
+        Native::Temporal(Op::Method(prototype_method(value.kind(), name)?)),
+        RealmId::PRIMARY,
+    ))
 }
 
 /// Which methods each of the eight types answers to.

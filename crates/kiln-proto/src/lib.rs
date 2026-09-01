@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -545,6 +545,11 @@ pub enum Request {
     Test {
         root: String,
         mode: TestMode,
+        /// Canonical root against which `changed_paths` are relative. The daemon only reuses a
+        /// resident corpus when that root contains the corpus, so an external checkout cannot be
+        /// mistaken for unchanged project state.
+        #[serde(default)]
+        changed_root: Option<String>,
         /// `None` requests the complete corpus; `Some` requests failures, smoke, and tests
         /// affected by these repository-relative paths.
         changed_paths: Option<Vec<String>>,
@@ -725,6 +730,10 @@ pub struct TestReasonSummary {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestSummary {
     pub discovered: usize,
+    /// Whether this request reused the resident daemon's parsed corpus inventory and harness.
+    /// False for one-shot coordination and whenever corpus inputs require rediscovery.
+    #[serde(default)]
+    pub discovery_cache_hit: bool,
     pub selected: usize,
     pub passed: usize,
     pub failed: usize,
@@ -884,8 +893,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn protocol_v24_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 24);
+    fn protocol_v25_run_step_budget_wire_contract_round_trips() {
+        assert_eq!(PROTOCOL_VERSION, 25);
 
         let requests = [
             (
@@ -976,6 +985,22 @@ mod tests {
                     dry_run: true,
                 },
                 serde_json::json!({"CacheGc": {"project_root": "/project", "dry_run": true}}),
+            ),
+            (
+                Request::Test {
+                    root: "/project/conformance".to_owned(),
+                    mode: TestMode::Node,
+                    changed_root: Some("/project".to_owned()),
+                    changed_paths: Some(vec!["crates/kiln-runtime/src/node_net.rs".to_owned()]),
+                    previously_failed: Vec::new(),
+                },
+                serde_json::json!({"Test": {
+                    "root": "/project/conformance",
+                    "mode": "Node",
+                    "changed_root": "/project",
+                    "changed_paths": ["crates/kiln-runtime/src/node_net.rs"],
+                    "previously_failed": []
+                }}),
             ),
         ];
 
@@ -1068,6 +1093,34 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn test_summary_reports_discovery_reuse_and_defaults_old_payloads_to_cold() {
+        let summary = TestSummary {
+            discovered: 35,
+            discovery_cache_hit: true,
+            selected: 5,
+            passed: 5,
+            ..TestSummary::default()
+        };
+        let encoded = serde_json::to_value(&summary).expect("serialize test summary");
+        assert_eq!(encoded["discovery_cache_hit"], true);
+
+        let legacy = serde_json::json!({
+            "discovered": 35,
+            "selected": 5,
+            "passed": 5,
+            "failed": 0,
+            "unsupported": 0,
+            "skipped": 0,
+            "elapsed_millis": 1,
+            "cases": [],
+            "reasons": []
+        });
+        let decoded: TestSummary =
+            serde_json::from_value(legacy).expect("decode pre-v25 test summary");
+        assert!(!decoded.discovery_cache_hit);
     }
 
     #[test]
