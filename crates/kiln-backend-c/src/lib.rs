@@ -7613,9 +7613,9 @@ static kiln_value kiln_c99_control_diagnostic(void) {
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth) {
     /* A helper may add detail before the generated instruction that owns the failure has had a
-     * chance to name itself. That partial diagnostic is not provenance. Instructions at the same
-     * call depth may refine it as control unwinds; shallower callers must leave it untouched. */
-    if (kiln_c99_diagnostic_site != NULL && depth < kiln_c99_diagnostic_depth) return;
+     * chance to name itself. That partial diagnostic is not provenance. The first instruction at
+     * the deepest call depth owns the site; equal-depth control unwinding must not blame a caller. */
+    if (kiln_c99_diagnostic_site != NULL && depth <= kiln_c99_diagnostic_depth) return;
     kiln_c99_diagnostic_site = site;
     kiln_c99_diagnostic_instruction = instruction;
     kiln_c99_diagnostic_operation = operation;
@@ -25100,8 +25100,8 @@ fn emit_instruction(
         site,
         guarded,
     } = emitter;
-    // A public/module entry instruction starts a fresh diagnostic attempt. Function bodies do
-    // not clear this state: when one calls another, the deepest failing body owns the refusal
+    // A public scalar instruction starts a fresh diagnostic attempt. Function bodies do not
+    // clear this state: when one calls another, the deepest failing body owns the refusal
     // provenance and every caller preserves it while unwinding.
     if matches!(site, ReturnSite::Entry { exports: None, .. }) {
         output.push_str(
@@ -25111,6 +25111,9 @@ fn emit_instruction(
     let before = output.len();
     let instruction_site = c_string(diagnostic_site);
     let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
+    let direct_refusal = format!(
+        "kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); return KILN_C99_CONTROL_ERROR;"
+    );
     let control_refusal = format!(
         "if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) {{ kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth);"
     );
@@ -25173,7 +25176,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value built; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_construct(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = built; }}"
+                "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value built; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_construct(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = built; }}"
             )
             .unwrap();
         }
@@ -25555,7 +25558,7 @@ fn emit_instruction(
             let enumerable = i32::from(*enumerable);
             writeln!(
                 output,
-                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -25573,7 +25576,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value function = stack[--sp]; kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_private(stack[sp - 1], {symbol}_constant_{name}, {len}, function, {tag}) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }}",
+                "    {{ kiln_value function = stack[--sp]; kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private(stack[sp - 1], {symbol}_constant_{name}, {len}, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
                 len = text.len()
             )
             .unwrap();
@@ -25581,9 +25584,11 @@ fn emit_instruction(
         // A class's methods are not enumerated, which is the whole difference from the
         // `SetProperty` an object literal's methods lower to.
         Instruction::DefineMethod => {
-            output.push_str(
-                "    { kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR; if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) return KILN_C99_CONTROL_ERROR; }\n",
-            );
+            writeln!(
+                output,
+                "    {{ kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) {{ {direct_refusal} }} }}"
+            )
+            .unwrap();
         }
         // `in` asks whether the property exists, not what it produces, so unlike a read it does
         // not call an accessor.
@@ -25677,7 +25682,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value self_value = stack[sp - 1]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
+                "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value self_value = stack[sp - 1]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
             )
             .unwrap();
         }
@@ -25687,7 +25692,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = stack[--sp]; kiln_value parent = stack[--sp]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) return KILN_C99_CONTROL_ERROR; given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
+                "    {{ kiln_value list = stack[--sp]; kiln_value parent = stack[--sp]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
             )
             .unwrap();
         }
@@ -27411,6 +27416,35 @@ int main(void) {
             generated
                 .source
                 .contains("Object.defineProperty invalid key or arity")
+        );
+    }
+
+    #[test]
+    fn structural_instruction_refusals_always_name_their_owner() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("structural refusal probe emits");
+        assert!(
+            generated.source.contains("kiln_c99_note_refusal"),
+            "runtime must include the refusal provenance boundary"
+        );
+        let emitter = include_str!("lib.rs");
+        let instruction_emitter = emitter
+            .split("fn emit_instruction(")
+            .nth(1)
+            .expect("instruction emitter")
+            .split("fn instruction_diagnostic(")
+            .next()
+            .expect("instruction emitter end");
+        let templates = instruction_emitter
+            .split("let refusal_target =")
+            .next()
+            .expect("instruction templates");
+        assert!(
+            !templates
+                .lines()
+                .skip(35)
+                .any(|line| line.contains("return KILN_C99_CONTROL_ERROR;")),
+            "instruction templates must route structural refusals through direct_refusal"
         );
     }
 
