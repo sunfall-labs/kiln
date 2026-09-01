@@ -30022,6 +30022,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.call_with_this(closure, argc, instruction, Value::Undefined, None)
     }
 
+    /// The receiver sloppy code actually gets, which is never a primitive.
+    ///
+    /// Modern output rarely reaches this -- a module is strict, and TypeScript emits `"use
+    /// strict"` -- but a CommonJS bundle is sloppy from its first line, and the idiom
+    /// `var root = this;` at the top of a UMD wrapper is *reading the global* through exactly
+    /// this rule.
+    fn bind_sloppy_this(&mut self, receiver: Value) -> Value {
+        match receiver {
+            Value::Undefined | Value::Null => self.global_object(),
+            // The five boxable primitives, listed rather than derived: everything else -- a
+            // function, an array, a proxy, a date, a typed array -- is already an object in the
+            // specification's sense and `ToObject` hands it straight back.
+            primitive @ (Value::String(_)
+            | Value::Number(_)
+            | Value::Boolean(_)
+            | Value::Symbol(_)
+            | Value::BigInt(_)) => wrap_primitive(primitive),
+            other => other,
+        }
+    }
+
     /// Enter a closure with an explicit receiver.
     fn call_with_this(
         &mut self,
@@ -30059,6 +30080,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Some(captured) => captured.clone(),
             None => this_value,
         };
+        // `OrdinaryCallBindThis`: sloppy code never sees a primitive `this`.
+        //
+        // The specification substitutes the global object for `undefined` and `null` and
+        // `ToObject`s everything else, so a sloppy `f.call(7)` receives a `Number` wrapper it can
+        // write a property on and `f()` receives the global. Strict code receives exactly what it
+        // was passed, which is what makes `this` `undefined` in a bare strict call.
+        //
+        // Skipped while constructing, where `this` is the new instance and already an object, and
+        // for an arrow, which has no `this` of its own to bind -- both are settled above and
+        // neither is a receiver this call chose.
+        let entering =
+            if closure.captured_this.is_none() && constructing.is_none() && !closure.is_strict() {
+                self.bind_sloppy_this(entering)
+            } else {
+                entering
+            };
         let target = match &closure.captured_new_target {
             Some(captured) => captured.clone(),
             None if constructing.is_some() => {
