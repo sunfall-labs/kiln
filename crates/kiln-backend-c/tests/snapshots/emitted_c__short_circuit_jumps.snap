@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 751
 expression: body(&unit)
 ---
 /* Program hash: 476c6f33848a04b3; bytecode version: 2. */

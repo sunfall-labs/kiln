@@ -481,6 +481,14 @@ pub struct FunctionProto {
     /// pair cannot say which of the three shapes this is. This is the third bit.
     pub async_generator: bool,
     pub parameter_count: u32,
+    /// Whether this function's `arguments` is the *mapped* kind: the code is sloppy and
+    /// `IsSimpleParameterList` is true.
+    ///
+    /// A fact about the function rather than about the mention, which is why it is here beside
+    /// `arrow` rather than on `LoadArguments`. An arrow captures the enclosing call's object
+    /// where it is created, which can be before anything has mentioned `arguments` -- so the
+    /// answer has to be reachable from the frame, not only from the instruction that asks.
+    pub mapped_arguments: bool,
     /// What `f.length` reports: the parameters before the first one with an initializer, and
     /// before a rest.
     ///
@@ -1628,6 +1636,12 @@ struct Compiler {
     loops: Vec<LoopContext>,
     /// Counter for compiler-introduced bindings, so two in one scope never collide.
     hidden_bindings: usize,
+    /// Whether the function being compiled would be given a *mapped* `arguments` object:
+    /// `IsSimpleParameterList` is true and the code is sloppy.
+    ///
+    /// Recorded here because the mention of `arguments` is compiled far from the parameter list
+    /// that decides it, and only [`Instruction::LoadArguments`] reads it.
+    mapped_arguments: bool,
     /// Whether the function being compiled is an async generator.
     ///
     /// `yield*` is the only thing that reads it, and it needs it because the two generator kinds
@@ -1775,6 +1789,8 @@ impl Compiler {
             hidden_bindings: 0,
             resource_scopes: Vec::new(),
             async_generator: false,
+            // The module body has no parameters and no `arguments`; the flag is a function's.
+            mapped_arguments: false,
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
             next_private_scope: 0,
@@ -5852,6 +5868,23 @@ impl Compiler {
         // written after a strict function is not strict because of it.
         let inherited_strict = self.strict || function.strict;
         let outer_strict = std::mem::replace(&mut self.strict, inherited_strict);
+        // `IsSimpleParameterList`, and the strictness beside it: together they are the
+        // specification's own test for which of the two `arguments` objects this function gets.
+        //
+        // An arrow inherits rather than deciding, because the `arguments` it sees is not its
+        // own: it is the enclosing call's, and so is the kind.
+        let mapped_arguments = if function.arrow {
+            self.mapped_arguments
+        } else {
+            !inherited_strict
+                && function.rest.is_none()
+                && function
+                    .parameters
+                    .iter()
+                    .all(|parameter| matches!(parameter.pattern, Pattern::Identifier(_)))
+        };
+        let outer_mapped_arguments =
+            std::mem::replace(&mut self.mapped_arguments, mapped_arguments);
         let outer = FunctionState {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
@@ -5958,6 +5991,7 @@ impl Compiler {
             .pop()
             .expect("this function pushed its own enclosing state");
         let strict = std::mem::replace(&mut self.strict, outer_strict);
+        self.mapped_arguments = outer_mapped_arguments;
         let proto = FunctionProto {
             name: function.name.clone(),
             arrow: function.arrow,
@@ -5968,6 +6002,7 @@ impl Compiler {
             generator: function.generator || function.asynchronous,
             async_generator: function.generator && function.asynchronous,
             parameter_count,
+            mapped_arguments,
             declared_length,
             local_count: std::mem::replace(&mut self.local_count, restored.local_count),
             prologue_end,

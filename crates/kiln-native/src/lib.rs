@@ -7264,6 +7264,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                         async_generator: false,
                         parameter_count: 0,
                         declared_length: 0,
+                        mapped_arguments: false,
                         local_count: 0,
                         code: vec![
                             Instruction::Const(1),
@@ -7285,6 +7286,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                         async_generator: false,
                         parameter_count: 0,
                         declared_length: 0,
+                        mapped_arguments: false,
                         local_count: 0,
                         code: vec![
                             Instruction::Const(0),
