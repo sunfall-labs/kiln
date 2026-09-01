@@ -66,8 +66,11 @@ function $262For(realmGlobal) {
     createRealm: function () {
       return $262For(realmGlobal.$262CreateRealm());
     },
-    evalScript: function () {
-      throw new Error("kiln: host capability not provided: $262.evalScript");
+    evalScript: function (source) {
+      if (typeof realmGlobal.$262EvalScript !== "function") {
+        throw new Error("kiln: host capability not provided: $262.evalScript");
+      }
+      return realmGlobal.$262EvalScript(source);
     },
     detachArrayBuffer: function (buffer) {
       realmGlobal.ArrayBuffer.prototype.transfer.call(buffer);
@@ -111,8 +114,11 @@ var $262 = {
     }
     return $262For($262CreateRealm());
   },
-  evalScript: function () {
-    throw new Error("kiln: host capability not provided: $262.evalScript");
+  evalScript: function (source) {
+    if (typeof $262EvalScript !== "function") {
+      throw new Error("kiln: host capability not provided: $262.evalScript");
+    }
+    return $262EvalScript(source);
   },
   detachArrayBuffer: function (buffer) {
     ArrayBuffer.prototype.transfer.call(buffer);

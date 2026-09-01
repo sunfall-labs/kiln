@@ -34,8 +34,10 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
     } else {
         request.source.to_owned()
     };
-    // Always a Script. Eval code cannot import or export, and choosing the module goal would
-    // silently accept syntax the language does not allow here.
+    // Always the Script *goal*. Eval code cannot import or export, and choosing the module goal
+    // would silently accept syntax the language does not allow here. That is a different
+    // question from `request.script`, which says whether this text is a Script rather than eval
+    // code and so decides where its `var`s live and whether they can be deleted.
     let module = parse_with_goal("<eval>", &source, SourceGoal::Script);
     if let Some(diagnostic) = module.diagnostics.first() {
         return Err(EvalCompileError::Syntax(diagnostic.message.clone()));
@@ -51,6 +53,7 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
             outer: request.outer.to_vec(),
             strict: request.strict,
             global_var_scope: request.global_var_scope,
+            script: request.script,
         },
     )
     .map_err(|diagnostics| {

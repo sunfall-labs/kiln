@@ -445,6 +445,13 @@ pub enum Native {
     /// the `$262` object it hangs off is assembled by the runner rather than here, because what
     /// a host can do is the host's statement to make.
     HostCreateRealm,
+    /// Evaluate source as a *Script* in this realm, the way Test262's `$262.evalScript` does.
+    ///
+    /// Not `eval`. An indirect `eval` gives strict code a variable environment of its own and
+    /// makes every global binding it does create configurable; a Script does neither, and both
+    /// differences are what the tests reaching for this are about. Reachable only from a realm
+    /// whose host asked for it, for the same reason [`Native::HostCreateRealm`] is.
+    HostEvalScript,
     /// `Map.prototype.getOrInsert` and its three siblings. `weak` says which collection this is
     /// reached through and `computed` whether the value is a callback's result, because the two
     /// differ only in where the value comes from and when it is asked for.
@@ -6524,6 +6531,9 @@ pub struct EvalSource<'a> {
     /// Whether this eval's `var` and function declarations belong to the global environment
     /// record, and so become properties of the global object rather than slots of its own frame.
     pub global_var_scope: bool,
+    /// Whether this source is a Script rather than eval code: its `var`s reach the global object
+    /// even in strict mode, and the bindings it makes there are not configurable.
+    pub script: bool,
 }
 
 /// Why a run-time compilation produced no program.
@@ -13587,7 +13597,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Entered rather than driven: the interpreter loop runs the eval's frame
                     // next, and its `Return` leaves the completion value where this instruction's
                     // result belongs. Nothing is pushed here.
-                    let entered = self.enter_eval(&source, Some(site));
+                    let entered = self.enter_eval(&source, Some(site), false);
                     if self.catchable(entered, current)?.is_none() {
                         continue;
                     }
@@ -15354,6 +15364,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if native == Native::HostCreateRealm {
             return self.create_realm();
+        }
+        if native == Native::HostEvalScript {
+            let source = match arguments.first() {
+                Some(Value::String(source)) => source.clone(),
+                // Unlike `eval`, which hands a non-string straight back: `evalScript` is given
+                // source text or it is given nothing it can run.
+                Some(value) => self.as_string(value, instruction)?,
+                None => String::new(),
+            };
+            return self.drive_eval(&source, None, true);
         }
         // A write through a view onto an immutable buffer is refused before its arguments are
         // converted, and that order is observable: a `valueOf` handed to a setter on such a view
@@ -25432,6 +25452,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 "$262CreateRealm",
                 Value::Native(Native::HostCreateRealm, realm),
             );
+            // Published per realm and carrying it, so `other.$262EvalScript(src)` enters that
+            // realm before it runs and its declarations land on *that* global object.
+            object.borrow_mut().set_non_enumerable(
+                "$262EvalScript",
+                Value::Native(Native::HostEvalScript, realm),
+            );
         }
         self.global_objects[realm.0 as usize] = Some(value.clone());
         value
@@ -31650,7 +31676,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// program binds by name, and its `this`, `arguments` and `new.target` are the caller's --
     /// which is the whole of what "evaluates in the caller's scope" means. Without one, this is
     /// an indirect eval: global scope, the global object as `this`, and no arguments.
-    fn enter_eval(&mut self, source: &str, site: Option<&EvalSite>) -> Result<(), ExecutionError> {
+    fn enter_eval(
+        &mut self,
+        source: &str,
+        site: Option<&EvalSite>,
+        script: bool,
+    ) -> Result<(), ExecutionError> {
         let Some(compile) = self.source_compiler else {
             return Err(ExecutionError::NoSourceCompiler);
         };
@@ -31677,6 +31708,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             outer: &outer,
             strict,
             global_var_scope,
+            script,
         })
         .map_err(|error| match error {
             EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
@@ -31759,6 +31791,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         source: &str,
         site: Option<&EvalSite>,
+        script: bool,
     ) -> Result<Value, ExecutionError> {
         if self.native_depth >= self.limits.max_native_depth {
             return Err(ExecutionError::CallDepthExceeded {
@@ -31768,7 +31801,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         self.native_depth += 1;
         let depth = self.frames.len();
         let outcome = self
-            .enter_eval(source, site)
+            .enter_eval(source, site, script)
             .and_then(|()| self.run_frames(depth).map(|result| result.value));
         self.native_depth -= 1;
         outcome
@@ -32010,7 +32043,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         match arguments.first() {
             Some(Value::String(source)) => {
                 let source = source.clone();
-                self.drive_eval(&source, None)
+                self.drive_eval(&source, None, false)
             }
             Some(value) => Ok(value.clone()),
             None => Ok(Value::Undefined),
@@ -32033,7 +32066,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Some((body, parameters)) = arguments.split_last() else {
-            return self.drive_eval("(function anonymous(\n) {\n\n})", None);
+            return self.drive_eval("(function anonymous(\n) {\n\n})", None, false);
         };
         // Every parameter first, in order, and only then the body. That order is the
         // specification's and it is observable: when both a parameter's `toString` and the
@@ -32049,7 +32082,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The newlines are the specification's own: they stop a `//` comment in the parameter
         // list from swallowing the brace, and one in the body from swallowing the close.
         let source = format!("(function anonymous({joined}\n) {{\n{body}\n}})");
-        self.drive_eval(&source, None)
+        self.drive_eval(&source, None, false)
     }
 
     /// `ToString`: the conversion the *program* defines, which runs its code and can throw.
@@ -34128,9 +34161,9 @@ fn call_native(
         // machine. Arriving here would mean the two dispatch paths disagree.
         // Making a realm is `Vm::create_realm`'s: it has to extend the machine's realm tables,
         // and this path has no machine. Arriving here would mean the two dispatch paths disagree.
-        Native::HostCreateRealm => {
+        Native::HostCreateRealm | Native::HostEvalScript => {
             return Err(ExecutionError::TypeErrorMessage {
-                message: "$262.createRealm reached the machine-free dispatch path".to_owned(),
+                message: "a $262 host facility reached the machine-free dispatch path".to_owned(),
             });
         }
         Native::Temporal(_) => {
@@ -42325,6 +42358,7 @@ const fn native_length(native: Native) -> Option<f64> {
         N::PrototypeOf(_) => return None,
         N::Math | N::Json | N::Reflect | N::Performance => return None,
         N::HostCreateRealm => 0.0,
+        N::HostEvalScript => 1.0,
         // `Intl`'s arities come from its own table: the namespace and the six prototypes are
         // not callable, and the constructors do not all take the same number of arguments.
         N::Intl(op) => match intl::length(op) {

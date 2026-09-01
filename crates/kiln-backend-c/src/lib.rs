@@ -1234,6 +1234,12 @@ method_ids! {
 /// a name is a fact about the program, not about the interpreter's tables.
 const HOST_CREATE_REALM: &str = "$262CreateRealm";
 
+/// The hook a host installs when it lets a program evaluate Script source at run time.
+///
+/// Refused for the same reason `DirectEval` is: this backend has no compiler to reach at run
+/// time. Named separately from `eval` because it is a different name in the program.
+const HOST_EVAL_SCRIPT: &str = "$262EvalScript";
+
 const NATIVE_CONSTRUCTORS: &[NativeConstructor] = &[
     native_constructor!(KILN_C99_METHOD_NODE_EVENT_EMITTER, None, EventEmitter),
     native_constructor!(
@@ -24161,13 +24167,16 @@ fn validate_code(
             | Instruction::CallMethod { name, .. }
                 if matches!(
                     program.constants.get(*name as usize),
-                    Some(Constant::String(text)) if text == HOST_CREATE_REALM
+                    Some(Constant::String(text))
+                        if text == HOST_CREATE_REALM || text == HOST_EVAL_SCRIPT
                 ) =>
             {
+                let hook = match program.constants.get(*name as usize) {
+                    Some(Constant::String(text)) => text.clone(),
+                    _ => HOST_CREATE_REALM.to_owned(),
+                };
                 return Err(EmitError::Unsupported {
-                    feature: format!(
-                        "creating a realm ({HOST_CREATE_REALM}) at instruction {index}"
-                    ),
+                    feature: format!("host realm facility {hook} at instruction {index}"),
                 });
             }
             // A property name is emitted by naming the constant's own C symbol, and only a
@@ -30037,6 +30046,22 @@ int main(void) {{
             };
             assert!(
                 feature.contains(HOST_CREATE_REALM),
+                "the refusal must name what it refused, got {feature}"
+            );
+            let refused_eval = emit(&program(
+                vec![Constant::String(HOST_EVAL_SCRIPT.to_owned())],
+                vec![
+                    Instruction::LoadGlobalBindingOrUndefined(0),
+                    Instruction::Pop,
+                    Instruction::Return,
+                ],
+                0,
+            ));
+            let Err(EmitError::Unsupported { feature }) = refused_eval else {
+                panic!("the backend must refuse {HOST_EVAL_SCRIPT}, not compile it");
+            };
+            assert!(
+                feature.contains(HOST_EVAL_SCRIPT),
                 "the refusal must name what it refused, got {feature}"
             );
         }
