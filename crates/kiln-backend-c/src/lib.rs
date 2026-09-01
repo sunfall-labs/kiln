@@ -7590,9 +7590,9 @@ static kiln_value kiln_c99_control_diagnostic(void) {
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth) {
     /* A helper may add detail before the generated instruction that owns the failure has had a
-     * chance to name itself. That partial diagnostic is not provenance. The innermost instruction
-     * installs the site exactly once; callers see the non-null site and leave it untouched. */
-    if (kiln_c99_diagnostic_site != NULL && depth <= kiln_c99_diagnostic_depth) return;
+     * chance to name itself. That partial diagnostic is not provenance. Instructions at the same
+     * call depth may refine it as control unwinds; shallower callers must leave it untouched. */
+    if (kiln_c99_diagnostic_site != NULL && depth < kiln_c99_diagnostic_depth) return;
     kiln_c99_diagnostic_site = site;
     kiln_c99_diagnostic_instruction = instruction;
     kiln_c99_diagnostic_operation = operation;
