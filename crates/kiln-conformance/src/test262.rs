@@ -1118,8 +1118,11 @@ pub(crate) fn is_intentionally_unsupported(message: &str) -> bool {
 fn unsupported_case_requirement(case: &TestCase, harness: Option<&Harness>) -> Option<String> {
     // `[[CanBlock]]` is a property of the agent, and Test262 splits the pair of cases that turn
     // on it. `CanBlockIsFalse` describes a host whose main agent may not suspend -- a browser's
-    // main thread. This one may: `Atomics.wait` sleeps its timeout out. Running the case anyway
-    // would demand a `TypeError` this agent has no reason to raise.
+    // main thread. This one may, and the reason has changed: it used to be that `Atomics.wait`
+    // sleeps its timeout out, which is a weak sort of blocking. It now genuinely suspends the
+    // agent until another agent's `Atomics.notify` wakes it, so `[[CanBlock]]` is true of both
+    // the main agent and every agent `$262.agent.start` makes. Running these cases anyway would
+    // demand a `TypeError` no agent here has a reason to raise.
     if has_flag(case, "CanBlockIsFalse") {
         return Some("this agent's [[CanBlock]] is true".to_owned());
     }

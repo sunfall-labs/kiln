@@ -9235,6 +9235,11 @@ struct Vm<'host, H: HostOps + ?Sized> {
     agents: Option<Arc<AgentGroup>>,
     /// This machine's agent, zero for the main one.
     agent_id: usize,
+    /// `Atomics.waitAsync` promises this agent is holding, by the scheduler's ticket.
+    ///
+    /// The promise cannot go to the scheduler -- it is `Rc` and belongs to this realm -- so the
+    /// scheduler holds the ticket, and this is where the two are matched up again.
+    async_waits: Vec<(u64, Rc<PromiseData>)>,
     /// Held only by the main agent, and only so that dropping the machine stops the threads.
     agent_owner: Option<AgentOwner>,
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
@@ -9372,6 +9377,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             agent_owner: agents.clone().map(AgentOwner),
             agents,
             agent_id: 0,
+            async_waits: Vec::new(),
             symbol_serial: 0,
             realm: Realm::new(),
             clock_capability: capabilities.clock,
@@ -13008,7 +13014,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // this agent's Rust stack, frames and operand stack all stay exactly where they are,
         // which is the whole reason an agent is a thread rather than a continuation.
         if let Some(group) = &self.agents
-            && group.concurrent()
+            && group.scheduled()
         {
             let group = Arc::clone(group);
             group
@@ -13016,13 +13022,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 .map_err(|_| ExecutionError::AgentTerminated)?;
         }
         self.checkpoint = self.next_checkpoint();
+        // Whatever it settled queues a promise reaction, which the ordinary microtask checkpoint
+        // takes: settling is not itself a checkpoint.
+        self.settle_async_waits()?;
         Ok(())
     }
 
     /// Where the dispatch loop should stop next.
     fn next_checkpoint(&self) -> u64 {
         match &self.agents {
-            Some(group) if group.concurrent() => self
+            Some(group) if group.scheduled() => self
                 .steps
                 .saturating_add(agent::QUANTUM_STEPS)
                 .min(self.limits.max_steps),
@@ -23517,10 +23526,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `.catch` on the next line must not be a failure, and by the time the queue is
             // empty every handler that was going to attach has.
             runtime.enter(|| self.check_unhandled_rejection())?;
+            // Before asking for a timer, because settling a wait queues reactions and those are
+            // microtasks: going straight on to the timer -- or worse, to the return below --
+            // would leave a resolved promise with its `then` unrun.
+            if self.settle_async_waits()? {
+                continue;
+            }
             let Some(WorkItem::Timer { work: timer, .. }) =
                 self.with_realm_mut(|realm| runtime.next_timer(realm))
             else {
-                return Ok(());
+                // This realm has nothing left, but an `Atomics.waitAsync` it made may not have
+                // ended. Returning here would finish the program with a promise nobody could
+                // settle -- so the agent parks until the scheduler says how the wait went, and
+                // the scheduler answers rather than hanging even when nothing ever will.
+                if self.async_waits.is_empty() {
+                    return Ok(());
+                }
+                let Some(group) = self.agents.clone() else {
+                    return Ok(());
+                };
+                if group.await_async(self.agent_id).is_err() {
+                    return Err(ExecutionError::AgentTerminated);
+                }
+                self.checkpoint = self.next_checkpoint();
+                continue;
             };
             // The Realm Runtime has already rearmed an interval under the same id, so clearing
             // it inside this callback cancels the next occurrence.
@@ -31045,19 +31074,39 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             None if timeout == 0.0 => (false, Value::String("timed-out".to_owned())),
             None => {
                 let promise = PromiseState::pending();
-                let timer = Timer {
-                    // The resolve half of the promise's own pair, called with the answer: a
-                    // timer carries its state in its arguments rather than in a closure.
-                    callback: Value::Settler(Rc::clone(&promise), false),
-                    arguments: vec![Value::String("timed-out".to_owned())],
-                    context: Rc::clone(&self.async_context),
-                };
-                let delay = duration_from_milliseconds(if timeout.is_finite() {
-                    timeout
-                } else {
-                    ATOMICS_UNBOUNDED_WAIT_MS
-                });
-                self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
+                let store = view.buffer.bytes.store().map(Arc::clone);
+                match (self.agents.clone(), store) {
+                    // A real waiter, on the same list the synchronous spelling joins: a `notify`
+                    // from another agent settles it "ok", and the group's virtual clock settles
+                    // it "timed-out" when the deadline arrives. Neither costs wall-clock time.
+                    (Some(group), Some(store)) => {
+                        let address =
+                            agent::address(&store, view.offset + index * view.kind.width());
+                        let ticket = group.wait_async(self.agent_id, address, timeout);
+                        self.async_waits.push((ticket, Rc::clone(&promise)));
+                        // The deadline this wait is on is the scheduler's, and the only thing
+                        // that can move the scheduler's clock is a quantum boundary in an agent
+                        // -- which for a program with one agent means this one.
+                        self.checkpoint = self.next_checkpoint();
+                    }
+                    // No agents: nothing can ever reach the waiter list, so the wait can only
+                    // run out. A realm timer is what says so without hanging.
+                    _ => {
+                        let timer = Timer {
+                            // The resolve half of the promise's own pair, called with the answer:
+                            // a timer carries its state in its arguments rather than in a closure.
+                            callback: Value::Settler(Rc::clone(&promise), false),
+                            arguments: vec![Value::String("timed-out".to_owned())],
+                            context: Rc::clone(&self.async_context),
+                        };
+                        let delay = duration_from_milliseconds(if timeout.is_finite() {
+                            timeout
+                        } else {
+                            ATOMICS_UNBOUNDED_WAIT_MS
+                        });
+                        self.with_realm_mut(|realm| realm.set_timeout(delay, timer));
+                    }
+                }
                 (true, Value::Promise(promise))
             }
         };
@@ -31095,6 +31144,40 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // Another agent has run since, so this one's quantum has to start again from here.
         self.checkpoint = self.next_checkpoint();
         Ok(outcome.as_str().to_owned())
+    }
+
+    /// Settle every `Atomics.waitAsync` promise whose wait has ended.
+    ///
+    /// Called wherever this agent could have learnt something: after a `notify` it performed
+    /// itself, at every quantum boundary, and at each turn of its event loop. The scheduler
+    /// decides *how* a wait ended; this only hands the answer to the promise.
+    fn settle_async_waits(&mut self) -> Result<bool, ExecutionError> {
+        let Some(group) = self.agents.clone() else {
+            return Ok(false);
+        };
+        if self.async_waits.is_empty() {
+            return Ok(false);
+        }
+        let mut settled = false;
+        for (ticket, outcome) in group.take_async_settled(self.agent_id) {
+            let Some(position) = self
+                .async_waits
+                .iter()
+                .position(|(held, _)| *held == ticket)
+            else {
+                continue;
+            };
+            let (_, promise) = self.async_waits.remove(position);
+            let settler = Value::Settler(promise, false);
+            self.call_value(
+                &settler,
+                Value::Undefined,
+                vec![Value::String(outcome.as_str().to_owned())],
+                self.instruction,
+            )?;
+            settled = true;
+        }
+        Ok(settled)
     }
 
     /// Sleep out a wait that nothing will ever interrupt.
@@ -31154,8 +31237,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             usize::MAX
         };
         let address = agent::address(&store, view.offset + index * view.kind.width());
+        let woken = group.notify(address, wanted);
+        // An asynchronous waiter this agent woke is one of its own promises, and the program
+        // that called `notify` expects it to settle without another turn of anything.
+        self.settle_async_waits()?;
         #[allow(clippy::cast_precision_loss)]
-        Ok(Value::Number(group.notify(address, wanted) as f64))
+        Ok(Value::Number(woken as f64))
     }
 
     /// One operation of Test262's agent protocol.
