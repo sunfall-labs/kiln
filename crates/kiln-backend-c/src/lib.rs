@@ -3937,10 +3937,17 @@ static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *bl
 
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
     kiln_gc_block *block;
+    uintptr_t address = (uintptr_t)payload;
     size_t mask;
     size_t slot;
     if (payload == NULL || heap->table_capacity == 0) return NULL;
-    block = (kiln_gc_block *)((char *)payload - sizeof(kiln_gc_block));
+    /* A candidate edge is not necessarily a pointer at all: `bits` and `ptr` share one word, so
+     * a builtin's code or a method's code arrives here as a small integer. Stepping back from it
+     * with pointer arithmetic is undefined behaviour on a pointer that never pointed at an
+     * object, and the sanitizer traps it -- so the header address is computed in integers and
+     * anything that cannot be a payload is rejected before a pointer exists. */
+    if (address < sizeof(kiln_gc_block)) return NULL;
+    block = (kiln_gc_block *)(address - sizeof(kiln_gc_block));
     mask = heap->table_capacity - 1;
     slot = kiln_c99_gc_hash(block, mask);
     while (heap->table[slot] != NULL) {
