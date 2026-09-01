@@ -103,8 +103,12 @@ separately emitted modules observe one identity, and realm teardown releases it 
 Generated graph launchers now enter the realm once around the complete CommonJS/ESM bootstrap
 rather than once per module, and every generated closure transfers its allocation to that realm for
 exact-once teardown. Calls still enter their generated C body directly, so this adds no dispatch
-indirection. These are deliberately bridges into the kernel, not the kernel extraction itself;
-ordinary objects and other per-unit state still follow the remaining sequence below.
+indirection. Ordinary object allocation now follows the same typed realm-ownership contract: the
+object and its property array are released exactly once at realm teardown, while hot property reads
+and writes remain direct generated-C operations during this migration slice. Callable-store records
+and their object values have independent, non-overlapping ownership, so teardown order is not part
+of correctness. These are deliberately bridges into the kernel, not the kernel extraction itself;
+object operations and other per-unit state still follow the remaining sequence below.
 
 1. Extract the internal value/kernel declarations from emitted module source and give the shipped
    runtime an explicit private export list.

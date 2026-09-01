@@ -584,7 +584,7 @@ mod realm {
         symbols: RefCell<HashMap<Vec<u8>, u64>>,
         symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
-        closures: RefCell<Vec<OwnedClosure>>,
+        heap_allocations: RefCell<Vec<OwnedHeapAllocation>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
     }
@@ -607,12 +607,12 @@ mod realm {
         drop: DropWork,
     }
 
-    struct OwnedClosure {
+    struct OwnedHeapAllocation {
         pointer: *mut c_void,
         drop: DropWork,
     }
 
-    impl Drop for OwnedClosure {
+    impl Drop for OwnedHeapAllocation {
         fn drop(&mut self) {
             // SAFETY: registration transfers one live allocation and its matching destructor to
             // the realm. The entry is never cloned or removed and realm teardown drops it once.
@@ -642,10 +642,10 @@ mod realm {
                 symbols: RefCell::new(HashMap::new()),
                 symbol_keys: RefCell::new(HashMap::new()),
                 callable_stores: RefCell::new(HashMap::new()),
-                // Most server graphs create hundreds of closures during bootstrap. Reserve one
-                // compact pointer/destructor slab up front so the common path never reallocates;
-                // unlike the former leak, the slab and every closure are released at teardown.
-                closures: RefCell::new(Vec::with_capacity(512)),
+                // Server graphs create hundreds of objects and closures during bootstrap.
+                // Reserve one compact pointer/destructor slab so the common path does not keep
+                // reallocating; unlike the former leaks, every entry is released at teardown.
+                heap_allocations: RefCell::new(Vec::with_capacity(1024)),
                 entered: Cell::new(false),
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
             })
@@ -1758,10 +1758,7 @@ mod realm {
     /// generated-C closure bodies still keep their private metadata layout: the realm owns the
     /// allocation lifetime without making that layout part of the Rust ABI.
     #[unsafe(no_mangle)]
-    pub unsafe extern "C" fn kiln_realm_own_closure(
-        pointer: *mut c_void,
-        drop_pointer: Option<DropWork>,
-    ) -> i32 {
+    unsafe fn own_heap_allocation(pointer: *mut c_void, drop_pointer: Option<DropWork>) -> i32 {
         ffi(|| {
             if pointer.is_null() || drop_pointer.is_none() {
                 return INVALID_ARGUMENT;
@@ -1769,16 +1766,35 @@ mod realm {
             let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
-            let mut closures = realm.closures.borrow_mut();
-            if closures.try_reserve(1).is_err() {
+            let mut allocations = realm.heap_allocations.borrow_mut();
+            if allocations.try_reserve(1).is_err() {
                 return RUNTIME_ERROR;
             }
-            closures.push(OwnedClosure {
+            allocations.push(OwnedHeapAllocation {
                 pointer,
                 drop: drop_pointer.expect("checked above"),
             });
             0
         })
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_own_closure(
+        pointer: *mut c_void,
+        drop_pointer: Option<DropWork>,
+    ) -> i32 {
+        // SAFETY: the typed exported boundary preserves the shared ownership contract.
+        unsafe { own_heap_allocation(pointer, drop_pointer) }
+    }
+
+    /// Transfers one generated-C ordinary object to the active realm for exact-once teardown.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_own_object(
+        pointer: *mut c_void,
+        drop_pointer: Option<DropWork>,
+    ) -> i32 {
+        // SAFETY: the typed exported boundary preserves the shared ownership contract.
+        unsafe { own_heap_allocation(pointer, drop_pointer) }
     }
 
     /// Writes the active Realm's deterministic clock in ECMAScript milliseconds.
@@ -2902,6 +2918,40 @@ mod realm {
             let mut handle = 0;
             let mut drops = 0_usize;
             // SAFETY: both output and callback context stay live through the calls.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(handle, Some(register), (&raw mut drops).cast::<c_void>())
+                },
+                0
+            );
+            assert_eq!(drops, 0);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+            assert_eq!(drops, 1);
+        }
+
+        #[test]
+        fn generated_objects_share_the_realm_heap_lifetime() {
+            unsafe extern "C" fn register(context: *mut c_void) -> i32 {
+                // SAFETY: the test passes a live counter through realm entry.
+                let allocation = Box::into_raw(Box::new(context.cast::<usize>())).cast::<c_void>();
+                // SAFETY: allocation and destructor are an exact pair.
+                let status = unsafe { kiln_realm_own_object(allocation, Some(drop_object)) };
+                if status != 0 {
+                    // SAFETY: transfer failed, so the caller still owns the allocation.
+                    unsafe { drop_object(allocation) };
+                }
+                status
+            }
+            unsafe extern "C" fn drop_object(pointer: *mut c_void) {
+                // SAFETY: `register` created this Box and transfers it at most once.
+                let counter = unsafe { Box::from_raw(pointer.cast::<*mut usize>()) };
+                // SAFETY: the test counter outlives realm destruction.
+                unsafe { **counter += 1 };
+            }
+
+            let mut handle = 0;
+            let mut drops = 0_usize;
             assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
             assert_eq!(
                 unsafe {
@@ -4556,6 +4606,9 @@ mod realm {
         };
         (realm, kiln_realm_own_closure, realm_own_closure) => {
             const _: unsafe extern "C" fn(*mut c_void, Option<DropWork>) -> i32 = kiln_realm_own_closure;
+        };
+        (realm, kiln_realm_own_object, realm_own_object) => {
+            const _: unsafe extern "C" fn(*mut c_void, Option<DropWork>) -> i32 = kiln_realm_own_object;
         };
         (realm, kiln_realm_now, realm_now) => {
             const _: unsafe extern "C" fn(*mut f64) -> i32 = kiln_realm_now;
