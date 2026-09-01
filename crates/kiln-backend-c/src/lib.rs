@@ -1204,6 +1204,12 @@ method_ids! {
     (KILN_C99_METHOD_FUNCTION_TO_STRING, 428, Generic),
     (KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW, 429, Generic),
     (KILN_C99_METHOD_THROW_TYPE_ERROR, 430, Generic),
+    /* `console.log` reached as a *value* rather than through the `console.log(x)` shape the
+     * compiler recognises. `Direct` and attached to the console object by name, exactly as the
+     * `Atomics` methods are: nothing looks these up by name through a group range, so a `log`
+     * on some other receiver cannot find them. */
+    (KILN_C99_METHOD_CONSOLE_LOG, 431, Direct),
+    (KILN_C99_METHOD_CONSOLE_UNAVAILABLE, 432, Direct),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1590,6 +1596,40 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_ABORT_SIGNAL 72
 #define KILN_C99_BUILTIN_TEXT_ENCODER 73
 #define KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE 75
+
+/* The globals this backend does not implement yet, published anyway so that `typeof` tells the
+ * truth about them.
+ *
+ * WHY A VALUE AT ALL, RATHER THAN LEAVING THE NAME ABSENT. `typeof X === "undefined"` is how real
+ * code feature-detects, so a name the interpreter answers `"function"` for and this backend
+ * answers `"undefined"` for does not make a compiled program fail -- it makes it silently take
+ * the *other* branch. That is a wrong answer, and a wrong answer is the one thing this backend is
+ * not allowed to give. A refusal is honest: the program stops and the message names the operation
+ * nobody implemented. So each of these carries the right `typeof` and the right `name`, and every
+ * other use of one reaches the refusal at the end of the builtin read, or the refusal at the end
+ * of the construct dispatch, and says so.
+ *
+ * Contiguous, and bounded by the two markers, because the only thing the rest of the file needs
+ * to ask about them is "is this one of them" -- `kiln_c99_is_unavailable_global`. */
+#define KILN_C99_BUILTIN_UNAVAILABLE_FIRST 76
+#define KILN_C99_BUILTIN_INTL 76
+#define KILN_C99_BUILTIN_DATA_VIEW 77
+#define KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER 78
+#define KILN_C99_BUILTIN_WEAK_REF 79
+#define KILN_C99_BUILTIN_FINALIZATION_REGISTRY 80
+#define KILN_C99_BUILTIN_SHADOW_REALM 81
+#define KILN_C99_BUILTIN_ITERATOR 82
+#define KILN_C99_BUILTIN_FLOAT16_ARRAY 83
+#define KILN_C99_BUILTIN_BIG_INT64_ARRAY 84
+#define KILN_C99_BUILTIN_BIG_UINT64_ARRAY 85
+#define KILN_C99_BUILTIN_DISPOSABLE_STACK 86
+#define KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK 87
+#define KILN_C99_BUILTIN_SUPPRESSED_ERROR 88
+#define KILN_C99_BUILTIN_EVAL_ERROR 89
+#define KILN_C99_BUILTIN_TEXT_DECODER 90
+#define KILN_C99_BUILTIN_EVAL 91
+#define KILN_C99_BUILTIN_PERFORMANCE 92
+#define KILN_C99_BUILTIN_UNAVAILABLE_LAST 92
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -2052,6 +2092,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT),
     emit_method_define!(KILN_C99_METHOD_PROCESS_CWD),
     emit_method_define!(KILN_C99_METHOD_ATOMICS_UNAVAILABLE),
+    emit_method_define!(KILN_C99_METHOD_CONSOLE_LOG),
+    emit_method_define!(KILN_C99_METHOD_CONSOLE_UNAVAILABLE),
     emit_method_define!(KILN_C99_METHOD_SET_IMMEDIATE),
     emit_method_define!(KILN_C99_METHOD_CLEAR_IMMEDIATE),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER),
@@ -6086,6 +6128,25 @@ static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
  * `conformance/differential/builtin-names.js` is what checks the two agree with node. */
 static const char *kiln_c99_builtin_name(uint64_t builtin) {
     switch (builtin) {
+    /* The globals this backend has not implemented still have to name themselves, because the
+     * name is what the refusal reports and what `X.name` answers. */
+    case KILN_C99_BUILTIN_INTL: return "Intl";
+    case KILN_C99_BUILTIN_DATA_VIEW: return "DataView";
+    case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER: return "SharedArrayBuffer";
+    case KILN_C99_BUILTIN_WEAK_REF: return "WeakRef";
+    case KILN_C99_BUILTIN_FINALIZATION_REGISTRY: return "FinalizationRegistry";
+    case KILN_C99_BUILTIN_SHADOW_REALM: return "ShadowRealm";
+    case KILN_C99_BUILTIN_ITERATOR: return "Iterator";
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY: return "Float16Array";
+    case KILN_C99_BUILTIN_BIG_INT64_ARRAY: return "BigInt64Array";
+    case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: return "BigUint64Array";
+    case KILN_C99_BUILTIN_DISPOSABLE_STACK: return "DisposableStack";
+    case KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK: return "AsyncDisposableStack";
+    case KILN_C99_BUILTIN_SUPPRESSED_ERROR: return "SuppressedError";
+    case KILN_C99_BUILTIN_EVAL_ERROR: return "EvalError";
+    case KILN_C99_BUILTIN_TEXT_DECODER: return "TextDecoder";
+    case KILN_C99_BUILTIN_EVAL: return "eval";
+    case KILN_C99_BUILTIN_PERFORMANCE: return "performance";
     case KILN_C99_BUILTIN_STRING: return "String";
     case KILN_C99_BUILTIN_MATH: return "Math";
     case KILN_C99_BUILTIN_NUMBER: return "Number";
@@ -6407,6 +6468,7 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
 #define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
 #define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
 #define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+#define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
 
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     void *slot = NULL;
@@ -6438,6 +6500,45 @@ static int kiln_c99_atomics_object(kiln_value *out) {
             kiln_c99_method(KILN_C99_METHOD_ATOMICS_UNAVAILABLE));
     if (status != KILN_C99_OK) return status;
     *out = *atomics;
+    return KILN_C99_OK;
+}
+
+/* The realm's `console`, created on first use.
+ *
+ * `console.log(x)` written out in full is a compile-time shape -- the compiler turns it into a
+ * host call and no `console` value exists at all -- so this object is what the *other* spellings
+ * reach: `globalThis.console`, `const c = console`, `[1, 2].forEach(console.log)`. Without it
+ * `typeof globalThis.console` answered "undefined" here and "object" in the interpreter, which is
+ * the shape of feature-detection every bundle does before it decides whether it can log at all.
+ *
+ * `log` and `info` are the same host operation the compiled shape uses. `error` and `warn` are
+ * not: the interpreter sends those to standard *error*, and the host ABI publishes one captured
+ * output operation, so there is nothing here that could put bytes on the other stream. They
+ * refuse by name rather than quietly printing to stdout, which would be the two engines
+ * disagreeing about which stream a line went to -- invisible in a terminal and wrong in a pipe. */
+static int kiln_c99_console_object(kiln_value *out) {
+    kiln_value *console;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_CONSOLE, &console);
+    if (status != KILN_C99_OK) return status;
+    if (console->tag == KILN_VALUE_OBJECT) {
+        *out = *console;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_object(console);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "log", 3,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_LOG));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "info", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_LOG));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "error", 5,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_UNAVAILABLE));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "warn", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_UNAVAILABLE));
+    if (status != KILN_C99_OK) return status;
+    *out = *console;
     return KILN_C99_OK;
 }
 
@@ -6545,7 +6646,50 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"AggregateError", KILN_C99_BUILTIN_AGGREGATE_ERROR},
                         {"AbortController", KILN_C99_BUILTIN_ABORT_CONTROLLER},
                         {"AbortSignal", KILN_C99_BUILTIN_ABORT_SIGNAL},
-                        {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER}};
+                        {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER},
+                        /* THE REST OF THE REALM'S FURNITURE. Everything below this line was
+                         * reachable by its bare name -- `new WeakMap()` compiles and runs -- and
+                         * absent from the global *object*, so `globalThis.WeakMap` answered
+                         * `undefined` while `WeakMap` answered a constructor. Two lists for one
+                         * question is how they drifted, and `globalThis.X` is the spelling a
+                         * bundle's feature detection actually uses. One list now. */
+                        {"Function", KILN_C99_BUILTIN_FUNCTION},
+                        {"ArrayBuffer", KILN_C99_BUILTIN_ARRAY_BUFFER},
+                        {"WeakMap", KILN_C99_BUILTIN_WEAK_MAP},
+                        {"WeakSet", KILN_C99_BUILTIN_WEAK_SET},
+                        {"URL", KILN_C99_BUILTIN_URL},
+                        {"Buffer", KILN_C99_BUILTIN_BUFFER},
+                        {"Int8Array", KILN_C99_BUILTIN_INT8_ARRAY},
+                        {"Uint8Array", KILN_C99_BUILTIN_UINT8_ARRAY},
+                        {"Uint8ClampedArray", KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY},
+                        {"Int16Array", KILN_C99_BUILTIN_INT16_ARRAY},
+                        {"Uint16Array", KILN_C99_BUILTIN_UINT16_ARRAY},
+                        {"Int32Array", KILN_C99_BUILTIN_INT32_ARRAY},
+                        {"Uint32Array", KILN_C99_BUILTIN_UINT32_ARRAY},
+                        {"Float32Array", KILN_C99_BUILTIN_FLOAT32_ARRAY},
+                        {"Float64Array", KILN_C99_BUILTIN_FLOAT64_ARRAY},
+                        /* AND THE ONES THIS BACKEND DOES NOT IMPLEMENT. Present so that `typeof`
+                         * answers what the interpreter answers; every use of one refuses and
+                         * names itself. `undefined` here would not stop a compiled program -- it
+                         * would send it down the branch written for a realm that never had the
+                         * feature, which is a different program from the one the author wrote. */
+                        {"Intl", KILN_C99_BUILTIN_INTL},
+                        {"DataView", KILN_C99_BUILTIN_DATA_VIEW},
+                        {"SharedArrayBuffer", KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER},
+                        {"WeakRef", KILN_C99_BUILTIN_WEAK_REF},
+                        {"FinalizationRegistry", KILN_C99_BUILTIN_FINALIZATION_REGISTRY},
+                        {"ShadowRealm", KILN_C99_BUILTIN_SHADOW_REALM},
+                        {"Iterator", KILN_C99_BUILTIN_ITERATOR},
+                        {"Float16Array", KILN_C99_BUILTIN_FLOAT16_ARRAY},
+                        {"BigInt64Array", KILN_C99_BUILTIN_BIG_INT64_ARRAY},
+                        {"BigUint64Array", KILN_C99_BUILTIN_BIG_UINT64_ARRAY},
+                        {"DisposableStack", KILN_C99_BUILTIN_DISPOSABLE_STACK},
+                        {"AsyncDisposableStack", KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK},
+                        {"SuppressedError", KILN_C99_BUILTIN_SUPPRESSED_ERROR},
+                        {"EvalError", KILN_C99_BUILTIN_EVAL_ERROR},
+                        {"TextDecoder", KILN_C99_BUILTIN_TEXT_DECODER},
+                        {"eval", KILN_C99_BUILTIN_EVAL},
+                        {"performance", KILN_C99_BUILTIN_PERFORMANCE}};
     static const struct {
         const char *name;
         uint64_t code;
@@ -6563,7 +6707,9 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"setTimeout", KILN_C99_METHOD_SET_TIMEOUT},
                      {"setInterval", KILN_C99_METHOD_SET_INTERVAL},
                      {"clearTimeout", KILN_C99_METHOD_CLEAR_TIMEOUT},
-                     {"clearInterval", KILN_C99_METHOD_CLEAR_INTERVAL}};
+                     {"clearInterval", KILN_C99_METHOD_CLEAR_INTERVAL},
+                     {"setImmediate", KILN_C99_METHOD_SET_IMMEDIATE},
+                     {"clearImmediate", KILN_C99_METHOD_CLEAR_IMMEDIATE}};
     size_t index;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
     if (status != KILN_C99_OK) return status;
@@ -6586,6 +6732,22 @@ static int kiln_c99_global_object(kiln_value *out) {
         status = kiln_c99_put(NULL, *globals, functions[index].name,
                               strlen(functions[index].name),
                               kiln_c99_method(functions[index].code), 0, NULL);
+    }
+    /* The two the realm builds rather than names: each is a real object with its own slot, so
+     * `globalThis.console === console` and a second read finds the same one. */
+    if (status == KILN_C99_OK) {
+        kiln_value built;
+        status = kiln_c99_atomics_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, *globals, "Atomics", 7, built, 0, NULL);
+        }
+    }
+    if (status == KILN_C99_OK) {
+        kiln_value built;
+        status = kiln_c99_console_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, *globals, "console", 7, built, 0, NULL);
+        }
     }
     /* The three value properties of the global object are the only ones the specification locks
      * on every axis: `{ writable: false, enumerable: false, configurable: false }`. An ordinary
@@ -7201,6 +7363,12 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
     /* `Temporal` and `Temporal.Now` hold functions rather than being callable; the eight types are
      * constructors and are not namespaces. */
     if (builtin == KILN_C99_BUILTIN_TEMPORAL || builtin == KILN_C99_BUILTIN_TEMPORAL_NOW) {
+        return 1;
+    }
+    /* `Intl` is a namespace this backend does not carry: `typeof Intl === "object"` is what a
+     * library feature-detects on, and it has to be the same word here as in the interpreter even
+     * though every member behind it refuses. */
+    if (builtin == KILN_C99_BUILTIN_INTL) {
         return 1;
     }
     return builtin == KILN_C99_BUILTIN_MATH || builtin == KILN_C99_BUILTIN_JSON ||
@@ -15716,6 +15884,49 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_throw_error(
             thrown, KILN_C99_BUILTIN_ERROR,
             "Atomics requires native SharedArrayBuffer support");
+    }
+    /* `console.log` and `console.info` reached as values. The same host operation the compiled
+     * `console.log(x)` shape uses, and the same argument reduction in front of it: the embedding
+     * boundary carries only the scalar tags, so anything else is reduced to the text a console
+     * shows for it -- which is what the interpreter prints for one too. */
+    if (code == KILN_C99_METHOD_CONSOLE_LOG) {
+        kiln_value inline_args[KILN_C99_COERCED_INLINE];
+        kiln_value *reduced = NULL;
+        kiln_value host_result;
+        size_t index;
+        int called;
+        (void)receiver;
+        if (argc > 0) {
+            reduced = argc <= KILN_C99_COERCED_INLINE
+                          ? inline_args
+                          : (kiln_value *)malloc(argc * sizeof *reduced);
+            if (reduced == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < argc; ++index) {
+                reduced[index] = kiln_c99_crosses_boundary(args[index])
+                                     ? kiln_c99_inspect(args[index])
+                                     : args[index];
+            }
+        }
+        called = host != NULL && host->call != NULL &&
+                 host->call(host->context, UINT16_C(1), (uint16_t)argc,
+                            argc == 0 ? NULL : reduced, &host_result) == 0;
+        if (reduced != NULL && reduced != inline_args) {
+            free(reduced);
+        }
+        if (!called) {
+            return KILN_C99_HOST_ERROR;
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    /* `console.error` and `console.warn` go to standard *error* in the interpreter, and the host
+     * ABI publishes one captured output operation. Printing them to stdout instead would be the
+     * two engines disagreeing about which stream a line went to, so this refuses by name. */
+    if (code == KILN_C99_METHOD_CONSOLE_UNAVAILABLE) {
+        kiln_c99_diagnostic_detail = "console.error and console.warn have no native stderr op";
+        return KILN_C99_CONTROL_ERROR;
     }
     /* Claimed here because the string range further down is open-ended at its top. */
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL)) {
