@@ -1167,7 +1167,7 @@ impl NativeBuilder {
         let topology = graph_shared_topology_digest(graph, &modules);
         let wrapper_symbol = format!(
             "kiln_shared_graph_{}",
-            graph_shared_public_digest(topology, &modules).to_hex()
+            graph_shared_public_digest(topology, &modules)?.to_hex()
         );
         let wrapper = graph_shared_wrapper_source(graph, &modules, &wrapper_symbol)?;
         let module_api_symbol = embedding_module_api_symbol(&wrapper_symbol)?;
@@ -2573,6 +2573,72 @@ fn compiler_environment_digest_with(
     Digest::hash(&encoded)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LogicalModulePath(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsFilename(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsDirname(String);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CommonJsModulePaths {
+    filename: CommonJsFilename,
+    dirname: CommonJsDirname,
+    diagnostic: LogicalModulePath,
+}
+
+impl LogicalModulePath {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CommonJsFilename {
+    fn new(path: &Path) -> Result<Self, NativeError> {
+        if !path.is_absolute() {
+            return Err(NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("CommonJS module path {} is not absolute", path.display()),
+            }));
+        }
+        Ok(Self(path.to_string_lossy().into_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl CommonJsDirname {
+    fn new(path: &Path) -> Result<Self, NativeError> {
+        let dirname = path.parent().ok_or_else(|| {
+            NativeError::Emit(EmitError::InvalidProgram {
+                message: format!("CommonJS module path {} has no parent", path.display()),
+            })
+        })?;
+        Ok(Self(dirname.to_string_lossy().into_owned()))
+    }
+
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl CommonJsModulePaths {
+    fn new(root: &Path, path: &Path) -> Result<Self, NativeError> {
+        Ok(Self {
+            filename: CommonJsFilename::new(path)?,
+            dirname: CommonJsDirname::new(path)?,
+            diagnostic: LogicalModulePath(logical_module_path(root, path)?),
+        })
+    }
+}
+
 fn logical_module_path(root: &Path, path: &Path) -> Result<String, NativeError> {
     let relative = path.strip_prefix(root).map_err(|_| {
         NativeError::Emit(EmitError::InvalidProgram {
@@ -2715,13 +2781,14 @@ fn graph_shared_topology_digest(
     Digest::hash(&bytes)
 }
 
-/// Derive the public graph wrapper identity from both topology and ordered module bodies. Private
-/// module symbols intentionally remain topology-based, but a public wrapper must not collide with
-/// another DSO containing the same path/import topology and different bytecode.
+/// Derive the public graph wrapper identity from topology, ordered module bodies, and every
+/// absolute CommonJS runtime path embedded by the wrapper. Private module symbols intentionally
+/// remain topology-based, but a public wrapper must not collide with another DSO containing the
+/// same logical graph and bytecode but different observable `__filename`/`__dirname` values.
 fn graph_shared_public_digest(
     topology: Digest,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
-) -> Digest {
+) -> Result<Digest, NativeError> {
     let mut bytes = topology.to_hex().into_bytes();
     bytes.push(0);
     for (_, module) in modules {
@@ -2729,7 +2796,21 @@ fn graph_shared_public_digest(
         bytes.extend_from_slice(digest.to_hex().as_bytes());
         bytes.push(0);
     }
-    Digest::hash(&bytes)
+    if modules
+        .iter()
+        .any(|(node, _)| node.source == ModuleSource::CommonJs)
+    {
+        bytes.extend_from_slice(b"commonjs-runtime-paths-v1\0");
+        for (node, _) in modules {
+            if node.source != ModuleSource::CommonJs {
+                continue;
+            }
+            let filename = CommonJsFilename::new(&node.path)?;
+            bytes.extend_from_slice(&(filename.as_bytes().len() as u64).to_le_bytes());
+            bytes.extend_from_slice(filename.as_bytes());
+        }
+    }
+    Ok(Digest::hash(&bytes))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3011,7 +3092,7 @@ fn native_commonjs_projection_index(node: &kiln_module_graph::ModuleNode) -> Opt
     match node.source {
         ModuleSource::Json => Some(0),
         ModuleSource::NodeBuiltin(_) => Some(node.program.exports.len()),
-        ModuleSource::Source | ModuleSource::CommonJs => return None,
+        ModuleSource::Source | ModuleSource::CommonJs => None,
     }
 }
 
@@ -3119,6 +3200,44 @@ fn native_c_string(value: &str) -> String {
     output
 }
 
+fn write_graph_commonjs_launcher_setup(
+    output: &mut String,
+    index: usize,
+    module_symbol: &str,
+    filename: &CommonJsFilename,
+    dirname: &CommonJsDirname,
+    diagnostic: &LogicalModulePath,
+) {
+    writeln!(
+        output,
+        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+        native_c_string(filename.as_str()),
+        filename.as_str().len(),
+        native_c_string(dirname.as_str()),
+        dirname.as_str().len(),
+        native_c_string(diagnostic.as_str()),
+    )
+    .unwrap();
+}
+
+fn write_graph_commonjs_shared_setup(
+    output: &mut String,
+    index: usize,
+    module_symbol: &str,
+    filename: &CommonJsFilename,
+    dirname: &CommonJsDirname,
+) {
+    writeln!(
+        output,
+        "    status = {module_symbol}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, &commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {module_symbol}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
+        native_c_string(filename.as_str()),
+        filename.as_str().len(),
+        native_c_string(dirname.as_str()),
+        dirname.as_str().len(),
+    )
+    .unwrap();
+}
+
 fn write_graph_namespace_build(
     output: &mut String,
     module_index: usize,
@@ -3185,9 +3304,9 @@ fn graph_launcher_source(
             },
         ));
     }
-    // Keep paths embedded in the cached launcher project-relative, just like module units. An
-    // absolute checkout path would make identical graphs in sibling roots compile different
-    // launcher objects.
+    // Diagnostic names remain project-relative, while CommonJS path roles are constructed as
+    // distinct types below so observable runtime paths cannot be replaced with diagnostics by a
+    // broad path-normalization refactor.
     let logical_paths = modules
         .iter()
         .map(|(node, _)| logical_module_path(graph.project_root(), &node.path))
@@ -3465,20 +3584,20 @@ int main(void) {
     // can return the initially allocated exports object without re-entering a module.
     for (index, (node, module)) in modules.iter().enumerate() {
         if node.source == ModuleSource::CommonJs {
-            let filename = &logical_paths[index];
-            let dirname = filename.rsplit_once('/').map_or("", |(parent, _)| parent);
-            writeln!(
-                output,
-                "    status = {}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
-                module.symbol,
-                native_c_string(filename),
-                filename.len(),
-                native_c_string(dirname),
-                dirname.len(),
-                native_c_string(filename),
-                module.symbol,
-            )
-            .unwrap();
+            // CommonJS observes the canonical filesystem identity through `__filename` and
+            // `__dirname`. Unlike the diagnostic names below, these values are language
+            // semantics: making them project-relative would disagree with Node and the
+            // interpreter. A CommonJS launcher is therefore intentionally checkout-specific
+            // while its module objects remain reusable across roots.
+            let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
+            write_graph_commonjs_launcher_setup(
+                &mut output,
+                index,
+                &module.symbol,
+                &paths.filename,
+                &paths.dirname,
+                &paths.diagnostic,
+            );
         }
     }
     for (index, (node, module)) in modules.iter().enumerate() {
@@ -4070,23 +4189,14 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         if node.source != ModuleSource::CommonJs {
             continue;
         }
-        let filename = node.path.to_string_lossy();
-        let dirname = node
-            .path
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .to_string_lossy();
-        writeln!(
-            output,
-            "    status = {}_commonjs_wrapper(import_arrays[{index}], (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, &commonjs_graph);\n    if (status != KILN_C99_OK) goto cleanup;\n    export_arrays[{index}][0] = import_arrays[{index}][0];\n    commonjs_modules[{index}] = (kiln_commonjs_context){{ {}, proxy_host, import_arrays[{index}], (size_t)5, export_arrays[{index}], 0 }};",
-            module.symbol,
-            native_c_string(&filename),
-            filename.len(),
-            native_c_string(&dirname),
-            dirname.len(),
-            module.symbol,
-        )
-        .unwrap();
+        let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
+        write_graph_commonjs_shared_setup(
+            &mut output,
+            index,
+            &module.symbol,
+            &paths.filename,
+            &paths.dirname,
+        );
     }
     for (index, (node, _)) in modules.iter().enumerate() {
         for (import_index, import) in node.program.imports.iter().enumerate() {
@@ -7451,8 +7561,11 @@ int main(void) {{
         fs::create_dir(root.path.join("pkg")).expect("create package directory");
         fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
             .expect("write CommonJS package");
-        fs::write(root.path.join("pkg/index.js"), "module.exports = 42;")
-            .expect("write CommonJS module");
+        fs::write(
+            root.path.join("pkg/index.js"),
+            "console.log(__filename, __dirname); module.exports = 42;",
+        )
+        .expect("write CommonJS module");
         fs::write(root.path.join("pkg/dep.js"), "module.exports = 41;")
             .expect("write CommonJS dependency");
         let entry = root.path.join("main.mjs");
@@ -7485,8 +7598,34 @@ int main(void) {{
             .collect::<Vec<_>>();
 
         let launcher = graph_launcher_source(&graph, &modules).expect("launcher reserves wrappers");
+        let commonjs_index = modules
+            .iter()
+            .position(|(node, _)| node.source == ModuleSource::CommonJs)
+            .expect("CommonJS module");
+        let commonjs_path = modules[commonjs_index].0.path.to_string_lossy();
+        let commonjs_dir = modules[commonjs_index]
+            .0
+            .path
+            .parent()
+            .expect("CommonJS module has a parent")
+            .to_string_lossy();
+        let logical_commonjs =
+            logical_module_path(graph.project_root(), &modules[commonjs_index].0.path)
+                .expect("logical CommonJS path");
         assert!(launcher.contains("static kiln_value kiln_imports_0[5];"));
         assert!(launcher.contains("_commonjs_wrapper(kiln_imports_0, (size_t)5, "));
+        assert!(launcher.contains(&format!(
+            "{}_commonjs_wrapper(kiln_imports_{commonjs_index}, (size_t)5, {}, (size_t){}, {}, (size_t){}",
+            modules[commonjs_index].1.symbol,
+            native_c_string(&commonjs_path),
+            commonjs_path.len(),
+            native_c_string(&commonjs_dir),
+            commonjs_dir.len(),
+        )));
+        assert!(launcher.contains(&format!(
+            "kiln_graph_diagnostic(\"commonjs-wrapper\", {})",
+            native_c_string(&logical_commonjs)
+        )));
         assert_eq!(
             launcher.matches("_commonjs_wrapper(kiln_imports_").count(),
             1
@@ -7500,6 +7639,8 @@ int main(void) {{
             .find("static int kiln_graph_load_commonjs")
             .expect("shared wrapper declares CommonJS loader");
         assert!(context < loader, "context must precede its first use");
+        assert!(wrapper.contains(&native_c_string(&commonjs_path)));
+        assert!(wrapper.contains(&native_c_string(&commonjs_dir)));
 
         let Some(toolchain) = Toolchain::discover().ok() else {
             eprintln!("skipping native CommonJS execution: no C compiler found");
@@ -7516,7 +7657,10 @@ int main(void) {{
                 },
             )
             .expect("native mixed graph builds and runs");
-        assert_eq!(report.stdout, b"42\n");
+        assert_eq!(
+            report.stdout,
+            format!("{commonjs_path} {commonjs_dir}\n42\n").as_bytes()
+        );
         builder
             .build_shared_graph(
                 &graph,
@@ -9132,6 +9276,76 @@ int main(void) {{
         assert!(!edited.cache_hits.executable);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn commonjs_shared_identity_includes_observable_absolute_path() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-commonjs-shared-path-identity");
+        let first = root.path.join("first");
+        let second = root.path.join("second");
+        for project in [&first, &second] {
+            fs::create_dir_all(project).expect("create CommonJS project");
+            fs::write(project.join("package.json"), r#"{"type":"commonjs"}"#)
+                .expect("write CommonJS package metadata");
+            fs::write(project.join("main.js"), "module.exports = __filename;")
+                .expect("write CommonJS entry");
+        }
+
+        let identity = |project: &Path| {
+            let entry = project.join("main.js");
+            let graph = ModuleGraph::build_node(
+                &entry,
+                NodeRuntimeResolver::new(project).expect("node resolver"),
+                |path: &Path| fs::read_to_string(path),
+                OxcFrontend,
+            )
+            .expect("build CommonJS graph");
+            let modules = graph
+                .modules()
+                .map(|node| {
+                    let logical = logical_module_path(graph.project_root(), &node.path)
+                        .expect("logical module path");
+                    (
+                        node,
+                        emit_native_graph_module(node, &logical, &NativeRealmPolicy::default())
+                            .expect("module emits"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let topology = graph_shared_topology_digest(&graph, &modules);
+            let public = graph_shared_public_digest(topology, &modules)
+                .expect("CommonJS graph has absolute module paths");
+            let module_sources = modules
+                .iter()
+                .map(|(_, module)| Digest::hash(module.source.as_bytes()))
+                .collect::<Vec<_>>();
+            let symbol = format!("kiln_shared_graph_{}", public.to_hex());
+            let wrapper = graph_shared_wrapper_source(&graph, &modules, &symbol)
+                .expect("shared wrapper emits");
+            (topology, public, module_sources, wrapper)
+        };
+
+        let first_identity = identity(&first);
+        let second_identity = identity(&second);
+        assert_eq!(first_identity.0, second_identity.0);
+        assert_eq!(first_identity.2, second_identity.2);
+        assert_ne!(first_identity.1, second_identity.1);
+        assert!(
+            first_identity.3.contains(&native_c_string(
+                &fs::canonicalize(first.join("main.js"))
+                    .expect("canonical first entry")
+                    .to_string_lossy()
+            ))
+        );
+        assert!(
+            second_identity.3.contains(&native_c_string(
+                &fs::canonicalize(second.join("main.js"))
+                    .expect("canonical second entry")
+                    .to_string_lossy()
+            ))
+        );
     }
 
     #[test]
