@@ -1276,13 +1276,16 @@ mod realm {
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         loop {
+            // Neither lane checkpoints between items. A checkpoint drives the Tokio scheduler,
+            // and doing that after every microtask made the per-request cost scale with how many
+            // microtasks a request happens to enqueue rather than with the work it does. The
+            // checkpoint below still runs before the loop can block, so nothing a callback wrote
+            // waits on a socket: it is deferred to the end of the drain, not past it. Batching it
+            // also lets one flush carry the writes of a whole turn.
             let next_tick = realm.work.borrow_mut().pop_next_tick();
             if let Some(work) = next_tick {
                 let status = run_in_runtime(realm, || work.run(host, thrown));
                 if status != 0 {
-                    return status;
-                }
-                if let Err(status) = checkpoint_http(realm, false) {
                     return status;
                 }
                 continue;
@@ -1292,9 +1295,6 @@ mod realm {
             if let Some(work) = microtask {
                 let status = run_in_runtime(realm, || work.run(host, thrown));
                 if status != 0 {
-                    return status;
-                }
-                if let Err(status) = checkpoint_http(realm, false) {
                     return status;
                 }
                 continue;
