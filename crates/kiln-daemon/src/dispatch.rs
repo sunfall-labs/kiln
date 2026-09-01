@@ -244,10 +244,17 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
         Request::Test {
             root,
             mode,
+            changed_root,
             changed_paths,
             previously_failed,
         } => (
-            match crate::testing::run(&root, mode, changed_paths, previously_failed) {
+            match crate::testing::run_with_changed_root(
+                &root,
+                mode,
+                changed_root,
+                changed_paths,
+                previously_failed,
+            ) {
                 Ok(summary) => Response::Tested(summary),
                 Err(message) => Response::Error { message },
             },
