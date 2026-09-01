@@ -24175,6 +24175,17 @@ fn validate_code(
             // granted the capability.
             Instruction::RequireGlobalBinding(name)
             | Instruction::LoadGlobalBindingOrUndefined(name)
+            // A name this backend has no global for never reaches the two above: the compiler
+            // emits the lookup and then `ThrowReference` for the miss, so refusing only the
+            // lookup let `new ShadowRealm()` compile and answer `ReferenceError` at run time --
+            // which reads to a program as "this engine does not have it" rather than "this
+            // backend cannot do it", and is the difference between a refusal and a wrong answer
+            // about what the language provides.
+            | Instruction::ThrowReference(name)
+            | Instruction::StoreGlobalBinding(name)
+            | Instruction::StoreGlobalBindingStrict(name)
+            | Instruction::DeleteGlobalBinding(name)
+            | Instruction::DeclareGlobalBinding { name, .. }
             | Instruction::GetProperty(name)
             | Instruction::CallMethod { name, .. }
                 if matches!(
@@ -30093,6 +30104,24 @@ int main(void) {{
             ));
             let Err(EmitError::Unsupported { feature }) = refused_shadow else {
                 panic!("the backend must refuse {SHADOW_REALM}, not compile it");
+            };
+            assert!(
+                feature.contains(SHADOW_REALM),
+                "the refusal must name what it refused, got {feature}"
+            );
+            // The instruction that actually carries `ShadowRealm` in a compiled program. A name
+            // this backend has no global for never reaches the lookup arms above: the compiler
+            // emits the miss as `ThrowReference`, so refusing only the lookup let
+            // `new ShadowRealm()` compile and answer `ReferenceError` at run time. That is a
+            // claim about the *language* rather than about this backend, and the two engines
+            // diverged on it.
+            let refused_reference = emit(&program(
+                vec![Constant::String(SHADOW_REALM.to_owned())],
+                vec![Instruction::ThrowReference(0), Instruction::Return],
+                0,
+            ));
+            let Err(EmitError::Unsupported { feature }) = refused_reference else {
+                panic!("the backend must refuse a {SHADOW_REALM} reference, not compile it");
             };
             assert!(
                 feature.contains(SHADOW_REALM),
