@@ -1177,6 +1177,19 @@ pub struct EvalOptions {
     /// Always true for an indirect eval, which *is* global code. True for a direct one only when
     /// the call is written at the top level of a script.
     pub global_var_scope: bool,
+    /// Whether this source is a *Script* rather than eval code.
+    ///
+    /// Two things separate the two, and both are visible to a program. A script's `var`s go on
+    /// the global object even in strict code -- strictness decides what an unresolvable
+    /// assignment does, not where a declaration lives -- while a strict eval gets a variable
+    /// environment of its own. And `CreateGlobalVarBinding` is called with `D` false for a
+    /// script and true for an eval, so one written in a script cannot afterwards be deleted and
+    /// one written in an `eval` can.
+    ///
+    /// This is what Test262's `$262.evalScript` asks for, and the reason it is not spelled
+    /// `eval`: a host that answered it with `eval` would report every binding it made as
+    /// configurable, which is the one thing those tests are checking.
+    pub script: bool,
 }
 
 /// Compile source that arrived at run time, as `eval` and the `Function` constructor do.
@@ -1205,8 +1218,8 @@ pub fn compile_eval_with_strictness(
     // the global object -- created with `D` true, which is why one written inside an `eval` can
     // be deleted and one written in a script cannot. Strict eval code gets a variable
     // environment of its own and never reaches here.
-    compiler.global_var_scope = options.global_var_scope && !compiler.strict;
-    compiler.global_bindings_configurable = true;
+    compiler.global_var_scope = options.global_var_scope && (options.script || !compiler.strict);
+    compiler.global_bindings_configurable = !options.script;
     // Unconditional, unlike an ordinary program, and it is what makes the eval'd code reachable
     // from itself. A module-scope binding that is *not* boxed is read from a nested function
     // through `LoadGlobal`, which finds the frame of whichever module is running -- and for an
@@ -8922,6 +8935,7 @@ mod tests {
                 }],
                 strict: false,
                 global_var_scope: false,
+                script: false,
             },
         )
         .expect("the eval source compiles");
@@ -9065,6 +9079,7 @@ mod tests {
                 outer: outer(),
                 strict: false,
                 global_var_scope: false,
+                script: false,
             },
         )
         .expect("the sloppy eval compiles");
@@ -9079,6 +9094,7 @@ mod tests {
                 outer: outer(),
                 strict: true,
                 global_var_scope: false,
+                script: false,
             },
         )
         .expect("the strict eval compiles");
