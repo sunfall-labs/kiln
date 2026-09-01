@@ -1594,6 +1594,21 @@ mod tests {
     }
 
     #[test]
+    fn a_second_realm_owns_its_intrinsics() {
+        // The whole of what a realm is, asked four ways. Each assertion is one a shared-intrinsic
+        // implementation would answer confidently and wrongly, which is why they are spelled out
+        // rather than summarised: `other.Array === Array` passing is not a smaller failure than
+        // the suite's, it is the same failure with nothing watching.
+        let mut probe = case(
+            "var other = $262CreateRealm();\n             if (other === globalThis) throw new Error('same global');\n             if (other.Array === Array) throw new Error('shared constructor');\n             if (other.Array.prototype === Array.prototype) throw new Error('shared prototype');\n             if (other.Array.prototype.constructor !== other.Array) throw new Error('constructor left its realm');\n             if (Array.prototype.constructor !== Array) throw new Error('constructor changed realm');\n             if (!Array.isArray(new other.Array())) throw new Error('a foreign array is not an array');\n             if (new other.Array() instanceof Array) throw new Error('a foreign array is this realm\\'s');\n             var C = new other.Function();\n             C.prototype = null;\n             var made = Reflect.construct(Object, [], C);\n             if (Object.getPrototypeOf(made) !== other.Object.prototype) throw new Error('prototype came from the wrong realm');\n             console.log('realms');",
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        let result = run_case(&probe, RunMode::Interpreter);
+        assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        assert_eq!(result.stdout, "realms\n");
+    }
+
+    #[test]
     fn each_interpreter_case_gets_fresh_host_state() {
         let mut first_case = case("console.log('one');");
         first_case.metadata.flags.push("raw".to_owned());

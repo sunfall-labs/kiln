@@ -19,6 +19,9 @@ pub(crate) fn capabilities() -> ExecutionCapabilities {
     ExecutionCapabilities::default()
         .with_source_compiler(compile_source)
         .with_module_loader(crate::module_loader::load)
+        // Test262's `$262.createRealm`. A host capability rather than a language feature, so it
+        // is named here beside the compiler rather than assumed by the engine.
+        .with_host_realms()
 }
 
 fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError> {
