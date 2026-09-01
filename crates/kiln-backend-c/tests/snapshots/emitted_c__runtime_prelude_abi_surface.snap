@@ -1051,7 +1051,7 @@ static kiln_value *kiln_c99_cell_of(kiln_value value) {
 static int kiln_c99_make_cell(kiln_value *slot) {
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
 static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char *name,
-static kiln_value kiln_c99_enter_new_target(const kiln_closure *closure) {
+static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
 static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_closure *closure,
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
 static kiln_value kiln_c99_number(double value) {

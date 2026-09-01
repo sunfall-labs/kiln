@@ -6466,6 +6466,87 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         assert_eq!(rest, "POST /echo 1.1\nabc123\n");
     }
 
+    #[test]
+    #[ignore = "native Fastify constructor still reaches an unowned Call refusal"]
+    fn native_fastify_server_case_runs_through_the_production_graph_when_installed() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native Fastify integration: no C compiler found");
+            return;
+        };
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/server/packages");
+        if !root.join("node_modules/fastify/fastify.js").is_file() {
+            eprintln!("skipping native Fastify integration: packages are not installed");
+            return;
+        }
+        let entry = root.join("s04-fastify.mjs");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root).expect("Node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("Fastify source graph compiles");
+        let project = TestDirectory::new("kiln-native-fastify");
+        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: project.path.join("server"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native Fastify graph builds");
+        let mut child = Command::new(&report.output)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run native Fastify graph");
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let (status, timed_out) = loop {
+            if let Some(status) = child.try_wait().expect("poll native Fastify graph") {
+                break (status, false);
+            }
+            if Instant::now() >= deadline {
+                child.kill().expect("kill stuck native Fastify graph");
+                break (child.wait().expect("reap stuck native Fastify graph"), true);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let mut stdout = String::new();
+        child
+            .stdout
+            .take()
+            .expect("capture Fastify stdout")
+            .read_to_string(&mut stdout)
+            .expect("read Fastify stdout");
+        let mut stderr = String::new();
+        child
+            .stderr
+            .take()
+            .expect("capture Fastify stderr")
+            .read_to_string(&mut stderr)
+            .expect("read Fastify stderr");
+        assert!(
+            !timed_out,
+            "native Fastify graph timed out; stdout={stdout:?} stderr={stderr:?}"
+        );
+        assert!(
+            status.success(),
+            "status={status}; stdout={stdout:?}; stderr={stderr:?}"
+        );
+        assert_eq!(
+            stdout,
+            "200 {\"ok\":true}\n200 {\"id\":\"7\"}\n200 {\"got\":{\"hello\":\"kiln\"}}\n404 {\"error\":\"not found\"}\n"
+        );
+        assert!(stderr.is_empty(), "stderr={stderr:?}");
+    }
+
     /// Serving a request and *reading the reply* are two different claims, and the corpus only
     /// covered the first. `setEncoding` is the seam: it is the one method name a `net.Socket`, an
     /// `http.IncomingMessage` and a `stream.Readable` all own, so the compiled dispatch has to

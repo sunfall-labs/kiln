@@ -7,10 +7,10 @@
 
 use std::{collections::HashSet, fmt::Write as _, sync::Arc};
 
-use kiln_host_abi::{HostOp, HOST_ABI_VERSION};
+use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{
-    BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program, UnaryOp, Upvalue,
-    BYTECODE_VERSION,
+    BYTECODE_VERSION, BinaryOp, Constant, FunctionProto, Instruction, ModuleProgram, Program,
+    UnaryOp, Upvalue,
 };
 use kiln_native_number::{NUMBER_FORMAT_VERSION, NUMBER_PARSE_VERSION};
 
@@ -7200,10 +7200,55 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
  * resumption, arbitrarily later. So an async arrow read whatever the global happened to hold and
  * answered `new.target === undefined` where the interpreter and node both say the captured one.
  * Re-establishing it per entry rather than per call is what makes the two engines agree. */
-static kiln_value kiln_c99_enter_new_target(const kiln_closure *closure) {
-    kiln_value saved = kiln_c99_new_target;
-    kiln_c99_new_target = closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
-    return saved;
+/* One body-entry boundary for every closure shape.
+ *
+ * Ordinary calls, parameter instantiation, generators and async resumptions used to establish
+ * overlapping subsets of this dynamic frame state before calling `closure->body` directly. That
+ * made the newest path the easiest place to forget `arguments`, lexical `this`, `new.target`, or
+ * diagnostic depth. Keep the mutable process globals behind one save/restore scope instead. */
+static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
+                                        kiln_closure *closure, kiln_value receiver,
+                                        const kiln_value *args, size_t argc, int depth,
+                                        kiln_value *thrown, kiln_generator *frame,
+                                        int inherit_new_target) {
+    kiln_value saved_target = kiln_c99_new_target;
+    const kiln_value *saved_args = kiln_c99_frame_args;
+    size_t saved_argc = kiln_c99_frame_argc;
+    kiln_value saved_captured = kiln_c99_captured_arguments;
+    int saved_is_arrow = kiln_c99_frame_is_arrow;
+    int saved_diagnostic_depth = kiln_c99_diagnostic_active_depth;
+    int status;
+    if (!inherit_new_target) {
+        kiln_c99_new_target =
+            closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
+    }
+    kiln_c99_frame_is_arrow = closure->arrow;
+    if (closure->arrow) {
+        kiln_c99_captured_arguments = closure->captured_arguments;
+    } else {
+        kiln_c99_frame_args = args;
+        kiln_c99_frame_argc = argc;
+    }
+    kiln_c99_diagnostic_active_depth = depth + 1;
+    status = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
+                           thrown, frame);
+    if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
+        kiln_c99_diagnostic_site = closure->diagnostic_source;
+        kiln_c99_diagnostic_operation = "FunctionBody";
+        kiln_c99_diagnostic_function = closure->name;
+        kiln_c99_diagnostic_function_len = closure->name_len;
+        kiln_c99_diagnostic_depth = (size_t)(depth + 1);
+        kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+        kiln_c99_diagnostic_detail =
+            "generated function body refused before an instruction owned the failure";
+    }
+    kiln_c99_new_target = saved_target;
+    kiln_c99_frame_args = saved_args;
+    kiln_c99_frame_argc = saved_argc;
+    kiln_c99_captured_arguments = saved_captured;
+    kiln_c99_frame_is_arrow = saved_is_arrow;
+    kiln_c99_diagnostic_active_depth = saved_diagnostic_depth;
+    return status;
 }
 
 /* Bind a generator's parameters, before the generator object reaches the program.
@@ -7222,29 +7267,11 @@ static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_
                                     int depth, kiln_value *thrown) {
     kiln_generator *frame = kiln_c99_generator_of(generator);
     kiln_value produced = kiln_c99_undefined();
-    kiln_value saved_target = kiln_c99_new_target;
-    const kiln_value *saved_args = kiln_c99_frame_args;
-    size_t saved_argc = kiln_c99_frame_argc;
-    kiln_value saved_captured = kiln_c99_captured_arguments;
-    int saved_is_arrow = kiln_c99_frame_is_arrow;
     int status;
-    kiln_c99_new_target = closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
-    kiln_c99_frame_is_arrow = closure->arrow;
-    if (closure->arrow) {
-        kiln_c99_captured_arguments = closure->captured_arguments;
-    } else {
-        kiln_c99_frame_args = args;
-        kiln_c99_frame_argc = argc;
-    }
     frame->binding = 1;
-    status = closure->body(host, &produced, closure->upvalues, receiver, args, argc, depth + 1,
-                           thrown, frame);
+    status = kiln_c99_invoke_closure_body(host, &produced, closure, receiver, args, argc, depth,
+                                          thrown, frame, 0);
     frame->binding = 0;
-    kiln_c99_new_target = saved_target;
-    kiln_c99_frame_args = saved_args;
-    kiln_c99_frame_argc = saved_argc;
-    kiln_c99_captured_arguments = saved_captured;
-    kiln_c99_frame_is_arrow = saved_is_arrow;
     if (status != KILN_C99_YIELDED) {
         /* The seam is the only exit a prologue has: it holds no `Yield` and no `Return`, so
          * `OK` here would mean the guard was never reached and the whole body ran. A throw is
@@ -7260,7 +7287,6 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown) {
     kiln_closure *closure;
-    int saved_diagnostic_depth = kiln_c99_diagnostic_active_depth;
     if (!kiln_c99_is_callable(callee)) {
         return kiln_c99_throw_not_a(thrown, callee, "function");
     }
@@ -7472,7 +7498,6 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         }
     }
     closure = kiln_c99_closure_of(callee);
-    kiln_c99_diagnostic_active_depth = depth + 1;
     if (closure->arrow) {
         receiver = closure->captured_this;
     }
@@ -7520,44 +7545,12 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         /* `new.target` is the constructor this call named -- nothing, for an ordinary call, and an
          * arrow's captured one, because an arrow has none of its own. `super(...)` is the one call
          * that keeps what it found: the base constructor is being run *for* the subclass. */
-        kiln_value saved = kiln_c99_new_target;
-        const kiln_value *saved_args = kiln_c99_frame_args;
-        size_t saved_argc = kiln_c99_frame_argc;
-        kiln_value saved_captured = kiln_c99_captured_arguments;
-        int saved_is_arrow = kiln_c99_frame_is_arrow;
-        int status;
+        int inherit_new_target = kiln_c99_inheriting_new_target;
         if (kiln_c99_inheriting_new_target) {
             kiln_c99_inheriting_new_target = 0;
-        } else {
-            kiln_c99_new_target =
-                closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
         }
-        kiln_c99_frame_is_arrow = closure->arrow;
-        if (closure->arrow) {
-            kiln_c99_captured_arguments = closure->captured_arguments;
-        } else {
-            kiln_c99_frame_args = args;
-            kiln_c99_frame_argc = argc;
-        }
-        status = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
-                               thrown, NULL);
-        if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
-            kiln_c99_diagnostic_site = closure->diagnostic_source;
-            kiln_c99_diagnostic_operation = "FunctionBody";
-            kiln_c99_diagnostic_function = closure->name;
-            kiln_c99_diagnostic_function_len = closure->name_len;
-            kiln_c99_diagnostic_depth = (size_t)(depth + 1);
-            kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
-            kiln_c99_diagnostic_detail =
-                "generated function body refused before an instruction owned the failure";
-        }
-        kiln_c99_new_target = saved;
-        kiln_c99_frame_args = saved_args;
-        kiln_c99_frame_argc = saved_argc;
-        kiln_c99_captured_arguments = saved_captured;
-        kiln_c99_frame_is_arrow = saved_is_arrow;
-        kiln_c99_diagnostic_active_depth = saved_diagnostic_depth;
-        return status;
+        return kiln_c99_invoke_closure_body(host, result, closure, receiver, args, argc, depth,
+                                            thrown, NULL, inherit_new_target);
     }
 }
 
@@ -7742,14 +7735,33 @@ static kiln_value kiln_c99_control_diagnostic(void) {
 
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
                                   const char *operation, size_t depth) {
+    int replaces_body_fallback =
+        kiln_c99_diagnostic_operation != NULL &&
+        strcmp(kiln_c99_diagnostic_operation, "FunctionBody") == 0;
     /* A helper may add detail before the generated instruction that owns the failure has had a
      * chance to name itself. That partial diagnostic is not provenance. The first instruction at
      * the deepest call depth owns the site; equal-depth control unwinding must not blame a caller. */
-    if (kiln_c99_diagnostic_site != NULL && depth <= kiln_c99_diagnostic_depth) return;
+    if (kiln_c99_diagnostic_site != NULL &&
+        kiln_c99_diagnostic_operation != NULL &&
+        strcmp(kiln_c99_diagnostic_operation, "FunctionBody") != 0 &&
+        depth <= kiln_c99_diagnostic_depth) return;
     kiln_c99_diagnostic_site = site;
     kiln_c99_diagnostic_instruction = instruction;
     kiln_c99_diagnostic_operation = operation;
     kiln_c99_diagnostic_depth = depth;
+    /* FunctionBody is only a fallback for a body that returned before any emitted instruction.
+     * Once an instruction claims the failure, its operation owns the payload too. */
+    if (replaces_body_fallback) {
+        kiln_c99_diagnostic_function = NULL;
+        kiln_c99_diagnostic_function_len = 0;
+        if (kiln_c99_diagnostic_detail != NULL &&
+            strcmp(kiln_c99_diagnostic_detail,
+                   "generated function body refused before an instruction owned the failure") == 0) {
+            kiln_c99_diagnostic_detail = NULL;
+            kiln_c99_diagnostic_receiver_tag = 0;
+            kiln_c99_diagnostic_has_method = 0;
+        }
+    }
 }
 
 
@@ -16862,14 +16874,10 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             } else if (!frame->done) {
                 frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
                 closure = kiln_c99_closure_of(frame->function);
-                {
-                    kiln_value saved_target = kiln_c99_enter_new_target(closure);
-                    frame->running = 1;
-                    status = closure->body(host, &produced, closure->upvalues, frame->receiver,
-                                           NULL, 0, depth + 1, thrown, frame);
-                    frame->running = 0;
-                    kiln_c99_new_target = saved_target;
-                }
+                frame->running = 1;
+                status = kiln_c99_invoke_closure_body(
+                    host, &produced, closure, frame->receiver, NULL, 0, depth, thrown, frame, 0);
+                frame->running = 0;
                 if (status == KILN_C99_YIELDED) {
                     frame->started = 1;
                     finished = 0;
@@ -21999,12 +22007,8 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    {
-        kiln_value saved_target = kiln_c99_enter_new_target(closure);
-        status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0,
-                               depth + 1, thrown, frame);
-        kiln_c99_new_target = saved_target;
-    }
+    status = kiln_c99_invoke_closure_body(host, &produced, closure, frame->receiver, NULL, 0,
+                                          depth, thrown, frame, 0);
     if (status == KILN_C99_YIELDED) {
         frame->started = 1;
         if (frame->awaiting) {
@@ -22066,12 +22070,8 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    {
-        kiln_value saved_target = kiln_c99_enter_new_target(closure);
-        status = closure->body(host, &produced, closure->upvalues, frame->receiver, NULL, 0,
-                               depth + 1, thrown, frame);
-        kiln_c99_new_target = saved_target;
-    }
+    status = kiln_c99_invoke_closure_body(host, &produced, closure, frame->receiver, NULL, 0,
+                                          depth, thrown, frame, 0);
     if (status == KILN_C99_YIELDED) {
         kiln_value awaited = produced;
         kiln_value resume;
@@ -25572,7 +25572,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result; kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -26007,7 +26007,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value self_value = stack[sp - {argc} - 1]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
@@ -26969,18 +26969,24 @@ mod tests {
         assert_ne!(legacy.symbol, host_clock.symbol);
         assert_ne!(legacy.program_hash, host_clock.program_hash);
         assert!(!legacy.source.contains("#define KILN_REALM_HOST_CLOCK"));
-        assert!(host_clock
-            .source
-            .contains("#define KILN_REALM_HOST_CLOCK 1"));
+        assert!(
+            host_clock
+                .source
+                .contains("#define KILN_REALM_HOST_CLOCK 1")
+        );
         assert!(host_clock.source.contains("UINT16_C(2)"));
         assert_ne!(legacy.symbol, seeded.symbol);
         assert_ne!(seeded.symbol, host_entropy.symbol);
-        assert!(seeded
-            .source
-            .contains("#define KILN_REALM_ENTROPY_SEED UINT64_C(7)"));
-        assert!(host_entropy
-            .source
-            .contains("#define KILN_REALM_HOST_ENTROPY 1"));
+        assert!(
+            seeded
+                .source
+                .contains("#define KILN_REALM_ENTROPY_SEED UINT64_C(7)")
+        );
+        assert!(
+            host_entropy
+                .source
+                .contains("#define KILN_REALM_HOST_ENTROPY 1")
+        );
         assert!(host_entropy.source.contains("UINT16_C(3)"));
         assert_ne!(legacy.symbol, named_timezone.symbol);
         assert_ne!(named_timezone.symbol, host_timezone.symbol);
@@ -27014,9 +27020,11 @@ mod tests {
         )
         .expect("runtime module emits");
 
-        assert!(emitted
-            .source
-            .contains("exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);"));
+        assert!(
+            emitted
+                .source
+                .contains("exports[0] = kiln_c99_method(KILN_C99_METHOD_QUEUE_MICROTASK);")
+        );
         assert!(emitted.source.contains("static int kiln_module_path_"));
         assert!(emitted.source.contains("kiln_realm_enter"));
         assert!(!emitted.source.contains("extern kiln_value"));
@@ -27652,12 +27660,16 @@ int main(void) {
                 .contains("kiln_c99_diagnostic_site = kiln_c99_diagnostic_site"),
             "diagnostic reset must not be substituted into the site expression"
         );
-        assert!(generated
-            .source
-            .contains("kiln_c99_diagnostic_detail = NULL;"));
-        assert!(generated
-            .source
-            .contains("Object.defineProperty invalid key or arity"));
+        assert!(
+            generated
+                .source
+                .contains("kiln_c99_diagnostic_detail = NULL;")
+        );
+        assert!(
+            generated
+                .source
+                .contains("Object.defineProperty invalid key or arity")
+        );
     }
 
     #[test]
@@ -27783,6 +27795,39 @@ int main(void) {
         assert!(
             run.status.success(),
             "function refusal source failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn an_instruction_replaces_the_function_body_fallback_at_the_same_depth() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("diagnostic ownership probe emits");
+        let wrapper = r#"
+int main(void) {
+    kiln_c99_diagnostic_site = "callee.js";
+    kiln_c99_diagnostic_instruction = 0;
+    kiln_c99_diagnostic_operation = "FunctionBody";
+    kiln_c99_diagnostic_depth = 2;
+    kiln_c99_diagnostic_function = "callee";
+    kiln_c99_diagnostic_function_len = 6;
+    kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+    kiln_c99_diagnostic_detail =
+        "generated function body refused before an instruction owned the failure";
+    kiln_c99_note_refusal("callee.js", 37, "CallMethod(listen)", 2);
+    if (kiln_c99_diagnostic_instruction != 37) return 1;
+    if (strcmp(kiln_c99_diagnostic_operation, "CallMethod(listen)") != 0) return 2;
+    if (kiln_c99_diagnostic_function != NULL) return 3;
+    if (kiln_c99_diagnostic_detail != NULL) return 4;
+    if (kiln_c99_diagnostic_receiver_tag != 0) return 5;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "instruction-replaces-body-fallback");
+        assert!(
+            run.status.success(),
+            "diagnostic ownership failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
         );
@@ -28285,9 +28330,11 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
         assert_eq!(first, second);
         assert!(first.symbol.starts_with("kiln_module_"));
         assert_eq!(first.symbol.len(), "kiln_module_".len() + 32);
-        assert!(first.symbol["kiln_module_".len()..]
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit()));
+        assert!(
+            first.symbol["kiln_module_".len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        );
         assert!(!first.source.contains("/Users/"));
         assert!(first.source.contains(&format!(
             "int {}(kiln_host *host, kiln_value *result)",
@@ -28360,10 +28407,11 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
         assert_ne!(one.source, two.source);
         assert_ne!(one.symbol, other.symbol);
         assert!(!one.symbol.contains("/"));
-        assert!(one
-            .symbol
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'));
+        assert!(
+            one.symbol
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        );
     }
 
     #[test]
@@ -28568,18 +28616,22 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
             0,
         );
         let generated = emit(&program).expect("locale probe emits");
-        assert!(generated
-            .source
-            .contains("kiln_string_to_number(value.ptr, value.len)"));
+        assert!(
+            generated
+                .source
+                .contains("kiln_string_to_number(value.ptr, value.len)")
+        );
         // A *call*, matching the printf check below. Both names still appear in the runtime's
         // prose, where they are naming the things that must not be reached for.
         assert!(!generated.source.contains("strtod("));
         assert!(!generated.source.contains("kiln_c99_strtod_c"));
         assert!(generated.source.contains("KILN_NUMBER_FORMAT_VERSION 1"));
         assert!(generated.source.contains("KILN_NUMBER_PARSE_VERSION 1"));
-        assert!(generated
-            .source
-            .contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))"));
+        assert!(
+            generated
+                .source
+                .contains("kiln_number_to_js_string(number, buffer, sizeof(buffer))")
+        );
         assert!(!generated.source.contains("snprintf("));
         assert!(!generated.source.contains("setlocale("));
         let wrapper = format!(
