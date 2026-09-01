@@ -24383,7 +24383,6 @@ fn render_functions(
             program,
             proto,
             &plan.functions,
-            plan.functions[index],
             index,
             symbol,
             diagnostic_site,
@@ -24460,11 +24459,11 @@ fn render_function(
     program: &Program,
     proto: &FunctionProto,
     frame_stacks: &[usize],
-    max_stack: usize,
     index: usize,
     symbol: &str,
     diagnostic_site: &str,
 ) {
+    let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
     // Only when the name is already a C identifier: it goes into a comment, and a name is
     // program text that could otherwise close one.
@@ -27502,9 +27501,8 @@ int main(void) {{
             0,
         ))
         .expect("symbol registry probe emits");
-        let wrapper = format!(
-            r#"
-int main(void) {{
+        let wrapper = r#"
+int main(void) {
     uint64_t realm;
     kiln_value key = kiln_c99_copy_text("fastify-error-generic", 21);
     kiln_value first;
@@ -27528,9 +27526,9 @@ int main(void) {{
         memcmp(kiln_c99_text(first).ptr, "Symbol(fastify-error-generic)", 29) != 0) return 9;
     kiln_test_realm_active = 0;
     return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 10;
-}}
+}
 "#
-        );
+        .to_string();
         let run = run_with_main(&generated, &wrapper, "symbol-registry");
         assert!(
             run.status.success(),
