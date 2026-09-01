@@ -59,6 +59,9 @@ enum Declaration {
     ExpectedStdout {
         expected: String,
         unavailable_reason: Option<String>,
+        /// A host adapter without which this program cannot run at all; see
+        /// [`crate::manifest::ManifestTest::requires_host`].
+        requires_host: Option<String>,
     },
 }
 
@@ -133,10 +136,36 @@ impl ConformanceTest {
             Declaration::ExpectedStdout {
                 expected: _,
                 unavailable_reason: Some(reason),
+                ..
             } => vec![skip_build_requirement(reason)],
+            // The corpus says this program needs a host adapter that this run did not install.
+            // Without it the program fails on its first `import`, and a whole corpus doing that
+            // at once looks exactly like a broken engine -- it has been reported as one. Say
+            // which flag is missing instead, on every affected test, so the count is unmistakably
+            // an operator error rather than 37 findings.
+            Declaration::ExpectedStdout {
+                requires_host: Some(host),
+                ..
+            } if !matches!(mode, RunMode::Node) => vec![VariantResult {
+                variant: Variant::Sloppy,
+                result: CaseResult::new(
+                    Outcome::Fail,
+                    vec![Diagnostic::new(
+                        DiagnosticPhase::Harness,
+                        format!(
+                            "this test requires the `{host}` host adapter, which this run did \
+                             not install; re-run with `--node`"
+                        ),
+                        None,
+                    )],
+                    String::new(),
+                    Instant::now(),
+                ),
+            }],
             Declaration::ExpectedStdout {
                 expected,
                 unavailable_reason: None,
+                ..
             } => {
                 if matches!(mode, RunMode::Node) {
                     vec![program::run_node_against_expected_stdout(
@@ -167,6 +196,7 @@ impl ConformanceTest {
             declaration: Declaration::ExpectedStdout {
                 expected: test.expected_stdout.clone(),
                 unavailable_reason: resolution.unavailable_reason,
+                requires_host: test.requires_host.clone(),
             },
         }
     }
@@ -246,6 +276,22 @@ pub fn discover(root: &Path) -> Result<Vec<ConformanceTest>, DiscoveryError> {
     }
     let (cases, errors) =
         kiln_test262::discover_reporting(root).map_err(DiscoveryError::Frontmatter)?;
+    // A tree with no manifest is assumed to be Test262, and every `.js` in it is parsed for
+    // frontmatter. When *nothing* in it has any, that assumption is simply wrong: the files are
+    // esbuild bundles, or fixtures, or somebody's probes. Reporting one failure per file is
+    // technically accurate and thoroughly misleading -- `conformance/thirdparty` produced a
+    // uniform wall of "invalid Test262 frontmatter" having executed no JavaScript at all, and was
+    // read as "0 of 11 real packages pass". Refuse the tree instead, once, and name its runner.
+    //
+    // Tolerating *some* bad files stays deliberate: large external suites are imperfect, and one
+    // unparseable file must not discard the valid ones beside it. Only a total absence is a
+    // statement about the corpus rather than about a file.
+    if cases.is_empty() && !errors.is_empty() {
+        return Err(DiscoveryError::NotATest262Corpus {
+            root: root.to_owned(),
+            files: errors.len(),
+        });
+    }
     let mut tests: Vec<_> = cases
         .into_iter()
         .map(|case| ConformanceTest::from_frontmatter(root, case))
@@ -294,6 +340,11 @@ fn governing_manifest(root: &Path) -> Result<Option<Manifest>, DiscoveryError> {
 pub enum DiscoveryError {
     Manifest(ManifestError),
     Frontmatter(kiln_test262::DiscoveryError),
+    /// The tree has no manifest and not one file in it carries Test262 frontmatter.
+    NotATest262Corpus {
+        root: PathBuf,
+        files: usize,
+    },
 }
 
 impl Display for DiscoveryError {
@@ -301,6 +352,14 @@ impl Display for DiscoveryError {
         match self {
             Self::Manifest(error) => write!(f, "conformance manifest: {error}"),
             Self::Frontmatter(error) => write!(f, "conformance frontmatter: {error}"),
+            Self::NotATest262Corpus { root, files } => write!(
+                f,
+                "{} is not a Test262 corpus: it has no manifest.toml, and none of its {files} \
+                 JavaScript files carry Test262 frontmatter, so running it here would report one \
+                 failure per file without executing any of them. Corpora with their own runner \
+                 are listed in AGENTS.md; conformance/thirdparty is run by scripts/thirdparty.sh.",
+                root.display()
+            ),
         }
     }
 }
@@ -310,6 +369,8 @@ impl Error for DiscoveryError {
         match self {
             Self::Manifest(error) => Some(error),
             Self::Frontmatter(error) => Some(error),
+            // A statement about the shape of the tree, with no underlying failure beneath it.
+            Self::NotATest262Corpus { .. } => None,
         }
     }
 }
@@ -360,6 +421,78 @@ mod tests {
         let remaining = discover(&root).expect("the valid neighbor remains discoverable");
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id(), "good.js");
+        fs::remove_dir_all(root).expect("remove corpus");
+    }
+
+    fn scratch_corpus(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("kiln-conformance-{name}-{stamp}"));
+        fs::create_dir_all(&root).expect("create corpus");
+        root
+    }
+
+    /// One bad file among good ones is a result; a tree where *nothing* is a Test262 test is a
+    /// mistake about which corpus this is. `conformance/thirdparty` — esbuild bundles — was run
+    /// this way and reported as eleven library failures, having executed no JavaScript.
+    #[test]
+    fn a_tree_with_no_test262_frontmatter_at_all_is_refused_rather_than_failed_file_by_file() {
+        let root = scratch_corpus("not-test262");
+        fs::write(root.join("one.bundle.js"), "var a=1;\n").expect("write bundle");
+        fs::write(root.join("two.bundle.js"), "var b=2;\n").expect("write bundle");
+
+        let error = discover(&root).expect_err("a tree with no frontmatter is not a corpus");
+        let message = error.to_string();
+        assert!(
+            matches!(error, DiscoveryError::NotATest262Corpus { files: 2, .. }),
+            "expected a corpus-shape refusal naming both files, got {message}"
+        );
+        assert!(
+            message.contains("scripts/thirdparty.sh"),
+            "the refusal must name a runner that would work, got {message}"
+        );
+
+        // One valid neighbour is enough to make it a Test262 tree again, bad files included.
+        fs::write(root.join("real.js"), "/*---\ndescription: valid\n---*/\n").expect("write test");
+        let tests = discover(&root).expect("a corpus with one real test is a corpus");
+        assert_eq!(tests.len(), 3);
+        fs::remove_dir_all(root).expect("remove corpus");
+    }
+
+    /// Without `--node` the Node and server corpora used to fail on their first `import`, 37 at
+    /// once, which reads as a broken engine rather than a missing flag.
+    #[test]
+    fn a_test_needing_the_node_adapter_says_so_instead_of_failing_obscurely() {
+        let root = scratch_corpus("requires-host");
+        fs::write(root.join("s01.mjs"), "import http from 'node:http';\n").expect("write program");
+        fs::write(
+            root.join(MANIFEST_FILE_NAME),
+            "[[test]]\nid = \"server/s01\"\nsource = \"s01.mjs\"\n\
+             requires_host = \"node\"\nexpected_stdout = \"ok\\n\"\n",
+        )
+        .expect("write manifest");
+
+        let tests = discover(&root).expect("the manifest governs this tree");
+        assert_eq!(tests.len(), 1);
+
+        let refused = &tests[0].run(RunMode::Interpreter)[0].result;
+        assert_eq!(refused.outcome, Outcome::Fail);
+        let message = &refused.primary_diagnostic().expect("a diagnostic").message;
+        assert!(
+            message.contains("--node"),
+            "the failure must name the missing flag, got {message}"
+        );
+
+        // Under `--node` the requirement is satisfied, so the test runs and is judged on its
+        // output rather than short-circuited here. Anything but the refusal above proves that.
+        let ran = &tests[0].run(RunMode::Node)[0].result;
+        assert!(
+            !ran.primary_diagnostic()
+                .is_some_and(|diagnostic| diagnostic.message.contains("--node")),
+            "with the adapter installed the test must actually run, got {ran:?}"
+        );
         fs::remove_dir_all(root).expect("remove corpus");
     }
 }
