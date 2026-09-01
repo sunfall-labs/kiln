@@ -337,6 +337,27 @@ pub enum Instruction {
     ///
     /// The operand is the name constant. Stack: `[value] -> []`.
     StoreGlobalBinding(u32),
+    /// The same assignment written in strict code: the global object's `SetMutableBinding` with
+    /// `S` true, which writes an existing property and throws a `ReferenceError` for a name the
+    /// realm does not have.
+    ///
+    /// Strict mode refuses to *create* a global by assignment; it does not refuse to write one.
+    /// The difference can only be settled at run time, because a global the program installed a
+    /// line earlier -- or that global code declared with `var` -- is a perfectly resolvable
+    /// reference the compiler cannot see. Deciding it at compile time made `"use strict"` code
+    /// throw on a write to a name that was plainly there.
+    ///
+    /// The operand is the name constant. Stack: `[value] -> []`.
+    StoreGlobalBindingStrict(u32),
+    /// Throw a `ReferenceError` now if the global object has no property `name`.
+    ///
+    /// Emitted where strict code *resolves* an assignment target no scope bound, which is before
+    /// the right-hand side runs: `ResolveBinding` decides then whether the reference is
+    /// unresolvable, and `PutValue` refuses an unresolvable one in strict mode however the value
+    /// was produced.
+    ///
+    /// The operand is the name constant. Stack: `[] -> []`.
+    RequireGlobalBinding(u32),
     /// `delete name` in sloppy code, where no scope declared `name`.
     ///
     /// The last environment record an unqualified reference reaches is the global object's, so
@@ -350,6 +371,23 @@ pub enum Instruction {
     ///
     /// The operand is the name constant. Stack: `[] -> [boolean]`.
     DeleteGlobalBinding(u32),
+    /// `CreateGlobalVarBinding`/`CreateGlobalFunctionBinding`: declare `name` on the global
+    /// object, leaving an existing property alone.
+    ///
+    /// Global code's variable environment *is* the global object, so `var x` at the top of a
+    /// script is a property of it and not a slot -- which is why `globalThis.x` finds it, why an
+    /// indirect `eval` can read it, and why `delete x` is decided by the property's own
+    /// attributes.
+    ///
+    /// It creates rather than assigns: `var x;` over an `x` the realm already has keeps the value
+    /// it had, which is the difference between declaring a binding and writing one.
+    /// `configurable` is the specification's `D`, false for a script and true for an `eval`.
+    ///
+    /// Stack: `[] -> []`.
+    DeclareGlobalBinding {
+        name: u32,
+        configurable: bool,
+    },
     /// Push the marker that fills a hole in an array literal.
     ///
     /// Not `undefined`: a hole is *absent*, and `in`, `Object.keys` and every array method that
@@ -867,6 +905,13 @@ pub struct EvalSite {
     pub strict: bool,
     /// Arguments on the stack above the call, or `None` when a spread put them in one array.
     pub argc: Option<u16>,
+    /// Whether the calling code's variable environment *is* the global environment record.
+    ///
+    /// True for a direct `eval` written at the top level of a script, and it is what decides
+    /// where the eval's own `var` and function declarations go: onto the global object, where
+    /// the script and every later `eval` can see them, rather than into slots that die with the
+    /// eval's frame. An indirect `eval` never carries a site at all and is global by definition.
+    pub global_var_scope: bool,
 }
 
 /// A runtime import lowered to a local slot. The graph linker initializes the slot from the
@@ -972,6 +1017,15 @@ pub struct CompileDiagnostic {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CompileOptions {
     pub strict: bool,
+    /// Whether this program is *global* code, whose variable environment is the global
+    /// environment record.
+    ///
+    /// It is not the same question as which grammar goal parsed the source, which is why the
+    /// caller has to say. Kiln parses a CommonJS body with the script grammar too, and a CommonJS
+    /// body has a variable environment of its own -- Node wraps it in a function -- so its
+    /// top-level `var`s must stay slots. Only a real script has the global object for a variable
+    /// environment, and only its `var`s and function declarations become properties of it.
+    pub global_code: bool,
 }
 
 /// Which compiled bodies run as strict code.
@@ -1046,6 +1100,13 @@ pub fn compile_with_strictness(
     // assignment to an unbound name creates a global.
     compiler.strict =
         options.strict || module.strict || matches!(module.source_goal, SourceGoal::Module);
+    // A script's `CreateGlobalVarBinding` is called with `D` false, so `var x` at the top of a
+    // script cannot be deleted afterwards. Strict global code still puts its `var`s on the
+    // object -- strictness decides what an *unresolvable* assignment does, not where a
+    // declaration lives.
+    compiler.global_var_scope =
+        options.global_code && !matches!(module.source_goal, SourceGoal::Module);
+    compiler.global_bindings_configurable = false;
     // The module body has nested functions too, so its own block bindings can be captured.
 
     for requested in module.runtime_requested_modules() {
@@ -1101,6 +1162,11 @@ pub struct EvalOptions {
     pub outer: Vec<EvalOuter>,
     /// Strict either because the caller is, or because the eval'd source says so itself.
     pub strict: bool,
+    /// Whether the variable environment this eval's declarations belong to is the global one.
+    ///
+    /// Always true for an indirect eval, which *is* global code. True for a direct one only when
+    /// the call is written at the top level of a script.
+    pub global_var_scope: bool,
 }
 
 /// Compile source that arrived at run time, as `eval` and the `Function` constructor do.
@@ -1124,6 +1190,13 @@ pub fn compile_eval_with_strictness(
     let mut compiler = Compiler::new(module);
     compiler.strict = options.strict || module.strict;
     compiler.eval_program = true;
+    // `EvalDeclarationInstantiation` puts an eval's `var`s in the calling context's variable
+    // environment, and when that *is* the global environment record they become properties of
+    // the global object -- created with `D` true, which is why one written inside an `eval` can
+    // be deleted and one written in a script cannot. Strict eval code gets a variable
+    // environment of its own and never reaches here.
+    compiler.global_var_scope = options.global_var_scope && !compiler.strict;
+    compiler.global_bindings_configurable = true;
     // Unconditional, unlike an ordinary program, and it is what makes the eval'd code reachable
     // from itself. A module-scope binding that is *not* boxed is read from a nested function
     // through `LoadGlobal`, which finds the frame of whichever module is running -- and for an
@@ -1531,6 +1604,14 @@ enum Resolution {
     /// in it. Refused until upvalues exist.
     /// A binding in an enclosing function, reached through this closure's captured cells.
     Upvalue(u32),
+    /// A `var` or function declaration at the top level of *global* code, which the
+    /// specification puts on the global object rather than in an environment slot.
+    ///
+    /// It is reached by name, because the object is where it lives: `var x = 1` at the top of a
+    /// script and `globalThis.x = 1` are two spellings of one property, and every later read --
+    /// from the script, from a function it declares, from an `eval` written anywhere -- has to
+    /// find the same one.
+    GlobalObject,
     Unresolved,
 }
 
@@ -1644,6 +1725,22 @@ struct Compiler {
     /// between here and the block, by a formal parameter, or by being `arguments` -- are never in
     /// this set, so the write is emitted only where the specification asks for it.
     annexb_var_functions: HashSet<String>,
+    /// Names this program declared on the global object rather than in a slot.
+    ///
+    /// Non-empty only for *global* code: a script and an `eval` whose variable environment is the
+    /// global one. A module body and a CommonJS body each have a variable environment of their
+    /// own, and their top-level `var`s stay slots -- which is the difference between the two
+    /// things kiln parses with the script grammar.
+    global_bindings: HashSet<String>,
+    /// Whether this program's variable environment *is* the global environment record, so that a
+    /// top-level `var` or function declaration is a property of the global object.
+    global_var_scope: bool,
+    /// Whether a binding this program creates on the global object may be deleted afterwards.
+    ///
+    /// `false` for a script, whose `CreateGlobalVarBinding` is called with `D` false, and `true`
+    /// for an `eval`, whose is called with `D` true. It is the whole reason `var x` at the top of
+    /// a script survives `delete x` and one written inside an `eval` does not.
+    global_bindings_configurable: bool,
     /// Box every binding of the function being compiled, not only the ones a nested function
     /// names.
     ///
@@ -1806,6 +1903,9 @@ impl Compiler {
             parameter_dead_zone: false,
             outer_names: HashSet::new(),
             annexb_var_functions: HashSet::new(),
+            global_bindings: HashSet::new(),
+            global_var_scope: false,
+            global_bindings_configurable: false,
             // Module scope is boxed too when the module contains a direct eval: a script's
             // top-level bindings are exactly the ones an eval written there can see.
             cell_everything: body_contains_direct_eval(&module.body),
@@ -2665,6 +2765,30 @@ impl Compiler {
         } else {
             self.scopes.len() - 1
         };
+        // A `var` at the top of global code is a property of the global object, and declaration
+        // instantiation already created it. All that is left is the initializer.
+        // `global_var_scope` and not merely the name being in `global_bindings`: a function
+        // written in a script whose top level declares `var x` still has its own `var x`, and
+        // that one is a slot of the call's.
+        if self.global_var_scope
+            && kind == VariableKind::Var
+            && scope_index == 0
+            && self.global_bindings.contains(name)
+        {
+            if bound_from_stack {
+                // The value is on the stack and `declare_bound` emits the store, because only it
+                // knows which instruction the binding needs.
+                return;
+            }
+            // `var x;` with no initializer keeps whatever the binding already holds -- which is
+            // the same rule a slot-backed `var` follows, and the reason a second `var x;` does
+            // not reset it to `undefined`.
+            if let Some(initializer) = initializer {
+                self.expression(initializer);
+                self.store_global_object_binding(name);
+            }
+            return;
+        }
         if let Some(existing) = self.scopes[scope_index].get(name).copied() {
             // A `var` re-declaration is an assignment, and the hoisting pass has already created
             // the slot for every declaration in the block -- so reaching an existing binding is
@@ -2906,6 +3030,7 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::GlobalObject => self.load_global_object_binding(name),
             Resolution::Unresolved if name == "this" => self.code.push(Instruction::LoadThis),
             // `arguments` is not a declared binding, so it only resolves when nothing else
             // bound the name -- a parameter or local called `arguments` shadows it, as it
@@ -3009,7 +3134,8 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-            Resolution::Unresolved => {
+            // A hidden binding, never a name a program could have declared on the object.
+            Resolution::GlobalObject | Resolution::Unresolved => {
                 self.error(None, "a `with` object went out of scope");
                 self.push_constant(Constant::Undefined);
             }
@@ -3056,6 +3182,13 @@ impl Compiler {
             // needs to run.
             Resolution::Local(_) | Resolution::Upvalue(_) | Resolution::Global(_) => {
                 self.push_constant(Constant::Boolean(false));
+            }
+            // A global `var` is a property like any other: whether it can be deleted is the
+            // property's own business, and a script's is non-configurable while an `eval`'s is
+            // not. So the object is asked, exactly as it is for a name nothing declared.
+            Resolution::GlobalObject => {
+                let name = self.constant_index(Constant::String(name.to_owned()));
+                self.code.push(Instruction::DeleteGlobalBinding(name));
             }
             // Nothing placed it, so the global object's environment record is the last one
             // an unqualified reference reaches and its `[[Delete]]` is the answer.  That is
@@ -3105,7 +3238,15 @@ impl Compiler {
             // difference between the two for hoisting purposes.
             StatementKind::Function(function) => {
                 if let Some(name) = &function.name {
-                    self.predeclare(VariableKind::Let, name, true);
+                    // At the top of global code a function declaration is a *var*-scoped
+                    // binding -- `CreateGlobalFunctionBinding` -- and so a property of the
+                    // global object. Anywhere else it is block-scoped like a `let`.
+                    let kind = if self.global_var_scope && self.scopes.len() == 1 {
+                        VariableKind::Var
+                    } else {
+                        VariableKind::Let
+                    };
+                    self.predeclare(kind, name, true);
                 }
             }
             StatementKind::Class(class) => {
@@ -3273,6 +3414,16 @@ impl Compiler {
             return;
         }
         let Some(target) = self.scopes[0].get(name).copied() else {
+            // The var-scoped binding is a property of the global object, so the copy is a write
+            // to it rather than to a slot.
+            if self.global_var_scope && self.global_bindings.contains(name) {
+                self.code.push(if block.celled {
+                    Instruction::LoadCell(block.slot)
+                } else {
+                    Instruction::LoadLocal(block.slot)
+                });
+                self.store_global_object_binding(name);
+            }
             return;
         };
         // The declaration is at the top level of the variable environment after all, so the
@@ -3320,6 +3471,20 @@ impl Compiler {
             self.scopes[0].remove(name);
         }
         if self.scopes[scope_index].contains_key(name) {
+            return;
+        }
+        // Global code's variable environment is the global object, so a `var` or a function
+        // declaration at the top of it is a property rather than a slot. Lexical declarations
+        // are not: `let` and `const` at the top of a script go in the global *declarative*
+        // record, where `globalThis` cannot see them, and they keep their slots.
+        if self.global_var_scope && scope_index == 0 && kind == VariableKind::Var {
+            if self.global_bindings.insert(name.to_owned()) {
+                let index = self.constant_index(Constant::String(name.to_owned()));
+                self.code.push(Instruction::DeclareGlobalBinding {
+                    name: index,
+                    configurable: self.global_bindings_configurable,
+                });
+            }
             return;
         }
         let slot = self.local_count;
@@ -4134,6 +4299,7 @@ impl Compiler {
                 self.code.push(Instruction::StoreCell(local.slot))
             }
             Resolution::Local(local) => self.code.push(Instruction::StoreLocal(local.slot)),
+            Resolution::GlobalObject => self.store_global_object_binding(name),
             _ => self.error(Some(span), format!("could not bind `{name}`")),
         }
     }
@@ -5291,6 +5457,17 @@ impl Compiler {
                     .expect("Global resolution just found this name in module scope");
                 (Place::Global(slot), local.kind, local.imported)
             }
+            // A `var` this program declared on the global object. `ThrowReference` reads it and
+            // `StoreGlobalBinding` writes it, exactly as for a name nothing declared -- the
+            // difference is that declaration instantiation already created the property, so the
+            // read cannot throw and the write cannot be the one that creates it.
+            Resolution::GlobalObject => {
+                let name = self.constant_index(Constant::String(target.to_owned()));
+                return Some((
+                    Instruction::ThrowReference(name),
+                    Instruction::StoreGlobalBinding(name),
+                ));
+            }
             Resolution::Unresolved => {
                 let _ = span;
                 let name = self.constant_index(Constant::String(target.to_owned()));
@@ -5303,12 +5480,20 @@ impl Compiler {
                 // throws in sloppy code too -- so the load stays `ThrowReference`, which is also
                 // the instruction that finds a global the program installed earlier.
                 if self.strict {
-                    self.code.push(Instruction::ThrowReference(name));
-                    return None;
+                    // Where the reference is *resolved*, which is before the right-hand side is
+                    // evaluated. Strict mode refuses to create a global by assignment, and
+                    // whether this name is one it would have to create can only be answered at
+                    // run time -- a `var` in global code, or a `globalThis.x = 1` a line above,
+                    // makes it a perfectly ordinary write.
+                    self.code.push(Instruction::RequireGlobalBinding(name));
                 }
                 return Some((
                     Instruction::ThrowReference(name),
-                    Instruction::StoreGlobalBinding(name),
+                    if self.strict {
+                        Instruction::StoreGlobalBindingStrict(name)
+                    } else {
+                        Instruction::StoreGlobalBinding(name)
+                    },
                 ));
             }
         };
@@ -5719,7 +5904,7 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-            Resolution::Unresolved => {
+            Resolution::GlobalObject | Resolution::Unresolved => {
                 self.error(None, "`super` outside of a method");
                 self.push_constant(Constant::Undefined);
                 return;
@@ -5770,7 +5955,7 @@ impl Compiler {
             Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
             Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
             Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
-            Resolution::Unresolved => {
+            Resolution::GlobalObject | Resolution::Unresolved => {
                 self.error(None, "`super` outside of a derived class");
                 self.push_constant(Constant::Undefined);
             }
@@ -5820,7 +6005,9 @@ impl Compiler {
         // Asking `resolve` instead found the enclosing parameter and overwrote it, which is
         // exactly what B.3.2.1 declines to do for a formal.
         let innermost = self.scopes.len() - 1;
-        if !self.scopes[innermost].contains_key(&name) {
+        let global_here =
+            self.global_var_scope && innermost == 0 && self.global_bindings.contains(&name);
+        if !self.scopes[innermost].contains_key(&name) && !global_here {
             self.predeclare(VariableKind::Let, &name, true);
         }
 
@@ -5837,6 +6024,13 @@ impl Compiler {
                     Instruction::StoreLocal(local.slot)
                 });
                 self.emit_annexb_var_write(&name, local);
+            }
+            // A function declaration at the top of global code: the binding is a property of the
+            // global object, created by `DeclareGlobalBinding` when the scope was entered and
+            // given its value here.
+            Resolution::GlobalObject => {
+                self.code.push(Instruction::MakeFunction(index));
+                self.store_global_object_binding(&name);
             }
             // The binding was just created in the current function's innermost scope, so any
             // other resolution means the scope bookkeeping is inconsistent.
@@ -6076,6 +6270,12 @@ impl Compiler {
         };
         let outer_mapped_arguments =
             std::mem::replace(&mut self.mapped_arguments, mapped_arguments);
+        // A function body has a variable environment of its own, whatever encloses it: `var i`
+        // inside a function written at the top of a script is that call's binding and not a
+        // property of the global object. `global_bindings` stays, because the names the *program*
+        // put on the object are still resolvable from in here -- it is only new declarations that
+        // stop going there.
+        let outer_global_var_scope = std::mem::replace(&mut self.global_var_scope, false);
         let outer = FunctionState {
             code: std::mem::take(&mut self.code),
             scopes: std::mem::replace(&mut self.scopes, vec![parameters]),
@@ -6184,6 +6384,7 @@ impl Compiler {
             .enclosing
             .pop()
             .expect("this function pushed its own enclosing state");
+        self.global_var_scope = outer_global_var_scope;
         let strict = std::mem::replace(&mut self.strict, outer_strict);
         self.mapped_arguments = outer_mapped_arguments;
         let proto = FunctionProto {
@@ -6326,18 +6527,29 @@ impl Compiler {
                 Instruction::LoadGlobal(slot),
                 Instruction::StoreGlobal(slot),
             ),
+            Resolution::GlobalObject => {
+                let name = self.constant_index(Constant::String(target.to_owned()));
+                (
+                    Instruction::ThrowReference(name),
+                    Instruction::StoreGlobalBinding(name),
+                )
+            }
+            // `x++` on a name nothing bound is settled against the global object, exactly as a
+            // read and a write of it separately would be. The read comes first and is
+            // `ThrowReference`, so an unresolvable name is the `ReferenceError` the language
+            // promises without the compiler having to decide it -- which it cannot: a global the
+            // program installed earlier, or one global code declared with `var`, is resolvable.
             Resolution::Unresolved => {
-                // Inside a `with` the name may be a property of the object and only fail to be
-                // one at run time, so the refusal has to wait until then. Outside one the
-                // compiler already knows, and says so where the mistake is written.
-                if self.with_scopes.is_empty() {
-                    self.error(Some(span), format!("unresolved identifier `{target}`"));
-                    self.push_constant(Constant::Undefined);
-                } else {
-                    let name = self.constant_index(Constant::String(target.to_owned()));
-                    self.code.push(Instruction::ThrowReference(name));
-                }
-                return;
+                let _ = span;
+                let name = self.constant_index(Constant::String(target.to_owned()));
+                (
+                    Instruction::ThrowReference(name),
+                    if self.strict {
+                        Instruction::StoreGlobalBindingStrict(name)
+                    } else {
+                        Instruction::StoreGlobalBinding(name)
+                    },
+                )
             }
         };
 
@@ -6889,6 +7101,7 @@ impl Compiler {
                 bindings,
                 strict: self.strict,
                 argc,
+                global_var_scope: self.global_var_scope && !self.compiling_function(),
             })));
             return;
         }
@@ -7072,14 +7285,28 @@ impl Compiler {
             return Resolution::Local(*local);
         }
         let Some(module) = self.enclosing.first() else {
-            // Compiling the module body: its scopes were searched above, so there is nowhere
-            // else a name could be.
-            return Resolution::Unresolved;
+            // Compiling the module body: its scopes were searched above, so the global object is
+            // the only place left, and only for a name this program declared there.
+            return self.global_object_binding(name);
         };
         if let Some(local) = module.scopes[0].get(name) {
             return Resolution::Global(local.slot);
         }
-        Resolution::Unresolved
+        self.global_object_binding(name)
+    }
+
+    /// Whether `name` is one this program declared on the global object.
+    ///
+    /// Checked last, after every scope: a `let` at the top of the script, a parameter, a block
+    /// binding all shadow it, exactly as they shadow any other global. Checked *before* the
+    /// built-in table, though, because `var Object = 1` at the top of a script is that script's
+    /// binding and not the intrinsic.
+    fn global_object_binding(&self, name: &str) -> Resolution {
+        if self.global_bindings.contains(name) {
+            Resolution::GlobalObject
+        } else {
+            Resolution::Unresolved
+        }
     }
 
     /// Resolve `name` and, if it lives in an enclosing function, capture it.
@@ -7123,6 +7350,22 @@ impl Compiler {
             return false;
         }
         matches!(self.resolve(name), Resolution::Unresolved)
+    }
+
+    /// Emit the read of a name this program put on the global object.
+    ///
+    /// `ThrowReference` is the whole of it: it looks the name up on the global object and only
+    /// throws when it is not there, which is what a read of a global `var` binding is -- the
+    /// property exists from declaration instantiation onwards, so the throw is unreachable for
+    /// as long as nothing deletes it, and correct the moment something does.
+    fn load_global_object_binding(&mut self, name: &str) {
+        let name = self.constant_index(Constant::String(name.to_owned()));
+        self.code.push(Instruction::ThrowReference(name));
+    }
+
+    fn store_global_object_binding(&mut self, name: &str) {
+        let name = self.constant_index(Constant::String(name.to_owned()));
+        self.code.push(Instruction::StoreGlobalBinding(name));
     }
 
     /// Thread a binding from the function that owns it down to the one being compiled.
@@ -8654,6 +8897,7 @@ mod tests {
                     declaration: EvalDeclaration::Var,
                 }],
                 strict: false,
+                global_var_scope: false,
             },
         )
         .expect("the eval source compiles");
@@ -8796,6 +9040,7 @@ mod tests {
             &EvalOptions {
                 outer: outer(),
                 strict: false,
+                global_var_scope: false,
             },
         )
         .expect("the sloppy eval compiles");
@@ -8809,6 +9054,7 @@ mod tests {
             &EvalOptions {
                 outer: outer(),
                 strict: true,
+                global_var_scope: false,
             },
         )
         .expect("the strict eval compiles");

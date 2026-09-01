@@ -6355,6 +6355,38 @@ static int kiln_c99_global_binding(kiln_value *out, const char *name, size_t nam
     return KILN_C99_OK;
 }
 
+/* `CreateGlobalVarBinding` / `CreateGlobalFunctionBinding`: declare a name on the global object,
+ * leaving an existing property alone.
+ *
+ * Global code's variable environment *is* the global object, so a `var` at the top of a script is
+ * a property of it. Creating rather than assigning is the whole point: `var x;` over an `x` the
+ * realm already has keeps the value it had. `configurable` is the specification's `D`, false for
+ * a script and true for an `eval`. */
+static int kiln_c99_declare_global(const char *name, size_t name_len, int configurable) {
+    kiln_value globals;
+    kiln_value existing;
+    kiln_property *slot;
+    int found = 0;
+    int status = kiln_c99_global_binding(&existing, name, name_len, &found);
+    if (status != KILN_C99_OK || found) {
+        return status;
+    }
+    status = kiln_c99_global_object(&globals);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    status = kiln_c99_own_slot(globals, name, name_len, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->accessor = 0;
+    slot->value = kiln_c99_undefined();
+    slot->enumerable = 1;
+    slot->writable = 1;
+    slot->configurable = configurable;
+    return KILN_C99_OK;
+}
+
 /* A BigInt written out in `radix`.
  *
  * The provider owns the digits, so this asks twice: once for the length and once for the bytes.
@@ -24118,6 +24150,9 @@ fn validate_code(
             | Instruction::SetPropertyStrict { name, .. }
             | Instruction::DeletePropertyStrict { name, .. }
             | Instruction::DeleteGlobalBinding(name)
+            | Instruction::StoreGlobalBindingStrict(name)
+            | Instruction::RequireGlobalBinding(name)
+            | Instruction::DeclareGlobalBinding { name, .. }
             | Instruction::CallMethod { name, .. } => match program.constants.get(*name as usize) {
                 Some(Constant::String(_)) => {}
                 Some(_) => {
@@ -24384,7 +24419,10 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::Throw
         | Instruction::ThrowReference(_)
         | Instruction::StoreGlobalBinding(_)
+        | Instruction::StoreGlobalBindingStrict(_)
+        | Instruction::RequireGlobalBinding(_)
         | Instruction::DeleteGlobalBinding(_)
+        | Instruction::DeclareGlobalBinding { .. }
         | Instruction::GetPrivate(_)
         | Instruction::SetPrivate(_)
         | Instruction::Dup2
@@ -24746,7 +24784,7 @@ fn stack_effect(
         // A sloppy assignment to an unbound name. The value is consumed and the property lands on
         // the global object, so nothing is left behind: the compound and expression-valued forms
         // duplicate the value themselves before the store.
-        Instruction::StoreGlobalBinding(_) => {
+        Instruction::StoreGlobalBinding(_) | Instruction::StoreGlobalBindingStrict(_) => {
             if height < 1 {
                 Err(underflow(1))
             } else {
@@ -24756,6 +24794,10 @@ fn stack_effect(
         // `delete unboundName` takes nothing and leaves the boolean the global object's
         // `[[Delete]]` answered.
         Instruction::DeleteGlobalBinding(_) => Ok((height + 1, false)),
+        // A declaration touches the global object and leaves the stack where it found it.
+        Instruction::DeclareGlobalBinding { .. } => Ok((height, false)),
+        // A check, not a value: it either throws or leaves the stack alone.
+        Instruction::RequireGlobalBinding(_) => Ok((height, false)),
         // A literal produces a fresh object, so it only ever grows the stack.
         Instruction::NewRegExp { .. } => Ok((height + 1, false)),
         Instruction::LoadNewTarget => Ok((height + 1, false)),
@@ -26151,6 +26193,18 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::DeclareGlobalBinding { name, configurable } => {
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ int status = kiln_c99_declare_global({symbol}_constant_{name}, {}, {}); if (status != KILN_C99_OK) return status; }}",
+                text.len(),
+                i32::from(*configurable)
+            )
+            .unwrap();
+        }
         Instruction::DeleteGlobalBinding(name) => {
             // The mirror of `StoreGlobalBinding`: an unqualified `delete` in sloppy code is the
             // global object environment record's `DeleteBinding`, which is that object's
@@ -26164,6 +26218,35 @@ fn emit_instruction(
                 output,
                 "    {{ kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; int answer; status = kiln_c99_delete(host, globals, {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_c99_boolean(answer); }}",
                 text.len()
+            )
+            .unwrap();
+        }
+        Instruction::RequireGlobalBinding(name) => {
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} }}",
+                text.len(),
+                c_string(&format!("{text} is not defined"))
+            )
+            .unwrap();
+        }
+        Instruction::StoreGlobalBindingStrict(name) => {
+            // The strict form: an existing global is written, and a name the realm does not have
+            // is the unresolvable reference strict mode refuses. Both engines must decide it the
+            // same way and at the same moment, which is run time.
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {len}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {len}, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
+                c_string(&format!("{text} is not defined")),
+                len = text.len()
             )
             .unwrap();
         }
@@ -27307,9 +27390,22 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, 74);
                 word(&mut hash, u64::from(*value));
             }
+            Instruction::StoreGlobalBindingStrict(value) => {
+                byte(&mut hash, 77);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::RequireGlobalBinding(value) => {
+                byte(&mut hash, 78);
+                word(&mut hash, u64::from(*value));
+            }
             Instruction::DeleteGlobalBinding(value) => {
                 byte(&mut hash, 75);
                 word(&mut hash, u64::from(*value));
+            }
+            Instruction::DeclareGlobalBinding { name, configurable } => {
+                byte(&mut hash, 76);
+                word(&mut hash, u64::from(*name));
+                byte(&mut hash, u8::from(*configurable));
             }
             Instruction::NewRegExp { pattern, flags } => {
                 byte(&mut hash, 56);

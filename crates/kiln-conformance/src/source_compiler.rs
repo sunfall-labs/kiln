@@ -47,6 +47,7 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
         &EvalOptions {
             outer: request.outer.to_vec(),
             strict: request.strict,
+            global_var_scope: request.global_var_scope,
         },
     )
     .map_err(|diagnostics| {

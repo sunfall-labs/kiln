@@ -6194,6 +6194,9 @@ pub struct EvalSource<'a> {
     pub source: &'a str,
     pub outer: &'a [kiln_ir::EvalOuter],
     pub strict: bool,
+    /// Whether this eval's `var` and function declarations belong to the global environment
+    /// record, and so become properties of the global object rather than slots of its own frame.
+    pub global_var_scope: bool,
 }
 
 /// Why a run-time compilation produced no program.
@@ -13415,6 +13418,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                     continue;
                 }
+                Instruction::DeclareGlobalBinding { name, configurable } => {
+                    // `CreateGlobalVarBinding`: the property is created only when the global
+                    // object does not already have it, so `var x;` over an existing `x` keeps the
+                    // value it had rather than resetting it to `undefined`.
+                    let name = self.string_constant(*name, current)?;
+                    if let Value::Object(globals) = self.global_object() {
+                        let mut globals = globals.borrow_mut();
+                        if globals.get_own(&name).is_none() {
+                            globals.define_value(
+                                &name,
+                                Value::Undefined,
+                                Attributes {
+                                    writable: true,
+                                    enumerable: true,
+                                    configurable: *configurable,
+                                },
+                            );
+                        }
+                    }
+                }
                 Instruction::DeleteGlobalBinding(name) => {
                     // The global object environment record's `DeleteBinding`: an ordinary
                     // `[[Delete]]` on the global object. Absent or removed is `true`, which is
@@ -13427,6 +13450,48 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let key = Value::String(name);
                     let removed = self.delete(&globals, &key, current)?;
                     self.stack.push(Value::Boolean(removed));
+                }
+                Instruction::RequireGlobalBinding(name) => {
+                    // `ResolveBinding` in strict code: an assignment target no scope bound is an
+                    // unresolvable reference unless the global object has it, and an
+                    // unresolvable one is a `ReferenceError` rather than a new global.
+                    let name = self.string_constant(*name, current)?;
+                    let present = match self.global_object() {
+                        Value::Object(globals) => globals.borrow().get_own(&name).is_some(),
+                        _ => false,
+                    };
+                    if !present {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            format!("{name} is not defined"),
+                            current,
+                        )?;
+                        continue;
+                    }
+                }
+                Instruction::StoreGlobalBindingStrict(name) => {
+                    // `SetMutableBinding` with `S` true on the global object environment record:
+                    // an existing property is written, and a name the realm does not have is the
+                    // unresolvable reference strict mode refuses -- decided here rather than at
+                    // compile time, because a global installed a line earlier is resolvable and
+                    // the compiler cannot see it.
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    let globals = self.global_object();
+                    let present = match &globals {
+                        Value::Object(globals) => globals.borrow().get_own(&name).is_some(),
+                        _ => false,
+                    };
+                    if !present {
+                        self.throw_error(
+                            ErrorKind::Reference,
+                            format!("{name} is not defined"),
+                            current,
+                        )?;
+                        continue;
+                    }
+                    let key = Value::String(name);
+                    self.set_or_throw(&globals, &key, value, current)?;
                 }
                 Instruction::StoreGlobalBinding(name) => {
                     let name = self.string_constant(*name, current)?;
@@ -30817,10 +30882,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .collect()
             })
             .unwrap_or_default();
+        // An indirect eval *is* global code, so its declarations always go on the global object.
+        // A direct one goes there only when the call was written at the top level of a script,
+        // which the compiler recorded on the site.
+        let global_var_scope = site.is_none_or(|site| site.global_var_scope);
         let (program, program_strictness) = compile(&EvalSource {
             source,
             outer: &outer,
             strict,
+            global_var_scope,
         })
         .map_err(|error| match error {
             EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
@@ -44353,6 +44423,7 @@ mod tests {
                         declaration: kiln_ir::EvalDeclaration::Var,
                     }],
                     strict: false,
+                    global_var_scope: false,
                     argc: Some(1),
                 })),
                 // The eval's completion value is discarded; the caller's binding is the answer.
