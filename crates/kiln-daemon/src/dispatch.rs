@@ -1146,7 +1146,6 @@ fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<D
                 | ModuleGraphError::UnresolvedImport { importer, .. }
                 | ModuleGraphError::MissingExport { importer, .. }
                 | ModuleGraphError::AmbiguousExport { importer, .. } => Some(importer),
-                ModuleGraphError::Cycle { paths } => paths.first(),
                 ModuleGraphError::DuplicateExport { module, .. }
                 | ModuleGraphError::Execution { module, .. } => Some(module),
                 ModuleGraphError::Compile { .. } | ModuleGraphError::StepOverflow => None,

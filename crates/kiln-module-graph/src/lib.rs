@@ -202,10 +202,6 @@ pub enum ModuleGraphError {
         specifier: String,
         error: ResolveError,
     },
-    Cycle {
-        /// The cycle is shown closed: the first path is repeated at the end.
-        paths: Vec<PathBuf>,
-    },
     DuplicateExport {
         module: PathBuf,
         name: String,
@@ -265,16 +261,6 @@ impl fmt::Display for ModuleGraphError {
                 "could not resolve `{specifier}` imported by {}: {error}",
                 importer.display()
             ),
-            Self::Cycle { paths } => {
-                f.write_str("module dependency cycle: ")?;
-                for (index, path) in paths.iter().enumerate() {
-                    if index != 0 {
-                        f.write_str(" -> ")?;
-                    }
-                    write!(f, "{}", path.display())?;
-                }
-                Ok(())
-            }
             Self::DuplicateExport { module, name } => {
                 write!(
                     f,
@@ -634,7 +620,6 @@ impl ModuleGraph {
             modules: BTreeMap::new(),
             states: HashMap::new(),
             stack: Vec::new(),
-            stack_sources: Vec::new(),
             order: Vec::new(),
         };
         builder.visit(entry_path.clone())?;
@@ -771,6 +756,90 @@ impl ModuleGraph {
             // is a value like any other and there is nothing to keep live.
             ModuleSelfExport::Settled(_) => None,
         }
+    }
+
+    /// The cell a back-edge import binds to, created on first demand.
+    ///
+    /// The importer is running before the module that owns the binding, so there is no value to
+    /// hand over. What can be handed over is the *place* the value will arrive in, which is what
+    /// an import slot holds anyway -- the interpreter boxes every import precisely so that an
+    /// import is a live view of the exporter's binding rather than a copy of it.
+    ///
+    /// Two shapes are refused instead of guessed. A namespace import of a module that has not
+    /// run would need an object whose every property is a live view, and this linker has one of
+    /// those only for a module importing from *itself*. An ambiguous or absent name has no
+    /// binding to point at in the first place. Both are named, because a cycle that cannot be
+    /// bound is a smaller thing than a cycle that cannot be built, and saying which is which is
+    /// the difference between a refusal and a wrong answer.
+    fn cycle_cell(
+        &self,
+        importer: &Path,
+        provider: &Path,
+        import: &kiln_ir::ImportBinding,
+        pending: &mut HashMap<(PathBuf, String), Cell>,
+    ) -> Result<Cell, ModuleGraphError> {
+        if import.imported == kiln_ir::NAMESPACE_IMPORT {
+            return Err(ModuleGraphError::Source {
+                path: importer.to_path_buf(),
+                message: format!(
+                    "`import * as` of `{}`, which imports it back before it has run, needs a \
+                     live namespace this linker cannot yet build",
+                    provider.display()
+                ),
+            });
+        }
+        let (origin, local_slot) = match self.resolved_export(provider, &import.imported) {
+            Some(ResolvedExport::Local { module, local_slot }) => (module.clone(), *local_slot),
+            Some(ResolvedExport::Namespace { module }) => {
+                return Err(ModuleGraphError::Source {
+                    path: importer.to_path_buf(),
+                    message: format!(
+                        "`{}` re-exports the namespace of `{}` around a cycle, which needs a \
+                         live namespace this linker cannot yet build",
+                        provider.display(),
+                        module.display()
+                    ),
+                });
+            }
+            Some(ResolvedExport::Ambiguous) => {
+                return Err(ModuleGraphError::AmbiguousExport {
+                    importer: importer.to_path_buf(),
+                    provider: provider.to_path_buf(),
+                    name: import.imported.clone(),
+                });
+            }
+            None => {
+                return Err(ModuleGraphError::MissingExport {
+                    importer: importer.to_path_buf(),
+                    provider: provider.to_path_buf(),
+                    name: import.imported.clone(),
+                });
+            }
+        };
+        // The resolution names a slot; the finished module will publish names. The name that
+        // slot is exported under is what bridges the two, and it is the key the cell waits on.
+        let exported = self
+            .module_node(&origin)
+            .and_then(|node| {
+                node.program
+                    .exports
+                    .iter()
+                    .find(|export| export.local_slot == local_slot)
+            })
+            .map(|export| export.exported.clone())
+            .ok_or_else(|| ModuleGraphError::MissingExport {
+                importer: importer.to_path_buf(),
+                provider: provider.to_path_buf(),
+                name: import.imported.clone(),
+            })?;
+        Ok(pending
+            .entry((origin, exported))
+            .or_insert_with(|| {
+                std::rc::Rc::new(std::cell::RefCell::new(Value::Native(
+                    kiln_interpreter::Native::Uninitialized,
+                )))
+            })
+            .clone())
     }
 
     /// Where one name exported by `module` gets its value, from `module`'s own point of view.
@@ -958,6 +1027,30 @@ impl ModuleGraph {
                     provider: dependency.target.clone(),
                     name: import.imported.clone(),
                 })?;
+                // A plan is a flat list the importing realm walks once, front to back, taking
+                // each module's values out of the array the one before it returned. A cycle
+                // makes a module ask for a value from an entry that has not run, and there is
+                // no array to take it from. The graph executor answers that with a dead-zone
+                // cell it fills in later; a plan has nowhere to put one, so this is refused by
+                // name rather than left pointing at an index whose contents do not exist.
+                let here = position.get(path.as_path()).copied().unwrap_or(0);
+                let reaches_forward = match &binding {
+                    ModuleBinding::Value(reference) => reference.module >= here,
+                    ModuleBinding::Namespace(entries) => entries
+                        .iter()
+                        .any(|(_, reference)| reference.module >= here),
+                    ModuleBinding::Ready(_) => false,
+                };
+                if reaches_forward {
+                    return Err(ModuleGraphError::Source {
+                        path: path.clone(),
+                        message: format!(
+                            "`import()` of a module graph whose cycle crosses `{}` is not \
+                             implemented",
+                            dependency.target.display()
+                        ),
+                    });
+                }
                 bindings.push((import.local_slot, binding));
             }
             let slots = wanted
@@ -1027,6 +1120,13 @@ impl ModuleGraph {
         node: bool,
     ) -> Result<ExecutionResult, ModuleGraphError> {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
+        // One cell per binding that a cycle forces somebody to hold before the module that owns
+        // it has run. The cell starts in the dead zone, so reading the binding too early is the
+        // `ReferenceError` the specification asks for rather than `undefined`, and it is filled
+        // in when the owning module finishes. Keyed by the *origin* of the name rather than by
+        // the specifier it arrived through, because a re-export chain can cross a cycle several
+        // times and every crossing has to land on the same cell.
+        let mut pending_cycle_cells: HashMap<(PathBuf, String), Cell> = HashMap::new();
         // A builtin has one canonical implementation and two language projections. `values`
         // holds its ESM bindings; this table holds Node's historical CommonJS `module.exports`
         // value so a later `require()` never has to reverse-engineer one projection from the
@@ -1160,6 +1260,27 @@ impl ModuleGraph {
                     imports.push(Value::Undefined);
                     continue;
                 }
+                // In a cycle a name can travel out through one module and come back as this
+                // module's own binding: `import { B } from "./b.js"` where b.js says
+                // `export { A as B } from "./a.js"` and a.js is this module. The specifier names
+                // b.js, but the *binding* is this module's, and it does not exist yet -- the
+                // body about to run creates it. That is precisely the shape the self-import
+                // machinery already handles, so it is routed there rather than given a second
+                // one: the slot starts in its dead zone and the machine ties the two together
+                // as the declaration runs.
+                if let Some(ResolvedExport::Local {
+                    module: origin,
+                    local_slot,
+                }) = self.resolved_export(&dependency.target, &import.imported)
+                    && origin == path
+                {
+                    self_imports.push(ModuleSelfImport::Binding {
+                        import_slot: import.local_slot,
+                        export_slot: *local_slot,
+                    });
+                    imports.push(Value::Undefined);
+                    continue;
+                }
                 if !values.contains_key(&dependency.target)
                     && self
                         .module_node(&dependency.target)
@@ -1172,11 +1293,20 @@ impl ModuleGraph {
                             error,
                         })?;
                 }
-                let provider = values.get(&dependency.target).ok_or_else(|| {
-                    ModuleGraphError::InternalMissingModule {
-                        path: dependency.target.clone(),
-                    }
-                })?;
+                // A dependency with no value table has not run, and in an acyclic graph that
+                // cannot happen. So this is a back edge: the importer is an ancestor of the
+                // module it is importing from, and the binding it wants will not exist until
+                // later in this very loop.
+                let Some(provider) = values.get(&dependency.target) else {
+                    let cell = self.cycle_cell(
+                        path,
+                        &dependency.target,
+                        import,
+                        &mut pending_cycle_cells,
+                    )?;
+                    imports.push(Value::Cell(cell));
+                    continue;
+                };
                 // `import * as ns` wants every export at once rather than one by name. The
                 // specification orders a namespace object's keys, so this sorts them: a hash map
                 // would otherwise make `Object.keys(ns)` differ run to run.
@@ -1285,6 +1415,14 @@ impl ModuleGraph {
                     {
                         exports.entry(name).or_insert(value);
                     }
+                }
+            }
+            // Whatever this module was holding a cycle's place for is now real. The value is
+            // read through its cell, because what is published is the binding and what a waiting
+            // importer's cell has to contain is the value in it.
+            for (name, value) in &exports {
+                if let Some(cell) = pending_cycle_cells.remove(&(path.clone(), name.clone())) {
+                    *cell.borrow_mut() = read_through_cell(value);
                 }
             }
             values.insert(path.clone(), exports);
@@ -1520,7 +1658,6 @@ struct Builder<P, R> {
     modules: BTreeMap<PathBuf, ModuleNode>,
     states: HashMap<PathBuf, VisitState>,
     stack: Vec<PathBuf>,
-    stack_sources: Vec<ModuleSource>,
     order: Vec<PathBuf>,
 }
 
@@ -1557,35 +1694,20 @@ where
             match item {
                 WorkItem::Enter { path, source } => match self.states.get(&path).copied() {
                     Some(VisitState::Done) => continue,
-                    Some(VisitState::Visiting) => {
-                        let start = self
-                            .stack
-                            .iter()
-                            .position(|item| item == &path)
-                            .unwrap_or(0);
-                        // CommonJS requires observe a cache entry even while that module is
-                        // executing. Keep the edge in the already-built parent's dependency
-                        // list, but do not descend into it again. Any ESM node in the cycle keeps
-                        // the established cycle error rather than getting CommonJS semantics.
-                        if self.stack_sources[start..]
-                            .iter()
-                            .all(|source| *source == ModuleSource::CommonJs)
-                        {
-                            continue;
-                        }
-                        // A module that names itself -- `export { x as y } from "./this.js"` is
-                        // how a module gives one of its own bindings a second name -- is a cycle
-                        // only in the graph's bookkeeping. There is no evaluation order to get
-                        // wrong: one module, evaluated once, and every name it re-exports from
-                        // itself resolves to a slot it already owns. The edge stays recorded on
-                        // the parent; only the descent stops.
-                        if self.stack.last() == Some(&path) {
-                            continue;
-                        }
-                        let mut cycle = self.stack[start..].to_vec();
-                        cycle.push(path);
-                        return Err(ModuleGraphError::Cycle { paths: cycle });
-                    }
+                    // A back edge: this module is an ancestor of itself, so the graph has a
+                    // cycle. The edge stays recorded on the parent that is being built; only the
+                    // descent stops, and that is the whole of what a cycle costs here.
+                    //
+                    // Stopping the descent is not an approximation of the specification's
+                    // `InnerModuleEvaluation` -- it *is* it. That algorithm returns immediately
+                    // when it meets a module whose `[[Status]]` is already `evaluating`, and
+                    // evaluates each body on the way back out of the recursion. So the order a
+                    // depth-first walk leaves behind, with back edges skipped, is exactly the
+                    // order the specification evaluates a cyclic graph in. `[[DFSIndex]]` and
+                    // `[[DFSAncestorIndex]]` compute a cycle *root*, which decides where an
+                    // asynchronous cycle's completion is collected and across which modules an
+                    // evaluation error is recorded -- neither of which changes the order.
+                    Some(VisitState::Visiting) => continue,
                     None => {
                         let source = match source {
                             ModuleSource::Source if !self.typed_sources => ModuleSource::Source,
@@ -1615,7 +1737,6 @@ where
                         };
                         self.states.insert(path.clone(), VisitState::Visiting);
                         self.stack.push(path.clone());
-                        self.stack_sources.push(source);
                         let (program, data) = match source {
                             ModuleSource::Source | ModuleSource::CommonJs => {
                                 let ModulePayload::Program(program) =
@@ -1721,7 +1842,6 @@ where
                 },
                 WorkItem::Exit(node) => {
                     self.stack.pop();
-                    self.stack_sources.pop();
                     self.states.insert(node.path.clone(), VisitState::Done);
                     self.order.push(node.path.clone());
                     self.modules.insert(node.path.clone(), *node);
@@ -1871,121 +1991,209 @@ fn validate_links(
     Ok(())
 }
 
-/// Resolve every exported name in dependency-first order.
+/// Resolve every visible export of every module, the way the specification does.
 ///
-/// ESM cycles are rejected by the graph builder, so every star provider has a completed table by
-/// the time its importer is visited. CommonJS cycles expose only their synthetic default and do
-/// not participate in star expansion. This avoids both recursive stack growth and an arbitrary
-/// maximum star depth.
-fn resolve_exports(
-    modules: &BTreeMap<PathBuf, ModuleNode>,
-    order: &[PathBuf],
-) -> Result<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>, ModuleGraphError> {
-    let mut tables: HashMap<PathBuf, BTreeMap<String, ResolvedExport>> = HashMap::new();
-    for module_path in order {
-        let node =
-            modules
-                .get(module_path)
-                .ok_or_else(|| ModuleGraphError::InternalMissingModule {
-                    path: module_path.clone(),
-                })?;
-        let mut table = BTreeMap::new();
-        let mut explicit_names = HashSet::new();
+/// A cyclic graph has no dependency-first order to resolve names in: two modules can each
+/// re-export a name the other provides, so neither table can be finished before the other is
+/// started. The specification does not build tables at all. It answers one question at a time --
+/// `ResolveExport(module, name)` -- and carries a *resolve set* of the `(module, name)` pairs
+/// already on the current question's path. Meeting a pair twice is the definition of a circular
+/// import request, and the answer is "no such export", which is what turns a self-resolving
+/// indirect export into the `SyntaxError` the specification asks for.
+///
+/// `GetExportedNames` is the same shape for the other half: the set of names a module offers,
+/// with a set of already-visited modules cutting `export *` cycles.
+///
+/// This is written recursively, as the specification is. Both walks terminate because each cuts
+/// on a set that only grows, and the depth either can reach is bounded by the number of distinct
+/// `(module, name)` pairs in the graph.
+struct ExportResolver<'graph> {
+    modules: &'graph BTreeMap<PathBuf, ModuleNode>,
+}
 
+/// What one `ResolveExport` question answers.
+///
+/// `Circular` is kept apart from `None`: both mean the importer has no binding to bind, but only
+/// the first has to stop a `export *` search from treating the absence as a real answer.
+enum Resolution {
+    Found(ResolvedExport),
+    Ambiguous,
+    None,
+}
+
+impl<'graph> ExportResolver<'graph> {
+    /// The dependency a module reaches through one written specifier.
+    fn dependency(&self, node: &ModuleNode, specifier: &str) -> Option<&'graph ModuleNode> {
+        let target = &node
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.specifier == specifier)?
+            .target;
+        self.modules.get(target)
+    }
+
+    /// The import entry that makes `slot` an *indirect* export rather than a local one.
+    ///
+    /// `export { a } from './x.js'` is compiled as an import into a slot no source can name plus
+    /// an export of that slot, so an indirect export is recognised by its slot being an import's.
+    fn indirect<'node>(
+        &self,
+        node: &'node ModuleNode,
+        slot: u32,
+    ) -> Option<&'node kiln_ir::ImportBinding> {
+        node.program
+            .imports
+            .iter()
+            .filter(|import| import.source != COMMONJS_WRAPPER_SOURCE)
+            .find(|import| import.local_slot == slot)
+    }
+
+    /// Every `export * from` specifier this module writes.
+    fn star_sources<'node>(&self, node: &'node ModuleNode) -> impl Iterator<Item = &'node str> {
+        node.program
+            .exports
+            .iter()
+            .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
+    }
+
+    /// The names a module offers, `export *` included. `default` never arrives through a star.
+    fn exported_names(&self, path: &Path, visited: &mut HashSet<PathBuf>) -> Vec<String> {
+        if !visited.insert(path.to_path_buf()) {
+            return Vec::new();
+        }
+        let Some(node) = self.modules.get(path) else {
+            return Vec::new();
+        };
+        let mut names = Vec::new();
         // Node's ESM bridge exposes the final `module.exports` value as the default export. The
         // value is materialized by CommonJS execution; the linker only needs its typed shape.
         if node.source == ModuleSource::CommonJs {
-            table.insert(
-                "default".to_owned(),
-                ResolvedExport::Local {
-                    module: module_path.clone(),
-                    local_slot: 0,
-                },
-            );
-            explicit_names.insert("default".to_owned());
+            names.push("default".to_owned());
         }
+        for export in &node.program.exports {
+            if !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX)
+                && !names.contains(&export.exported)
+            {
+                names.push(export.exported.clone());
+            }
+        }
+        for specifier in self.star_sources(node).collect::<Vec<_>>() {
+            let Some(provider) = self.dependency(node, specifier) else {
+                continue;
+            };
+            for name in self.exported_names(&provider.path, visited) {
+                if name != "default" && !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
 
-        for export in node
+    /// Where one name exported by one module ultimately comes from.
+    fn resolve(
+        &self,
+        path: &Path,
+        name: &str,
+        resolve_set: &mut HashSet<(PathBuf, String)>,
+    ) -> Resolution {
+        // The circular import request. The specification returns null here, and the caller that
+        // asked on behalf of an `import` or an indirect export turns that into a SyntaxError.
+        if !resolve_set.insert((path.to_path_buf(), name.to_owned())) {
+            return Resolution::None;
+        }
+        let Some(node) = self.modules.get(path) else {
+            return Resolution::None;
+        };
+        if node.source == ModuleSource::CommonJs && name == "default" {
+            return Resolution::Found(ResolvedExport::Local {
+                module: path.to_path_buf(),
+                local_slot: 0,
+            });
+        }
+        if let Some(export) = node
             .program
             .exports
             .iter()
             .filter(|export| !export.exported.starts_with(kiln_ir::STAR_REEXPORT_PREFIX))
+            .find(|export| export.exported == name)
         {
-            explicit_names.insert(export.exported.clone());
-            let resolution = if let Some(import) = node
-                .program
-                .imports
-                .iter()
-                .filter(|import| import.source != COMMONJS_WRAPPER_SOURCE)
-                .find(|import| import.local_slot == export.local_slot)
-            {
-                let dependency = node
-                    .dependencies
-                    .iter()
-                    .find(|dependency| dependency.specifier == import.source)
-                    .ok_or_else(|| ModuleGraphError::UnresolvedImport {
-                        importer: module_path.clone(),
-                        source: import.source.clone(),
-                    })?;
-                if import.imported == kiln_ir::NAMESPACE_IMPORT {
-                    ResolvedExport::Namespace {
-                        module: dependency.target.clone(),
-                    }
-                } else {
-                    // A module re-exporting from itself has no finished table yet: it is the
-                    // one being built. The names it declared before this line are already in
-                    // it, which is exactly the set a self re-export can name.
-                    let provider = if dependency.target == *module_path {
-                        Some(&table)
-                    } else {
-                        tables.get(&dependency.target)
-                    };
-                    match provider.and_then(|provider| provider.get(&import.imported)) {
-                        Some(resolution) => resolution.clone(),
-                        None => continue,
-                    }
-                }
-            } else {
-                ResolvedExport::Local {
-                    module: module_path.clone(),
+            let Some(import) = self.indirect(node, export.local_slot) else {
+                // A binding this module declares itself. This is where every chain ends.
+                return Resolution::Found(ResolvedExport::Local {
+                    module: path.to_path_buf(),
                     local_slot: export.local_slot,
-                }
+                });
             };
-            table.insert(export.exported.clone(), resolution);
+            let Some(provider) = self.dependency(node, &import.source) else {
+                return Resolution::None;
+            };
+            if import.imported == kiln_ir::NAMESPACE_IMPORT {
+                return Resolution::Found(ResolvedExport::Namespace {
+                    module: provider.path.clone(),
+                });
+            }
+            return self.resolve(&provider.path, &import.imported, resolve_set);
         }
+        // `export *` never forwards a default: a module's default is its own.
+        if name == "default" {
+            return Resolution::None;
+        }
+        let mut star = None;
+        for specifier in self.star_sources(node).collect::<Vec<_>>() {
+            let Some(provider) = self.dependency(node, specifier) else {
+                continue;
+            };
+            match self.resolve(&provider.path, name, &mut resolve_set.clone()) {
+                Resolution::Ambiguous => return Resolution::Ambiguous,
+                Resolution::None => {}
+                Resolution::Found(found) => match &star {
+                    None => star = Some(found),
+                    // Two stars offering the same name from different origins is the one case
+                    // the specification calls ambiguous: neither wins, and the name is visible
+                    // only in the sense that asking for it is an error rather than a miss.
+                    Some(existing) if *existing != found => return Resolution::Ambiguous,
+                    Some(_) => {}
+                },
+            }
+        }
+        match star {
+            Some(found) => Resolution::Found(found),
+            None => Resolution::None,
+        }
+    }
+}
 
-        for source in node
-            .program
-            .exports
-            .iter()
-            .filter_map(|export| export.exported.strip_prefix(kiln_ir::STAR_REEXPORT_PREFIX))
-        {
-            let dependency = node
-                .dependencies
-                .iter()
-                .find(|dependency| dependency.specifier == source)
-                .ok_or_else(|| ModuleGraphError::UnresolvedImport {
-                    importer: module_path.clone(),
-                    source: source.to_owned(),
-                })?;
-            let provider = tables.get(&dependency.target).ok_or_else(|| {
-                ModuleGraphError::InternalMissingModule {
-                    path: dependency.target.clone(),
+/// Resolve every exported name of every module in the graph.
+///
+/// The result is the same shape a bottom-up pass produced when cycles were rejected -- a table
+/// per module, keyed by visible name -- so nothing downstream has to know that the walk beneath
+/// it changed. A name with no resolution is absent, which is how `validate_links` tells a missing
+/// export from an ambiguous one.
+fn resolve_exports(
+    modules: &BTreeMap<PathBuf, ModuleNode>,
+    order: &[PathBuf],
+) -> Result<HashMap<PathBuf, BTreeMap<String, ResolvedExport>>, ModuleGraphError> {
+    let resolver = ExportResolver { modules };
+    let mut tables: HashMap<PathBuf, BTreeMap<String, ResolvedExport>> = HashMap::new();
+    for module_path in order {
+        if !modules.contains_key(module_path) {
+            return Err(ModuleGraphError::InternalMissingModule {
+                path: module_path.clone(),
+            });
+        }
+        let mut table = BTreeMap::new();
+        for name in resolver.exported_names(module_path, &mut HashSet::new()) {
+            match resolver.resolve(module_path, &name, &mut HashSet::new()) {
+                Resolution::Found(found) => {
+                    table.insert(name, found);
                 }
-            })?;
-            for (name, resolution) in provider {
-                if name == "default" || explicit_names.contains(name) {
-                    continue;
+                // Retained rather than dropped so namespace construction can omit it and an
+                // importer can report the difference from a name that is simply not there.
+                Resolution::Ambiguous => {
+                    table.insert(name, ResolvedExport::Ambiguous);
                 }
-                match (table.get(name), resolution) {
-                    (None, resolution) => {
-                        table.insert(name.clone(), resolution.clone());
-                    }
-                    (Some(existing), candidate) if existing != candidate => {
-                        table.insert(name.clone(), ResolvedExport::Ambiguous);
-                    }
-                    (Some(_), _) => {}
-                }
+                Resolution::None => {}
             }
         }
         tables.insert(module_path.clone(), table);
@@ -3011,14 +3219,24 @@ mod tests {
         project.write("b.mjs", "import './a.cjs';");
         let entry = project.write("main.mjs", "import './a.cjs';");
         let resolver = NodeRuntimeResolver::new(&project.root).expect("Node resolver");
-        let error = ModuleGraph::build_node(
+        let graph = ModuleGraph::build_node(
             &entry,
             resolver,
             |path: &Path| fs::read_to_string(path),
             OxcFrontend,
         )
-        .expect_err("mixed ESM/CommonJS cycle should be rejected");
-        assert!(matches!(error, ModuleGraphError::Cycle { paths } if paths.len() == 3));
+        .expect("a mixed ESM/CommonJS cycle is a legal module graph");
+        // b.mjs is reached through a.cjs and imports it back. The ESM walk stops at the back
+        // edge, so a.cjs appears once, after the module that required it -- and the CommonJS
+        // half still gets its own semantics, where the cache entry is observable mid-execution.
+        assert_eq!(
+            graph
+                .module_order()
+                .iter()
+                .map(|path| path.file_name().expect("a file name").to_owned())
+                .collect::<Vec<_>>(),
+            ["b.mjs", "a.cjs", "main.mjs"]
+        );
     }
 
     impl Drop for TempProject {
@@ -4604,13 +4822,97 @@ mod tests {
     }
 
     #[test]
-    fn direct_and_indirect_cycles_are_structured_errors() {
+    fn a_cycle_is_ordered_as_the_specification_evaluates_it() {
         let project = TempProject::new();
         let a = project.write("a.js", "import './b.js';");
-        project.write("b.js", "import './c.js';");
-        project.write("c.js", "import './a.js';");
-        let error = project.graph(&a).expect_err("cycle should be rejected");
-        assert!(matches!(error, ModuleGraphError::Cycle { paths } if paths.len() == 4));
+        let b = project.write("b.js", "import './c.js';");
+        let c = project.write("c.js", "import './a.js';");
+        let graph = project.graph(&a).expect("a cycle is a legal module graph");
+        // `InnerModuleEvaluation` returns as soon as it meets a module that is already
+        // evaluating, and runs each body on the way back out. So the deepest module of the
+        // cycle runs first and the entry runs last, exactly as it would without the back edge.
+        assert_eq!(
+            graph
+                .module_order()
+                .iter()
+                .map(|path| path.file_name().expect("a file name").to_owned())
+                .collect::<Vec<_>>(),
+            ["c.js", "b.js", "a.js"]
+        );
+        let _ = (b, c);
+    }
+
+    #[test]
+    fn a_cycle_evaluates_every_module_once_and_binds_across_the_back_edge() {
+        let project = TempProject::new();
+        let entry = project.write(
+            "a.js",
+            "import { fromB } from './b.js';\n\
+             export const fromA = 'a';\n\
+             globalThis.log = (globalThis.log ?? '') + 'a' + fromB;",
+        );
+        project.write(
+            "b.js",
+            "import { fromA } from './a.js';\n\
+             export const fromB = 'b';\n\
+             globalThis.log = (globalThis.log ?? '') + 'b';\n\
+             export const seenLate = () => fromA;",
+        );
+        let graph = project
+            .graph(&entry)
+            .expect("a cycle is a legal module graph");
+        // b runs first, so `fromA` is still in its dead zone while b's body runs -- but b only
+        // captures it in a closure, which is the idiom a real cyclic import relies on.
+        assert!(
+            matches!(
+                graph.resolved_export(&entry, "fromA"),
+                Some(ResolvedExport::Local { module, .. })
+                    if module.file_name() == Some(std::ffi::OsStr::new("a.js"))
+            ),
+            "fromA is a.js's own binding"
+        );
+        // The back edge is bound, not refused: b.js names a binding a.js has not created yet.
+        assert!(matches!(
+            graph.resolved_export(&entry, "fromB"),
+            None | Some(ResolvedExport::Local { .. })
+        ));
+        assert_eq!(graph.module_count(), 2);
+    }
+
+    #[test]
+    fn a_circular_indirect_export_resolves_to_nothing() {
+        let project = TempProject::new();
+        // The shape `language/module-code/instn-iee-err-circular.js` tests: each module says the
+        // other provides `x`, so `ResolveExport` meets the same (module, name) pair twice and
+        // the specification's answer is null -- which the linker reports as a missing export,
+        // and the conformance harness reports as the SyntaxError the test asks for.
+        let entry = project.write("a.js", "export { x } from './b.js';");
+        project.write("b.js", "export { x } from './a.js';");
+        let error = project
+            .graph(&entry)
+            .expect_err("a self-resolving indirect export has no binding to bind");
+        assert!(
+            matches!(&error, ModuleGraphError::MissingExport { name, .. } if name == "x"),
+            "expected a missing export, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_star_cycle_still_finds_a_name_one_side_provides() {
+        let project = TempProject::new();
+        let entry = project.write("a.js", "export * from './b.js'; export const own = 1;");
+        project.write("b.js", "export * from './a.js'; export const theirs = 2;");
+        let graph = project.graph(&entry).expect("a star cycle is legal");
+        // `GetExportedNames` cuts on the modules it has already asked, so the walk terminates
+        // and each side still sees the other's name.
+        assert!(matches!(
+            graph.resolved_export(&entry, "theirs"),
+            Some(ResolvedExport::Local { .. })
+        ));
+        assert!(matches!(
+            graph.resolved_export(&entry, "own"),
+            Some(ResolvedExport::Local { .. })
+        ));
     }
 
     #[test]
