@@ -588,7 +588,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 4
+#define KILN_REALM_ASYNC_ABI_VERSION 5
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -624,6 +624,8 @@ int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);
+int kiln_realm_argv_count(uint64_t *out_count);
+int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
 int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);

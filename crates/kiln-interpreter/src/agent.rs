@@ -932,7 +932,7 @@ fn run_agent_realm(group: &Arc<AgentGroup>, id: usize, source: &str) -> Result<(
         locals,
         group.limits,
         runtime.capabilities(),
-        group.execution,
+        group.execution.clone(),
     )?;
     // The group this agent belongs to, in place of the empty one its machine made for itself.
     vm.agents = Some(Arc::clone(group));

@@ -5,7 +5,8 @@
 //! that matter here - notably a query that panics, which a correct engine never does.
 
 use crate::dispatch::{
-    execute_prepared_run, install_graph_gate, install_run_gate, install_test_gate, prepare_run,
+    execute_prepared_run, install_graph_gate, install_run_gate, install_test_gate,
+    interpreted_argv, prepare_run,
 };
 use crate::framing::MAX_MESSAGE_BYTES;
 use crate::{Client as RawClient, Daemon, DaemonError, ShutdownHandle};
@@ -3233,4 +3234,16 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");
+}
+
+/// `process.argv[2..]` is where a program's own arguments live, in node and in a kiln binary
+/// alike. `kiln run` accepts none, so the interpreted command line is exactly the two entries
+/// node always puts in front of them -- never one, which would move the entry to index 0 and
+/// shift every position a program reads by one.
+#[test]
+fn interpreted_argv_names_the_interpreter_then_the_entry() {
+    let argv = interpreted_argv("/projects/app/main.mjs");
+    assert_eq!(argv.len(), 2);
+    assert!(!argv[0].is_empty());
+    assert_eq!(argv[1], "/projects/app/main.mjs");
 }
