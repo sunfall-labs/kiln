@@ -767,6 +767,7 @@ extern void kiln_cli_report_failure(int status, kiln_value value);
 typedef int (*kiln_realm_entry_fn)(void *context);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
 extern int 
@@ -788,7 +789,9 @@ static int kiln_cli_enter_module(void *opaque) {
 const LAUNCHER_BODY: &str = r#"(context->host, context->result);
 }
 
-int main(void) {
+/* argc/argv reach the realm before it is entered, so the first `process` the module builds
+ * already has the command line. The strings are copied on the other side of this call. */
+int main(int argc, char **argv) {
     kiln_host host;
     kiln_value result;
     kiln_cli_entry_context context;
@@ -804,6 +807,9 @@ int main(void) {
     context.host = &host;
     context.result = &result;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK && argc > 0) {
+        status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);
+    }
     if (status == KILN_C99_OK) {
         status = kiln_realm_enter(realm, kiln_cli_enter_module, &context);
     }
@@ -1172,6 +1178,27 @@ int main(void) {
         assert!(source.contains("return 1;"));
     }
 
+    /// The command line has to be on the realm before anything in the program can observe it:
+    /// `process` is built lazily by whichever module mentions it first, and that can be the very
+    /// first statement the entry module runs. Setting argv after `kiln_realm_enter` would leave
+    /// that first `process.argv` empty and every later one correct, which is the worst of both.
+    #[test]
+    fn launcher_hands_its_command_line_to_the_realm_before_entering_it() {
+        let source = launcher_source("kiln_module_argv").expect("valid symbol");
+        assert!(source.contains("int main(int argc, char **argv)"));
+        let set_argv = source
+            .find("kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv)")
+            .expect("launcher hands its command line to the realm");
+        let create = source
+            .find("kiln_realm_create(&realm)")
+            .expect("launcher creates a realm");
+        let realm_enter = source
+            .find("kiln_realm_enter(realm, kiln_cli_enter_module, &context)")
+            .expect("launcher enters realm");
+        assert!(create < set_argv);
+        assert!(set_argv < realm_enter);
+    }
+
     #[test]
     fn runtime_and_launcher_link_against_stub_module() {
         let Some(cc) = find_cc() else {
@@ -1420,6 +1447,14 @@ int kiln_realm_create(uint64_t *out_realm) {
 int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context) {
     if (realm != 1 || entry == NULL) return KILN_C99_INVALID_ARGUMENT;
     return entry(context);
+}
+
+/* The stub records nothing: this translation unit exists to prove the launcher links and
+ * writes its result, and no module here reads a command line. */
+int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv) {
+    (void)argc;
+    (void)argv;
+    return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
 }
 
 int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {

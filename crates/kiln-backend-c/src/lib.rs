@@ -2239,8 +2239,21 @@ extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidat
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
-extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
-extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
+/* The collector's seam with the runtime archive (ADR 0041). The prelude owns the heap and the
+ * tracer; the archive owns the turn boundary and the roots it holds. */
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+typedef struct kiln_gc_hooks {
+    uint32_t version;
+    uint32_t size;
+    void (*collect)(void *heap, int force);
+    void (*teardown_begin)(void *heap);
+    void (*teardown_end)(void *heap);
+    void (*mark_value)(void *heap, const void *value);
+    void (*mark_block)(void *heap, void *pointer);
+} kiln_gc_hooks;
+extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_mark_roots(void *heap);
 
 /* A closure is its body plus the boxes it captured.
  *
@@ -2766,11 +2779,55 @@ static void kiln_c99_node_unlink_response(kiln_node_response *response) {
     }
 }
 
+/* A server keeps its accepted sockets in a list so that `server.close()` can drain them and so
+ * that the last one to close is what emits the server's own `close`. A socket that has closed
+ * answers neither question, and leaving it linked would make the server retain every connection
+ * it ever accepted -- one live block per request, which is exactly the growth ADR 0041 exists to
+ * remove. Unlinking is what "all remaining sockets are open" means, so the walks above read the
+ * same either way. */
+static void kiln_c99_node_unlink_socket(kiln_node_socket *socket) {
+    kiln_node_socket **cursor;
+    if (socket == NULL || socket->server == NULL) return;
+    cursor = &socket->server->sockets;
+    while (*cursor != NULL) {
+        if (*cursor == socket) {
+            *cursor = socket->next;
+            socket->next = NULL;
+            return;
+        }
+        cursor = &(*cursor)->next;
+    }
+}
+
 static int kiln_c99_node_has_unended_response(const kiln_node_socket *socket) {
     const kiln_node_response *response;
     if (socket == NULL) return 0;
     for (response = socket->responses; response != NULL; response = response->next) {
         if (!response->ended) return 1;
+    }
+    return 0;
+}
+
+/* A response head the script already framed. Node leaves a script-supplied Content-Length or
+ * Transfer-Encoding alone; header names arrive from setHeader lowercased and from writeHead as
+ * written, so the comparison is case-insensitive. */
+static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
+    static const char *const framing[2] = {"content-length", "transfer-encoding"};
+    size_t index;
+    size_t which;
+    if (headers == NULL) return 0;
+    for (index = 0; index < headers->count; ++index) {
+        const kiln_property *property = &headers->properties[index];
+        for (which = 0; which < 2; ++which) {
+            size_t len = strlen(framing[which]);
+            size_t byte;
+            if (property->key_len != len) continue;
+            for (byte = 0; byte < len; ++byte) {
+                if ((char)tolower((unsigned char)property->key[byte]) != framing[which][byte])
+                    break;
+            }
+            if (byte == len) return 1;
+        }
     }
     return 0;
 }
@@ -2816,7 +2873,7 @@ double kiln_string_to_number(const char *bytes, size_t len);
 typedef int (*kiln_realm_work_fn)(void *work, void *host, void *thrown);
 typedef void (*kiln_realm_drop_fn)(void *work);
 typedef int (*kiln_realm_entry_fn)(void *context);
-#define KILN_REALM_ASYNC_ABI_VERSION 4
+#define KILN_REALM_ASYNC_ABI_VERSION 5
 #define KILN_REALM_ASYNC_OK 0
 #define KILN_REALM_ASYNC_ERROR 1
 #define KILN_REALM_ASYNC_NOT_FOUND 1
@@ -2891,6 +2948,11 @@ int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);
+/* The command line the launcher's `main` was handed, recorded on the realm before it was
+ * entered. A realm nobody launched -- an embedded module, a unit test -- reports zero, which is
+ * how `process.argv` stays empty instead of naming an executable that does not exist. */
+int kiln_realm_argv_count(uint64_t *out_count);
+int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
 int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
@@ -3179,6 +3241,7 @@ static kiln_value kiln_c99_inspect(kiln_value value);
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
 static int kiln_c99_text_append(kiln_text *text, const char *bytes, size_t len);
 static int kiln_c99_text_append_c(kiln_text *text, const char *literal);
+static kiln_value kiln_c99_text_value(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
@@ -3705,7 +3768,7 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         if (status == KILN_C99_OK && normalized.len == 0)
             status = kiln_c99_text_append_c(&normalized, absolute ? "/" : ".");
         if (status == KILN_C99_OK)
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, normalized.bytes, normalized.len);
+            *result = kiln_c99_text_value(&normalized);
         else free(normalized.bytes);
     }
 done:
@@ -3723,13 +3786,6 @@ static kiln_object *kiln_c99_object_of(kiln_value value) {
     return (kiln_object *)(uintptr_t)value.bits;
 }
 
-static void kiln_c99_drop_object(void *pointer) {
-    kiln_object *object = (kiln_object *)pointer;
-    if (object == NULL) return;
-    free(object->properties);
-    free(object);
-}
-
 static kiln_array *kiln_c99_array_of(kiln_value value) {
     return (kiln_array *)(uintptr_t)value.bits;
 }
@@ -3742,8 +3798,750 @@ static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
     return (kiln_typed_array *)(uintptr_t)value.bits;
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * The collector (ADR 0041).
+ *
+ * Every allocation a JavaScript value can point at, or that holds one, comes from
+ * `kiln_c99_gc_alloc`. It carries a header naming its kind, its mark epoch and its size, is
+ * linked into one heap shared by every translation unit of the program, and is entered in a hash
+ * set of block addresses. Marking is precise about edges and paranoid about targets: a candidate
+ * pointer is marked only when the set knows it, so a string that points at a constant table, a
+ * symbol that points at the well-known table, or an allocation site still on plain `malloc` is
+ * ignored rather than freed.
+ *
+ * Collection runs only at the top of the realm's drive loop, where no generated frame is on the
+ * stack (ADR 0041 says why that is enough for a server and not yet enough for a CPU-bound body).
+ * The runtime archive calls `collect` through the hooks below; it never reads a C layout. It
+ * enumerates the roots it owns by handing pointers and value slots back to `mark_block` and
+ * `mark_value`, and each translation unit marks its own statics through a registered root
+ * function.
+ *
+ * The heap struct's first member is the hooks pointer. The runtime reads exactly that one word
+ * through the otherwise opaque heap pointer, so a root function outside the prelude (the graph
+ * launcher) can mark through `kiln_realm_gc_mark_value`.
+ * ------------------------------------------------------------------------------------------- */
+
+typedef enum kiln_gc_kind {
+    KILN_GC_NONE = 0,
+    KILN_GC_STRING,
+    KILN_GC_BYTES,
+    KILN_GC_OBJECT,
+    KILN_GC_CLOSURE,
+    KILN_GC_CELL,
+    KILN_GC_ARRAY,
+    KILN_GC_GENERATOR,
+    KILN_GC_PROMISE,
+    KILN_GC_SETTLER,
+    KILN_GC_BOUND,
+    KILN_GC_COLLECTION,
+    KILN_GC_PROXY,
+    KILN_GC_DATE,
+    KILN_GC_REGEXP,
+    KILN_GC_SYMBOL,
+    KILN_GC_TYPED_BUFFER,
+    KILN_GC_TYPED_ARRAY,
+    KILN_GC_COMMONJS_REQUIRE,
+    KILN_GC_METHOD_STORE,
+    KILN_GC_NODE_SERVER,
+    KILN_GC_NODE_SOCKET,
+    KILN_GC_NODE_CLIENT_REQUEST,
+    KILN_GC_NODE_RESPONSE,
+    KILN_GC_NODE_COMPLETION,
+    KILN_GC_NODE_FS_COMPLETION,
+    KILN_GC_MICROTASK,
+    KILN_GC_NEXT_TICK,
+    KILN_GC_TIMER,
+    KILN_GC_KIND_COUNT
+} kiln_gc_kind;
+
+#define KILN_GC_PHASE_MARK 0
+#define KILN_GC_PHASE_TEARDOWN 1
+#define KILN_GC_PHASE_RESET 2
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_HOOKS_VERSION 1u
+#define KILN_GC_DEFAULT_FLOOR ((size_t)2 * 1024 * 1024)
+
+typedef struct kiln_gc_block {
+    struct kiln_gc_block *prev;
+    struct kiln_gc_block *next;
+    size_t size;
+    uint32_t kind;
+    uint32_t mark;
+} kiln_gc_block;
+
+typedef struct kiln_gc_heap {
+    const kiln_gc_hooks *hooks;
+    kiln_gc_block *head;
+    size_t count;
+    size_t bytes;
+    size_t since_collection;
+    size_t survived;
+    size_t floor;
+    uint32_t epoch;
+    int enabled;
+    int stress;
+    int trace;
+    int collecting;
+    int mark_failed;
+    int fallback;
+    kiln_gc_block **table;
+    size_t table_capacity;
+    size_t table_count;
+    kiln_gc_block **stack;
+    size_t stack_len;
+    size_t stack_capacity;
+    uint64_t collections;
+    uint64_t freed_blocks;
+    uint64_t freed_bytes;
+} kiln_gc_heap;
+
+static const kiln_gc_hooks kiln_c99_gc_hooks;
+/* The heap a unit uses when no realm is active: the prelude's own tests. It never collects. */
+static kiln_gc_heap kiln_c99_gc_fallback;
+
+static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
+    const char *setting;
+    memset(heap, 0, sizeof *heap);
+    heap->hooks = &kiln_c99_gc_hooks;
+    heap->floor = KILN_GC_DEFAULT_FLOOR;
+    heap->enabled = 1;
+    setting = getenv("KILN_GC");
+    if (setting != NULL && setting[0] == '0' && setting[1] == '\0') heap->enabled = 0;
+    setting = getenv("KILN_GC_STRESS");
+    heap->stress = setting != NULL && setting[0] != '\0' && setting[0] != '0';
+    setting = getenv("KILN_GC_TRACE");
+    heap->trace = setting != NULL && setting[0] != '\0' && setting[0] != '0';
+    setting = getenv("KILN_GC_FLOOR_KIB");
+    if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
+        size_t kib = 0;
+        while (*setting >= '0' && *setting <= '9' && kib < ((size_t)-1) / 10240) {
+            kib = kib * 10 + (size_t)(*setting - '0');
+            ++setting;
+        }
+        heap->floor = kib * 1024;
+    }
+}
+
+/* Diagnostics stay off the locale-sensitive printf family (decision recorded beside
+ * kiln_number_to_js_string): a count is spelled here by hand. */
+static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
+
+static void kiln_c99_gc_trace_count(uint64_t count) {
+    char digits[24];
+    size_t at = sizeof digits;
+    digits[--at] = '\0';
+    do {
+        digits[--at] = (char)('0' + (int)(count % 10));
+        count /= 10;
+    } while (count != 0 && at != 0);
+    fputs(&digits[at], stderr);
+}
+
+static kiln_gc_heap *kiln_c99_gc_heap(void) {
+    void *attached = NULL;
+    kiln_gc_heap *candidate;
+    int status = kiln_realm_gc_attach(&kiln_c99_gc_hooks, NULL, &attached);
+    if (status == KILN_C99_OK && attached != NULL) return (kiln_gc_heap *)attached;
+    if (status != KILN_C99_OK) {
+        if (kiln_c99_gc_fallback.hooks == NULL) {
+            kiln_c99_gc_heap_init(&kiln_c99_gc_fallback);
+            kiln_c99_gc_fallback.enabled = 0;
+            kiln_c99_gc_fallback.fallback = 1;
+        }
+        return &kiln_c99_gc_fallback;
+    }
+    candidate = (kiln_gc_heap *)malloc(sizeof *candidate);
+    if (candidate == NULL) return NULL;
+    kiln_c99_gc_heap_init(candidate);
+    status = kiln_realm_gc_attach(&kiln_c99_gc_hooks, candidate, &attached);
+    if (status != KILN_C99_OK || attached == NULL) {
+        free(candidate);
+        return NULL;
+    }
+    if (attached != candidate) free(candidate);
+    return (kiln_gc_heap *)attached;
+}
+
+static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
+    uint64_t bits = (uint64_t)(uintptr_t)pointer;
+    bits ^= bits >> 29;
+    bits *= UINT64_C(0xBF58476D1CE4E5B9);
+    bits ^= bits >> 32;
+    return (size_t)bits & mask;
+}
+
+static int kiln_c99_gc_table_grow(kiln_gc_heap *heap, size_t wanted) {
+    kiln_gc_block **grown;
+    kiln_gc_block **old = heap->table;
+    size_t old_capacity = heap->table_capacity;
+    size_t index;
+    size_t capacity = 64;
+    while (capacity < wanted * 2) {
+        if (capacity > ((size_t)-1) / 4) return KILN_C99_OUT_OF_MEMORY;
+        capacity *= 2;
+    }
+    grown = (kiln_gc_block **)calloc(capacity, sizeof *grown);
+    if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+    heap->table = grown;
+    heap->table_capacity = capacity;
+    heap->table_count = 0;
+    for (index = 0; index < old_capacity; ++index) {
+        kiln_gc_block *block = old[index];
+        if (block != NULL) {
+            size_t slot = kiln_c99_gc_hash(block, capacity - 1);
+            while (grown[slot] != NULL) slot = (slot + 1) & (capacity - 1);
+            grown[slot] = block;
+            ++heap->table_count;
+        }
+    }
+    free(old);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_gc_table_insert(kiln_gc_heap *heap, kiln_gc_block *block) {
+    size_t slot;
+    size_t mask;
+    if ((heap->table_count + 1) * 2 > heap->table_capacity) {
+        int status = kiln_c99_gc_table_grow(heap, heap->table_count + 1);
+        if (status != KILN_C99_OK) return status;
+    }
+    mask = heap->table_capacity - 1;
+    slot = kiln_c99_gc_hash(block, mask);
+    while (heap->table[slot] != NULL) slot = (slot + 1) & mask;
+    heap->table[slot] = block;
+    ++heap->table_count;
+    return KILN_C99_OK;
+}
+
+/* Linear probing with backward-shift deletion, so a release leaves no tombstone behind. */
+static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *block) {
+    size_t mask;
+    size_t slot;
+    size_t hole;
+    if (heap->table_capacity == 0) return;
+    mask = heap->table_capacity - 1;
+    slot = kiln_c99_gc_hash(block, mask);
+    while (heap->table[slot] != block) {
+        if (heap->table[slot] == NULL) return;
+        slot = (slot + 1) & mask;
+    }
+    hole = slot;
+    for (;;) {
+        size_t home;
+        slot = (slot + 1) & mask;
+        if (heap->table[slot] == NULL) break;
+        home = kiln_c99_gc_hash(heap->table[slot], mask);
+        /* Move the entry back into the hole when its home sits at or before the hole in probe
+         * order, otherwise a lookup that started at its home would stop at the hole. */
+        if ((slot > hole && (home <= hole || home > slot)) ||
+            (slot < hole && home <= hole && home > slot)) {
+            heap->table[hole] = heap->table[slot];
+            hole = slot;
+        }
+    }
+    heap->table[hole] = NULL;
+    --heap->table_count;
+}
+
+static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+    kiln_gc_block *block;
+    uintptr_t address = (uintptr_t)payload;
+    size_t mask;
+    size_t slot;
+    if (payload == NULL || heap->table_capacity == 0) return NULL;
+    /* A candidate edge is not necessarily a pointer at all: `bits` and `ptr` share one word, so
+     * a builtin's code or a method's code arrives here as a small integer. Stepping back from it
+     * with pointer arithmetic is undefined behaviour on a pointer that never pointed at an
+     * object, and the sanitizer traps it -- so the header address is computed in integers and
+     * anything that cannot be a payload is rejected before a pointer exists. */
+    if (address < sizeof(kiln_gc_block)) return NULL;
+    block = (kiln_gc_block *)(address - sizeof(kiln_gc_block));
+    mask = heap->table_capacity - 1;
+    slot = kiln_c99_gc_hash(block, mask);
+    while (heap->table[slot] != NULL) {
+        if (heap->table[slot] == block) return block;
+        slot = (slot + 1) & mask;
+    }
+    return NULL;
+}
+
+static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_block *block;
+    if (heap == NULL || size > ((size_t)-1) - sizeof *block) return NULL;
+    block = (kiln_gc_block *)malloc(sizeof *block + (size == 0 ? 1 : size));
+    if (block == NULL) return NULL;
+    if (kiln_c99_gc_table_insert(heap, block) != KILN_C99_OK) {
+        free(block);
+        return NULL;
+    }
+    block->kind = kind;
+    block->mark = 0;
+    block->size = size;
+    block->prev = NULL;
+    block->next = heap->head;
+    if (heap->head != NULL) heap->head->prev = block;
+    heap->head = block;
+    ++heap->count;
+    heap->bytes += size;
+    heap->since_collection += size;
+    return block + 1;
+}
+
+static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
+    void *payload = kiln_c99_gc_alloc(kind, size);
+    if (payload != NULL && size != 0) memset(payload, 0, size);
+    return payload;
+}
+
+static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
+    if (block->prev != NULL) block->prev->next = block->next;
+    else heap->head = block->next;
+    if (block->next != NULL) block->next->prev = block->prev;
+    block->prev = NULL;
+    block->next = NULL;
+    --heap->count;
+    heap->bytes -= block->size;
+}
+
+static void kiln_c99_gc_finalize(kiln_gc_block *block);
+
+/* Explicit release for a block whose lifetime is already known: queued work after it ran, a
+ * host-operation completion after its callback. The collector remains the backstop. */
+static void kiln_c99_gc_release(void *payload) {
+    kiln_gc_heap *heap;
+    kiln_gc_block *block;
+    if (payload == NULL) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    block = kiln_c99_gc_lookup(heap, payload);
+    if (block == NULL) return;
+    kiln_c99_gc_unlink(heap, block);
+    kiln_c99_gc_table_remove(heap, block);
+    kiln_c99_gc_finalize(block);
+    heap->freed_blocks += 1;
+    heap->freed_bytes += block->size;
+    free(block);
+}
+
+static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
+    kiln_gc_block *block = kiln_c99_gc_lookup(heap, payload);
+    if (block == NULL || block->mark == heap->epoch) return;
+    block->mark = heap->epoch;
+    if (heap->stack_len == heap->stack_capacity) {
+        size_t wanted = heap->stack_capacity == 0 ? 256 : heap->stack_capacity * 2;
+        kiln_gc_block **grown =
+            (kiln_gc_block **)realloc(heap->stack, wanted * sizeof *heap->stack);
+        if (grown == NULL) {
+            /* A collection that cannot record what it saw must not free anything. */
+            heap->mark_failed = 1;
+            return;
+        }
+        heap->stack = grown;
+        heap->stack_capacity = wanted;
+    }
+    heap->stack[heap->stack_len++] = block;
+}
+
+static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
+    /* Every payload-carrying tag keeps its pointer in the shared word, and a pointer the heap
+     * does not know (a constant, a well-known symbol, a provider handle) is simply not marked. */
+    if (value == NULL || value->tag < KILN_VALUE_STRING) return;
+    kiln_c99_gc_mark_block(heap, (const void *)(uintptr_t)value->bits);
+}
+
+static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
+                                    size_t count) {
+    size_t index;
+    if (values == NULL) return;
+    for (index = 0; index < count; ++index) kiln_c99_gc_mark_value(heap, &values[index]);
+}
+
+static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
+    void *payload = block + 1;
+    switch (block->kind) {
+    case KILN_GC_OBJECT: {
+        kiln_object *object = (kiln_object *)payload;
+        size_t index;
+        for (index = 0; index < object->count; ++index) {
+            const kiln_property *property = &object->properties[index];
+            kiln_c99_gc_mark_block(heap, property->key);
+            kiln_c99_gc_mark_value(heap, &property->value);
+            kiln_c99_gc_mark_value(heap, &property->getter);
+            kiln_c99_gc_mark_value(heap, &property->setter);
+        }
+        kiln_c99_gc_mark_value(heap, &object->prototype);
+        break;
+    }
+    case KILN_GC_CLOSURE: {
+        kiln_closure *closure = (kiln_closure *)payload;
+        kiln_c99_gc_mark_values(heap, closure->upvalues, closure->upvalue_count);
+        kiln_c99_gc_mark_value(heap, &closure->captured_this);
+        kiln_c99_gc_mark_value(heap, &closure->captured_new_target);
+        kiln_c99_gc_mark_value(heap, &closure->captured_arguments);
+        kiln_c99_gc_mark_value(heap, &closure->prototype);
+        kiln_c99_gc_mark_value(heap, &closure->properties);
+        break;
+    }
+    case KILN_GC_CELL:
+        kiln_c99_gc_mark_value(heap, (const kiln_value *)payload);
+        break;
+    case KILN_GC_ARRAY: {
+        kiln_array *array = (kiln_array *)payload;
+        kiln_c99_gc_mark_values(heap, array->elements, array->count);
+        kiln_c99_gc_mark_value(heap, &array->properties);
+        break;
+    }
+    case KILN_GC_GENERATOR: {
+        kiln_generator *frame = (kiln_generator *)payload;
+        kiln_c99_gc_mark_value(heap, &frame->function);
+        kiln_c99_gc_mark_value(heap, &frame->receiver);
+        kiln_c99_gc_mark_value(heap, &frame->promise);
+        kiln_c99_gc_mark_value(heap, &frame->sent);
+        if (frame->function.tag == KILN_VALUE_FUNCTION) {
+            const kiln_closure *closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
+            kiln_c99_gc_mark_values(heap, frame->locals, closure->local_count);
+            kiln_c99_gc_mark_values(heap, frame->stack, closure->stack_size);
+        }
+        break;
+    }
+    case KILN_GC_PROMISE: {
+        kiln_promise *promise = (kiln_promise *)payload;
+        size_t index;
+        kiln_c99_gc_mark_value(heap, &promise->value);
+        for (index = 0; index < promise->count; ++index) {
+            kiln_c99_gc_mark_value(heap, &promise->reactions[index].on_fulfilled);
+            kiln_c99_gc_mark_value(heap, &promise->reactions[index].on_rejected);
+            kiln_c99_gc_mark_value(heap, &promise->reactions[index].derived);
+        }
+        break;
+    }
+    case KILN_GC_SETTLER:
+        kiln_c99_gc_mark_value(heap, &((kiln_settler *)payload)->promise);
+        break;
+    case KILN_GC_BOUND: {
+        kiln_bound *bound = (kiln_bound *)payload;
+        kiln_c99_gc_mark_value(heap, &bound->target);
+        kiln_c99_gc_mark_value(heap, &bound->receiver);
+        kiln_c99_gc_mark_values(heap, bound->arguments, bound->count);
+        kiln_c99_gc_mark_value(heap, &bound->properties);
+        break;
+    }
+    case KILN_GC_COLLECTION: {
+        kiln_collection *collection = (kiln_collection *)payload;
+        size_t index;
+        for (index = 0; index < collection->count; ++index) {
+            if (collection->entries[index].dead) continue;
+            kiln_c99_gc_mark_value(heap, &collection->entries[index].key);
+            kiln_c99_gc_mark_value(heap, &collection->entries[index].value);
+        }
+        kiln_c99_gc_mark_value(heap, &collection->properties);
+        break;
+    }
+    case KILN_GC_PROXY:
+        kiln_c99_gc_mark_value(heap, &((kiln_proxy *)payload)->target);
+        kiln_c99_gc_mark_value(heap, &((kiln_proxy *)payload)->handler);
+        break;
+    case KILN_GC_TYPED_ARRAY:
+        kiln_c99_gc_mark_block(heap, ((kiln_typed_array *)payload)->buffer);
+        break;
+    case KILN_GC_METHOD_STORE:
+        kiln_c99_gc_mark_value(heap, &((kiln_method_store *)payload)->properties);
+        kiln_c99_gc_mark_block(heap, ((kiln_method_store *)payload)->next);
+        break;
+    case KILN_GC_NODE_SERVER: {
+        kiln_node_server *server = (kiln_node_server *)payload;
+        kiln_c99_gc_mark_value(heap, &server->object);
+        kiln_c99_gc_mark_value(heap, &server->connection_listener);
+        kiln_c99_gc_mark_block(heap, server->sockets);
+        break;
+    }
+    case KILN_GC_NODE_SOCKET: {
+        kiln_node_socket *socket = (kiln_node_socket *)payload;
+        kiln_c99_gc_mark_value(heap, &socket->object);
+        kiln_c99_gc_mark_block(heap, socket->next);
+        kiln_c99_gc_mark_block(heap, socket->server);
+        kiln_c99_gc_mark_block(heap, socket->client_requests);
+        kiln_c99_gc_mark_block(heap, socket->responses);
+        break;
+    }
+    case KILN_GC_NODE_CLIENT_REQUEST: {
+        kiln_node_client_request *request = (kiln_node_client_request *)payload;
+        kiln_c99_gc_mark_value(heap, &request->object);
+        kiln_c99_gc_mark_value(heap, &request->callback);
+        kiln_c99_gc_mark_value(heap, &request->response);
+        kiln_c99_gc_mark_block(heap, request->socket);
+        kiln_c99_gc_mark_block(heap, request->next);
+        break;
+    }
+    case KILN_GC_NODE_RESPONSE: {
+        kiln_node_response *response = (kiln_node_response *)payload;
+        kiln_c99_gc_mark_value(heap, &response->request);
+        kiln_c99_gc_mark_value(heap, &response->object);
+        kiln_c99_gc_mark_value(heap, &response->headers);
+        kiln_c99_gc_mark_block(heap, response->socket);
+        kiln_c99_gc_mark_block(heap, response->next);
+        break;
+    }
+    case KILN_GC_NODE_COMPLETION: {
+        kiln_node_completion *completion = (kiln_node_completion *)payload;
+        kiln_c99_gc_mark_block(heap, completion->server);
+        kiln_c99_gc_mark_block(heap, completion->socket);
+        kiln_c99_gc_mark_block(heap, completion->client_request);
+        break;
+    }
+    case KILN_GC_NODE_FS_COMPLETION:
+        kiln_c99_gc_mark_value(heap, &((kiln_node_fs_completion *)payload)->promise);
+        break;
+    case KILN_GC_MICROTASK: {
+        kiln_microtask *task = (kiln_microtask *)payload;
+        kiln_c99_gc_mark_value(heap, &task->handler);
+        kiln_c99_gc_mark_value(heap, &task->argument);
+        kiln_c99_gc_mark_value(heap, &task->derived);
+        break;
+    }
+    case KILN_GC_NEXT_TICK: {
+        kiln_next_tick *tick = (kiln_next_tick *)payload;
+        kiln_c99_gc_mark_value(heap, &tick->callback);
+        kiln_c99_gc_mark_values(heap, tick->args, tick->argc);
+        break;
+    }
+    case KILN_GC_TIMER: {
+        kiln_timer *timer = (kiln_timer *)payload;
+        kiln_c99_gc_mark_value(heap, &timer->callback);
+        kiln_c99_gc_mark_values(heap, timer->args, timer->argc);
+        break;
+    }
+    case KILN_GC_REGEXP: {
+        /* A pattern borrows the bytes it was compiled from, which may be a unit constant or a
+         * string the program built; the block table decides which. The provider handle is not a
+         * block and is released by the finaliser instead. */
+        kiln_regexp *regexp = (kiln_regexp *)payload;
+        kiln_c99_gc_mark_block(heap, regexp->source);
+        kiln_c99_gc_mark_block(heap, regexp->flags);
+        break;
+    }
+    case KILN_GC_SYMBOL: {
+        /* The reserved key is malloc-backed and outlives the heap, but a description can be a
+         * collected string (`Symbol(String(x))`), so both are offered to the table. */
+        kiln_symbol *symbol = (kiln_symbol *)payload;
+        kiln_c99_gc_mark_block(heap, symbol->key);
+        kiln_c99_gc_mark_block(heap, symbol->description);
+        break;
+    }
+    case KILN_GC_STRING:
+    case KILN_GC_BYTES:
+    case KILN_GC_DATE:
+    case KILN_GC_TYPED_BUFFER:
+    case KILN_GC_COMMONJS_REQUIRE:
+    default:
+        break;
+    }
+}
+
+/* Inner growth buffers are the owner's, never a value's, so they are released here and only
+ * here. A kind whose payload owns a provider handle releases it here too. */
+static void kiln_c99_gc_finalize(kiln_gc_block *block) {
+    void *payload = block + 1;
+    switch (block->kind) {
+    case KILN_GC_OBJECT:
+        free(((kiln_object *)payload)->properties);
+        break;
+    case KILN_GC_CLOSURE:
+        free(((kiln_closure *)payload)->upvalues);
+        break;
+    case KILN_GC_ARRAY:
+        free(((kiln_array *)payload)->elements);
+        break;
+    case KILN_GC_GENERATOR: {
+        kiln_generator *frame = (kiln_generator *)payload;
+        free(frame->locals);
+        free(frame->stack);
+        free(frame->handlers);
+        free(frame->handler_stack);
+        break;
+    }
+    case KILN_GC_PROMISE:
+        free(((kiln_promise *)payload)->reactions);
+        break;
+    case KILN_GC_BOUND:
+        free(((kiln_bound *)payload)->arguments);
+        break;
+    case KILN_GC_COLLECTION:
+        free(((kiln_collection *)payload)->entries);
+        break;
+    case KILN_GC_TYPED_BUFFER:
+        free(((kiln_typed_buffer *)payload)->bytes);
+        break;
+    case KILN_GC_REGEXP:
+        /* The compiled pattern is the provider's, and this is the only place it is handed back. */
+        kiln_regexp_free(((kiln_regexp *)payload)->handle);
+        break;
+    case KILN_GC_NODE_SERVER:
+        free(((kiln_node_server *)payload)->address);
+        break;
+    case KILN_GC_NODE_CLIENT_REQUEST: {
+        kiln_node_client_request *request = (kiln_node_client_request *)payload;
+        free(request->host_name);
+        free(request->path);
+        free(request->method);
+        free(request->headers);
+        free(request->pending_body);
+        break;
+    }
+    case KILN_GC_NEXT_TICK:
+        free(((kiln_next_tick *)payload)->args);
+        break;
+    case KILN_GC_TIMER:
+        free(((kiln_timer *)payload)->args);
+        break;
+    default:
+        break;
+    }
+}
+
+static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
+    while (heap->stack_len != 0 && !heap->mark_failed) {
+        kiln_gc_block *block = heap->stack[--heap->stack_len];
+        kiln_c99_gc_trace(heap, block);
+    }
+}
+
+static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
+    ++heap->epoch;
+    if (heap->epoch == 0) ++heap->epoch;
+    heap->stack_len = 0;
+    heap->mark_failed = 0;
+}
+
+/* Free every unmarked block. Marked blocks either stay (an ordinary collection) or are orphaned
+ * (teardown, where a result a caller still borrows must outlive the heap). */
+static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
+    kiln_gc_block *block = heap->head;
+    size_t survived = 0;
+    while (block != NULL) {
+        kiln_gc_block *next = block->next;
+        if (block->mark != heap->epoch) {
+            kiln_c99_gc_unlink(heap, block);
+            kiln_c99_gc_table_remove(heap, block);
+            kiln_c99_gc_finalize(block);
+            heap->freed_blocks += 1;
+            heap->freed_bytes += block->size;
+            free(block);
+        } else if (orphan_marked) {
+            kiln_c99_gc_unlink(heap, block);
+            kiln_c99_gc_table_remove(heap, block);
+        } else {
+            survived += block->size;
+        }
+        block = next;
+    }
+    heap->survived = survived;
+    heap->since_collection = 0;
+}
+
+static void kiln_c99_gc_collect(void *opaque, int force) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    size_t threshold;
+    uint64_t before_blocks;
+    uint64_t before_bytes;
+    if (heap == NULL || heap->collecting || heap->fallback) return;
+    if (!heap->enabled && !heap->stress) return;
+    threshold = heap->floor > heap->survived ? heap->floor : heap->survived;
+    if (!force && !heap->stress && heap->since_collection < threshold) return;
+    heap->collecting = 1;
+    before_blocks = heap->freed_blocks;
+    before_bytes = heap->freed_bytes;
+    kiln_c99_gc_begin(heap);
+    (void)kiln_realm_gc_mark_roots(heap);
+    kiln_c99_gc_drain(heap);
+    if (!heap->mark_failed) {
+        kiln_c99_gc_sweep(heap, 0);
+        heap->collections += 1;
+    }
+    if (heap->trace) {
+        kiln_c99_gc_trace_text("kiln gc: collection ");
+        kiln_c99_gc_trace_count(heap->collections);
+        kiln_c99_gc_trace_text(" freed ");
+        kiln_c99_gc_trace_count(heap->freed_blocks - before_blocks);
+        kiln_c99_gc_trace_text(" blocks (");
+        kiln_c99_gc_trace_count(heap->freed_bytes - before_bytes);
+        kiln_c99_gc_trace_text(" bytes), ");
+        kiln_c99_gc_trace_count((uint64_t)heap->count);
+        kiln_c99_gc_trace_text(" blocks (");
+        kiln_c99_gc_trace_count((uint64_t)heap->bytes);
+        kiln_c99_gc_trace_text(heap->mark_failed
+                                   ? " bytes) live (marking ran out of memory; nothing freed)\n"
+                                   : " bytes) live\n");
+    }
+    heap->collecting = 0;
+}
+
+static void kiln_c99_gc_teardown_begin(void *opaque) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    if (heap == NULL || heap->fallback) return;
+    heap->collecting = 1;
+    kiln_c99_gc_begin(heap);
+}
+
+static void kiln_c99_gc_teardown_end(void *opaque) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    if (heap == NULL || heap->fallback) return;
+    kiln_c99_gc_drain(heap);
+    if (heap->mark_failed) {
+        /* Orphan everything rather than free a block a survivor root still names. */
+        ++heap->epoch;
+        if (heap->epoch == 0) ++heap->epoch;
+        for (kiln_gc_block *block = heap->head; block != NULL; block = block->next)
+            block->mark = heap->epoch;
+    }
+    kiln_c99_gc_sweep(heap, 1);
+    if (heap->trace) {
+        kiln_c99_gc_trace_text("kiln gc: teardown after ");
+        kiln_c99_gc_trace_count(heap->collections);
+        kiln_c99_gc_trace_text(" collections, ");
+        kiln_c99_gc_trace_count(heap->freed_blocks);
+        kiln_c99_gc_trace_text(" blocks (");
+        kiln_c99_gc_trace_count(heap->freed_bytes);
+        kiln_c99_gc_trace_text(" bytes) freed in total\n");
+    }
+    free(heap->table);
+    free(heap->stack);
+    free(heap);
+}
+
+static void kiln_c99_gc_hook_mark_value(void *opaque, const void *value) {
+    kiln_c99_gc_mark_value((kiln_gc_heap *)opaque, (const kiln_value *)value);
+}
+
+static void kiln_c99_gc_hook_mark_block(void *opaque, void *payload) {
+    kiln_c99_gc_mark_block((kiln_gc_heap *)opaque, payload);
+}
+
+static const kiln_gc_hooks kiln_c99_gc_hooks = {
+    KILN_GC_HOOKS_VERSION,
+    (uint32_t)sizeof(kiln_gc_hooks),
+    kiln_c99_gc_collect,
+    kiln_c99_gc_teardown_begin,
+    kiln_c99_gc_teardown_end,
+    kiln_c99_gc_hook_mark_value,
+    kiln_c99_gc_hook_mark_block,
+};
+
+/* A borrowed result slot: marked during collection and again at teardown, so the value a caller
+ * reads after `kiln_realm_destroy` is never freed by it (ADR 0034's borrowed-result contract). */
+static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
+    if (phase == KILN_GC_PHASE_RESET || context == NULL) return;
+    kiln_c99_gc_mark_value((kiln_gc_heap *)opaque, (const kiln_value *)context);
+}
+
+/* Allocation helpers for the kinds whose bytes are the value: strings and raw byte payloads. */
+static char *kiln_c99_gc_alloc_text(size_t len) {
+    return (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len == 0 ? 1 : len);
+}
+
 static int kiln_c99_new_object(kiln_value *out) {
-    kiln_object *object = (kiln_object *)malloc(sizeof *object);
+    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc(KILN_GC_OBJECT, sizeof *object);
     if (object == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -3754,13 +4552,6 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->frozen = 0;
     object->module_namespace = 0;
     object->arguments_brand = 0;
-    {
-        int owned = kiln_realm_own_object(object, kiln_c99_drop_object);
-        if (owned != KILN_C99_OK) {
-            kiln_c99_drop_object(object);
-            return owned;
-        }
-    }
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -4188,7 +4979,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
                     goto format_oom;
             }
         }
-        *out = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+        *out = kiln_c99_text_value(&built);
         return KILN_C99_OK;
 format_oom:
         free(built.bytes);
@@ -4200,7 +4991,7 @@ format_oom:
 }
 
 static int kiln_c99_new_array(kiln_value *out) {
-    kiln_array *array = (kiln_array *)malloc(sizeof *array);
+    kiln_array *array = (kiln_array *)kiln_c99_gc_alloc(KILN_GC_ARRAY, sizeof *array);
     if (array == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -4306,13 +5097,16 @@ static int kiln_c99_typed_prototype_kind(uint64_t builtin, kiln_typed_kind *kind
 }
 
 static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length) {
-    kiln_typed_buffer *buffer = (kiln_typed_buffer *)malloc(sizeof *buffer);
+    kiln_typed_buffer *buffer =
+        (kiln_typed_buffer *)kiln_c99_gc_alloc(KILN_GC_TYPED_BUFFER, sizeof *buffer);
     if (buffer == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
+    /* The bytes stay malloc-backed: nothing but this buffer ever points at them, and the
+     * KILN_GC_TYPED_BUFFER finaliser is the one place they are released. */
     buffer->bytes = (uint8_t *)calloc(byte_length == 0 ? 1 : byte_length, 1);
     if (buffer->bytes == NULL) {
-        free(buffer);
+        kiln_c99_gc_release(buffer);
         return KILN_C99_OUT_OF_MEMORY;
     }
     buffer->byte_length = byte_length;
@@ -4503,7 +5297,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                         "invalid typed array length or offset");
         }
         count = has_length ? length : (buffer->byte_length - byte_offset) / width;
-        view = (kiln_typed_array *)malloc(sizeof *view);
+        view = (kiln_typed_array *)kiln_c99_gc_alloc(KILN_GC_TYPED_ARRAY, sizeof *view);
         if (view == NULL) {
             return KILN_C99_OUT_OF_MEMORY;
         }
@@ -4532,7 +5326,7 @@ static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
     if (status != KILN_C99_OK) {
         return status;
     }
-    view = (kiln_typed_array *)malloc(sizeof *view);
+    view = (kiln_typed_array *)kiln_c99_gc_alloc(KILN_GC_TYPED_ARRAY, sizeof *view);
     if (view == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -4570,7 +5364,7 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
     if (status != KILN_C99_OK) {
         return status;
     }
-    view = (kiln_typed_array *)malloc(sizeof *view);
+    view = (kiln_typed_array *)kiln_c99_gc_alloc(KILN_GC_TYPED_ARRAY, sizeof *view);
     if (view == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -4944,7 +5738,7 @@ static kiln_generator *kiln_c99_generator_of(kiln_value value) {
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
                                   const kiln_value *args, size_t argc) {
     kiln_closure *closure = kiln_c99_closure_of(function);
-    kiln_generator *frame = (kiln_generator *)malloc(sizeof *frame);
+    kiln_generator *frame = (kiln_generator *)kiln_c99_gc_alloc(KILN_GC_GENERATOR, sizeof *frame);
     size_t locals = closure->local_count == 0 ? 1 : closure->local_count;
     size_t depth = closure->stack_size == 0 ? 1 : closure->stack_size;
     size_t index;
@@ -4962,11 +5756,9 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
                          sizeof *frame->handler_stack);
     if (frame->locals == NULL || frame->stack == NULL || frame->handlers == NULL ||
         frame->handler_stack == NULL) {
-        free(frame->locals);
-        free(frame->stack);
-        free(frame->handlers);
-        free(frame->handler_stack);
-        free(frame);
+        /* The four buffers are the frame's, so the KILN_GC_GENERATOR finaliser releases the ones
+         * that did allocate; releasing the frame is the whole of the cleanup. */
+        kiln_c99_gc_release(frame);
         return KILN_C99_OUT_OF_MEMORY;
     }
     frame->handler_top = 0;
@@ -5067,7 +5859,8 @@ static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_requir
                                            void *context) {
     kiln_commonjs_require *require;
     if (out == NULL || call == NULL) return KILN_C99_INVALID_ARGUMENT;
-    require = (kiln_commonjs_require *)malloc(sizeof *require);
+    require = (kiln_commonjs_require *)kiln_c99_gc_alloc(KILN_GC_COMMONJS_REQUIRE,
+                                                         sizeof *require);
     if (require == NULL) return KILN_C99_OUT_OF_MEMORY;
     require->call = call;
     require->context = context;
@@ -5597,7 +6390,7 @@ static int kiln_c99_form_decode(const char *bytes, size_t len, kiln_value *out) 
         index += 1;
     }
     if (kiln_c99_valid_utf8(decoded.bytes, decoded.len)) {
-        *out = kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+        *out = kiln_c99_text_value(&decoded);
         return KILN_C99_OK;
     }
     {
@@ -5645,7 +6438,7 @@ static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *ar
         status = kiln_c99_form_decode(equal < pair_end ? input.ptr + equal + 1 : "",
                                       equal < pair_end ? pair_end - equal - 1 : 0, &value);
         if (status != KILN_C99_OK) {
-            free((void *)name.ptr);
+            kiln_c99_gc_release((void *)name.ptr);
             return status;
         }
         object = kiln_c99_object_of(*out);
@@ -5660,7 +6453,7 @@ static int kiln_c99_node_querystring_parse(kiln_value *out, const kiln_value *ar
             if (status == KILN_C99_OK) property->value = value;
         } else {
             kiln_value previous = property->value;
-            free((void *)name.ptr);
+            kiln_c99_gc_release((void *)name.ptr);
             if (previous.tag == KILN_VALUE_ARRAY) {
                 status = kiln_c99_array_push(previous, value);
             } else {
@@ -5830,7 +6623,7 @@ static int kiln_c99_to_fixed(kiln_value *out, double value, int places) {
             return KILN_C99_OUT_OF_MEMORY;
         }
     }
-    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    *out = kiln_c99_text_value(&text);
     return KILN_C99_OK;
 }
 
@@ -6118,7 +6911,7 @@ static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
             }
         }
     }
-    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    *out = kiln_c99_text_value(&text);
     return KILN_C99_OK;
 }
 
@@ -6580,6 +7373,47 @@ static int kiln_c99_process_object(kiln_value *out) {
     if (status == KILN_C99_OK)
         status = kiln_c99_put(NULL, *process, "pid", 3,
                               kiln_c99_number(1.0), 0, NULL);
+    /* `process.argv` follows node's single-executable-application convention, because a compiled
+     * kiln program is one: there is no separate interpreter to name in slot 0 and no script file
+     * to name in slot 1, so both name the executable and the program's own arguments still start
+     * at index 2 -- which is where every argv-parsing library, and `const [, , first] =
+     * process.argv`, already looks. Reporting a one-element argv would be more literal and would
+     * silently shift every argument by one. */
+    if (status == KILN_C99_OK) {
+        uint64_t argv_count = 0;
+        if (kiln_realm_argv_count(&argv_count) == KILN_C99_OK && argv_count != 0) {
+            const uint8_t *bytes = NULL;
+            uint64_t bytes_len = 0;
+            uint64_t index;
+            status = kiln_realm_argv_at(0, &bytes, &bytes_len);
+            /* Three copies rather than one shared allocation: a `kiln_value` string owns its
+             * bytes, and two array slots plus a property naming the same buffer would be three
+             * owners of one allocation. */
+            for (index = 0; status == KILN_C99_OK && index < 2; ++index) {
+                kiln_value executable = kiln_c99_copy_text((const char *)bytes,
+                                                           (size_t)bytes_len);
+                if (executable.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+                else status = kiln_c99_array_push(argv, executable);
+            }
+            if (status == KILN_C99_OK) {
+                kiln_value executable = kiln_c99_copy_text((const char *)bytes,
+                                                           (size_t)bytes_len);
+                if (executable.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+                else status = kiln_c99_put(NULL, *process, "execPath", 8, executable, 0, NULL);
+            }
+            for (index = 1; status == KILN_C99_OK && index < argv_count; ++index) {
+                kiln_value argument;
+                status = kiln_realm_argv_at(index, &bytes, &bytes_len);
+                if (status != KILN_C99_OK) break;
+                argument = kiln_c99_copy_text((const char *)bytes, (size_t)bytes_len);
+                if (argument.tag != KILN_VALUE_STRING) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                    break;
+                }
+                status = kiln_c99_array_push(argv, argument);
+            }
+        }
+    }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
@@ -7111,7 +7945,7 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR,
                                     "Invalid regular expression");
     }
-    regexp = (kiln_regexp *)malloc(sizeof *regexp);
+    regexp = (kiln_regexp *)kiln_c99_gc_alloc(KILN_GC_REGEXP, sizeof *regexp);
     if (regexp == NULL) {
         kiln_regexp_free(handle);
         return KILN_C99_OUT_OF_MEMORY;
@@ -7250,7 +8084,7 @@ static kiln_value kiln_c99_property_key(kiln_value key) {
  * so the identity is the allocation's and the reserved key carries a serial. */
 static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     static uint64_t next_serial;
-    kiln_symbol *symbol = (kiln_symbol *)malloc(sizeof *symbol);
+    kiln_symbol *symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
     kiln_text key = {NULL, 0, 0};
     char digits[24];
     int written;
@@ -7262,9 +8096,14 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     if (written < 0 || kiln_c99_text_append_c(&key, "@@symbol:") != KILN_C99_OK ||
         kiln_c99_text_append(&key, digits, (size_t)written) != KILN_C99_OK) {
         free(key.bytes);
-        free(symbol);
+        kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;
     }
+    /* The reserved key stays malloc-backed and is never released: a symbol lives as long as the
+     * realm does (`kiln_c99_symbols` roots every one of them), and the key bytes are borrowed by
+     * every property stored under this symbol. The tracer still marks both `key` and
+     * `description` as candidate blocks, so a description that came from a collected string --
+     * `Symbol(String(x))` -- is kept alive by the symbol that carries it. */
     symbol->key = key.bytes;
     symbol->key_len = key.len;
     if (description.tag == KILN_VALUE_UNDEFINED) {
@@ -7276,7 +8115,7 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
         kiln_value text = kiln_c99_text(description);
         if (text.tag != KILN_VALUE_STRING) {
             free(key.bytes);
-            free(symbol);
+            kiln_c99_gc_release(symbol);
             return KILN_C99_OUT_OF_MEMORY;
         }
         symbol->description = text.ptr;
@@ -7301,11 +8140,13 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     if (kiln_realm_symbol_key_for(id, &registered_key, &registered_key_len) != KILN_C99_OK ||
         registered_key_len > SIZE_MAX)
         return KILN_C99_CONTROL_ERROR;
-    symbol = (kiln_symbol *)malloc(sizeof *symbol);
+    symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
     if (symbol == NULL) return KILN_C99_OUT_OF_MEMORY;
+    /* Registry key bytes, like `Symbol()`'s, stay malloc-backed and outlive the realm's heap:
+     * the symbol they belong to is rooted for the realm's whole life. */
     property_key = (char *)malloc((sizeof property_prefix - 1) + sizeof id);
     if (property_key == NULL) {
-        free(symbol);
+        kiln_c99_gc_release(symbol);
         return KILN_C99_OUT_OF_MEMORY;
     }
     memcpy(property_key, property_prefix, sizeof property_prefix - 1);
@@ -7810,12 +8651,6 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value) {
     return (kiln_closure *)(uintptr_t)value.bits;
 }
 
-static void kiln_c99_drop_closure(void *pointer) {
-    kiln_closure *closure = (kiln_closure *)pointer;
-    if (closure == NULL) return;
-    free(closure->upvalues);
-    free(closure);
-}
 
 static kiln_value *kiln_c99_cell_of(kiln_value value) {
     return (kiln_value *)(uintptr_t)value.bits;
@@ -7824,7 +8659,7 @@ static kiln_value *kiln_c99_cell_of(kiln_value value) {
 /* Turn a slot into a box in place.  Whatever the slot already held becomes the box's first
  * contents, which is what makes `let x = 1;` followed by a closure over `x` see the 1. */
 static int kiln_c99_make_cell(kiln_value *slot) {
-    kiln_value *box = (kiln_value *)malloc(sizeof *box);
+    kiln_value *box = (kiln_value *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *box);
     if (box == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -7857,7 +8692,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
                                  uint32_t handler_depth, uint32_t prologue_resume,
                                  const kiln_value *captured,
                                  uint32_t count) {
-    kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
+    kiln_closure *closure = (kiln_closure *)kiln_c99_gc_alloc(KILN_GC_CLOSURE, sizeof *closure);
     kiln_value *upvalues = NULL;
     uint32_t index;
     if (closure == NULL) {
@@ -7866,7 +8701,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     if (count != 0) {
         upvalues = (kiln_value *)malloc((size_t)count * sizeof *upvalues);
         if (upvalues == NULL) {
-            free(closure);
+            kiln_c99_gc_release(closure);
             return KILN_C99_OUT_OF_MEMORY;
         }
         for (index = 0; index < count; ++index) {
@@ -7893,7 +8728,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
          * before the arrow is called, so it has to be copied out now rather than pointed at. */
         int captured = kiln_c99_visible_arguments(&closure->captured_arguments);
         if (captured != KILN_C99_OK) {
-            free(closure);
+            kiln_c99_gc_release(closure);
             return captured;
         }
     }
@@ -7909,13 +8744,6 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->proto = proto;
     closure->upvalue_count = count;
     closure->upvalues = upvalues;
-    {
-        int owned = kiln_realm_own_closure(closure, kiln_c99_drop_closure);
-        if (owned != KILN_C99_OK) {
-            kiln_c99_drop_closure(closure);
-            return owned;
-        }
-    }
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
 }
@@ -8491,7 +9319,7 @@ static int kiln_c99_truthy(kiln_value value) {
 }
 
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
-    char *copy = (char *)malloc(len == 0 ? 1 : len);
+    char *copy = kiln_c99_gc_alloc_text(len);
     if (copy == NULL) {
         return kiln_c99_undefined();
     }
@@ -8506,10 +9334,10 @@ static kiln_value kiln_c99_control_diagnostic(void) {
         uint64_t len = 0;
         uint8_t *bytes;
         if (kiln_realm_diagnostic_render(NULL, 0, &len) == KILN_C99_INVALID_ARGUMENT && len != 0) {
-            bytes = (uint8_t *)malloc((size_t)len);
+            bytes = (uint8_t *)kiln_c99_gc_alloc_text((size_t)len);
             if (bytes != NULL && kiln_realm_diagnostic_render(bytes, len, &len) == KILN_C99_OK)
                 return kiln_c99_value(KILN_VALUE_STRING, 0, (const char *)bytes, (size_t)len);
-            free(bytes);
+            kiln_c99_gc_release(bytes);
         }
     }
     kiln_text text = {NULL, 0, 0};
@@ -8557,7 +9385,7 @@ static kiln_value kiln_c99_control_diagnostic(void) {
     }
 #undef KILN_DIAGNOSTIC_DECIMAL
     if (text.bytes == NULL) return kiln_c99_copy_text("unknown native operation", 24);
-    return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return kiln_c99_text_value(&text);
 }
 
 static void kiln_c99_note_refusal(const char *site, size_t instruction,
@@ -8623,6 +9451,22 @@ static int kiln_c99_text_append_c(kiln_text *text, const char *literal) {
     return kiln_c99_text_append(text, literal, strlen(literal));
 }
 
+/* A builder's bytes become a string value here and only here (ADR 0041).
+ *
+ * The builder itself is scratch: it doubles through `realloc`, and a collected block cannot move,
+ * so the two cannot be the same allocation. The copy at the escape is the price, and it is paid
+ * once per string rather than once per append. The builder is emptied as well, so an error path
+ * further down that still calls `free(text.bytes)` frees nothing rather than freeing a block. */
+static kiln_value kiln_c99_text_value(kiln_text *text) {
+    kiln_value result = text->len == 0 ? kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0)
+                                       : kiln_c99_copy_text(text->bytes, text->len);
+    free(text->bytes);
+    text->bytes = NULL;
+    text->len = 0;
+    text->capacity = 0;
+    return result;
+}
+
 /* Node decodes a `readFile(..., "utf8")` result with replacement semantics rather than exposing
  * malformed bytes as a JavaScript string. Match Rust's `String::from_utf8_lossy`: consume the
  * valid prefix of an otherwise malformed sequence, leave the offending byte to be reconsidered,
@@ -8677,7 +9521,7 @@ static kiln_value kiln_c99_copy_utf8_lossy(const uint8_t *bytes, size_t length) 
             goto oom;
         at += width;
     }
-    return kiln_c99_value(KILN_VALUE_STRING, 0, decoded.bytes, decoded.len);
+    return kiln_c99_text_value(&decoded);
 oom:
     free(decoded.bytes);
     return kiln_c99_undefined();
@@ -8761,7 +9605,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
                 }
             }
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
+        return kiln_c99_text_value(&joined);
     }
     case KILN_VALUE_BIGINT: {
         /* No `n` suffix: that is the literal's spelling, not the value's -- `String(1n)` is
@@ -8785,7 +9629,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
                 return kiln_c99_undefined();
             }
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
+        return kiln_c99_text_value(&joined);
     }
     case KILN_VALUE_ARRAY_BUFFER:
         return kiln_c99_copy_text("[object ArrayBuffer]", 21);
@@ -8800,7 +9644,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
             free(built.bytes);
             return kiln_c99_undefined();
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+        return kiln_c99_text_value(&built);
     }
     case KILN_VALUE_SYMBOL: {
         /* `String(sym)` spells the symbol out. Concatenation is a different question -- the
@@ -8814,7 +9658,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
             free(built.bytes);
             return kiln_c99_undefined();
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+        return kiln_c99_text_value(&built);
     }
     case KILN_VALUE_METHOD:
     case KILN_VALUE_BUILTIN: {
@@ -8837,7 +9681,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
                 free(built.bytes);
                 return kiln_c99_undefined();
             }
-            return kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            return kiln_c99_text_value(&built);
         }
         if (kiln_c99_text_append_c(&built, "function ") != KILN_C99_OK ||
             kiln_c99_text_append_c(&built, name) != KILN_C99_OK ||
@@ -8845,7 +9689,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
             free(built.bytes);
             return kiln_c99_undefined();
         }
-        return kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+        return kiln_c99_text_value(&built);
     }
     case KILN_VALUE_FUNCTION: {
         /* `Function.prototype.toString`: the text the program wrote, carried on the closure as a
@@ -8884,7 +9728,7 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
         l.len > (size_t)-1 - r.len) {
         return kiln_c99_undefined();
     }
-    copy = (char *)malloc((l.len + r.len) == 0 ? 1 : l.len + r.len);
+    copy = kiln_c99_gc_alloc_text(l.len + r.len);
     if (copy == NULL) {
         return kiln_c99_undefined();
     }
@@ -9217,10 +10061,11 @@ static kiln_method_store *kiln_c99_fixture_method_stores;
 static void kiln_c99_drop_callable_store(void *pointer) {
     kiln_method_store *entry = (kiln_method_store *)pointer;
     if (entry == NULL) return;
-    /* `entry->properties` is independently registered in the realm object arena. The store owns
-     * only this routing record; freeing the object here as well would make teardown order part of
-     * correctness and double-free it when the object arena runs. */
-    free(entry);
+    /* `entry->properties` is a collected object in its own right. The store owns only this
+     * routing record, and releasing it here is the explicit half of ADR 0041's contract: the
+     * realm drops the record when it drops the registry, the collector is only the backstop.
+     * This is the record's one release -- nothing else frees it. */
+    kiln_c99_gc_release(entry);
 }
 
 static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int create) {
@@ -9263,12 +10108,12 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
-        entry = (kiln_method_store *)malloc(sizeof *entry);
+        entry = (kiln_method_store *)kiln_c99_gc_alloc(KILN_GC_METHOD_STORE, sizeof *entry);
         if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
         entry->code = store_code;
         entry->next = kiln_c99_fixture_method_stores;
         if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
-            free(entry);
+            kiln_c99_gc_release(entry);
             return KILN_C99_OUT_OF_MEMORY;
         }
         kiln_c99_fixture_method_stores = entry;
@@ -9292,12 +10137,12 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
         }
     }
     /* Publication transfers the winning candidate and destructor to the realm. */
-    entry = (kiln_method_store *)malloc(sizeof *entry);
+    entry = (kiln_method_store *)kiln_c99_gc_alloc(KILN_GC_METHOD_STORE, sizeof *entry);
     if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
     entry->code = callable.bits | ((uint64_t)callable.tag << 56);
     entry->next = NULL;
     if (kiln_c99_new_object(&entry->properties) != KILN_C99_OK) {
-        free(entry);
+        kiln_c99_gc_release(entry);
         return KILN_C99_OUT_OF_MEMORY;
     }
     {
@@ -9306,7 +10151,7 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
                                                kiln_c99_drop_callable_store,
                                                (void **)&published);
         if (status != KILN_C99_OK) {
-            free(entry);
+            kiln_c99_gc_release(entry);
             return status;
         }
         if (published != entry) {
@@ -11808,7 +12653,7 @@ static kiln_value kiln_c99_inspect(kiln_value value) {
         free(text.bytes);
         return kiln_c99_undefined();
     }
-    return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return kiln_c99_text_value(&text);
 }
 
 /* Every position-taking string method counts UTF-16 code units (ADR 0022), so each of them
@@ -11877,7 +12722,7 @@ static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
             return kiln_c99_undefined();
         }
     }
-    return kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    return kiln_c99_text_value(&text);
 }
 
 /* The first position at or after `from` where `needle` occurs, or -1. */
@@ -12220,7 +13065,7 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
             while (remaining-- > 0 && status == KILN_C99_OK) {
                 status = kiln_c99_text_append(&repeated, receiver.ptr, receiver.len);
             }
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, repeated.bytes, repeated.len);
+            *result = kiln_c99_text_value(&repeated);
         }
         break;
     }
@@ -12344,7 +13189,7 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
             if (kiln_c99_text_append(&built, rest.ptr, rest.len) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
-                *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+                *result = kiln_c99_text_value(&built);
             }
         }
         free(replacement);
@@ -12364,7 +13209,7 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
             }
         }
         if (status == KILN_C99_OK) {
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            *result = kiln_c99_text_value(&built);
         }
         break;
     }
@@ -12623,7 +13468,7 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
             if (kiln_c99_text_append(&built, rest.ptr, rest.len) != KILN_C99_OK) {
                 status = KILN_C99_OUT_OF_MEMORY;
             } else {
-                *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+                *result = kiln_c99_text_value(&built);
             }
             break;
         }
@@ -13015,7 +13860,7 @@ static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
                               kiln_c99_undefined(), 0, 0, thrown);
 }
 
-static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_completion(void *opaque) { kiln_c99_gc_release(opaque); }
 static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
@@ -13038,7 +13883,7 @@ static int kiln_c99_node_start(uint32_t operation, uint64_t resource, uint64_t a
     framed.bytes_len = bytes_len;
     status = kiln_realm_start_active_host_op(&framed, kiln_c99_node_complete,
                                              kiln_c99_node_drop_completion, continuation, request);
-    if (status != KILN_C99_OK) free(continuation);
+    if (status != KILN_C99_OK) kiln_c99_gc_release(continuation);
     return status;
 }
 
@@ -13077,7 +13922,7 @@ static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     }
     kiln_c99_node_cancel_request(&socket->write_request);
     kiln_c99_node_cancel_request(&socket->shutdown_request);
-    work = (kiln_node_completion *)calloc(1, sizeof *work);
+    work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *work);
     if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
     work->kind = KILN_REALM_OP_CLOSE_RESOURCE;
     work->socket = socket;
@@ -13131,7 +13976,8 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     if (socket == NULL || event == NULL) return KILN_C99_INVALID_ARGUMENT;
     client = kiln_c99_node_client_for_id(socket, event->id);
     if (event->kind == 1) {
-        response = (kiln_node_response *)calloc(1, sizeof *response);
+        response = (kiln_node_response *)kiln_c99_gc_calloc(KILN_GC_NODE_RESPONSE,
+                                                            sizeof *response);
         if (response == NULL) return KILN_C99_OUT_OF_MEMORY;
         response->socket = socket;
         response->request_id = event->id;
@@ -13194,7 +14040,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 value_len = strlen(value);
                 at += value_len + 1;
                 if (at > event->headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
-                owned_name = name_len == 0 ? NULL : (char *)malloc(name_len);
+                owned_name = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
                 if (name_len != 0 && owned_name == NULL) {
                     status = KILN_C99_OUT_OF_MEMORY;
                     break;
@@ -13202,7 +14048,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 if (name_len != 0) memcpy(owned_name, name, name_len);
                 status = kiln_c99_put(NULL, request_headers, owned_name, name_len,
                                       kiln_c99_copy_text(value, value_len), 0, NULL);
-                if (status != KILN_C99_OK) free(owned_name);
             }
             if (status == KILN_C99_OK)
                 status = kiln_c99_put(NULL, request, "headers", 7, request_headers, 0, NULL);
@@ -13335,7 +14180,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                     value_len = strlen(value);
                     at += value_len + 1;
                     if (at > event->headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
-                    owned_name = name_len == 0 ? NULL : (char *)malloc(name_len);
+                    owned_name = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
                     if (name_len != 0 && owned_name == NULL) {
                         status = KILN_C99_OUT_OF_MEMORY;
                         break;
@@ -13343,7 +14188,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                     if (name_len != 0) memcpy(owned_name, name, name_len);
                     status = kiln_c99_put(NULL, headers, owned_name, name_len,
                                           kiln_c99_copy_text(value, value_len), 0, NULL);
-                    if (status != KILN_C99_OK) free(owned_name);
                 }
                 if (status == KILN_C99_OK)
                     status = kiln_c99_put(NULL, client->response, "headers", 7, headers, 0,
@@ -13403,6 +14247,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         int status;
         socket->closing = 1;
         socket->closed = 1;
+        kiln_c99_node_unlink_socket(socket);
         if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
             return KILN_C99_CONTROL_ERROR;
         status = kiln_c99_node_emit(socket->host, socket->object, "close",
@@ -13431,7 +14276,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
     if (work->client_request != NULL) {
         kiln_node_client_request *request = work->client_request;
         if (work->kind == KILN_REALM_OP_TCP_CONNECT) {
-            kiln_node_socket *socket = (kiln_node_socket *)calloc(1, sizeof *socket);
+            kiln_node_socket *socket = (kiln_node_socket *)kiln_c99_gc_calloc(KILN_GC_NODE_SOCKET,
+                                                                              sizeof *socket);
             int status;
             if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
             socket->host = request->host;
@@ -13452,7 +14298,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         status = kiln_c99_node_emit(socket->host, socket->object, "connect",
                                     kiln_c99_undefined(), 0, 0, exception);
         if (status != KILN_C99_OK || socket->closing) return status;
-        read = (kiln_node_completion *)calloc(1, sizeof *read);
+        read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *read);
         if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
         read->kind = KILN_REALM_OP_TCP_READ;
         read->socket = socket;
@@ -13478,7 +14324,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             status = kiln_c99_node_emit(server->host, server->object, "listening",
                                         kiln_c99_undefined(), 0, 0, exception);
             if (status != KILN_C99_OK || server->closing) return status;
-            accept = (kiln_node_completion *)calloc(1, sizeof *accept);
+            accept = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                                sizeof *accept);
             if (accept == NULL) return KILN_C99_OUT_OF_MEMORY;
             accept->kind = KILN_REALM_OP_TCP_ACCEPT;
             accept->server = server;
@@ -13492,7 +14339,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             int status;
             kiln_value allow_half_close;
             server->accept_request = 0;
-            socket = (kiln_node_socket *)calloc(1, sizeof *socket);
+            socket = (kiln_node_socket *)kiln_c99_gc_calloc(KILN_GC_NODE_SOCKET, sizeof *socket);
             if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
             socket->host = server->host;
             socket->next = server->sockets;
@@ -13518,7 +14365,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             if (status != KILN_C99_OK || server->closing) return status;
             if (!server->protocol_http) {
                 kiln_node_completion *read =
-                    (kiln_node_completion *)calloc(1, sizeof *read);
+                    (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                               sizeof *read);
                 if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
                 read->kind = KILN_REALM_OP_TCP_READ;
                 read->socket = socket;
@@ -13527,7 +14375,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                                              &socket->read_request);
                 if (status != KILN_C99_OK) return status;
             }
-            accept = (kiln_node_completion *)calloc(1, sizeof *accept);
+            accept = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                                sizeof *accept);
             if (accept == NULL) return KILN_C99_OUT_OF_MEMORY;
             accept->kind = KILN_REALM_OP_TCP_ACCEPT;
             accept->server = server;
@@ -13557,7 +14406,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                 status = kiln_c99_node_emit(socket->host, socket->object, "data", data, 1, 0,
                                             exception);
                 if (status != KILN_C99_OK || socket->closing) return status;
-                read = (kiln_node_completion *)calloc(1, sizeof *read);
+                read = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                                  sizeof *read);
                 if (read == NULL) return KILN_C99_OUT_OF_MEMORY;
                 read->kind = KILN_REALM_OP_TCP_READ;
                 read->socket = socket;
@@ -13569,7 +14419,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             kiln_node_completion *next;
             socket->write_request = 0;
             if (socket->close_after_write) {
-                next = (kiln_node_completion *)calloc(1, sizeof *next);
+                next = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                                  sizeof *next);
                 if (next == NULL) return KILN_C99_OUT_OF_MEMORY;
                 next->kind = KILN_REALM_OP_CLOSE_RESOURCE;
                 next->socket = socket;
@@ -13579,7 +14430,8 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             }
             if (socket->shutdown_after_write) {
                 socket->shutdown_after_write = 0;
-                next = (kiln_node_completion *)calloc(1, sizeof *next);
+                next = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                                  sizeof *next);
                 if (next == NULL) return KILN_C99_OUT_OF_MEMORY;
                 next->kind = KILN_REALM_OP_TCP_SHUTDOWN;
                 next->socket = socket;
@@ -13599,6 +14451,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
             int status;
             socket->close_request = 0;
             socket->closed = 1;
+            kiln_c99_node_unlink_socket(socket);
             if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
                 return KILN_C99_CONTROL_ERROR;
             status = kiln_c99_node_emit(socket->host, socket->object, "close",
@@ -13610,7 +14463,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
     return KILN_C99_CONTROL_ERROR;
 }
 
-static void kiln_c99_node_drop_fs_completion(void *opaque) { free(opaque); }
+static void kiln_c99_node_drop_fs_completion(void *opaque) { kiln_c99_gc_release(opaque); }
 
 static int kiln_c99_node_fs_error_property(kiln_value error, const char *key, size_t key_len,
                                            const uint8_t *bytes, uint64_t length) {
@@ -13820,7 +14673,7 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
     }
     status = kiln_c99_new_promise(&promise);
     if (status != KILN_C99_OK) return status;
-    work = (kiln_node_fs_completion *)calloc(1, sizeof *work);
+    work = (kiln_node_fs_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_FS_COMPLETION, sizeof *work);
     if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
     work->promise = promise;
     work->operation = code == KILN_C99_METHOD_NODE_FS_READ_FILE
@@ -13839,7 +14692,7 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
     status = kiln_realm_start_active_host_op(&operation, kiln_c99_node_fs_complete,
                                              kiln_c99_node_drop_fs_completion, work, &request);
     if (status != KILN_C99_OK) {
-        free(work);
+        kiln_c99_gc_release(work);
         return status;
     }
     *result = promise;
@@ -13862,7 +14715,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         if (!(port >= 0.0 && port <= 65535.0 && floor(port) == port))
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                         "Port should be >= 0 and < 65536");
-        socket = (kiln_node_socket *)calloc(1, sizeof *socket);
+        socket = (kiln_node_socket *)kiln_c99_gc_calloc(KILN_GC_NODE_SOCKET, sizeof *socket);
         if (socket == NULL) return KILN_C99_OUT_OF_MEMORY;
         socket->host = host;
         status = kiln_c99_node_socket_object(socket, thrown);
@@ -13875,7 +14728,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                                          socket->object, once_args, 2, depth, thrown);
             if (status != KILN_C99_OK) return status;
         }
-        work = (kiln_node_completion *)calloc(1, sizeof *work);
+        work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *work);
         if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
         work->kind = KILN_REALM_OP_TCP_CONNECT;
         work->socket = socket;
@@ -13915,7 +14768,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 }
             }
         }
-        server = (kiln_node_server *)calloc(1, sizeof *server);
+        server = (kiln_node_server *)kiln_c99_gc_calloc(KILN_GC_NODE_SERVER, sizeof *server);
         if (server == NULL) return KILN_C99_OUT_OF_MEMORY;
         server->host = host;
         server->connection_listener = listener;
@@ -13938,7 +14791,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 kiln_c99_method(KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT));
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(server->object, "@@node:server", 13, server);
-        if (status != KILN_C99_OK) { free(server); return status; }
+        if (status != KILN_C99_OK) { kiln_c99_gc_release(server); return status; }
         if (http) {
             server->protocol_http = 1;
             status = kiln_c99_put(host, server->object, "httpAllowHalfOpen", 17,
@@ -13953,7 +14806,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 status = kiln_c99_put(host, server->object, "requestTimeout", 14,
                                       kiln_c99_number(300000.0), depth, thrown);
         }
-        if (status != KILN_C99_OK) { free(server); return status; }
+        if (status != KILN_C99_OK) { kiln_c99_gc_release(server); return status; }
         *result = server->object;
         return KILN_C99_OK;
     }
@@ -14003,7 +14856,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                                              receiver, once_args, 2, depth, thrown);
                 if (status != KILN_C99_OK) return status;
             }
-            work = (kiln_node_completion *)calloc(1, sizeof *work);
+            work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                              sizeof *work);
             if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
             work->kind = KILN_REALM_OP_TCP_LISTEN;
             work->server = server;
@@ -14043,7 +14897,8 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
                 if (status != KILN_C99_OK) return status;
             }
             if (server->listener != 0) {
-                work = (kiln_node_completion *)calloc(1, sizeof *work);
+                work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                                  sizeof *work);
                 if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
                 work->kind = KILN_REALM_OP_CLOSE_RESOURCE;
                 work->server = server;
@@ -14100,7 +14955,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             *result = receiver;
             return KILN_C99_OK;
         }
-        work = (kiln_node_completion *)calloc(1, sizeof *work);
+        work = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION, sizeof *work);
         if (work == NULL) return KILN_C99_OUT_OF_MEMORY;
         work->socket = socket;
         if (code == KILN_C99_METHOD_NODE_SOCKET_WRITE) {
@@ -14119,7 +14974,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
             socket->shutdown_after_write = 1;
             status = kiln_c99_node_socket_ready_state(socket, "readOnly", 8);
             if (status != KILN_C99_OK) {
-                free(work);
+                kiln_c99_gc_release(work);
                 return status;
             }
             status = kiln_c99_node_start(KILN_REALM_OP_TCP_WRITE, socket->resource, 0, NULL, 0,
@@ -14135,7 +14990,7 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
         work->kind = KILN_REALM_OP_TCP_SHUTDOWN;
         status = kiln_c99_node_socket_ready_state(socket, "readOnly", 8);
         if (status != KILN_C99_OK) {
-            free(work);
+            kiln_c99_gc_release(work);
             return status;
         }
         status = kiln_c99_node_start(
@@ -14192,7 +15047,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         method_value = kiln_c99_text(method_value);
         if (!kiln_c99_is_callable(callback))
             return kiln_c99_throw_not_a(thrown, callback, "function");
-        request = (kiln_node_client_request *)calloc(1, sizeof *request);
+        request = (kiln_node_client_request *)kiln_c99_gc_calloc(KILN_GC_NODE_CLIENT_REQUEST,
+                                                                 sizeof *request);
         if (request == NULL) return KILN_C99_OUT_OF_MEMORY;
         request->host = host;
         request->callback = callback;
@@ -14257,7 +15113,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                 (const uint8_t *)request->host_name, request->host_name_len,
                 request->port, request->request_id, &resource);
             if (decision == KILN_REALM_HTTP_AGENT_CONNECT) {
-                connect = (kiln_node_completion *)calloc(1, sizeof *connect);
+                connect = (kiln_node_completion *)kiln_c99_gc_calloc(KILN_GC_NODE_COMPLETION,
+                                                                     sizeof *connect);
                 if (connect == NULL) return KILN_C99_OUT_OF_MEMORY;
                 connect->kind = KILN_REALM_OP_TCP_CONNECT;
                 connect->client_request = request;
@@ -14337,7 +15194,7 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
     if (code == KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
         kiln_value value = kiln_c99_text(argc > 1 ? args[1] : kiln_c99_undefined());
-        char *normalized = name.len == 0 ? NULL : (char *)malloc(name.len);
+        char *normalized = name.len == 0 ? NULL : kiln_c99_gc_alloc_text(name.len);
         size_t index;
         int status;
         if (name.len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -14354,7 +15211,7 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         kiln_object *headers = kiln_c99_object_of(response->headers);
         size_t index;
         size_t byte;
-        char *normalized = name.len == 0 ? NULL : (char *)malloc(name.len);
+        char *normalized = name.len == 0 ? NULL : kiln_c99_gc_alloc_text(name.len);
         if (name.len != 0 && normalized == NULL) return KILN_C99_OUT_OF_MEMORY;
         for (byte = 0; byte < name.len; ++byte)
             normalized[byte] = (char)tolower((unsigned char)name.ptr[byte]);
@@ -14419,6 +15276,17 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
                     if (status != KILN_C99_OK) return status;
                 }
             }
+        }
+        /* Node's writeHead commits the header block, so a later end(body) can no longer declare a
+         * length and Node writes Transfer-Encoding: chunked into the block instead. Recording it
+         * keeps the committed head identical to Node's; Hyper still owns the encoding and drops
+         * the header where no body is allowed. */
+        if (response->status != 204 && response->status != 304 &&
+            !(response->status >= 100 && response->status < 200) &&
+            !kiln_c99_node_response_is_framed(kiln_c99_object_of(response->headers))) {
+            status = kiln_c99_put(NULL, response->headers, "transfer-encoding", 17,
+                                  kiln_c99_copy_text("chunked", 7), 0, NULL);
+            if (status != KILN_C99_OK) return status;
         }
         *result = receiver;
         return KILN_C99_OK;
@@ -15777,7 +16645,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             status = kiln_c99_text_append_c(&url, "/");
         if (status == KILN_C99_OK) status = kiln_c99_text_append(&url, input.ptr, input.len);
         if (status != KILN_C99_OK) { free(url.bytes); return status; }
-        construct_args[0] = kiln_c99_value(KILN_VALUE_STRING, 0, url.bytes, url.len);
+        construct_args[0] = kiln_c99_text_value(&url);
         return kiln_c99_url_construct(result, construct_args, 1, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_URL_PARSE) {
@@ -15830,7 +16698,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         bytes[6] = (uint8_t)((bytes[6] & 0x0f) | 0x40);
         bytes[8] = (uint8_t)((bytes[8] & 0x3f) | 0x80);
-        uuid = (char *)malloc(36);
+        uuid = kiln_c99_gc_alloc_text(36);
         if (uuid == NULL) return KILN_C99_OUT_OF_MEMORY;
         for (index = 0; index < 16; ++index) {
             if (index == 4 || index == 6 || index == 8 || index == 10) uuid[at++] = '-';
@@ -16338,12 +17206,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                        kiln_c99_method(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
                                        *result);
             if (status != KILN_C99_OK) return status;
-            entry = (kiln_timer *)malloc(sizeof *entry);
+            entry = (kiln_timer *)kiln_c99_gc_alloc(KILN_GC_TIMER, sizeof *entry);
             if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
             entry->callback = callback;
             entry->argc = 1;
             entry->args = (kiln_value *)malloc(sizeof *entry->args);
-            if (entry->args == NULL) { free(entry); return KILN_C99_OUT_OF_MEMORY; }
+            if (entry->args == NULL) {
+                kiln_c99_gc_release(entry);
+                return KILN_C99_OUT_OF_MEMORY;
+            }
             entry->args[0] = reason;
             if (!(isfinite(delay) && delay > 0.0)) delay = 0.0;
             status = kiln_realm_set_timeout(delay, kiln_c99_run_timer, kiln_c99_drop_timer,
@@ -16415,7 +17286,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (!(isfinite(delay) && delay > 0.0)) {
                 delay = 0.0;
             }
-            entry = (kiln_timer *)malloc(sizeof *entry);
+            entry = (kiln_timer *)kiln_c99_gc_alloc(KILN_GC_TIMER, sizeof *entry);
             if (entry == NULL) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -16429,7 +17300,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (entry->argc != 0) {
                 entry->args = (kiln_value *)malloc(entry->argc * sizeof *entry->args);
                 if (entry->args == NULL) {
-                    free(entry);
+                    kiln_c99_gc_release(entry);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
                 memcpy(entry->args,
@@ -16517,7 +17388,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     free(built.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
-                *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+                *result = kiln_c99_text_value(&built);
                 return KILN_C99_OK;
             }
             {
@@ -16612,7 +17483,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     return KILN_C99_OUT_OF_MEMORY;
                 }
             }
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            *result = kiln_c99_text_value(&built);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_DECODE_URI:
@@ -16667,7 +17538,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 free(built.bytes);
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_URI_ERROR, "URI malformed");
             }
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            *result = kiln_c99_text_value(&built);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_GLOBAL_IS_NAN:
@@ -18031,7 +18902,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     free(built.bytes);
                     return KILN_C99_OUT_OF_MEMORY;
                 }
-                *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+                *result = kiln_c99_text_value(&built);
                 return KILN_C99_OK;
             }
             switch (receiver.tag) {
@@ -18088,7 +18959,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 free(built.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            *result = kiln_c99_text_value(&built);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING: {
@@ -18476,7 +19347,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             /* `JSON.stringify(undefined)` is `undefined`, not the string. */
             if (wrote) {
-                *result = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+                *result = kiln_c99_text_value(&text);
             } else {
                 free(text.bytes);
                 *result = kiln_c99_undefined();
@@ -18900,7 +19771,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     }
                 }
             }
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+            *result = kiln_c99_text_value(&built);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: {
@@ -19312,7 +20183,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     return KILN_C99_OUT_OF_MEMORY;
                 }
             }
-            *result = kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
+            *result = kiln_c99_text_value(&joined);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_ARRAY_VALUES:
@@ -19326,7 +20197,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                                    view->length, 0);
             size_t end = kiln_c99_relative_index(argc > 1 ? args[1] : kiln_c99_undefined(),
                                                  view->length, view->length);
-            kiln_typed_array *sub = (kiln_typed_array *)malloc(sizeof *sub);
+            kiln_typed_array *sub =
+                (kiln_typed_array *)kiln_c99_gc_alloc(KILN_GC_TYPED_ARRAY, sizeof *sub);
             if (sub == NULL) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
@@ -19334,6 +20206,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             sub->byte_offset = view->byte_offset + start * kiln_c99_typed_width(view->kind);
             sub->length = end >= start ? end - start : 0;
             sub->kind = view->kind;
+            /* A slice of a Buffer is a Buffer. The field was left unwritten while the view came
+             * from malloc, which read uninitialised memory; a collected block is no more zeroed
+             * than malloc was, so the answer has to be written down. */
+            sub->is_buffer = view->is_buffer;
             *result = kiln_c99_value(KILN_VALUE_TYPED_ARRAY, (uint64_t)(uintptr_t)sub, NULL, 0);
             return KILN_C99_OK;
         }
@@ -19669,7 +20545,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
             }
         }
-        *result = kiln_c99_value(KILN_VALUE_STRING, 0, joined.bytes, joined.len);
+        *result = kiln_c99_text_value(&joined);
         return KILN_C99_OK;
     }
     case KILN_C99_METHOD_INDEX_OF:
@@ -22177,7 +23053,7 @@ static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
                 free(text.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+            *out = kiln_c99_text_value(&text);
             return KILN_C99_OK;
         }
         if (byte != '\\') {
@@ -22581,7 +23457,7 @@ static double kiln_c99_date_time(kiln_value value) {
 }
 
 static int kiln_c99_new_date(kiln_value *out, double time) {
-    double *slot = (double *)malloc(sizeof *slot);
+    double *slot = (double *)kiln_c99_gc_alloc(KILN_GC_DATE, sizeof *slot);
     if (slot == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -22650,7 +23526,7 @@ static int kiln_c99_iso_string(kiln_value *out, double time) {
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    *out = kiln_c99_text_value(&text);
     return KILN_C99_OK;
 }
 
@@ -22682,7 +23558,7 @@ static int kiln_c99_date_to_string(kiln_value *out, double time) {
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    *out = kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len);
+    *out = kiln_c99_text_value(&text);
     return KILN_C99_OK;
 }
 
@@ -22711,7 +23587,7 @@ static kiln_value kiln_c99_proxy_inner(kiln_value value) {
 }
 
 static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
-    kiln_proxy *proxy = (kiln_proxy *)malloc(sizeof *proxy);
+    kiln_proxy *proxy = (kiln_proxy *)kiln_c99_gc_alloc(KILN_GC_PROXY, sizeof *proxy);
     if (proxy == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -22723,7 +23599,8 @@ static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value han
 }
 
 static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
-    kiln_collection *collection = (kiln_collection *)malloc(sizeof *collection);
+    kiln_collection *collection =
+        (kiln_collection *)kiln_c99_gc_alloc(KILN_GC_COLLECTION, sizeof *collection);
     if (collection == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -22894,7 +23771,7 @@ static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_va
         free(built.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
+    *result = kiln_c99_text_value(&built);
     return KILN_C99_OK;
 }
 
@@ -22931,8 +23808,7 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
     }
     /* `stack` first, because that is the order the own keys come out in: the header is attached
      * by the constructor before the message is. */
-    status = kiln_c99_put(NULL, error, "stack", 5,
-                          kiln_c99_value(KILN_VALUE_STRING, 0, stack.bytes, stack.len), 0, NULL);
+    status = kiln_c99_put(NULL, error, "stack", 5, kiln_c99_text_value(&stack), 0, NULL);
     if (status == KILN_C99_OK && message.tag != KILN_VALUE_UNDEFINED) {
         status = kiln_c99_put(NULL, error, "message", 7, text, 0, NULL);
     }
@@ -23091,8 +23967,7 @@ static int kiln_c99_private_error(kiln_value *thrown, const char *key, size_t ke
         free(text.bytes);
         return KILN_C99_OUT_OF_MEMORY;
     }
-    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_TYPE_ERROR,
-                                kiln_c99_value(KILN_VALUE_STRING, 0, text.bytes, text.len));
+    status = kiln_c99_new_error(&error, KILN_C99_BUILTIN_TYPE_ERROR, kiln_c99_text_value(&text));
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -23335,7 +24210,7 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
                             int rejected) {
     kiln_microtask *task;
     int status;
-    task = (kiln_microtask *)malloc(sizeof *task);
+    task = (kiln_microtask *)kiln_c99_gc_alloc(KILN_GC_MICROTASK, sizeof *task);
     if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
     task->handler = handler;
     task->argument = argument;
@@ -23351,7 +24226,8 @@ static int kiln_c99_enqueue(kiln_value handler, kiln_value argument, kiln_value 
 }
 
 static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *args, size_t argc) {
-    kiln_next_tick *task = (kiln_next_tick *)malloc(sizeof *task);
+    kiln_next_tick *task =
+        (kiln_next_tick *)kiln_c99_gc_alloc(KILN_GC_NEXT_TICK, sizeof *task);
     int status;
     if (task == NULL) return KILN_C99_OUT_OF_MEMORY;
     task->callback = callback;
@@ -23359,12 +24235,12 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
     task->args = NULL;
     if (argc != 0) {
         if (argc > SIZE_MAX / sizeof *task->args) {
-            free(task);
+            kiln_c99_gc_release(task);
             return KILN_C99_OUT_OF_MEMORY;
         }
         task->args = (kiln_value *)malloc(argc * sizeof *task->args);
         if (task->args == NULL) {
-            free(task);
+            kiln_c99_gc_release(task);
             return KILN_C99_OUT_OF_MEMORY;
         }
         memcpy(task->args, args, argc * sizeof *task->args);
@@ -23378,7 +24254,7 @@ static int kiln_c99_enqueue_next_tick(kiln_value callback, const kiln_value *arg
 }
 
 static int kiln_c99_new_promise(kiln_value *out) {
-    kiln_promise *promise = (kiln_promise *)malloc(sizeof *promise);
+    kiln_promise *promise = (kiln_promise *)kiln_c99_gc_alloc(KILN_GC_PROMISE, sizeof *promise);
     if (promise == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -23397,7 +24273,7 @@ static kiln_promise *kiln_c99_promise_of(kiln_value value) {
 
 static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value receiver,
                               const kiln_value *arguments, size_t count) {
-    kiln_bound *bound = (kiln_bound *)malloc(sizeof *bound);
+    kiln_bound *bound = (kiln_bound *)kiln_c99_gc_alloc(KILN_GC_BOUND, sizeof *bound);
     if (bound == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -23407,9 +24283,11 @@ static int kiln_c99_bind_with(kiln_value *out, kiln_value target, kiln_value rec
     bound->count = count;
     bound->properties = kiln_c99_undefined();
     if (count != 0) {
+        /* The argument array is the bound function's alone, so it stays malloc-backed and the
+         * KILN_GC_BOUND finaliser is the one place it is released. */
         bound->arguments = (kiln_value *)malloc(count * sizeof *bound->arguments);
         if (bound->arguments == NULL) {
-            free(bound);
+            kiln_c99_gc_release(bound);
             return KILN_C99_OUT_OF_MEMORY;
         }
         memcpy(bound->arguments, arguments, count * sizeof *bound->arguments);
@@ -23467,7 +24345,7 @@ static int kiln_c99_settle(kiln_value promise, kiln_value value, int rejected) {
 }
 
 static int kiln_c99_new_settler(kiln_value *out, kiln_value promise, int rejects) {
-    kiln_settler *settler = (kiln_settler *)malloc(sizeof *settler);
+    kiln_settler *settler = (kiln_settler *)kiln_c99_gc_alloc(KILN_GC_SETTLER, sizeof *settler);
     if (settler == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -23505,7 +24383,7 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
 }
 
 static void kiln_c99_drop_microtask(void *work) {
-    free(work);
+    kiln_c99_gc_release(work);
 }
 
 static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_pointer) {
@@ -23539,11 +24417,9 @@ static int kiln_c99_run_microtask(void *work, void *host_pointer, void *thrown_p
     return KILN_C99_OK;
 }
 
+/* The finaliser frees `args`, so the release below must not free it a second time. */
 static void kiln_c99_drop_next_tick(void *work) {
-    kiln_next_tick *task = (kiln_next_tick *)work;
-    if (task == NULL) return;
-    free(task->args);
-    free(task);
+    kiln_c99_gc_release(work);
 }
 
 static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_pointer) {
@@ -23556,11 +24432,9 @@ static int kiln_c99_run_next_tick(void *work, void *host_pointer, void *thrown_p
                          task->argc == 0 ? NULL : task->args, task->argc, 0, thrown);
 }
 
+/* The finaliser frees `args`, so the release below must not free it a second time. */
 static void kiln_c99_drop_timer(void *work) {
-    kiln_timer *timer = (kiln_timer *)work;
-    if (timer == NULL) return;
-    free(timer->args);
-    free(timer);
+    kiln_c99_gc_release(work);
 }
 
 static int kiln_c99_run_timer(void *work, void *host_pointer, void *thrown_pointer) {
@@ -25002,6 +25876,40 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
     return KILN_C99_OK;
 }
 
+/* This unit's own roots (ADR 0041): the symbols it made, the intrinsic prototypes it filled in
+ * lazily, and the call-transient statics, which are marked rather than cleared so a stale read
+ * after a collection still names live memory. Module-scope slots are marked by the emitted root
+ * function that calls this. At teardown the statics are reset, because a later realm in the same
+ * process must not find the previous realm's freed objects in them. */
+static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    size_t index;
+    size_t constructors = sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors;
+    (void)context;
+    if (phase == KILN_GC_PHASE_RESET) {
+        free(kiln_c99_symbols);
+        kiln_c99_symbols = NULL;
+        kiln_c99_symbol_count = 0;
+        kiln_c99_symbol_capacity = 0;
+        for (index = 0; index < constructors; ++index)
+            kiln_c99_native_constructors[index].prototype = kiln_c99_undefined();
+        kiln_c99_new_target = kiln_c99_undefined();
+        kiln_c99_adopted_this = kiln_c99_undefined();
+        kiln_c99_captured_arguments = kiln_c99_undefined();
+        kiln_c99_frame_arguments_object = kiln_c99_undefined();
+        kiln_c99_frame_callee = kiln_c99_undefined();
+        return;
+    }
+    if (phase != KILN_GC_PHASE_MARK) return;
+    kiln_c99_gc_mark_values(heap, kiln_c99_symbols, kiln_c99_symbol_count);
+    for (index = 0; index < constructors; ++index)
+        kiln_c99_gc_mark_value(heap, &kiln_c99_native_constructors[index].prototype);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_new_target);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_adopted_this);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_captured_arguments);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_frame_arguments_object);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_frame_callee);
+}
 
 "#,
 );
@@ -25038,6 +25946,7 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_symbol_count", C99StateOwner::Realm),
     ("kiln_c99_symbol_capacity", C99StateOwner::Realm),
     ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
+    ("kiln_c99_gc_fallback", C99StateOwner::TestFixture),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -26419,6 +27328,25 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
     }
 }
 
+/// The root function this unit registers with the realm (ADR 0041): its module-scope slots,
+/// when it has them, and the prelude statics every unit owns a copy of.
+fn render_unit_roots(output: &mut String, symbol: &str, module_scope: bool, local_count: u32) {
+    writeln!(
+        output,
+        "static void {symbol}_gc_roots(void *heap, void *context, int phase) {{"
+    )
+    .unwrap();
+    if module_scope {
+        writeln!(
+            output,
+            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((kiln_gc_heap *)heap, {symbol}_globals, {});",
+            usize::try_from(local_count).unwrap().max(1)
+        )
+        .unwrap();
+    }
+    output.push_str("    kiln_c99_gc_unit_roots(heap, context, phase);\n}\n");
+}
+
 fn render_scalar_realm_wrapper(output: &mut String, symbol: &str) {
     writeln!(
         output,
@@ -26427,6 +27355,11 @@ typedef struct {symbol}_realm_context {{
     kiln_host *host;
     kiln_value *result;
 }} {symbol}_realm_context;
+
+static int {symbol}_gc_result_entry(void *result) {{
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}}
 
 static int {symbol}_realm_entry(void *opaque) {{
     {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
@@ -26444,6 +27377,8 @@ int {symbol}(kiln_host *host, kiln_value *result) {{
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, {symbol}_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, {symbol}_realm_entry, &context);
     if (status == KILN_C99_OK)
@@ -26473,6 +27408,11 @@ typedef struct {symbol}_realm_context {{
     kiln_value *exports;
     size_t export_count;
 }} {symbol}_realm_context;
+
+static int {symbol}_gc_result_entry(void *result) {{
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}}
 
 static int {symbol}_realm_entry(void *opaque) {{
     {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
@@ -26520,6 +27460,8 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     context.exports = exports;
     context.export_count = export_count;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, {symbol}_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, {symbol}_realm_entry, &context);
     if (status == KILN_C99_OK)
@@ -26662,10 +27604,11 @@ namespace_failure_without_order:
             if (data->properties[index].key_len == (size_t)13 &&
                 memcmp(data->properties[index].key, "@@toStringTag", (size_t)13) == 0 &&
                 data->properties[index].value.tag == KILN_VALUE_STRING)
-                free((void *)data->properties[index].value.ptr);
+                kiln_c99_gc_release((void *)data->properties[index].value.ptr);
         }}
-        free(data->properties);
-        free(data);
+        /* The object is a collected block; releasing it runs the finaliser that owns
+         * `properties`, and unlinks it from the heap the way free() could not. */
+        kiln_c99_gc_release(data);
     }}
     return status;
 }}
@@ -26730,6 +27673,12 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         )
         .unwrap();
     }
+    render_unit_roots(
+        &mut output,
+        symbol,
+        uses_module_scope(program),
+        program.local_count,
+    );
     render_functions(
         &mut output,
         program,
@@ -26745,6 +27694,11 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    writeln!(
+        output,
+        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
+    )
+    .unwrap();
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -26863,6 +27817,12 @@ fn render_module(
         )
         .unwrap();
     }
+    render_unit_roots(
+        &mut output,
+        symbol,
+        uses_module_scope(program),
+        program.local_count,
+    );
     render_functions(
         &mut output,
         program,
@@ -26878,6 +27838,11 @@ fn render_module(
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    writeln!(
+        output,
+        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
+    )
+    .unwrap();
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -30248,18 +31213,6 @@ static kiln_value kiln_test_value_slots[3];
 static uint64_t kiln_test_entropy_seed = 0;
 static uint64_t kiln_test_entropy_state = 0;
 static int kiln_test_entropy_initialized = 0;
-static void *kiln_test_owned_pointers[4096];
-static kiln_drop_opaque_fn kiln_test_owned_drops[4096];
-static size_t kiln_test_owned_count = 0;
-static int kiln_test_implicit_realm = 0;
-
-static void kiln_test_drop_owned(void) {
-    size_t index;
-    for (index = kiln_test_owned_count; index != 0; --index) {
-        kiln_test_owned_drops[index - 1](kiln_test_owned_pointers[index - 1]);
-    }
-    kiln_test_owned_count = 0;
-}
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -30283,7 +31236,6 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
 }
 int kiln_realm_destroy(uint64_t realm) {
     if (realm != 1 || kiln_test_realm_active) return KILN_C99_INVALID_ARGUMENT;
-    kiln_test_drop_owned();
     return KILN_C99_OK;
 }
 /* Here rather than beside the other provider stubs, because its argument is a struct the runtime
@@ -30380,22 +31332,22 @@ int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word) {
     *out_word = mixed ^ (mixed >> 31);
     return KILN_C99_OK;
 }
-int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer) {
-    if (pointer == NULL || drop_pointer == NULL) {
-        return KILN_C99_INVALID_ARGUMENT;
-    }
-    if (!kiln_test_realm_active && !kiln_test_implicit_realm) {
-        if (atexit(kiln_test_drop_owned) != 0) return KILN_C99_OUT_OF_MEMORY;
-        kiln_test_implicit_realm = 1;
-    }
-    if (kiln_test_owned_count == 4096) return KILN_C99_OUT_OF_MEMORY;
-    kiln_test_owned_pointers[kiln_test_owned_count] = pointer;
-    kiln_test_owned_drops[kiln_test_owned_count] = drop_pointer;
-    ++kiln_test_owned_count;
+int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
+    /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
+    (void)hooks;
+    (void)candidate;
+    if (out_heap != NULL) *out_heap = NULL;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags) {
+    (void)roots;
+    (void)context;
+    (void)flags;
     return KILN_C99_OK;
 }
-int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer) {
-    return kiln_realm_own_closure(pointer, drop_pointer);
+int kiln_realm_gc_mark_roots(void *heap) {
+    (void)heap;
+    return KILN_C99_OK;
 }
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
@@ -30425,6 +31377,19 @@ int kiln_realm_queue_next_tick(kiln_realm_work_fn run,
     (void)run;
     if (drop != NULL) drop(work);
     return KILN_C99_OK;
+}
+/* No launcher ran, so there is no command line. The prelude reads zero here and leaves
+ * `process.argv` empty, which is what a harness-hosted realm should report. */
+int kiln_realm_argv_count(uint64_t *out_count) {
+    if (!kiln_test_realm_active || out_count == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_count = 0;
+    return KILN_C99_OK;
+}
+int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len) {
+    (void)index;
+    (void)out_bytes;
+    (void)out_len;
+    return KILN_C99_INVALID_ARGUMENT;
 }
 static int kiln_test_set_timer(double delay_ms,
                                kiln_realm_work_fn run,

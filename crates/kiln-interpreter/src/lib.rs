@@ -6772,12 +6772,19 @@ pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), E
 /// Environmental values remain [`RealmCapabilities`] owned by `kiln-runtime`. This companion
 /// keeps compiler/linker implementation types out of that scheduler crate while making their
 /// authority just as explicit. The default realm cannot compile source at run time.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
     module_loader: Option<ModuleLoader>,
     host_realms: bool,
     host_agents: Option<&'static str>,
+    /// The command line this execution's `process.argv` reports, exactly as the host spelled it.
+    ///
+    /// Empty by default, and empty is not the same as `[node, script]` with the names left off:
+    /// an execution nobody launched from a command line has no command line, and inventing one
+    /// would put a made-up executable path in front of a program that asked where it came from.
+    /// A host that has one states it, which is the same bargain as every other entry here.
+    argv: Vec<String>,
 }
 
 impl ExecutionCapabilities {
@@ -6786,7 +6793,7 @@ impl ExecutionCapabilities {
         self
     }
 
-    pub const fn source_compiler(self) -> Option<SourceCompiler> {
+    pub const fn source_compiler(&self) -> Option<SourceCompiler> {
         self.source_compiler
     }
 
@@ -6795,7 +6802,7 @@ impl ExecutionCapabilities {
         self
     }
 
-    pub const fn module_loader(self) -> Option<ModuleLoader> {
+    pub const fn module_loader(&self) -> Option<ModuleLoader> {
         self.module_loader
     }
 
@@ -6810,7 +6817,7 @@ impl ExecutionCapabilities {
         self
     }
 
-    pub const fn host_realms(self) -> bool {
+    pub const fn host_realms(&self) -> bool {
         self.host_realms
     }
 
@@ -6829,8 +6836,21 @@ impl ExecutionCapabilities {
         self
     }
 
-    pub const fn host_agents(self) -> Option<&'static str> {
+    pub const fn host_agents(&self) -> Option<&'static str> {
         self.host_agents
+    }
+
+    /// State the command line this execution runs under, as `process.argv` should report it.
+    ///
+    /// The host supplies the whole vector, including the two leading entries, because only the
+    /// host knows what they are: which executable is running and what it was pointed at.
+    pub fn with_argv(mut self, argv: Vec<String>) -> Self {
+        self.argv = argv;
+        self
+    }
+
+    pub fn argv(&self) -> &[String] {
+        &self.argv
     }
 }
 
@@ -9321,6 +9341,8 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
     host_agents: Option<&'static str>,
     module_loader: Option<ModuleLoader>,
+    /// The command line `process.argv` reports, as the host stated it. Empty when no host did.
+    argv: Vec<String>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
     /// Persistent Node resource requests routed to provider-neutral server/stream drivers.
@@ -9502,7 +9524,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // the empty one it was given costs a mutex and stops nothing when it is dropped.
         let agents = execution
             .host_agents()
-            .map(|_| AgentGroup::new(execution, limits));
+            .map(|_| AgentGroup::new(execution.clone(), limits));
         Ok(Self {
             program,
             strict: strictness.body,
@@ -9545,6 +9567,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             module_loader: execution.module_loader(),
             host_realms: execution.host_realms(),
             host_agents: execution.host_agents(),
+            argv: execution.argv().to_vec(),
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
@@ -12039,6 +12062,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             state.headers.push((name, value));
                         }
                     }
+                }
+                // Node's `writeHead` commits the header block: `_storeHeader` runs here, so a
+                // later `end(body)` can no longer declare a length and Node writes
+                // `Transfer-Encoding: chunked` into the block instead. Recording that header is
+                // what makes the committed head observably identical to Node's; Hyper still owns
+                // the encoding, and drops the header where no body is allowed.
+                let framed = state.headers.iter().any(|(name, _)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        || name.eq_ignore_ascii_case("transfer-encoding")
+                });
+                let status = state.status;
+                if !framed && !matches!(status, 204 | 304) && !(100..200).contains(&status) {
+                    state
+                        .headers
+                        .push(("transfer-encoding".into(), "chunked".into()));
                 }
                 Ok(receiver.clone())
             }
@@ -26339,7 +26377,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "env",
             Value::Object(Rc::new(RefCell::new(ObjectData::default()))),
         );
-        process.set("argv", Value::Array(ArrayData::new(Vec::new())));
+        // Whatever the host said, verbatim -- including the two leading entries, which node
+        // guarantees are there and which `const [, , first] = process.argv` depends on. A host
+        // that stated no command line leaves this empty rather than inventing an executable
+        // path; nothing was launched, so there is nothing to report.
+        process.set(
+            "argv",
+            Value::Array(ArrayData::new(
+                self.argv.iter().cloned().map(Value::String).collect(),
+            )),
+        );
+        if let Some(executable) = self.argv.first() {
+            process.set("execPath", Value::String(executable.clone()));
+        }
         // Not "darwin" or "linux": this realm is not either of them, and claiming to be one
         // invites a program to take a path nothing here implements.
         process.set("platform", Value::String("kiln".to_owned()));

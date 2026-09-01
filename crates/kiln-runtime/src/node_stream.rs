@@ -462,6 +462,15 @@ impl<T> DuplexState<T> {
         true
     }
 
+    /// Writes the consumer has not taken yet. A submitted write is already in its hands, so a
+    /// stream with none of these left has produced everything it ever will.
+    pub(crate) fn unsubmitted_writes(&self) -> usize {
+        self.writes
+            .iter()
+            .filter(|write| write.request.is_none())
+            .count()
+    }
+
     pub fn next_write(&self) -> Option<&T> {
         self.writes
             .front()
