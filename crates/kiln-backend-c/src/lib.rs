@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 13;
+pub const C_GENERATOR_VERSION: u32 = 14;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -2260,6 +2260,10 @@ typedef struct kiln_object {
      * strict and a real engine would throw, but the interpreter is silent here and the two have
      * to agree before either can change. */
     int frozen;
+    /* Module namespace objects are non-extensible and reject [[Set]] even though their exported
+     * data properties report writable=true. This is deliberately separate from `frozen`: a
+     * namespace is not an ordinary frozen object, and reflection must preserve that distinction. */
+    int module_namespace;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -3222,6 +3226,13 @@ static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value);
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target);
 static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len);
+static int kiln_c99_throw_module_namespace_write(kiln_value *thrown, const char *key,
+                                                 size_t key_len);
+static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char *key,
+                                                  size_t key_len);
+static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char *key,
+                                                  size_t key_len);
+static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown);
 static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len);
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
                                    kiln_value right, kiln_value *out, int depth,
@@ -3561,6 +3572,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->capacity = 0;
     object->prototype = kiln_c99_undefined();
     object->frozen = 0;
+    object->module_namespace = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -4575,6 +4587,10 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(target);
+    if (object->module_namespace) {
+        return strict ? kiln_c99_throw_module_namespace_write(thrown, key, key_len)
+                       : KILN_C99_OK;
+    }
     if (object->frozen) {
         return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
     }
@@ -10050,6 +10066,9 @@ static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
     for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
         kiln_object *object = kiln_c99_object_of(current);
         size_t index;
+        if (steps == 0 && object->module_namespace) {
+            return 0;
+        }
         if (steps == 0 && object->frozen) {
             return 0;
         }
@@ -17333,6 +17352,30 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
             int *flag = NULL;
             if (subject.tag == KILN_VALUE_OBJECT) {
+                if (kiln_c99_object_of(subject)->module_namespace) {
+                    kiln_object *namespace_object = kiln_c99_object_of(subject);
+                    size_t namespace_index;
+                    int has_writable_export = 0;
+                    /* A namespace is already non-extensible. A non-empty one cannot make its
+                     * export descriptors non-writable without violating the exotic contract;
+                     * an empty namespace has only the fixed toStringTag slot and is frozen. */
+                    for (namespace_index = 0; namespace_index < namespace_object->count;
+                         ++namespace_index) {
+                        if (namespace_object->properties[namespace_index].writable) {
+                            has_writable_export = 1;
+                            break;
+                        }
+                    }
+                    if (code == KILN_C99_METHOD_OBJECT_FREEZE) {
+                        if (has_writable_export)
+                            return kiln_c99_throw_module_namespace_freeze(thrown);
+                        namespace_object->frozen = 1;
+                        *result = subject;
+                        return KILN_C99_OK;
+                    }
+                    *result = kiln_c99_boolean(!has_writable_export);
+                    return KILN_C99_OK;
+                }
                 flag = &kiln_c99_object_of(subject)->frozen;
             } else if (subject.tag == KILN_VALUE_ARRAY) {
                 /* An array is not a `kiln_object` here, so freezing one has to reach the flag on
@@ -18863,6 +18906,9 @@ static int kiln_c99_delete_or_throw(kiln_host *host, kiln_value target, const ch
     if (status != KILN_C99_OK || !strict || *answer) {
         return status;
     }
+    if (target.tag == KILN_VALUE_OBJECT && kiln_c99_object_of(target)->module_namespace) {
+        return kiln_c99_throw_module_namespace_delete(thrown, key, key_len);
+    }
     return kiln_c99_throw_cannot_delete(thrown, key, key_len);
 }
 
@@ -19363,6 +19409,29 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
                 existed = 1;
                 break;
             }
+        }
+        if (object->module_namespace) {
+            /* A namespace accepts only a descriptor that makes no semantic change. In
+             * particular, export descriptors report writable=true even though [[Set]] rejects;
+             * turning one non-writable would make this object look like an ordinary frozen one. */
+            if (!existed) {
+                return kiln_c99_throw_module_namespace_define(thrown, key, key_len);
+            }
+            {
+                kiln_property *fixed = &object->properties[at];
+                int refused = (has_getter || has_setter) ||
+                              (has_value && !kiln_c99_strict_equal(value, fixed->value)) ||
+                              (has_writable &&
+                               (kiln_c99_truthy(writable) != 0) != (fixed->writable != 0)) ||
+                              (has_enumerable &&
+                               (kiln_c99_truthy(enumerable) != 0) !=
+                                   (fixed->enumerable != 0)) ||
+                              (has_configurable && kiln_c99_truthy(configurable));
+                if (refused) {
+                    return kiln_c99_throw_module_namespace_define(thrown, key, key_len);
+                }
+            }
+            return KILN_C99_OK;
         }
         /* What a definition is *not allowed* to do, checked before anything is written.
          *
@@ -21347,6 +21416,49 @@ static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t 
     return status;
 }
 
+static int kiln_c99_throw_module_namespace(kiln_value *thrown, const char *prefix,
+                                           const char *key, size_t key_len) {
+    static const char terminator[1] = {0};
+    kiln_text built = {NULL, 0, 0};
+    int status;
+    if (kiln_c99_text_append_c(&built, prefix) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, key, key_len) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, "'", 1) != KILN_C99_OK ||
+        kiln_c99_text_append(&built, terminator, 1) != KILN_C99_OK) {
+        free(built.bytes);
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, built.bytes);
+    free(built.bytes);
+    return status;
+}
+
+static int kiln_c99_throw_module_namespace_write(kiln_value *thrown, const char *key,
+                                                 size_t key_len) {
+    return kiln_c99_throw_module_namespace(thrown,
+                                            "Cannot assign to module namespace property '", key,
+                                            key_len);
+}
+
+static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char *key,
+                                                  size_t key_len) {
+    return kiln_c99_throw_module_namespace(thrown,
+                                            "Cannot delete module namespace property '", key,
+                                            key_len);
+}
+
+static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char *key,
+                                                  size_t key_len) {
+    return kiln_c99_throw_module_namespace(thrown,
+                                            "Cannot redefine module namespace property '", key,
+                                            key_len);
+}
+
+static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown) {
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                "Cannot freeze module namespace object");
+}
+
 static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len) {
     static const char terminator[1] = {0};
     kiln_text built = {NULL, 0, 0};
@@ -22393,6 +22505,9 @@ static int kiln_c99_can_be_prototype(kiln_value value) {
  * what makes this take a function as well as an object. */
 static int kiln_c99_set_prototype(kiln_value target, kiln_value prototype) {
     if (target.tag == KILN_VALUE_OBJECT) {
+        if (kiln_c99_object_of(target)->module_namespace) {
+            return KILN_C99_CONTROL_ERROR;
+        }
         if (!kiln_c99_can_be_prototype(prototype)) {
             /* `{ __proto__: 42 }` is an object literal with no property and no link: the
              * specification honours the `__proto__` production only for an object or null and
@@ -24428,6 +24543,144 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     .unwrap();
 }
 
+/// Emit the private object-layout seam used by native graph launchers to materialize ESM
+/// namespace snapshots. The launcher owns the graph's export values but not this translation
+/// unit's object representation, so construction stays here beside `kiln_c99_new_object`.
+fn render_namespace_wrapper(output: &mut String, symbol: &str) {
+    writeln!(
+        output,
+        r#"
+int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
+                               const size_t *name_lengths, const kiln_value *values,
+                               size_t count) {{
+    kiln_value object;
+    kiln_object *data = NULL;
+    size_t *order = NULL;
+    size_t index;
+    int status;
+    if (result == NULL || (count != 0 && (names == NULL || name_lengths == NULL || values == NULL)))
+        return KILN_C99_INVALID_ARGUMENT;
+    for (index = 0; index < count; ++index) {{
+        if (names[index] == NULL) return KILN_C99_INVALID_ARGUMENT;
+        /* The current generated runtime uses @@-prefixed strings for symbol-keyed protocol
+         * slots. Refuse an ambiguous export at this private seam rather than aliasing it with
+         * Symbol.toStringTag and silently returning the wrong namespace. */
+        if (name_lengths[index] >= 2 && names[index][0] == '@' && names[index][1] == '@')
+            return KILN_C99_INVALID_ARGUMENT;
+        if (index != 0 && name_lengths[index - 1] == name_lengths[index] &&
+            memcmp(names[index - 1], names[index], name_lengths[index]) == 0)
+            return KILN_C99_INVALID_ARGUMENT;
+    }}
+    if (count != 0) {{
+        if (count > SIZE_MAX / sizeof *order) return KILN_C99_OUT_OF_MEMORY;
+        order = (size_t *)malloc(count * sizeof *order);
+        if (order == NULL) return KILN_C99_OUT_OF_MEMORY;
+        for (index = 0; index < count; ++index) order[index] = index;
+        /* Stable insertion sort keeps equal source inputs deterministic without relying on a
+         * qsort callback that cannot carry the caller's parallel arrays. */
+        for (index = 1; index < count; ++index) {{
+            size_t at = index;
+            size_t candidate = order[index];
+            while (at != 0) {{
+                size_t previous = order[at - 1];
+                size_t common = name_lengths[previous] < name_lengths[candidate]
+                                    ? name_lengths[previous] : name_lengths[candidate];
+                int comparison = common == 0 ? 0 : memcmp(names[previous], names[candidate], common);
+                if (comparison < 0 ||
+                    (comparison == 0 && name_lengths[previous] <= name_lengths[candidate]))
+                    break;
+                order[at] = previous;
+                --at;
+            }}
+            order[at] = candidate;
+        }}
+        for (index = 1; index < count; ++index) {{
+            size_t previous = order[index - 1];
+            size_t current = order[index];
+            if (name_lengths[previous] == name_lengths[current] &&
+                (name_lengths[current] == 0 ||
+                 memcmp(names[previous], names[current], name_lengths[current]) == 0)) {{
+                free(order);
+                return KILN_C99_INVALID_ARGUMENT;
+            }}
+        }}
+    }}
+    status = kiln_c99_new_object(&object);
+    if (status != KILN_C99_OK) {{
+        free(order);
+        return status;
+    }}
+    data = kiln_c99_object_of(object);
+    data->prototype = kiln_c99_null();
+    for (index = 0; index < count; ++index) {{
+        size_t source = order[index];
+        kiln_property *slot;
+        kiln_value value = values[source];
+        while (value.tag == KILN_VALUE_CELL) {{
+            if (value.bits == 0) {{
+                status = KILN_C99_CONTROL_ERROR;
+                goto namespace_failure;
+            }}
+            value = *kiln_c99_cell_of(value);
+        }}
+        status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
+                                  sizeof *data->properties);
+        if (status != KILN_C99_OK) {{
+            goto namespace_failure;
+        }}
+        /* Namespace export keys stay in the linker's lexical order. Ordinary object insertion
+         * would move integer-looking names to numeric order, which is not the namespace exotic
+         * object's [[OwnPropertyKeys]] rule. */
+        slot = &data->properties[data->count++];
+        slot->key = names[source];
+        slot->key_len = name_lengths[source];
+        slot->value = value;
+        slot->writable = 1;
+        slot->enumerable = 1;
+        slot->configurable = 0;
+        slot->accessor = 0;
+        slot->getter = kiln_c99_undefined();
+        slot->setter = kiln_c99_undefined();
+    }}
+    {{
+        kiln_property *tag;
+        status = kiln_c99_own_slot(object, "@@toStringTag", 13, &tag);
+        if (status == KILN_C99_OK) {{
+            tag->value = kiln_c99_copy_text("Module", 6);
+            if (tag->value.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
+            tag->writable = 0;
+            tag->enumerable = 0;
+            tag->configurable = 0;
+            tag->accessor = 0;
+        }}
+    }}
+    free(order);
+    if (status != KILN_C99_OK) goto namespace_failure_without_order;
+    data->module_namespace = 1;
+    *result = object;
+    return KILN_C99_OK;
+
+namespace_failure:
+    free(order);
+namespace_failure_without_order:
+    if (data != NULL) {{
+        for (index = 0; index < data->count; ++index) {{
+            if (data->properties[index].key_len == (size_t)13 &&
+                memcmp(data->properties[index].key, "@@toStringTag", (size_t)13) == 0 &&
+                data->properties[index].value.tag == KILN_VALUE_STRING)
+                free((void *)data->properties[index].value.ptr);
+        }}
+        free(data->properties);
+        free(data);
+    }}
+    return status;
+}}
+
+"#
+    )
+    .unwrap();
+}
+
 fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
     if *policy == EmissionPolicy::default() {
         return;
@@ -24694,6 +24947,7 @@ fn render_module(
         )
         .unwrap();
     }
+    render_namespace_wrapper(&mut output, symbol);
     if callables {
         render_module_realm_wrapper(&mut output, symbol);
     }
@@ -24744,6 +24998,7 @@ fn render_runtime_module(
         output.push('\n');
     }
     output.push_str("    *result = kiln_c99_undefined();\n    return KILN_C99_OK;\n}\n");
+    render_namespace_wrapper(&mut output, symbol);
     render_module_realm_wrapper(&mut output, symbol);
     output
 }
@@ -26471,6 +26726,134 @@ mod tests {
         assert!(emitted.source.contains("static int kiln_module_path_"));
         assert!(emitted.source.contains("kiln_realm_enter"));
         assert!(!emitted.source.contains("extern kiln_value"));
+    }
+
+    #[test]
+    fn executable_namespace_wrapper_materializes_sorted_immutable_namespace() {
+        let module = ModuleProgram {
+            program: Program {
+                version: BYTECODE_VERSION,
+                constants: Vec::new(),
+                code: vec![Instruction::Return],
+                local_count: 0,
+                functions: Vec::new(),
+            },
+            dependencies: Vec::new(),
+            imports: Vec::new(),
+            exports: Vec::new(),
+        };
+        let generated = emit_module_with_logical_path(&module, "src/namespace.js")
+            .expect("namespace helper module emits");
+        let same = emit_module_with_logical_path(&module, "src/namespace.js")
+            .expect("namespace helper module emits deterministically");
+        assert_eq!(generated, same);
+        let wrapper = format!(
+            r#"
+int main(void) {{
+    static const char *names[] = {{"z", "a"}};
+    static const size_t lengths[] = {{1, 1}};
+    static const char *numeric_names[] = {{"2", "10"}};
+    static const size_t numeric_lengths[] = {{1, 2}};
+    static const char *reserved_names[] = {{"@@toStringTag"}};
+    static const size_t reserved_lengths[] = {{13}};
+    kiln_value values[2] = {{kiln_c99_number(2.0), kiln_c99_number(1.0)}};
+    kiln_value namespace_object;
+    kiln_value numeric_namespace;
+    kiln_value empty_namespace;
+    kiln_value cell = values[0];
+    kiln_value read;
+    kiln_value descriptor;
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value args[3];
+    int found;
+    if (kiln_c99_make_cell(&cell) != KILN_C99_OK) return 1;
+    *kiln_c99_cell_of(cell) = kiln_c99_number(9.0);
+    values[0] = cell;
+    if ({symbol}_namespace_wrapper(&namespace_object, names, lengths, values, 2) != KILN_C99_OK)
+        return 2;
+    if (namespace_object.tag != KILN_VALUE_OBJECT) return 3;
+    if (kiln_c99_object_of(namespace_object)->prototype.tag != KILN_VALUE_NULL) return 4;
+    if (!kiln_c99_object_of(namespace_object)->module_namespace ||
+        kiln_c99_object_of(namespace_object)->frozen) return 5;
+    if (kiln_c99_object_of(namespace_object)->count != 3 ||
+        strcmp(kiln_c99_object_of(namespace_object)->properties[0].key, "a") != 0 ||
+        strcmp(kiln_c99_object_of(namespace_object)->properties[1].key, "z") != 0 ||
+        strcmp(kiln_c99_object_of(namespace_object)->properties[2].key, "@@toStringTag") != 0)
+        return 6;
+    if (kiln_c99_get(NULL, namespace_object, "z", 1, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(read) != 9.0) return 7;
+    if (kiln_c99_describe_property(NULL, namespace_object, "a", 1, &descriptor, &found, 0,
+                                   &thrown) != KILN_C99_OK || !found) return 8;
+    if (kiln_c99_get(NULL, descriptor, "writable", 8, &read, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(read)) return 9;
+    if (kiln_c99_get(NULL, descriptor, "enumerable", 10, &read, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(read)) return 10;
+    if (kiln_c99_get(NULL, descriptor, "configurable", 12, &read, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_truthy(read)) return 11;
+    args[0] = namespace_object;
+    args[1] = kiln_c99_copy_text("a", 1);
+    args[2] = descriptor;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY,
+                               kiln_c99_undefined(), args, 3, 0, &thrown) != KILN_C99_OK)
+        return 12;
+    if (kiln_c99_put(NULL, descriptor, "writable", 8, kiln_c99_boolean(0), 0, &thrown) !=
+        KILN_C99_OK ||
+        kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY,
+                               kiln_c99_undefined(), args, 3, 0, &thrown) != KILN_C99_THROWN)
+        return 13;
+    if (kiln_c99_get(NULL, namespace_object, "@@toStringTag", 13, &read, 0, &thrown) !=
+            KILN_C99_OK ||
+        read.tag != KILN_VALUE_STRING || read.len != 6 || memcmp(read.ptr, "Module", 6) != 0)
+        return 13;
+    if (kiln_c99_put_mode(NULL, namespace_object, "a", 1, kiln_c99_number(3.0), 1, 0,
+                          &thrown) != KILN_C99_THROWN)
+        return 14;
+    if (kiln_c99_get(NULL, thrown, "message", 7, &read, 0, &thrown) != KILN_C99_OK ||
+        read.tag != KILN_VALUE_STRING || strstr(read.ptr, "module namespace") == NULL) return 15;
+    if (kiln_c99_write_would_accept(namespace_object, "a", 1)) return 16;
+    if (kiln_c99_delete(NULL, namespace_object, "a", 1, &found, 0, &thrown) != KILN_C99_OK ||
+        found != 0) return 17;
+    if (kiln_c99_delete(NULL, namespace_object, "missing", 7, &found, 0, &thrown) !=
+            KILN_C99_OK ||
+        found != 1) return 18;
+    args[0] = namespace_object;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_IS_FROZEN,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_OK ||
+        kiln_c99_truthy(read)) return 19;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_FREEZE,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_THROWN)
+        return 20;
+    if (kiln_c99_set_prototype(namespace_object, kiln_c99_undefined()) !=
+        KILN_C99_CONTROL_ERROR) return 21;
+    if ({symbol}_namespace_wrapper(&numeric_namespace, numeric_names, numeric_lengths, values, 2)
+        != KILN_C99_OK) return 22;
+    if (kiln_c99_object_of(numeric_namespace)->count != 3 ||
+        strcmp(kiln_c99_object_of(numeric_namespace)->properties[0].key, "10") != 0 ||
+        strcmp(kiln_c99_object_of(numeric_namespace)->properties[1].key, "2") != 0)
+        return 23;
+    if ({symbol}_namespace_wrapper(&read, reserved_names, reserved_lengths, values, 1) !=
+        KILN_C99_INVALID_ARGUMENT) return 24;
+    if ({symbol}_namespace_wrapper(&empty_namespace, NULL, NULL, NULL, 0) != KILN_C99_OK)
+        return 25;
+    args[0] = empty_namespace;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_FREEZE,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_strict_equal(read, empty_namespace)) return 26;
+    if (kiln_c99_invoke_method(NULL, &read, KILN_C99_METHOD_OBJECT_IS_FROZEN,
+                               kiln_c99_undefined(), args, 1, 0, &thrown) != KILN_C99_OK ||
+        !kiln_c99_truthy(read)) return 27;
+    return 0;
+}}
+"#,
+            symbol = generated.symbol
+        );
+        let run = run_with_main(&generated, &wrapper, "namespace-wrapper");
+        assert!(
+            run.status.success(),
+            "generated namespace wrapper failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
     }
 
     #[test]
