@@ -1137,6 +1137,7 @@ expected_stdout = "ok\n"
             .request(&Request::Test {
                 root: test_root,
                 mode: TestMode::Parse,
+                changed_root: None,
                 changed_paths: None,
                 previously_failed: Vec::new(),
             })
@@ -2705,13 +2706,14 @@ fn production_daemon_executes_an_acyclic_module_graph_and_reuses_module_ir() {
     else {
         panic!("expected run response");
     };
-    assert!(!cycle.succeeded);
-    assert!(
-        cycle
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("cycle"))
-    );
+    // The dependency now imports the entry back. That is a legal cyclic graph: the back edge
+    // carries no binding, so the dependency still evaluates first and the entry still reads
+    // `answer` from a module that has finished. It runs, and it prints what it printed before
+    // the cycle existed.
+    assert!(cycle.succeeded, "{:?}", cycle.diagnostics);
+    // The rewritten dependency no longer logs, so only the entry's own line remains -- and the
+    // entry still saw the value the dependency exported, which is the point.
+    assert_eq!(cycle.stdout, "42\n");
     let Response::Stats(after_cycle) = client.request(&Request::Stats).expect("cycle stats") else {
         panic!("expected stats response");
     };
@@ -3188,11 +3190,46 @@ fn production_daemon_native_graph_matches_interpreter_order_and_reuses_artifacts
             text: "import './native-entry.js'; export const answer = 42;\n".into(),
         })
         .expect("set cycle");
-    let response = client.request(&request).expect("cycle response");
-    let Response::Error { message } = response else {
-        panic!("expected native cycle error, got {response:?}");
+    // A cycle whose back edge carries no binding compiles natively too: the launcher still has
+    // every provider's export array in hand before the module that reads it.
+    let Response::NativeRan(cyclic) = client.request(&request).expect("cyclic native run") else {
+        panic!("expected a native run for a cycle nothing reads forward across");
     };
-    assert!(message.contains("cycle"), "{message}");
+    assert_eq!(cyclic.stdout, "42\n");
+
+    // A cycle whose back edge *does* carry a binding is the one the launcher cannot express, and
+    // it is refused by name rather than compiled into a read of an export array that has not
+    // been filled in yet.
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: std::fs::canonicalize(&entry)
+                .expect("canonical entry")
+                .to_string_lossy()
+                .into_owned(),
+            text: "export const seed = 42;\n\
+                   import { answer } from './native-dependency.js';\n\
+                   console.log(answer);\n"
+                .into(),
+        })
+        .expect("set forward cycle entry");
+    client
+        .request(&Request::SetSource {
+            source_view: SourceView(0),
+            path: canonical_dependency.to_string_lossy().into_owned(),
+            text: "import { seed } from './native-entry.js';\n\
+                   export const answer = seed;\n"
+                .into(),
+        })
+        .expect("set forward cycle");
+    let response = client.request(&request).expect("forward cycle response");
+    let Response::Error { message } = response else {
+        panic!("expected a native refusal, got {response:?}");
+    };
+    assert!(
+        message.contains("across a module cycle"),
+        "the refusal has to name what it refused: {message}"
+    );
 
     stop.shutdown();
     within(Duration::from_secs(5), move || serving.join()).expect("accept loop must stop");

@@ -71,6 +71,14 @@ and points at `scripts/thirdparty.sh`.
 in a single `kiln test`, and that one process has repeatedly grown until it filled the disk. Run it
 under an explicit cap and watch it; do not point `kiln test` at the corpus by hand.
 
+## Changing Node HTTP close behavior
+
+Run `bash scripts/check-http-close-contract.sh`. HTTP close authority spans the runtime transport,
+the provider FFI, generated C and a real native socket; testing only the crate you edited can miss
+the response-before-close ordering that `server.close()` depends on. The contract command runs the
+compile-fail authority checks and all four executable seams in order, and is intentionally much
+smaller than the workspace suite.
+
 ## The native number provider is a staticlib, and `cargo build` does not build it
 
 `crates/kiln-native-number-ffi` declares `crate-type = ["rlib"]`, which is what workspace tests
@@ -81,7 +89,7 @@ produced by `scripts/package-native-number-provider.sh`.
 The consequence: a change to the provider ABI can leave the workspace build completely clean while
 every native link fails with `Undefined symbols for architecture arm64`. `regexp`, `bigint` and
 `temporal` are off by default, and dropping just `bigint` and `temporal` leaves an archive missing
-24 of the 65 exports — measured, by building one that way.
+24 of the 69 exports — measured, by building one that way.
 
 The packager now verifies the archive's symbol table against `PROVIDER_EXPORTS` and names the
 missing symbols, so this fails at packaging time with the fix in the message. If you are chasing

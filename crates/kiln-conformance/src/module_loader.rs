@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{ModuleLoadError, ModulePlan, install_module_loader};
+use kiln_interpreter::{ModuleLoadError, ModulePlan};
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ResolveError};
 
 thread_local! {
@@ -31,12 +31,18 @@ thread_local! {
 /// Called at the top of every run rather than once at startup, for the same reason the source
 /// compiler is: a conformance run creates a VM per case, and the base directory is a property of
 /// the case rather than of the process.
-pub(crate) fn install(base: &Path) {
+/// Record the directory a bare relative specifier resolves against.
+///
+/// The loader itself is now handed over as an [`ExecutionCapabilities`] entry rather than
+/// installed globally, so this only carries the base path. `3440edd9` made capabilities explicit
+/// and removed this file with them; nothing wired the loader into the new capability, and every
+/// run-time `import()` in the corpus began answering "no module loader is installed" -- 533
+/// variants, all in `language/expressions/dynamic-import`, with no test failing to say so.
+pub(crate) fn set_base(base: &Path) {
     BASE.with(|slot| *slot.borrow_mut() = Some(base.to_path_buf()));
-    install_module_loader(load);
 }
 
-fn load(specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
+pub(crate) fn load(specifier: &str) -> Result<ModulePlan, ModuleLoadError> {
     let Some(base) = BASE.with(|slot| slot.borrow().clone()) else {
         return Err(ModuleLoadError::Unsupported(
             "no directory was recorded to resolve `import()` against".to_owned(),

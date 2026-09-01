@@ -16,6 +16,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -202,6 +203,10 @@ pub struct CommandSpec {
     pub args: Vec<OsString>,
     /// Optional working directory.
     pub current_dir: Option<PathBuf>,
+    /// Exact environment overrides applied without clearing the inherited environment.
+    pub environment: Vec<(OsString, OsString)>,
+    /// Optional cross-process lock held for the complete child-process invocation.
+    pub exclusive_lock: Option<PathBuf>,
 }
 
 impl CommandSpec {
@@ -210,7 +215,19 @@ impl CommandSpec {
             program,
             args,
             current_dir,
+            environment: Vec::new(),
+            exclusive_lock: None,
         }
+    }
+
+    fn with_environment_lock(
+        mut self,
+        environment: Vec<(OsString, OsString)>,
+        exclusive_lock: Option<PathBuf>,
+    ) -> Self {
+        self.environment = environment;
+        self.exclusive_lock = exclusive_lock;
+        self
     }
 
     /// Render a diagnostic-friendly command line without invoking a shell.
@@ -288,7 +305,8 @@ impl ProcessOutput {
 pub trait ProcessRunner: Send + Sync {
     /// Execute one command, returning an I/O error only when the process could not be started or
     /// its output could not be collected.  A non-zero exit is represented by `ProcessOutput` so
-    /// callers retain stdout and stderr in the structured [`ToolchainError::ProcessFailed`].
+    /// callers retain stdout and stderr in the structured [`ToolchainError::ProcessFailed`]. A
+    /// custom runner must honor `environment` and `exclusive_lock` just like the system runner.
     fn run(&self, command: &CommandSpec) -> io::Result<ProcessOutput>;
 }
 
@@ -298,9 +316,22 @@ pub struct SystemProcessRunner;
 
 impl ProcessRunner for SystemProcessRunner {
     fn run(&self, specification: &CommandSpec) -> io::Result<ProcessOutput> {
+        let _lock = if let Some(path) = &specification.exclusive_lock {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .read(true)
+                .write(true)
+                .open(path)?;
+            file.lock()?;
+            Some(file)
+        } else {
+            None
+        };
         let mut command = Command::new(&specification.program);
         command
             .args(&specification.args)
+            .envs(specification.environment.iter().cloned())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -495,6 +526,14 @@ pub struct ProcessFailure {
     pub elapsed: Duration,
 }
 
+/// Details retained when the compiler process could not be started or collected.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessIoFailure {
+    pub stage: BuildStage,
+    pub command: CommandSpec,
+    pub message: String,
+}
+
 /// Structured failure from discovery, process execution, or artifact inspection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolchainError {
@@ -502,12 +541,10 @@ pub enum ToolchainError {
     NoCompiler { searched: Vec<String> },
     /// The chosen compiler could not answer its version probe.
     CompilerProbeFailed(Box<CompilerProbeFailure>),
+    /// Kiln could not create its isolated Zig global cache.
+    ZigCacheDirectory { path: PathBuf, message: String },
     /// The process could not be started or its output could not be collected.
-    ProcessIo {
-        stage: BuildStage,
-        command: CommandSpec,
-        message: String,
-    },
+    ProcessIo(Box<ProcessIoFailure>),
     /// The process ran but returned a non-zero status.
     ProcessFailed(Box<ProcessFailure>),
     /// A required input path did not exist or was not a regular file.
@@ -530,9 +567,11 @@ pub enum ToolchainError {
 impl ToolchainError {
     pub fn stage(&self) -> Option<BuildStage> {
         match self {
-            Self::NoCompiler { .. } | Self::CompilerProbeFailed(_) => None,
-            Self::ProcessIo { stage, .. }
-            | Self::InputMissing { stage, .. }
+            Self::NoCompiler { .. }
+            | Self::CompilerProbeFailed(_)
+            | Self::ZigCacheDirectory { .. } => None,
+            Self::ProcessIo(failure) => Some(failure.stage),
+            Self::InputMissing { stage, .. }
             | Self::OutputMissing { stage, .. }
             | Self::OutputMetadata { stage, .. } => Some(*stage),
             Self::UnsupportedPlatform { .. } => None,
@@ -541,11 +580,11 @@ impl ToolchainError {
     }
 
     fn command_error(stage: BuildStage, command: &CommandSpec, error: io::Error) -> Self {
-        Self::ProcessIo {
+        Self::ProcessIo(Box::new(ProcessIoFailure {
             stage,
             command: command.clone(),
             message: error.to_string(),
-        }
+        }))
     }
 }
 
@@ -565,14 +604,17 @@ impl fmt::Display for ToolchainError {
                 String::from_utf8_lossy(&failure.stderr).trim()
             )
             .and_then(|_| write!(formatter, " [{}]", failure.command.display_command())),
-            Self::ProcessIo {
-                stage,
-                command,
-                message,
-            } => write!(
+            Self::ZigCacheDirectory { path, message } => write!(
                 formatter,
-                "{stage} could not start: {message} [{}]",
-                command.display_command()
+                "creating isolated Zig cache {} failed: {message}",
+                path.display()
+            ),
+            Self::ProcessIo(failure) => write!(
+                formatter,
+                "{} could not start: {} [{}]",
+                failure.stage,
+                failure.message,
+                failure.command.display_command()
             ),
             Self::ProcessFailed(failure) => write!(
                 formatter,
@@ -621,7 +663,14 @@ pub struct Toolchain {
     identity: ToolIdentity,
     /// `zig` needs the extra `cc` subcommand; ordinary drivers have no prefix.
     command_prefix: Vec<OsString>,
+    zig_cache: Option<ZigCachePolicy>,
     runner: Arc<dyn ProcessRunner>,
+}
+
+#[derive(Debug, Clone)]
+struct ZigCachePolicy {
+    directory: OsString,
+    lock_file: Option<PathBuf>,
 }
 
 impl fmt::Debug for Toolchain {
@@ -630,6 +679,7 @@ impl fmt::Debug for Toolchain {
             .debug_struct("Toolchain")
             .field("identity", &self.identity)
             .field("command_prefix", &self.command_prefix)
+            .field("zig_cache", &self.zig_cache)
             .finish_non_exhaustive()
     }
 }
@@ -639,6 +689,7 @@ impl Clone for Toolchain {
         Self {
             identity: self.identity.clone(),
             command_prefix: self.command_prefix.clone(),
+            zig_cache: self.zig_cache.clone(),
             runner: Arc::clone(&self.runner),
         }
     }
@@ -719,6 +770,11 @@ impl Toolchain {
         let version = first_non_empty_line(&output.stdout)
             .or_else(|| first_non_empty_line(&output.stderr))
             .unwrap_or_else(|| "unknown".to_owned());
+        let zig_cache = if kind == CompilerKind::Zig {
+            Some(zig_cache_policy(&version)?)
+        } else {
+            None
+        };
         // `-dumpmachine` is supported by GCC, Clang, and most `cc` wrappers.  Zig exposes the
         // same compiler query through its `cc` subcommand.  Some wrappers do not implement it,
         // so target discovery is best-effort: retaining `unknown` avoids making discovery fail
@@ -729,6 +785,12 @@ impl Toolchain {
                 path.clone(),
                 vec![OsString::from("cc"), OsString::from("-dumpmachine")],
                 None,
+            )
+            .with_environment_lock(
+                zig_cache_environment(zig_cache.as_ref()),
+                zig_cache
+                    .as_ref()
+                    .and_then(|policy| policy.lock_file.clone()),
             )
         } else {
             CommandSpec::new(path.clone(), vec![OsString::from("-dumpmachine")], None)
@@ -757,6 +819,7 @@ impl Toolchain {
                 target,
             },
             command_prefix,
+            zig_cache,
             runner,
         })
     }
@@ -891,7 +954,12 @@ impl Toolchain {
     }
 
     fn command(&self, args: Vec<OsString>, current_dir: Option<PathBuf>) -> CommandSpec {
-        CommandSpec::new(self.identity.path.clone(), args, current_dir)
+        CommandSpec::new(self.identity.path.clone(), args, current_dir).with_environment_lock(
+            zig_cache_environment(self.zig_cache.as_ref()),
+            self.zig_cache
+                .as_ref()
+                .and_then(|policy| policy.lock_file.clone()),
+        )
     }
 
     fn run_artifact(
@@ -943,6 +1011,71 @@ impl Toolchain {
             stderr: output.stderr,
         })
     }
+}
+
+fn zig_cache_policy(version: &str) -> Result<ZigCachePolicy, ToolchainError> {
+    zig_cache_policy_with(
+        version,
+        std::env::var_os("ZIG_GLOBAL_CACHE_DIR"),
+        &std::env::temp_dir(),
+    )
+}
+
+fn zig_cache_policy_with(
+    version: &str,
+    inherited: Option<OsString>,
+    temporary_root: &Path,
+) -> Result<ZigCachePolicy, ToolchainError> {
+    if let Some(directory) = inherited {
+        return Ok(ZigCachePolicy {
+            directory,
+            lock_file: None,
+        });
+    }
+
+    // Zig's ambient global cache is shared by every repository and process. Concurrent Kiln
+    // worktrees have observed half-written runtime archives there, making an unrelated native test
+    // fail until a developer manually replaces the cache. Keep one versioned Kiln cache instead
+    // and serialize only Zig child processes across Kiln processes. A crash releases the OS lock;
+    // the cache itself remains warm and Zig never races another Kiln writer.
+    let version = version
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                character
+            } else {
+                '-'
+            }
+        })
+        .take(80)
+        .collect::<String>();
+    let version = if version.is_empty() {
+        "unknown"
+    } else {
+        version.as_str()
+    };
+    let directory = temporary_root
+        .join("kiln-zig-global-cache-v1")
+        .join(version);
+    std::fs::create_dir_all(&directory).map_err(|error| ToolchainError::ZigCacheDirectory {
+        path: directory.clone(),
+        message: error.to_string(),
+    })?;
+    Ok(ZigCachePolicy {
+        directory: directory.as_os_str().to_owned(),
+        lock_file: Some(directory.join(".kiln-exclusive.lock")),
+    })
+}
+
+fn zig_cache_environment(policy: Option<&ZigCachePolicy>) -> Vec<(OsString, OsString)> {
+    policy
+        .map(|policy| {
+            vec![(
+                OsString::from("ZIG_GLOBAL_CACHE_DIR"),
+                policy.directory.clone(),
+            )]
+        })
+        .unwrap_or_default()
 }
 
 fn require_input(
@@ -1348,6 +1481,150 @@ mod tests {
             commands[1].args,
             [OsString::from("cc"), OsString::from("-dumpmachine")]
         );
+        assert_eq!(
+            commands[1]
+                .environment
+                .iter()
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>(),
+            [&OsString::from("ZIG_GLOBAL_CACHE_DIR")]
+        );
+    }
+
+    #[test]
+    fn managed_zig_cache_is_versioned_locked_and_explicit_policy_is_preserved() {
+        let temporary_root = temp_dir("managed-zig-cache");
+        let managed = zig_cache_policy_with("0.14.0 dev build", None, &temporary_root)
+            .expect("create managed Zig cache");
+        let managed_path = PathBuf::from(&managed.directory);
+        assert_eq!(
+            managed_path,
+            temporary_root
+                .join("kiln-zig-global-cache-v1")
+                .join("0.14.0-dev-build")
+        );
+        assert!(managed_path.is_dir());
+        assert_eq!(
+            managed.lock_file,
+            Some(managed_path.join(".kiln-exclusive.lock"))
+        );
+        assert_eq!(
+            zig_cache_environment(Some(&managed)),
+            [(
+                OsString::from("ZIG_GLOBAL_CACHE_DIR"),
+                managed.directory.clone()
+            )]
+        );
+
+        let explicit = zig_cache_policy_with(
+            "0.14.0",
+            Some(OsString::from("/chosen/zig-cache")),
+            &temporary_root,
+        )
+        .expect("preserve explicit Zig cache");
+        assert_eq!(explicit.directory, OsString::from("/chosen/zig-cache"));
+        assert_eq!(explicit.lock_file, None);
+
+        fs::remove_dir_all(temporary_root).expect("temporary directory cleanup");
+    }
+
+    #[test]
+    fn every_zig_cc_stage_uses_one_managed_cache_and_lock() {
+        let directory = temp_dir("zig-stage-environment");
+        let source = directory.join("unit.c");
+        let object = directory.join("unit.o");
+        let executable = directory.join("unit");
+        fs::write(&source, "int main(void) { return 0; }").expect("source fixture");
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("0.14.0\n", ""),
+                ProcessOutput::success("aarch64-macos\n", ""),
+                ProcessOutput::success("", ""),
+                ProcessOutput::success("", ""),
+            ],
+            true,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+        let toolchain =
+            Toolchain::from_compiler_with_runner("/opt/zig", runner).expect("compiler probe");
+        toolchain
+            .compile_c(&source, &object, &CompileOptions::default())
+            .expect("Zig compile");
+        toolchain
+            .link_executable(&[object], &executable, &LinkOptions::default())
+            .expect("Zig link");
+
+        let commands = runner_impl.commands();
+        let target = &commands[1];
+        for command in &commands[2..] {
+            assert_eq!(command.environment, target.environment);
+            assert_eq!(command.exclusive_lock, target.exclusive_lock);
+        }
+
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn system_runner_serializes_commands_that_share_an_exclusive_lock() {
+        use std::thread;
+
+        let directory = temp_dir("exclusive-runner-lock");
+        let script = directory.join("hold-marker.sh");
+        let marker = directory.join("marker");
+        let ready = directory.join("ready");
+        let release = directory.join("release");
+        let lock = directory.join("compiler.lock");
+        fs::write(
+            &script,
+            "if ! mkdir \"$1\"; then\n  exit 41\nfi\n: > \"$2\"\nwhile [ ! -e \"$3\" ]; do\n  sleep 0.01\ndone\nrmdir \"$1\"\n",
+        )
+        .expect("write lock fixture");
+        let specification = CommandSpec::new(
+            PathBuf::from("/bin/sh"),
+            vec![
+                script.as_os_str().to_owned(),
+                marker.as_os_str().to_owned(),
+                ready.as_os_str().to_owned(),
+                release.as_os_str().to_owned(),
+            ],
+            None,
+        )
+        .with_environment_lock(Vec::new(), Some(lock));
+
+        let first_specification = specification.clone();
+        let first = thread::spawn(move || SystemProcessRunner.run(&first_specification));
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(ready.exists(), "first command acquired the marker");
+
+        let second = thread::spawn(move || SystemProcessRunner.run(&specification));
+        thread::sleep(Duration::from_millis(25));
+        fs::write(&release, "release").expect("release first command");
+
+        assert!(
+            first
+                .join()
+                .expect("first runner thread")
+                .unwrap()
+                .status
+                .success
+        );
+        assert!(
+            second
+                .join()
+                .expect("second runner thread")
+                .unwrap()
+                .status
+                .success,
+            "the second command runs only after the first releases the marker"
+        );
+
+        fs::remove_dir_all(directory).expect("temporary directory cleanup");
     }
 
     #[test]

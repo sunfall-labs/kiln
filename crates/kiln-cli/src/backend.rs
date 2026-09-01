@@ -209,12 +209,14 @@ pub trait Backend: Send {
         &mut self,
         root: String,
         mode: TestMode,
+        changed_root: Option<String>,
         changed_paths: Option<Vec<String>>,
         previously_failed: Vec<String>,
     ) -> Result<TestSummary> {
         match self.request(Request::Test {
             root,
             mode,
+            changed_root,
             changed_paths,
             previously_failed,
         })? {

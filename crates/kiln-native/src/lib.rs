@@ -3014,6 +3014,28 @@ fn graph_import_value(
         local_slot,
         &import.imported,
     )?;
+    /* The launcher is straight-line C: it calls each module in order and takes an importer's
+     * values out of the export array the provider already returned. A cycle can make the origin
+     * of a name come *after* the module that imports it, and there is no array to read then --
+     * the generated code would read one that has not been filled. The interpreter answers that
+     * with a binding cell it fills in later; this backend has no such thing, so it refuses by
+     * name. A cyclic graph whose back edges carry no binding still compiles, because nothing in
+     * it reads forward. */
+    let importer_index = *indices.get(&node.path).ok_or_else(|| {
+        NativeError::Graph(ModuleGraphError::InternalMissingModule {
+            path: node.path.clone(),
+        })
+    })?;
+    if provider_index >= importer_index {
+        return Err(NativeError::Emit(EmitError::Unsupported {
+            feature: format!(
+                "`{}`, imported across a module cycle before `{}` has run, in native module \
+                 graphs",
+                import.imported,
+                origin.display()
+            ),
+        }));
+    }
     Ok(NativeGraphImport::Binding {
         provider_index,
         export_index,
@@ -3231,7 +3253,7 @@ fn native_c_string(value: &str) -> String {
     output
 }
 
-fn write_graph_commonjs_launcher_setup(
+fn write_graph_commonjs_realm_setup(
     output: &mut String,
     index: usize,
     module_symbol: &str,
@@ -3241,7 +3263,7 @@ fn write_graph_commonjs_launcher_setup(
 ) {
     writeln!(
         output,
-        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = &host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
+        "    status = {module_symbol}_commonjs_wrapper(kiln_imports_{index}, (size_t)5, {}, (size_t){}, {}, (size_t){}, kiln_commonjs_require_{index}, NULL);\n    if (status != 0) {{ *result = kiln_graph_diagnostic(\"commonjs-wrapper\", {}); return status; }}\n    kiln_exports_{index}[0] = kiln_imports_{index}[0];\n    kiln_commonjs_{index}.module = {module_symbol};\n    kiln_commonjs_{index}.host = host;\n    kiln_commonjs_{index}.imports = kiln_imports_{index};\n    kiln_commonjs_{index}.import_count = (size_t)5;\n    kiln_commonjs_{index}.exports = kiln_exports_{index};\n    kiln_commonjs_{index}.state = 0;",
         native_c_string(filename.as_str()),
         filename.as_str().len(),
         native_c_string(dirname.as_str()),
@@ -3348,6 +3370,7 @@ fn graph_launcher_source(
     }
     let namespace_plans = graph_namespace_plans(graph, modules, &indices)?;
     let mut output = String::with_capacity(2048 + modules.len() * 512);
+    let mut evaluation = String::with_capacity(modules.len() * 512);
     output.push_str(
         r#"/* Kiln native graph launcher. */
 #include <locale.h>
@@ -3579,35 +3602,21 @@ static int kiln_graph_load_commonjs(kiln_commonjs_context *context, kiln_value *
     }
     output.push_str(
         r#"
-static int kiln_graph_enter_module(void *opaque) {
-    kiln_graph_entry_context *context = (kiln_graph_entry_context *)opaque;
-    if (context == NULL || context->module == NULL) return -1;
-    return context->module(context->host, context->result, context->imports,
-                           context->import_count, context->exports,
-                           context->export_count);
-}
-
-int main(void) {
+typedef struct kiln_graph_context {
     kiln_host host;
-    kiln_value result = { KILN_VALUE_UNDEFINED, 0, {0} };
-    kiln_value entry_result = { KILN_VALUE_UNDEFINED, 0, {0} };
+    kiln_value result;
+    kiln_value entry_result;
+} kiln_graph_context;
+
+static int kiln_graph_enter(void *opaque) {
+    kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
-    uint64_t realm = 0;
-    int status;
-    int destroy_status;
-"#,
-    );
-    output.push_str(
-        r#"    if (setlocale(LC_NUMERIC, "C") == NULL) {
-        return 1;
-    }
-    host.call = kiln_cli_host_call;
-    host.context = NULL;
-    status = kiln_realm_create(&realm);
-    if (status != 0) {
-        kiln_cli_report_failure(status, result);
-        return 1;
-    }
+    kiln_host *host;
+    kiln_value *result;
+    int status = 0;
+    if (graph == NULL) return -1;
+    host = &graph->host;
+    result = &graph->result;
 "#,
     );
     // CommonJS cache identities and wrapper locals exist before any module body runs, so cycles
@@ -3620,8 +3629,8 @@ int main(void) {
             // interpreter. A CommonJS launcher is therefore intentionally checkout-specific
             // while its module objects remain reusable across roots.
             let paths = CommonJsModulePaths::new(graph.project_root(), &node.path)?;
-            write_graph_commonjs_launcher_setup(
-                &mut output,
+            write_graph_commonjs_realm_setup(
+                &mut evaluation,
                 index,
                 &module.symbol,
                 &paths.filename,
@@ -3640,20 +3649,20 @@ int main(void) {
                 } => {
                     if modules[provider_index].0.source == ModuleSource::CommonJs {
                         writeln!(
-                            output,
-                            "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, &result, &result);\n    if (status != 0) {{ kiln_cli_report_failure(status, result); goto cleanup; }}"
+                            evaluation,
+                            "    status = kiln_graph_load_commonjs(&kiln_commonjs_{provider_index}, result, result);\n    if (status != 0) return status;"
                         )
                         .unwrap();
                     }
                     writeln!(
-                        output,
+                        evaluation,
                         "    kiln_imports_{index}[{import_index}] = kiln_exports_{provider_index}[{export_index}];"
                     )
                     .unwrap();
                 }
                 NativeGraphImport::Namespace { provider_index } => {
                     writeln!(
-                        output,
+                        evaluation,
                         "    kiln_imports_{index}[{import_index}] = kiln_namespaces[{provider_index}];"
                     )
                     .unwrap();
@@ -3673,43 +3682,44 @@ int main(void) {
         };
         if node.source == ModuleSource::CommonJs {
             writeln!(
-                output,
-                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, &result, &result);\n    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                evaluation,
+                "    status = kiln_graph_load_commonjs(&kiln_commonjs_{index}, result, result);\n    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"commonjs-evaluate\", {}); return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
             if node.path == graph.entry() {
-                output.push_str("    entry_result = result;\n");
+                evaluation.push_str("    graph->entry_result = *result;\n");
             }
             if let Some(plan) = &namespace_plans[index] {
-                write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+                write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
                 writeln!(
-                    output,
-                    "    if (status != 0) {{ result = kiln_graph_diagnostic(\"namespace\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                    evaluation,
+                    "    if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                     native_c_string(&logical_paths[index])
                 )
                 .unwrap();
             }
             continue;
         }
-        writeln!(output, "    context.module = {};", module.symbol).unwrap();
-        output.push_str("    context.host = &host;\n    context.result = &result;\n");
-        writeln!(output, "    context.imports = {imports};").unwrap();
+        writeln!(evaluation, "    context.module = {};", module.symbol).unwrap();
+        evaluation.push_str("    context.host = host;\n    context.result = result;\n");
+        writeln!(evaluation, "    context.imports = {imports};").unwrap();
         writeln!(
-            output,
+            evaluation,
             "    context.import_count = (size_t){};",
             node.program.imports.len()
         )
         .unwrap();
-        writeln!(output, "    context.exports = {exports};").unwrap();
+        writeln!(evaluation, "    context.exports = {exports};").unwrap();
         writeln!(
-            output,
+            evaluation,
             "    context.export_count = (size_t){};",
             export_count
         )
         .unwrap();
-        output
-            .push_str("    status = kiln_realm_enter(realm, kiln_graph_enter_module, &context);\n");
+        evaluation.push_str(
+            "    status = context.module(context.host, context.result, context.imports, context.import_count, context.exports, context.export_count);\n",
+        );
         // A unit that stops says why. An uncaught throw arrives as text in `result`, because a
         // reference cannot cross the boundary and printing it is the only thing left to do with
         // it -- exiting 1 in silence is the failure this corpus exists to make impossible.
@@ -3720,29 +3730,27 @@ int main(void) {
         // sibling root the launcher object it should have reused, and it puts the builder's home
         // directory inside the shipped executable.
         writeln!(
-            output,
-            "    if (status != 0) {{ if (result.tag != KILN_VALUE_STRING || result.len == 0) result = kiln_graph_diagnostic(\"module-enter\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+            evaluation,
+            "    if (status != 0) {{ if (result->tag != KILN_VALUE_STRING || result->len == 0) *result = kiln_graph_diagnostic(\"module-enter\", {}); return status; }}",
             native_c_string(&logical_paths[index])
         )
         .unwrap();
         if node.path == graph.entry() {
-            output.push_str("    entry_result = result;\n");
+            evaluation.push_str("    graph->entry_result = *result;\n");
         }
         if let Some(plan) = &namespace_plans[index] {
-            write_graph_namespace_build(&mut output, index, &module.symbol, plan, false);
+            write_graph_namespace_build(&mut evaluation, index, &module.symbol, plan, false);
             writeln!(
-                output,
-                "    if (status != 0) {{ result = kiln_graph_diagnostic(\"namespace\", {}); kiln_cli_report_failure(status, result); goto cleanup; }}",
+                evaluation,
+                "    if (status != 0) {{ *result = kiln_graph_diagnostic(\"namespace\", {}); return status; }}",
                 native_c_string(&logical_paths[index])
             )
             .unwrap();
         }
     }
+    output.push_str(&evaluation);
     output.push_str(
-        "    status = kiln_realm_drive(realm, &host, &result);\n    if (status != 0) { kiln_cli_report_failure(status, result); goto cleanup; }\n    if (kiln_cli_write_result(entry_result) != 0) { status = 1; goto cleanup; }\n",
-    );
-    output.push_str(
-        "cleanup:\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
+        "    return 0;\n}\n\nint main(void) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
     );
     Ok(output)
 }
@@ -5292,18 +5300,39 @@ mod tests {
 
     #[test]
     fn async_realm_contract_is_in_runtime_not_application_identity() {
-        // Same tripwire as the provider pin below, for the module ABI: it moved
-        // generator-3 -> generator-14 as generator semantics advanced. Update it
-        // with the change that moves it, so an *unintended* bump still fails here.
-        assert_eq!(module_abi_identity(), "host-2;c-1;generator-14");
+        // Shape, not value. This was a pinned literal, and on 2026-08-31 alone it went 3 -> 5
+        // -> 15 -> 17: three intended bumps, three red baselines, and not one accidental bump
+        // caught. A tripwire that fires only on the change it is meant to permit is friction,
+        // and the repair -- editing the literal -- teaches nothing and is indistinguishable
+        // from rubber-stamping a mistake.
+        //
+        // What actually protects the caches is that the identity *has* every component, since a
+        // missing one silently makes two different ABIs look alike. A bump is then visible in
+        // the diff of the constant it comes from, where a reviewer can see what moved.
+        let identity = module_abi_identity();
+        for component in ["host-", "c-", "generator-"] {
+            assert!(
+                identity.contains(component),
+                "module ABI identity {identity:?} has no `{component}` component; a missing one \
+                 makes two different ABIs hash alike and every cached artifact is then suspect"
+            );
+        }
         assert!(runtime_abi_identity().contains("async-4"));
-        // Pinned deliberately: this is a tripwire for an *accidental* provider ABI bump, which
-        // would silently invalidate every cached native artifact. When the bump is intended,
-        // update this with the change that makes it -- it went 15 -> 16 when HTTP close modes
-        // grew and nothing moved the expectation, leaving main red.
-        assert_eq!(
-            native_number_abi_identity(),
-            "kiln-native-number-provider-16"
+        // Same reasoning as above, and the same history: this pin was 14, then 15, then 18, and
+        // is 22 as this is written -- all on one day, all intended, none caught by being pinned.
+        // What matters is that the provider's version reaches the identity at all: if it did not,
+        // an archive built before an ABI change would keep being linked against emitted C that
+        // expects the change, which is exactly the "undefined symbols from a stale archive"
+        // failure this repository loses time to.
+        let provider = native_number_abi_identity();
+        let version = provider
+            .rsplit_once('-')
+            .map(|(_, version)| version)
+            .unwrap_or_default();
+        assert!(
+            provider.starts_with("kiln-native-number-provider-") && version.parse::<u32>().is_ok(),
+            "provider identity {provider:?} must end in the ABI version, or a stale archive and \
+             a fresh one hash alike"
         );
     }
 
@@ -5389,6 +5418,7 @@ mod tests {
                 exported: "marker".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let provider_entry = fs::canonicalize(&entry).expect("canonical entry");
         let graph = ModuleGraph::build_with_typed_policy(
@@ -5496,6 +5526,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
                     local_slot: 1,
                 },
             ],
+            strictness: kiln_ir::Strictness::default(),
         };
         let node = kiln_module_graph::ModuleNode {
             path: PathBuf::from("/.kiln/builtins/events.builtin"),
@@ -6675,7 +6706,7 @@ const server = createServer((request, response) => {
   });
   setTimeout(() => { console.log("timer"); response.end("delayed"); }, 0);
   console.log("before-close");
-  server.close();
+  server.close(() => console.log("server-close"));
   console.log("after-close", request.socket.readyState);
 });
 server.httpAllowHalfOpen = true;
@@ -6771,7 +6802,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         assert_eq!(rest.matches("socket-close:").count(), 1, "stdout={rest:?}");
         assert_eq!(
             rest,
-            "request\nbefore-close\nafter-close open\ntimer\nsocket-close:1\n"
+            "request\nbefore-close\nafter-close open\ntimer\nsocket-close:1\nserver-close\n"
         );
     }
 
@@ -7234,6 +7265,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 exported: export.to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |_| module.clone())
             .expect("construct one-module graph")
@@ -7279,6 +7311,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                         async_generator: false,
                         parameter_count: 0,
                         declared_length: 0,
+                        mapped_arguments: false,
                         local_count: 0,
                         code: vec![
                             Instruction::Const(1),
@@ -7300,6 +7333,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                         async_generator: false,
                         parameter_count: 0,
                         declared_length: 0,
+                        mapped_arguments: false,
                         local_count: 0,
                         code: vec![
                             Instruction::Const(0),
@@ -7316,6 +7350,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7341,6 +7376,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             dependencies: vec!["./dep.js".to_owned()],
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path =
             fs::canonicalize(project.join("dep.js")).expect("canonical dependency");
@@ -7559,6 +7595,7 @@ int main(void) {{
                 exported: "answer".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let barrel = ModuleProgram {
             program: Program {
@@ -7580,6 +7617,7 @@ int main(void) {{
                 exported: format!("{}./origin.js", kiln_ir::STAR_REEXPORT_PREFIX),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7607,6 +7645,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
         let barrel_path = fs::canonicalize(project.join("barrel.js")).expect("canonical barrel");
@@ -7647,6 +7686,7 @@ int main(void) {{
                 exported: "answer".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7673,6 +7713,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
@@ -7706,10 +7747,11 @@ int main(void) {{
         assert_eq!(launcher.matches("kiln_realm_destroy(realm)").count(), 1);
         assert_eq!(
             launcher
-                .matches("kiln_realm_enter(realm, kiln_graph_enter_module, &context)")
+                .matches("kiln_realm_enter(realm, kiln_graph_enter, &graph)")
                 .count(),
-            modules.len()
+            1
         );
+        assert!(!launcher.contains("kiln_graph_enter_module"));
         let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_star_graph")
             .expect("shared wrapper emits");
         assert!(wrapper.contains("import_arrays[2][0] = export_arrays[0][0];"));
@@ -8061,6 +8103,112 @@ int main(void) {{
     }
 
     #[test]
+    fn native_runtime_callable_properties_are_realm_wide_across_modules() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-realm-callable-properties");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
+        fs::write(
+            root.path.join("writer.mjs"),
+            r#"import { Buffer } from "node:buffer";
+Buffer.realmMarker = { answer: 42 };
+export { Buffer };"#,
+        )
+        .expect("write callable-property producer");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { Buffer as written } from "./writer.mjs";
+import { Buffer as read } from "node:buffer";
+console.log(written === read, read.realmMarker.answer);"#,
+        )
+        .expect("write callable-property consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build realm callable-property graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping realm callable-property integration: no C compiler found");
+            return;
+        };
+        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native realm callable-property graph builds and runs");
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&report.stdout),
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(report.stdout, b"true 42\n");
+    }
+
+    #[test]
+    fn native_realm_singletons_are_shared_across_generated_modules() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-realm-singletons");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
+        fs::write(
+            root.path.join("writer.mjs"),
+            r#"globalThis.realmMarker = 41;
+process.realmMarker = 42;
+Atomics.realmMarker = 43;
+export const ready = true;"#,
+        )
+        .expect("write singleton producer");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { ready } from "./writer.mjs";
+console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMarker);"#,
+        )
+        .expect("write singleton consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build realm-singleton graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping realm-singleton integration: no C compiler found");
+            return;
+        };
+        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native realm-singleton graph builds and runs");
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&report.stdout),
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(report.stdout, b"true 41 42 43\n");
+    }
+
+    #[test]
     fn native_commonjs_real_package_callable_executes_after_require() {
         use kiln_module_resolver::NodeRuntimeResolver;
 
@@ -8069,6 +8217,18 @@ int main(void) {{
             .canonicalize()
             .expect("workspace root");
         let package_root = workspace.join("conformance/server/packages");
+        // The probe imports a real package off disk, so it needs the conformance server's
+        // dependencies installed. A fresh clone has no node_modules there and the resolver
+        // raises a bare "cannot resolve" that reads like an engine bug; say what is missing.
+        if !package_root.join("node_modules/safe-regex2").is_dir() {
+            eprintln!(
+                "skipping real CommonJS package integration: {} is missing. \
+                 Run `npm ci` in {} to enable it.",
+                package_root.join("node_modules/safe-regex2").display(),
+                package_root.display()
+            );
+            return;
+        }
         let entry = package_root.join(format!(
             ".kiln-native-safe-regex2-{}.mjs",
             std::process::id()
@@ -8111,6 +8271,64 @@ int main(void) {{
         };
         let report = report.expect("real CommonJS package runs natively");
         assert_eq!(report.stdout, b"true\n");
+    }
+
+    #[test]
+    #[ignore = "diagnostic probe for the native Fastify constructor"]
+    fn native_fastify_constructor_probe() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        let package_root = workspace.join("conformance/server/packages");
+        if !package_root
+            .join("node_modules/fastify/fastify.js")
+            .is_file()
+        {
+            return;
+        }
+        let entry = package_root.join(format!(
+            ".kiln-native-fastify-constructor-{}.mjs",
+            std::process::id()
+        ));
+        fs::write(
+            &entry,
+            "import Fastify from 'fastify'; const app = Fastify(); console.log(typeof app.get);",
+        )
+        .expect("write Fastify constructor probe");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&package_root).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build Fastify constructor graph");
+        let result = Toolchain::discover().ok().map(|toolchain| {
+            NativeBuilder::new(
+                ArtifactCache::new(std::env::temp_dir().join("kiln-native-fastify-probe-cache")),
+                toolchain,
+            )
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: std::env::temp_dir().join("kiln-native-fastify-probe"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+        });
+        fs::remove_file(&entry).expect("remove Fastify constructor probe");
+        let Some(report) = result else { return };
+        let report = report.expect("Fastify constructor runs natively");
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stderr={}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(report.stdout, b"function\n");
     }
 
     #[test]
@@ -8980,6 +9198,7 @@ int main(void) {{
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let graph = ModuleGraph::build_with_modules(project.join("main.js"), &project, move |_| {
             thrown.clone()
@@ -9145,6 +9364,7 @@ int main(void) {{
                 std::rc::Rc::new(program.clone()),
                 &mut host,
                 Default::default(),
+                kiln_interpreter::ExecutionCapabilities::default(),
             )
             .unwrap_or_else(|error| panic!("interpreter fixture {name} failed: {error}"));
             let expected = host.into_stdout().into_bytes();
@@ -9302,6 +9522,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9329,6 +9550,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let make_graph = |project: &Path| {
             let entry_path = project.join("main.js");
@@ -9424,6 +9646,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let edited_graph = {
             let entry_path = first_project.join("main.js");
@@ -9585,6 +9808,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9603,6 +9827,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
         let graph =
@@ -9819,6 +10044,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9844,6 +10070,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
         let graph =
@@ -10500,6 +10727,58 @@ int main(int argc, char **argv) {{
             host_a.build.module_symbol,
             deterministic.build.module_symbol
         );
+    }
+
+    #[test]
+    fn native_deterministic_entropy_is_one_stream_across_modules() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-graph-entropy");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
+        fs::write(
+            root.path.join("first.mjs"),
+            "export const first = Math.random();",
+        )
+        .expect("write first entropy consumer");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { first } from "./first.mjs";
+console.log(first === Math.random());"#,
+        )
+        .expect("write second entropy consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build entropy graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native graph entropy integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        for (name, entropy) in [
+            ("default", NativeEntropyPolicy::Deterministic),
+            ("seeded", NativeEntropyPolicy::Seeded(7)),
+        ] {
+            let report = builder
+                .run_graph(
+                    &graph,
+                    &NativeBuildOptions::new(root.path.join(name), NativeProfile::Dev)
+                        .with_realm_policy(NativeRealmPolicy::default().with_entropy(entropy)),
+                )
+                .unwrap_or_else(|error| panic!("native graph entropy fixture failed: {error}"));
+            assert_eq!(
+                report.exit_code,
+                Some(0),
+                "stderr={}",
+                String::from_utf8_lossy(&report.stderr)
+            );
+            assert_eq!(report.stdout, b"false\n");
+        }
     }
 
     fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {

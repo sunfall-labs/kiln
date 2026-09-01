@@ -22,6 +22,13 @@ per-translation-unit queue in ADR 0033 is gone. Native `process.nextTick` is the
 lane: its FIFO must live beside the Realm microtask queue and drain before ordinary microtasks at
 every checkpoint.
 
+The resident conformance coordinator now keeps one non-`Send` interpreter scheduler in each Rayon
+worker thread. Pure interpreter cases reuse that scheduler while constructing and reclaiming a
+fresh VM, language realm, global object, host capture, timers and value graph for every case. The
+worker is discarded after an interpreter unwind. Parse mode needs no scheduler, and Node mode is
+excluded until its provider resources have a separate reset contract; realm shutdown remains
+terminal rather than masquerading as a reusable reset.
+
 ## Context
 
 At decision time Kiln had two implementations of one runtime. The interpreter owned a virtual
@@ -109,13 +116,20 @@ correction ADR 0033 reserved.
 ### Runtime ownership is explicit
 
 A standalone executable owns its runtime and drives it until no referenced realm work remains. The
-resident daemon owns a long-lived runtime rather than constructing one per warm interpreter run.
+resident daemon's conformance Rayon threads each own a long-lived current-thread runtime rather
+than constructing one per warm interpreter case. Runtime infrastructure may be reused only when
+the language realm is fresh and no provider resource can cross the case boundary.
 
 A runtime created through the C embedding ABI has explicit ownership and thread affinity. Starting,
 polling or dropping an embedded Kiln realm never implicitly constructs a nested Tokio runtime and
 never assumes that an ambient Tokio handle exists. The ABI prototype decides whether a C embedder
 drives a nonblocking runtime handle or asks Kiln to own a runtime thread; both forms keep completion,
 cancellation and shutdown explicit, and neither changes realm ordering.
+
+Inside Rust, the provider trait makes shutdown a required implementation obligation. The realm
+runtime closes admission first, aborts protocol transports and their correlated requests, then asks
+the provider to cancel all remaining work and release resources. Explicit shutdown and `Drop` share
+that idempotent path; dropping the Tokio executor is not a substitute for it.
 
 Rust-only embedders may use an internal asynchronous API with an existing Tokio handle, but that is
 not the stable C contract and cannot change its observable scheduling rules.
