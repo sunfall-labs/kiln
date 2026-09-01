@@ -15358,7 +15358,11 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             return kiln_c99_number_in_radix(result, subject, (int)radix);
         }
         case KILN_C99_METHOD_NUMBER_TO_FIXED: {
+            /* `ToIntegerOrInfinity`: `undefined` and NaN both mean zero digits, so
+             * `(1.5).toFixed(undefined)` is `(1.5).toFixed()` and not a RangeError. */
             double digits = argc > 0 ? first : 0.0;
+            if (digits != digits) digits = 0.0;
+            digits = trunc(digits);
             if (!(digits >= 0.0 && digits <= 100.0)) {
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
                                             "toString() radix must be between 2 and 36");
