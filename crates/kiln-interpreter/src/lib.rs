@@ -13415,6 +13415,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     )?;
                     continue;
                 }
+                Instruction::DeleteGlobalBinding(name) => {
+                    // The global object environment record's `DeleteBinding`: an ordinary
+                    // `[[Delete]]` on the global object. Absent or removed is `true`, which is
+                    // why `delete neverDeclared` and `x = 1; delete x` both answer `true` and
+                    // the second really does take the property away -- the `ThrowReference`
+                    // fallback above then finds nothing, and a later read of `x` throws.
+                    // Non-configurable is `false`, which is what `delete NaN` is.
+                    let name = self.string_constant(*name, current)?;
+                    let globals = self.global_object();
+                    let key = Value::String(name);
+                    let removed = self.delete(&globals, &key, current)?;
+                    self.stack.push(Value::Boolean(removed));
+                }
                 Instruction::StoreGlobalBinding(name) => {
                     let name = self.string_constant(*name, current)?;
                     let value = self.pop(current)?;
@@ -24697,8 +24710,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         console.set_non_enumerable("warn", Value::Native(Native::ConsoleError));
         console.set_non_enumerable("info", Value::Native(Native::ConsoleLog));
         globals.set_non_enumerable("console", Value::Object(Rc::new(RefCell::new(console))));
-        globals.set_non_enumerable("NaN", Value::Number(f64::NAN));
-        globals.set_non_enumerable("Infinity", Value::Number(f64::INFINITY));
+        // The three value properties of the global object are the only ones the specification
+        // locks on every axis: `{ writable: false, enumerable: false, configurable: false }`.
+        // That is not decoration -- it is what makes `delete NaN` answer `false` and
+        // `globalThis.undefined = 1` a silent no-op in sloppy code and a TypeError in strict.
+        globals.define_value("NaN", Value::Number(f64::NAN), Attributes::NONE);
+        globals.define_value("Infinity", Value::Number(f64::INFINITY), Attributes::NONE);
+        globals.define_value("undefined", Value::Undefined, Attributes::NONE);
         let object = Rc::new(RefCell::new(globals));
         let value = Value::Object(Rc::clone(&object));
         // The global object holds itself under both of its names, which is how a program reaches

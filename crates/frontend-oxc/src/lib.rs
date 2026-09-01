@@ -835,30 +835,43 @@ impl Lowerer<'_> {
             Expression::UnaryExpression(expression)
                 if matches!(expression.operator, UnaryOperator::Delete) =>
             {
-                let Expression::StaticMemberExpression(member) = &expression.argument else {
-                    if let Expression::ComputedMemberExpression(member) = &expression.argument {
-                        return HirExpression {
-                            kind: HirExpressionKind::Delete {
-                                object: Box::new(self.expression(&member.object)),
-                                property: Box::new(kiln_hir::ObjectKey::Computed(
-                                    self.expression(&member.expression),
-                                )),
-                            },
-                            span: expression_span,
-                        };
-                    }
-                    // `delete x` on a plain binding is a no-op that returns false in strict mode
-                    // and cannot be spelled at all in a module; refusing beats guessing.
-                    return self.unsupported_expression(
-                        "delete of something other than a property",
-                        expression_span,
-                    );
-                };
-                HirExpressionKind::Delete {
-                    object: Box::new(self.expression(&member.object)),
-                    property: Box::new(kiln_hir::ObjectKey::Static(
-                        member.property.name.to_string(),
-                    )),
+                // Parentheses do not make an operand something else: `delete (o.x)` still deletes
+                // the property and `delete (x)` is still the unqualified delete the parser
+                // reports as an early error in strict code.  Everything below therefore decides
+                // on the operand with its parentheses taken off.
+                let mut argument = &expression.argument;
+                while let Expression::ParenthesizedExpression(inner) = argument {
+                    argument = &inner.expression;
+                }
+                match argument {
+                    Expression::StaticMemberExpression(member) => HirExpressionKind::Delete {
+                        object: Box::new(self.expression(&member.object)),
+                        property: Box::new(kiln_hir::ObjectKey::Static(
+                            member.property.name.to_string(),
+                        )),
+                    },
+                    Expression::ComputedMemberExpression(member) => HirExpressionKind::Delete {
+                        object: Box::new(self.expression(&member.object)),
+                        property: Box::new(kiln_hir::ObjectKey::Computed(
+                            self.expression(&member.expression),
+                        )),
+                    },
+                    Expression::PrivateFieldExpression(member) => HirExpressionKind::Delete {
+                        object: Box::new(self.expression(&member.object)),
+                        property: Box::new(kiln_hir::ObjectKey::Private(
+                            member.field.name.to_string(),
+                        )),
+                    },
+                    // A binding, whose answer depends on which scope declared it -- so the name
+                    // travels to the IR compiler, which is the only thing that knows.
+                    Expression::Identifier(identifier) => HirExpressionKind::DeleteBinding {
+                        name: identifier.name.to_string(),
+                    },
+                    // Not a reference at all. `delete 0`, `delete f()`, `delete this`: the
+                    // operand is evaluated for its effects and the answer is `true`.
+                    other => HirExpressionKind::DeleteValue {
+                        argument: Box::new(self.expression(other)),
+                    },
                 }
             }
             Expression::UnaryExpression(expression) => {

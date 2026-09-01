@@ -823,6 +823,24 @@ pub enum ExpressionKind {
         pattern: String,
         flags: String,
     },
+    /// `delete name`, where `name` is an unqualified identifier rather than a property access.
+    ///
+    /// A separate node from [`ExpressionKind::Delete`] because the operand is a *binding* and
+    /// resolving one is the IR compiler's job, not the frontend's: the answer is `false` for
+    /// anything a scope declared, and only for a name no scope declared does it become the
+    /// global object's `[[Delete]]`.  Strict code cannot spell this at all -- the parser reports
+    /// the early error -- so reaching here means the containing body is sloppy.
+    DeleteBinding {
+        name: String,
+    },
+    /// `delete <expression>` where the operand is not a reference at all -- `delete 0`,
+    /// `delete f()`, `delete this`.
+    ///
+    /// The specification evaluates the operand, discards it and answers `true`; the operand is
+    /// kept rather than dropped because it may have side effects that a program observes.
+    DeleteValue {
+        argument: Box<Expression>,
+    },
     /// `delete object.property`.
     ///
     /// Not a unary operator over a member expression: the operand must not be *read*, and a
