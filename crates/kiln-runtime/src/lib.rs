@@ -39,6 +39,8 @@ use crate::http_body::{BodyEvent, ResponseBodyDriver};
 use crate::http_transport::HttpTransportDriver;
 use crate::node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin};
 
+pub use crate::http_transport::{HttpHostOp, HttpResourceId, HttpStreamAction};
+
 /// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
 /// objects and stream events. No Hyper or Tokio type crosses this seam.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,28 +135,30 @@ pub trait ActiveHttpRuntime {
         &mut self,
         resource: ResourceId,
         allow_half_close: bool,
-    ) -> Vec<node_stream::StreamAction>;
+    ) -> Vec<HttpStreamAction>;
     fn connection_started(
         &mut self,
         resource: ResourceId,
-        operation: &AsyncHostOp,
+        operation: &HttpHostOp,
         request: RequestId,
     ) -> bool;
+    /// Start the only raw resource close authorized for an HTTP-owned connection.
+    fn start_connection_close(&mut self, resource: HttpResourceId) -> Option<RequestId>;
+    /// Start the authorized close while already executing inside this realm runtime.
+    fn start_connection_close_in_context(&mut self, resource: HttpResourceId) -> Option<RequestId>;
     fn complete_connection(
         &mut self,
         resource: ResourceId,
         completion: Completion,
-    ) -> Option<Vec<node_stream::StreamAction>>;
-    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>>;
-    fn poll_connection_in_context(
-        &mut self,
-        resource: ResourceId,
-    ) -> Option<Vec<node_stream::StreamAction>>;
+    ) -> Option<Vec<HttpStreamAction>>;
+    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>>;
+    fn poll_connection_in_context(&mut self, resource: ResourceId)
+    -> Option<Vec<HttpStreamAction>>;
     fn close_connection(
         &mut self,
         resource: ResourceId,
         mode: HttpCloseMode,
-    ) -> Option<Vec<node_stream::StreamAction>>;
+    ) -> Option<Vec<HttpStreamAction>>;
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
     fn start_response(
         &mut self,
@@ -176,7 +180,7 @@ pub trait ActiveHttpRuntime {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition>;
-    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction>;
+    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction>;
     fn send_client_request(
         &mut self,
         resource: ResourceId,
@@ -824,10 +828,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     }
 
     /// Install one Hyper HTTP/1 connection on an existing portable TCP resource.
-    pub fn start_http1_connection(
-        &mut self,
-        resource: ResourceId,
-    ) -> Vec<node_stream::StreamAction> {
+    pub fn start_http1_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
         self.start_http1_connection_with_options(resource, false)
     }
 
@@ -835,14 +836,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         allow_half_close: bool,
-    ) -> Vec<node_stream::StreamAction> {
+    ) -> Vec<HttpStreamAction> {
         // The listening server is the Node-visible resource that keeps the realm alive. Accepted
         // HTTP keep-alive sockets are Hyper-owned implementation resources; their reads remain
         // registered for reuse but must not outlive `server.close()` merely because they inherited
         // the listener's referenced flag at accept time. Referenced writes and close operations
         // still keep active work alive through their individual HostOps requests.
         let _ = self.host.set_resource_referenced_now(resource, false);
-        let (io, mut transport) = HttpTransportDriver::new(resource);
+        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let (response_sender, response_receiver) = mpsc::unbounded_channel();
         let task = self.local.spawn_local(hyper_http::event_connection(
@@ -874,11 +875,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         actions
     }
 
-    pub fn start_http1_client_connection(
-        &mut self,
-        resource: ResourceId,
-    ) -> Vec<node_stream::StreamAction> {
-        let (io, mut transport) = HttpTransportDriver::new(resource);
+    pub fn start_http1_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
+        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
         let (request_sender, request_receiver) = mpsc::unbounded_channel();
         let (event_sender, event_receiver) = mpsc::unbounded_channel();
         let task = self.local.spawn_local(hyper_http::client_connection(
@@ -913,7 +911,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     pub fn http_connection_started(
         &mut self,
         resource: ResourceId,
-        operation: &AsyncHostOp,
+        operation: &HttpHostOp,
         request: RequestId,
     ) -> bool {
         self.http_connections
@@ -921,12 +919,57 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .is_some_and(|connection| connection.transport.started(operation, request))
     }
 
+    /// Start and register the raw close selected by an HTTP transport.
+    ///
+    /// HTTP actions cannot express `AsyncHostOp::CloseResource` directly. Keeping the conversion
+    /// here ensures adapters cannot bypass the protocol drain/abort decision accidentally.
+    #[doc(hidden)]
+    pub fn start_http_connection_close(&mut self, resource: HttpResourceId) -> Option<RequestId> {
+        self.start_http_connection_close_with_context(resource, false)
+    }
+
+    /// Start an authorized HTTP close while already executing inside this realm runtime.
+    #[doc(hidden)]
+    pub fn start_http_connection_close_in_context(
+        &mut self,
+        resource: HttpResourceId,
+    ) -> Option<RequestId> {
+        self.start_http_connection_close_with_context(resource, true)
+    }
+
+    fn start_http_connection_close_with_context(
+        &mut self,
+        resource: HttpResourceId,
+        in_context: bool,
+    ) -> Option<RequestId> {
+        let raw = resource.resource();
+        if !self.http_connections.contains_key(&raw) {
+            return None;
+        }
+        let operation = AsyncHostOp::CloseResource { resource: raw };
+        let request = if in_context {
+            self.start_host_op_in_context(operation, true)
+        } else {
+            self.start_host_op(operation, true)
+        };
+        let accepted = self
+            .http_connections
+            .get_mut(&raw)
+            .is_some_and(|connection| connection.transport.close_started(request));
+        if accepted {
+            Some(request)
+        } else {
+            self.cancel_host_op(request);
+            None
+        }
+    }
+
     #[doc(hidden)]
     pub fn complete_http_connection(
         &mut self,
         resource: ResourceId,
         completion: Completion,
-    ) -> Option<Vec<node_stream::StreamAction>> {
+    ) -> Option<Vec<HttpStreamAction>> {
         let idle_client = self
             .http_connections
             .get(&resource)
@@ -941,17 +984,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             // A keep-alive connection may be reset after its response has completed and the Agent
             // has made it idle. There is no language request left to reject, so expose the close
             // transition but not the transport error. Busy connections still surface every error.
-            actions.retain(|action| !matches!(action, node_stream::StreamAction::Error(_)));
+            actions.retain(|action| !matches!(action, HttpStreamAction::Error(_)));
         }
         Some(actions)
     }
 
     /// Poll woken Hyper tasks and return bytes they selected for the existing HostOps stream.
     #[doc(hidden)]
-    pub fn poll_http_connection(
-        &mut self,
-        resource: ResourceId,
-    ) -> Option<Vec<node_stream::StreamAction>> {
+    pub fn poll_http_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>> {
         self.poll_http_tasks();
         self.http_connections
             .get_mut(&resource)
@@ -966,7 +1006,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     pub fn poll_http_connection_in_context(
         &mut self,
         resource: ResourceId,
-    ) -> Option<Vec<node_stream::StreamAction>> {
+    ) -> Option<Vec<HttpStreamAction>> {
         self.http_connections
             .get_mut(&resource)
             .map(|connection| connection.transport.pump_write())
@@ -1004,7 +1044,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         mode: HttpCloseMode,
-    ) -> Option<Vec<node_stream::StreamAction>> {
+    ) -> Option<Vec<HttpStreamAction>> {
         let connection = self.http_connections.get_mut(&resource)?;
         if mode == HttpCloseMode::Abort {
             return Some(connection.transport.abort());
@@ -1447,35 +1487,43 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         allow_half_close: bool,
-    ) -> Vec<node_stream::StreamAction> {
+    ) -> Vec<HttpStreamAction> {
         self.start_http1_connection_with_options(resource, allow_half_close)
     }
 
     fn connection_started(
         &mut self,
         resource: ResourceId,
-        operation: &AsyncHostOp,
+        operation: &HttpHostOp,
         request: RequestId,
     ) -> bool {
         self.http_connection_started(resource, operation, request)
+    }
+
+    fn start_connection_close(&mut self, resource: HttpResourceId) -> Option<RequestId> {
+        self.start_http_connection_close(resource)
+    }
+
+    fn start_connection_close_in_context(&mut self, resource: HttpResourceId) -> Option<RequestId> {
+        self.start_http_connection_close_in_context(resource)
     }
 
     fn complete_connection(
         &mut self,
         resource: ResourceId,
         completion: Completion,
-    ) -> Option<Vec<node_stream::StreamAction>> {
+    ) -> Option<Vec<HttpStreamAction>> {
         self.complete_http_connection(resource, completion)
     }
 
-    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<node_stream::StreamAction>> {
+    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>> {
         self.poll_http_connection(resource)
     }
 
     fn poll_connection_in_context(
         &mut self,
         resource: ResourceId,
-    ) -> Option<Vec<node_stream::StreamAction>> {
+    ) -> Option<Vec<HttpStreamAction>> {
         self.poll_http_connection_in_context(resource)
     }
 
@@ -1483,7 +1531,7 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         mode: HttpCloseMode,
-    ) -> Option<Vec<node_stream::StreamAction>> {
+    ) -> Option<Vec<HttpStreamAction>> {
         self.close_http_connection(resource, mode)
     }
 
@@ -1520,7 +1568,7 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         self.end_http1_response(resource, id, data)
     }
 
-    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<node_stream::StreamAction> {
+    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
         self.start_http1_client_connection(resource)
     }
 
@@ -2668,6 +2716,17 @@ mod tests {
             .expect("realm runtime remains healthy")
     }
 
+    fn start_http_test_operation<H: RealmHostProvider>(
+        runtime: &mut RealmRuntime<H>,
+        resource: ResourceId,
+        operation: &HttpHostOp,
+        referenced: bool,
+    ) -> RequestId {
+        let request = runtime.start_host_op(operation.clone().into_host_op(), referenced);
+        assert!(runtime.http_connection_started(resource, operation, request));
+        request
+    }
+
     #[test]
     fn terminal_request_events_are_deduplicated() {
         let mut completed = HashSet::new();
@@ -3473,7 +3532,7 @@ mod tests {
     #[test]
     fn scripted_provider_drives_hyper_connection_through_the_same_stream_bridge() {
         use crate::node_http::HttpResponse;
-        use crate::node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction};
+        use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
 
         let resource = ResourceId::new(43);
         let connect = AsyncHostOp::TcpConnect {
@@ -3518,21 +3577,20 @@ mod tests {
             Ok(AsyncHostValue::Resource(connected))
         );
         let start = runtime.start_http1_connection(resource);
-        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
             panic!("HTTP connection starts one scripted read: {start:?}");
         };
-        assert_eq!(read_operation, &read);
-        let read_request = runtime.start_host_op(read_operation.clone(), false);
-        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+        assert_eq!(read_operation.clone().into_host_op(), read);
+        let read_request = start_http_test_operation(&mut runtime, resource, read_operation, false);
         let request_completion =
             next_host_completion(&mut runtime).expect("request read completes");
         let actions = runtime
             .complete_http_connection(resource, request_completion)
             .expect("request read belongs to HTTP connection");
-        let [StreamAction::Start(next_read)] = actions.as_slice() else {
+        let [HttpStreamAction::Start(next_read)] = actions.as_slice() else {
             panic!("HTTP bridge starts one follow-up read: {actions:?}");
         };
-        assert_eq!(next_read, &read);
+        assert_eq!(next_read.clone().into_host_op(), read);
 
         let events = (0..8)
             .find_map(|_| {
@@ -3561,12 +3619,12 @@ mod tests {
                     .filter(|actions| !actions.is_empty())
             })
             .unwrap_or_else(|| panic!("Hyper did not select a response write"));
-        let [StreamAction::Start(write_operation)] = writes.as_slice() else {
+        let [HttpStreamAction::Start(write_operation)] = writes.as_slice() else {
             panic!("Hyper selects one scripted response write: {writes:?}");
         };
-        assert_eq!(write_operation, &write);
-        let write_request = runtime.start_host_op(write_operation.clone(), false);
-        assert!(runtime.http_connection_started(resource, write_operation, write_request));
+        assert_eq!(write_operation.clone().into_host_op(), write);
+        let _write_request =
+            start_http_test_operation(&mut runtime, resource, write_operation, false);
         let write_completion =
             next_host_completion(&mut runtime).expect("response write completes");
         let mut write_actions = runtime
@@ -3584,24 +3642,22 @@ mod tests {
                 );
             }
             write_actions.extend(runtime.poll_http_connection(resource).unwrap_or_default());
-            if write_actions.iter().any(|action| {
-                matches!(
-                    action,
-                    StreamAction::Start(AsyncHostOp::CloseResource { .. })
-                )
-            }) {
+            if write_actions
+                .iter()
+                .any(|action| matches!(action, HttpStreamAction::Close(_)))
+            {
                 break;
             }
         }
         assert!(write_actions.iter().any(|action| matches!(
             action,
-            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
-                if *closed == resource
+            HttpStreamAction::Close(closed) if closed.resource() == resource
         )));
         assert!(
-            !write_actions
-                .iter()
-                .any(|action| matches!(action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })))
+            !write_actions.iter().any(|action| matches!(
+                action,
+                HttpStreamAction::Start(HttpHostOp::TcpWrite { .. })
+            ))
         );
         assert_ne!(connect_request, read_request);
         assert!(runtime.host_mut().is_exhausted());
@@ -3609,8 +3665,6 @@ mod tests {
 
     #[test]
     fn scripted_provider_drains_response_before_same_turn_server_close() {
-        use crate::node_stream::StreamAction;
-
         let resource = ResourceId::new(45);
         let read = AsyncHostOp::TcpRead {
             stream: resource,
@@ -3639,12 +3693,12 @@ mod tests {
         ]))
         .expect("scripted runtime builds");
         let start = runtime.start_http1_connection(resource);
-        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
             panic!("HTTP connection starts one scripted read: {start:?}");
         };
-        assert_eq!(read_operation, &read);
-        let read_request = runtime.start_host_op(read_operation.clone(), false);
-        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+        assert_eq!(read_operation.clone().into_host_op(), read);
+        let _read_request =
+            start_http_test_operation(&mut runtime, resource, read_operation, false);
         let read_completion =
             next_host_completion(&mut runtime).expect("scripted request read completes");
         let actions = runtime
@@ -3652,7 +3706,8 @@ mod tests {
             .expect("request read belongs to connection");
         assert!(actions.iter().any(|action| matches!(
             action,
-            StreamAction::Start(AsyncHostOp::TcpRead { stream, .. }) if *stream == resource
+            HttpStreamAction::Start(HttpHostOp::TcpRead { stream, .. })
+                if stream.resource() == resource
         )));
         runtime.poll_http_connection(resource);
         let events = runtime.take_http_events(resource);
@@ -3682,11 +3737,11 @@ mod tests {
         let writes = runtime
             .poll_http_connection(resource)
             .expect("connection remains while response drains");
-        let [StreamAction::Start(AsyncHostOp::TcpWrite { stream, data })] = writes.as_slice()
+        let [HttpStreamAction::Start(HttpHostOp::TcpWrite { stream, data })] = writes.as_slice()
         else {
             panic!("response write must precede close: {writes:?}");
         };
-        assert_eq!(*stream, resource);
+        assert_eq!(stream.resource(), resource);
         assert_eq!(
             &AsyncHostOp::TcpWrite {
                 stream: resource,
@@ -3694,8 +3749,12 @@ mod tests {
             },
             &write
         );
-        let write_request = runtime.start_host_op(write.clone(), false);
-        assert!(runtime.http_connection_started(resource, &write, write_request));
+        let write_operation = HttpHostOp::TcpWrite {
+            stream: HttpResourceId::new(resource),
+            data: data.clone(),
+        };
+        let _write_request =
+            start_http_test_operation(&mut runtime, resource, &write_operation, false);
         let write_completion =
             next_host_completion(&mut runtime).expect("scripted response write completes");
         let completion = runtime
@@ -3705,8 +3764,8 @@ mod tests {
             completion.is_empty()
                 || completion.iter().all(|action| matches!(
                     action,
-                    StreamAction::Start(AsyncHostOp::TcpWrite { .. })
-                        | StreamAction::Event(node_stream::StreamEvent::Close)
+                    HttpStreamAction::Start(HttpHostOp::TcpWrite { .. })
+                        | HttpStreamAction::Event(node_stream::StreamEvent::Close)
                 ))
         );
 
@@ -3717,8 +3776,8 @@ mod tests {
                     actions.into_iter().find(|action| {
                         matches!(
                             action,
-                            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
-                                if *closed == resource
+                            HttpStreamAction::Close(closed)
+                                if closed.resource() == resource
                         )
                     })
                 })
@@ -3726,10 +3785,11 @@ mod tests {
             .unwrap_or_else(|| panic!("response write must be acknowledged before close"));
         assert!(matches!(
             close_action,
-            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
-                if closed == resource
+            HttpStreamAction::Close(closed) if closed.resource() == resource
         ));
-        let close_request = runtime.start_host_op(close, false);
+        let close_request = runtime
+            .start_http_connection_close(HttpResourceId::new(resource))
+            .expect("authorized HTTP close starts");
         assert_eq!(
             next_host_completion(&mut runtime)
                 .expect("close follows the response write")
@@ -3741,8 +3801,6 @@ mod tests {
 
     #[test]
     fn scripted_runtime_aborts_http_connection_without_waiting_for_response_write() {
-        use crate::node_stream::StreamAction;
-
         let resource = ResourceId::new(46);
         let read = AsyncHostOp::TcpRead {
             stream: resource,
@@ -3762,11 +3820,10 @@ mod tests {
         .expect("scripted runtime builds");
 
         let start = runtime.start_http1_connection(resource);
-        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
             panic!("HTTP connection starts one scripted read");
         };
-        let read_request = runtime.start_host_op(read_operation.clone(), true);
-        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+        let read_request = start_http_test_operation(&mut runtime, resource, read_operation, true);
 
         let actions = runtime
             .close_http_connection(resource, HttpCloseMode::Abort)
@@ -3774,16 +3831,17 @@ mod tests {
         assert_eq!(
             actions,
             vec![
-                StreamAction::Cancel(read_request),
-                StreamAction::Start(close.clone()),
+                HttpStreamAction::Cancel(read_request),
+                HttpStreamAction::Close(HttpResourceId::new(resource)),
             ]
         );
         assert!(runtime.cancel_host_op(read_request));
-        let StreamAction::Start(close_operation) = &actions[1] else {
+        let HttpStreamAction::Close(close_resource) = actions[1] else {
             panic!("abort must select a portable close operation");
         };
-        let close_request = runtime.start_host_op(close_operation.clone(), true);
-        assert!(runtime.http_connection_started(resource, close_operation, close_request));
+        let close_request = runtime
+            .start_http_connection_close(close_resource)
+            .expect("authorized HTTP close starts");
         assert_eq!(
             next_host_completion(&mut runtime)
                 .expect("aborted close completes")
@@ -3795,7 +3853,7 @@ mod tests {
 
     #[test]
     fn scripted_provider_dispatches_buffered_http1_pipeline_after_first_response() {
-        use crate::node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction};
+        use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
 
         let resource = ResourceId::new(44);
         let read = AsyncHostOp::TcpRead {
@@ -3821,11 +3879,11 @@ mod tests {
         ]))
         .expect("scripted runtime builds");
         let start = runtime.start_http1_connection(resource);
-        let [StreamAction::Start(read_operation)] = start.as_slice() else {
+        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
             panic!("HTTP connection starts one read")
         };
-        let read_request = runtime.start_host_op(read_operation.clone(), false);
-        assert!(runtime.http_connection_started(resource, read_operation, read_request));
+        let _read_request =
+            start_http_test_operation(&mut runtime, resource, read_operation, false);
         let completion = next_host_completion(&mut runtime).expect("pipeline read completes");
         runtime
             .complete_http_connection(resource, completion)
@@ -3860,12 +3918,12 @@ mod tests {
                     .filter(|actions| !actions.is_empty())
             })
             .expect("first response write");
-        let [StreamAction::Start(write_operation)] = write_actions.as_slice() else {
+        let [HttpStreamAction::Start(write_operation)] = write_actions.as_slice() else {
             panic!("first response selects one write: {write_actions:?}")
         };
-        assert_eq!(write_operation, &first_write);
-        let write_request = runtime.start_host_op(write_operation.clone(), false);
-        assert!(runtime.http_connection_started(resource, write_operation, write_request));
+        assert_eq!(write_operation.clone().into_host_op(), first_write);
+        let _write_request =
+            start_http_test_operation(&mut runtime, resource, write_operation, false);
         let completion = next_host_completion(&mut runtime).expect("first write completes");
         runtime
             .complete_http_connection(resource, completion)
@@ -4599,7 +4657,6 @@ mod tests {
     #[test]
     fn runtime_owned_hyper_connection_uses_live_hostops_transport() {
         use crate::node_http::HttpResponse;
-        use crate::node_stream::StreamAction;
 
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         runtime.start_host_op(
@@ -4649,11 +4706,10 @@ mod tests {
         let server = server.expect("accepted stream exists");
         let client = client.expect("client stream exists");
         let start = runtime.start_http1_connection(server.id);
-        let [StreamAction::Start(read)] = start.as_slice() else {
+        let [HttpStreamAction::Start(read)] = start.as_slice() else {
             panic!("HTTP connection starts one read")
         };
-        let read_request = runtime.start_host_op(read.clone(), false);
-        assert!(runtime.http_connection_started(server.id, read, read_request));
+        let read_request = start_http_test_operation(&mut runtime, server.id, read, false);
         runtime.start_host_op(
             AsyncHostOp::TcpWrite {
                 stream: client.id,
@@ -4672,9 +4728,8 @@ mod tests {
             .complete_http_connection(server.id, read_completion.expect("server read completes"))
             .expect("connection owns completion");
         for action in actions {
-            if let StreamAction::Start(operation) = action {
-                let request = runtime.start_host_op(operation.clone(), false);
-                assert!(runtime.http_connection_started(server.id, &operation, request));
+            if let HttpStreamAction::Start(operation) = action {
+                start_http_test_operation(&mut runtime, server.id, &operation, false);
             }
         }
         runtime.poll_http_connection(server.id);
@@ -4696,11 +4751,10 @@ mod tests {
         let writes = runtime
             .poll_http_connection(server.id)
             .expect("connection exists");
-        let [StreamAction::Start(write)] = writes.as_slice() else {
+        let [HttpStreamAction::Start(write)] = writes.as_slice() else {
             panic!("Hyper selected one response write: {writes:?}")
         };
-        let write_request = runtime.start_host_op(write.clone(), false);
-        assert!(runtime.http_connection_started(server.id, write, write_request));
+        let write_request = start_http_test_operation(&mut runtime, server.id, write, false);
         runtime.start_host_op(
             AsyncHostOp::TcpRead {
                 stream: client.id,
@@ -4734,12 +4788,11 @@ mod tests {
     #[test]
     fn runtime_owned_hyper_connection_is_deterministic_over_scripted_completions() {
         use crate::node_http::HttpResponse;
-        use crate::node_stream::StreamAction;
 
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         let resource = ResourceId::new(91);
         let start = runtime.start_http1_connection(resource);
-        let [StreamAction::Start(read)] = start.as_slice() else {
+        let [HttpStreamAction::Start(read)] = start.as_slice() else {
             panic!("HTTP connection starts one read")
         };
         assert!(runtime.http_connection_started(resource, read, RequestId::new(1)));
@@ -4758,7 +4811,8 @@ mod tests {
             .expect("scripted completion belongs to connection");
         assert!(actions.iter().any(|action| matches!(
             action,
-            StreamAction::Start(AsyncHostOp::TcpRead { stream, .. }) if *stream == resource
+            HttpStreamAction::Start(HttpHostOp::TcpRead { stream, .. })
+                if stream.resource() == resource
         )));
         runtime.poll_http_connection(resource);
         let events = runtime.take_http_events(resource);
@@ -4778,11 +4832,11 @@ mod tests {
         let writes = runtime
             .poll_http_connection(resource)
             .expect("connection exists");
-        let [StreamAction::Start(AsyncHostOp::TcpWrite { stream, data })] = writes.as_slice()
+        let [HttpStreamAction::Start(HttpHostOp::TcpWrite { stream, data })] = writes.as_slice()
         else {
             panic!("script selects one write: {writes:?}")
         };
-        assert_eq!(*stream, resource);
+        assert_eq!(stream.resource(), resource);
         let response = String::from_utf8(data.clone()).expect("HTTP is ASCII");
         assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
         assert!(response.contains("content-type: text/plain\r\n"));
@@ -4790,8 +4844,8 @@ mod tests {
         assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
         assert!(runtime.http_connection_started(
             resource,
-            &AsyncHostOp::TcpWrite {
-                stream: resource,
+            &HttpHostOp::TcpWrite {
+                stream: HttpResourceId::new(resource),
                 data: data.clone(),
             },
             RequestId::new(2),
@@ -4818,35 +4872,33 @@ mod tests {
                 );
             }
             after_write.extend(runtime.poll_http_connection(resource).unwrap_or_default());
-            if after_write.iter().any(|action| {
-                matches!(
-                    action,
-                    StreamAction::Start(AsyncHostOp::CloseResource { .. })
-                )
-            }) {
+            if after_write
+                .iter()
+                .any(|action| matches!(action, HttpStreamAction::Close(_)))
+            {
                 break;
             }
         }
         assert!(after_write.iter().any(|action| matches!(
             action,
-            StreamAction::Start(AsyncHostOp::CloseResource { resource: closed })
-                if *closed == resource
+            HttpStreamAction::Close(closed) if closed.resource() == resource
         )));
         assert!(
-            !after_write
-                .iter()
-                .any(|action| matches!(action, StreamAction::Start(AsyncHostOp::TcpWrite { .. })))
+            !after_write.iter().any(|action| matches!(
+                action,
+                HttpStreamAction::Start(HttpHostOp::TcpWrite { .. })
+            ))
         );
     }
 
     #[test]
     fn runtime_http_response_body_preserves_node_write_and_drain_semantics() {
-        use crate::node_stream::{StreamAction, WriteDisposition};
+        use crate::node_stream::WriteDisposition;
 
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         let resource = ResourceId::new(92);
         let start = runtime.start_http1_connection(resource);
-        let [StreamAction::Start(read)] = start.as_slice() else {
+        let [HttpStreamAction::Start(read)] = start.as_slice() else {
             panic!("HTTP connection starts one read")
         };
         assert!(runtime.http_connection_started(resource, read, RequestId::new(1)));

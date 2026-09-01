@@ -18,6 +18,123 @@ use crate::node_stream::{DEFAULT_HIGH_WATER_MARK, StreamAction, StreamDriver, St
 
 const DEFAULT_BUFFER_LIMIT: usize = 64 * 1024;
 
+/// A portable resource after ownership has transferred to the realm HTTP engine.
+///
+/// Keeping this distinct from [`ResourceId`] prevents HTTP transport code from selecting raw
+/// resource operations accidentally. Converting back to an untyped resource is explicit at a
+/// HostOps adapter boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HttpResourceId(ResourceId);
+
+impl HttpResourceId {
+    /// Mark an accepted or connected TCP resource as owned by the HTTP engine.
+    pub const fn new(resource: ResourceId) -> Self {
+        Self(resource)
+    }
+
+    /// Return the provider resource identity at an explicit adapter boundary.
+    pub const fn resource(self) -> ResourceId {
+        self.0
+    }
+}
+
+/// Host operation an HTTP transport may select directly.
+///
+/// There is deliberately no raw close variant. Closing an HTTP-owned resource is represented by
+/// [`HttpStreamAction::Close`] and must pass through the runtime's authorized close adapter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpHostOp {
+    TcpRead {
+        stream: HttpResourceId,
+        max_bytes: usize,
+    },
+    TcpWrite {
+        stream: HttpResourceId,
+        data: Vec<u8>,
+    },
+    TcpShutdown {
+        stream: HttpResourceId,
+    },
+}
+
+impl HttpHostOp {
+    /// Lower one HTTP-safe operation at the provider boundary.
+    pub fn into_host_op(self) -> AsyncHostOp {
+        match self {
+            Self::TcpRead { stream, max_bytes } => AsyncHostOp::TcpRead {
+                stream: stream.resource(),
+                max_bytes,
+            },
+            Self::TcpWrite { stream, data } => AsyncHostOp::TcpWrite {
+                stream: stream.resource(),
+                data,
+            },
+            Self::TcpShutdown { stream } => AsyncHostOp::TcpShutdown {
+                stream: stream.resource(),
+            },
+        }
+    }
+}
+
+/// Side effect selected by an HTTP transport.
+///
+/// Unlike the generic Node stream action, this type cannot contain
+/// `AsyncHostOp::CloseResource`. That makes bypassing HTTP's drain/abort state machine a type
+/// error in interpreter and native adapters.
+///
+/// ```compile_fail
+/// use kiln_host_abi::ResourceId;
+/// use kiln_runtime::{HttpHostOp, HttpResourceId};
+///
+/// let resource = HttpResourceId::new(ResourceId::new(7));
+/// let _ = HttpHostOp::CloseResource { resource };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HttpStreamAction {
+    Start(HttpHostOp),
+    Cancel(RequestId),
+    Data(Vec<u8>),
+    Event(StreamEvent),
+    Error(AsyncHostError),
+    Close(HttpResourceId),
+}
+
+fn http_action(action: StreamAction) -> HttpStreamAction {
+    match action {
+        StreamAction::Start(AsyncHostOp::TcpRead { stream, max_bytes }) => {
+            HttpStreamAction::Start(HttpHostOp::TcpRead {
+                stream: HttpResourceId::new(stream),
+                max_bytes,
+            })
+        }
+        StreamAction::Start(AsyncHostOp::TcpWrite { stream, data }) => {
+            HttpStreamAction::Start(HttpHostOp::TcpWrite {
+                stream: HttpResourceId::new(stream),
+                data,
+            })
+        }
+        StreamAction::Start(AsyncHostOp::TcpShutdown { stream }) => {
+            HttpStreamAction::Start(HttpHostOp::TcpShutdown {
+                stream: HttpResourceId::new(stream),
+            })
+        }
+        StreamAction::Start(AsyncHostOp::CloseResource { resource }) => {
+            HttpStreamAction::Close(HttpResourceId::new(resource))
+        }
+        StreamAction::Cancel(request) => HttpStreamAction::Cancel(request),
+        StreamAction::Data(data) => HttpStreamAction::Data(data),
+        StreamAction::Event(event) => HttpStreamAction::Event(event),
+        StreamAction::Error(error) => HttpStreamAction::Error(error),
+        StreamAction::Start(operation) => {
+            unreachable!("HTTP stream selected unsupported host operation {operation:?}")
+        }
+    }
+}
+
+fn http_actions(actions: Vec<StreamAction>) -> Vec<HttpStreamAction> {
+    actions.into_iter().map(http_action).collect()
+}
+
 /// Build the two private halves of one HTTP connection transport.
 pub(crate) fn channel() -> (HyperTransport, RealmTransport) {
     channel_with_limit(DEFAULT_BUFFER_LIMIT)
@@ -240,12 +357,12 @@ pub(crate) struct HttpTransportDriver {
 }
 
 impl HttpTransportDriver {
-    pub(crate) fn new(resource: ResourceId) -> (HyperTransport, Self) {
+    pub(crate) fn new(resource: HttpResourceId) -> (HyperTransport, Self) {
         let (hyper, transport) = channel();
         (
             hyper,
             Self {
-                stream: StreamDriver::new(resource, DEFAULT_HIGH_WATER_MARK),
+                stream: StreamDriver::new(resource.resource(), DEFAULT_HIGH_WATER_MARK),
                 transport,
                 write_request: None,
                 write_selected: false,
@@ -256,12 +373,15 @@ impl HttpTransportDriver {
         )
     }
 
-    pub(crate) fn start(&mut self) -> Vec<StreamAction> {
-        self.stream.start_reading()
+    pub(crate) fn start(&mut self) -> Vec<HttpStreamAction> {
+        http_actions(self.stream.start_reading())
     }
 
-    pub(crate) fn started(&mut self, operation: &AsyncHostOp, request: RequestId) -> bool {
-        if matches!(operation, AsyncHostOp::TcpWrite { .. }) {
+    pub(crate) fn started(&mut self, operation: &HttpHostOp, request: RequestId) -> bool {
+        if let HttpHostOp::TcpWrite { stream, .. } = operation {
+            if stream.resource() != self.stream.resource() {
+                return false;
+            }
             if !self.write_selected || self.write_request.is_some() {
                 return false;
             }
@@ -269,35 +389,44 @@ impl HttpTransportDriver {
             self.write_request = Some(request);
             true
         } else {
-            self.stream.started(operation, request)
+            self.stream
+                .started(&operation.clone().into_host_op(), request)
         }
+    }
+
+    /// Associate the one raw close request authorized by the HTTP runtime.
+    pub(crate) fn close_started(&mut self, request: RequestId) -> bool {
+        let operation = AsyncHostOp::CloseResource {
+            resource: self.stream.resource(),
+        };
+        self.stream.started(&operation, request)
     }
 
     /// Pump bytes produced by the most recent Hyper poll into the stream driver's write queue.
     ///
     /// Call this at the realm checkpoint after Tokio has polled local connection tasks. A write
     /// remains at the transport front until its HostOps completion arrives.
-    pub(crate) fn pump_write(&mut self) -> Vec<StreamAction> {
+    pub(crate) fn pump_write(&mut self) -> Vec<HttpStreamAction> {
         if self.write_selected || self.write_request.is_some() {
             return Vec::new();
         }
         let Some(bytes) = self.transport.next_write() else {
             return if self.close_requested && self.wrote_bytes && !self.close_started {
                 self.close_started = true;
-                self.stream.close_actions()
+                http_actions(self.stream.close_actions())
             } else {
                 Vec::new()
             };
         };
         self.write_selected = true;
         self.wrote_bytes = true;
-        vec![StreamAction::Start(AsyncHostOp::TcpWrite {
-            stream: self.stream.resource(),
+        vec![HttpStreamAction::Start(HttpHostOp::TcpWrite {
+            stream: HttpResourceId::new(self.stream.resource()),
             data: bytes,
         })]
     }
 
-    pub(crate) fn completed(&mut self, completion: Completion) -> Option<Vec<StreamAction>> {
+    pub(crate) fn completed(&mut self, completion: Completion) -> Option<Vec<HttpStreamAction>> {
         if self.write_request == Some(completion.request) {
             self.write_request = None;
             return Some(match completion.result {
@@ -319,11 +448,11 @@ impl HttpTransportDriver {
                         "unexpected host value for write",
                     );
                     self.fail_transport(&error);
-                    vec![StreamAction::Error(error)]
+                    vec![HttpStreamAction::Error(error)]
                 }
                 Err(error) => {
                     self.fail_transport(&error);
-                    vec![StreamAction::Error(error)]
+                    vec![HttpStreamAction::Error(error)]
                 }
             });
         }
@@ -344,14 +473,14 @@ impl HttpTransportDriver {
                         && !(error.syscall == "write" && error.message.contains("Broken pipe"))
                     {
                         self.fail_transport(&error);
-                        outward.push(StreamAction::Error(error));
+                        outward.push(HttpStreamAction::Error(error));
                     }
                 }
                 StreamAction::Event(StreamEvent::Close) => {
                     self.transport.finish_read();
-                    outward.push(StreamAction::Event(StreamEvent::Close));
+                    outward.push(HttpStreamAction::Event(StreamEvent::Close));
                 }
-                action => outward.push(action),
+                action => outward.push(http_action(action)),
             }
         }
         // This catches output already produced before the completion. Output produced because
@@ -361,7 +490,7 @@ impl HttpTransportDriver {
     }
 
     /// Close the portable resource after Hyper's final buffered write is acknowledged.
-    pub(crate) fn close(&mut self) -> Vec<StreamAction> {
+    pub(crate) fn close(&mut self) -> Vec<HttpStreamAction> {
         self.close_requested = true;
         if self.write_selected
             || self.write_request.is_some()
@@ -371,21 +500,21 @@ impl HttpTransportDriver {
             Vec::new()
         } else {
             self.close_started = true;
-            self.stream.close_actions()
+            http_actions(self.stream.close_actions())
         }
     }
 
     /// Abort the protocol immediately, canceling both transport directions before closing the
     /// portable resource. Unlike [`Self::close`], this intentionally does not wait for a queued
     /// response write; it is the path for Node's forced destroy and protocol failure/EOF.
-    pub(crate) fn abort(&mut self) -> Vec<StreamAction> {
+    pub(crate) fn abort(&mut self) -> Vec<HttpStreamAction> {
         self.close_requested = true;
         self.close_started = true;
         self.write_selected = false;
         let write_request = self.write_request.take();
-        let mut actions = self.stream.close_actions();
+        let mut actions = http_actions(self.stream.close_actions());
         if let Some(request) = write_request {
-            actions.insert(0, StreamAction::Cancel(request));
+            actions.insert(0, HttpStreamAction::Cancel(request));
         }
         actions
     }
@@ -512,9 +641,10 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local.block_on(&runtime, async {
             let resource = ResourceId::new(7);
-            let (mut hyper, mut driver) = HttpTransportDriver::new(resource);
+            let http_resource = HttpResourceId::new(resource);
+            let (mut hyper, mut driver) = HttpTransportDriver::new(http_resource);
             let start = driver.start();
-            let [StreamAction::Start(read)] = start.as_slice() else {
+            let [HttpStreamAction::Start(read)] = start.as_slice() else {
                 panic!("driver starts exactly one read")
             };
             assert!(driver.started(read, RequestId::new(1)));
@@ -525,7 +655,7 @@ mod tests {
                     .iter()
                     .any(|action| matches!(
                         action,
-                        StreamAction::Start(AsyncHostOp::TcpRead { .. })
+                        HttpStreamAction::Start(HttpHostOp::TcpRead { .. })
                     ))
             );
 
@@ -537,10 +667,18 @@ mod tests {
             assert_eq!(&input, b"request");
             hyper.write_all(b"response").await.expect("write buffers");
             let pumped = driver.pump_write();
-            let [StreamAction::Start(write)] = pumped.as_slice() else {
+            let [HttpStreamAction::Start(write)] = pumped.as_slice() else {
                 panic!("driver starts exactly one write")
             };
-            assert!(matches!(write, AsyncHostOp::TcpWrite { data, .. } if data == b"response"));
+            assert!(matches!(write, HttpHostOp::TcpWrite { data, .. } if data == b"response"));
+            let wrong_write = HttpHostOp::TcpWrite {
+                stream: HttpResourceId::new(ResourceId::new(70)),
+                data: b"response".to_vec(),
+            };
+            assert!(
+                !driver.started(&wrong_write, RequestId::new(2)),
+                "an HTTP write cannot be registered on another connection"
+            );
             assert!(driver.started(write, RequestId::new(2)));
             let completed = driver
                 .completed(completion(2, AsyncHostValue::Undefined))
@@ -555,7 +693,7 @@ mod tests {
 
     #[test]
     fn abort_cancels_pending_http_write_before_closing_resource() {
-        use kiln_host_abi::{AsyncHostOp, ResourceId};
+        use kiln_host_abi::ResourceId;
 
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -563,10 +701,11 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local.block_on(&runtime, async {
             let resource = ResourceId::new(8);
-            let (mut hyper, mut driver) = HttpTransportDriver::new(resource);
+            let http_resource = HttpResourceId::new(resource);
+            let (mut hyper, mut driver) = HttpTransportDriver::new(http_resource);
             hyper.write_all(b"response").await.expect("write buffers");
             let pumped = driver.pump_write();
-            let [StreamAction::Start(write)] = pumped.as_slice() else {
+            let [HttpStreamAction::Start(write)] = pumped.as_slice() else {
                 panic!("driver starts exactly one HTTP write");
             };
             assert!(driver.started(write, RequestId::new(1)));
@@ -574,8 +713,8 @@ mod tests {
             assert_eq!(
                 driver.abort(),
                 vec![
-                    StreamAction::Cancel(RequestId::new(1)),
-                    StreamAction::Start(AsyncHostOp::CloseResource { resource }),
+                    HttpStreamAction::Cancel(RequestId::new(1)),
+                    HttpStreamAction::Close(http_resource),
                 ]
             );
         });
