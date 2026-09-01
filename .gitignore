@@ -21,3 +21,8 @@
 /conformance/thirdparty/react-ssr.bundle.js
 /conformance/thirdparty/babel.bundle.js
 /conformance/thirdparty/.scratch/
+
+# insta writes a pending `.snap.new` beside a snapshot whenever one fails. It is a build artifact
+# of the failing run, never a thing to commit -- `cargo insta accept` turns it into a real `.snap`
+# -- and leaving it untracked is how `git add -A` sweeps one into somebody's commit.
+*.snap.new
