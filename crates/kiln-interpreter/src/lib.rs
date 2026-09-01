@@ -31,10 +31,16 @@ mod temporal;
 // `Intl` is glue over the same kind of linked engine, and its option-reading half is long
 // enough to bury the machine for the same reason. ADR 0025 links it; ADR 0029 §4 names ICU4X.
 mod intl;
+// A second agent is a thread, a realm and a turn between them, and none of that is the bytecode
+// machine's business until `Atomics.wait` blocks. Kept beside the machine rather than inside it
+// so the scheduler can be read -- and reasoned about for determinism -- on its own.
+mod agent;
+use agent::{AgentGroup, AgentOwner, Bytes};
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::fmt;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 /// The built-ins the runtime provides natively.
 ///
@@ -452,6 +458,13 @@ pub enum Native {
     /// differences are what the tests reaching for this are about. Reachable only from a realm
     /// whose host asked for it, for the same reason [`Native::HostCreateRealm`] is.
     HostEvalScript,
+    /// One operation of Test262's agent protocol, published on the global object of a realm
+    /// whose host asked for agents (`ExecutionCapabilities::with_host_agents`).
+    ///
+    /// Eight hooks rather than one object, for the same reason `$262CreateRealm` is a hook: the
+    /// `$262.agent` a program sees is the runner's, assembled from what it found published. What
+    /// the engine owes is the operations themselves.
+    HostAgent(AgentOp),
     /// `Map.prototype.getOrInsert` and its three siblings. `weak` says which collection this is
     /// reached through and `computed` whether the value is a callback's result, because the two
     /// differ only in where the value comes from and when it is asked for.
@@ -4076,6 +4089,58 @@ fn helper_slot(state: &Rc<RefCell<ObjectData>>, key: &str) -> Value {
         .unwrap_or(Value::Undefined)
 }
 
+/// One operation of Test262's agent protocol, as the interpreter publishes it.
+///
+/// The names are the hooks' names -- `$262AgentStart` and its seven siblings -- because a hook
+/// is a name a program reaches for, and the C backend refuses them by exactly that name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum AgentOp {
+    Start,
+    Broadcast,
+    GetReport,
+    Sleep,
+    MonotonicNow,
+    ReceiveBroadcast,
+    Report,
+    Leaving,
+}
+
+impl AgentOp {
+    /// Every hook, in the order the host object lists them.
+    pub const ALL: [Self; 8] = [
+        Self::Start,
+        Self::Broadcast,
+        Self::GetReport,
+        Self::Sleep,
+        Self::MonotonicNow,
+        Self::ReceiveBroadcast,
+        Self::Report,
+        Self::Leaving,
+    ];
+
+    /// The global name this hook is published under.
+    #[must_use]
+    pub const fn hook_name(self) -> &'static str {
+        match self {
+            Self::Start => "$262AgentStart",
+            Self::Broadcast => "$262AgentBroadcast",
+            Self::GetReport => "$262AgentGetReport",
+            Self::Sleep => "$262AgentSleep",
+            Self::MonotonicNow => "$262AgentMonotonicNow",
+            Self::ReceiveBroadcast => "$262AgentReceiveBroadcast",
+            Self::Report => "$262AgentReport",
+            Self::Leaving => "$262AgentLeaving",
+        }
+    }
+
+    const fn arity(self) -> f64 {
+        match self {
+            Self::GetReport | Self::MonotonicNow | Self::Leaving => 0.0,
+            _ => 1.0,
+        }
+    }
+}
+
 /// One operation the `Atomics` namespace publishes.
 ///
 /// One variant with a payload rather than fourteen flat ones, for the reason `Temporal` has
@@ -4891,7 +4956,14 @@ fn coerce_element(kind: TypedKind, value: &Value) -> Result<Value, ExecutionErro
 /// it ever uses, and reserving eagerly would turn a declaration into an allocation.
 #[derive(Debug)]
 pub struct BufferData {
-    bytes: RefCell<Vec<u8>>,
+    /// The bytes themselves.
+    ///
+    /// A `RefCell` for an ordinary buffer and an `Arc<Mutex<..>>` for a shared one -- see
+    /// [`Bytes`]. The distinction exists because `$262.agent.broadcast` hands a
+    /// `SharedArrayBuffer`'s bytes to a *second thread*, and the value graph around them is
+    /// `Rc`-based and cannot go. Every reader still spells the access `borrow`/`borrow_mut`,
+    /// because reading a buffer's bytes is one operation whoever holds them.
+    bytes: Bytes,
     max_byte_length: Option<usize>,
     /// Whether this is a `SharedArrayBuffer` rather than an `ArrayBuffer`.
     ///
@@ -4935,7 +5007,7 @@ impl BufferData {
     /// A buffer of `length` zero bytes whose length can never change.
     fn fixed(length: usize) -> Rc<Self> {
         Rc::new(Self {
-            bytes: RefCell::new(vec![0; length]),
+            bytes: Bytes::new(false, vec![0; length]),
             max_byte_length: None,
             shared: false,
             detached: std::cell::Cell::new(false),
@@ -6567,6 +6639,7 @@ pub struct ExecutionCapabilities {
     source_compiler: Option<SourceCompiler>,
     module_loader: Option<ModuleLoader>,
     host_realms: bool,
+    host_agents: Option<&'static str>,
 }
 
 impl ExecutionCapabilities {
@@ -6601,6 +6674,25 @@ impl ExecutionCapabilities {
 
     pub const fn host_realms(self) -> bool {
         self.host_realms
+    }
+
+    /// Let this execution start a second agent, and say what a new agent's realm is told about
+    /// its host before it runs the program's source.
+    ///
+    /// The prelude is the *host's* text, not the engine's, for the same reason `$262` itself is
+    /// assembled by the runner: a new agent needs a `$262.agent` to call `receiveBroadcast` and
+    /// `report` on, and what a host can do is the host's statement to make. Passing it here also
+    /// keeps the interpreter from having a Test262-shaped string in it.
+    ///
+    /// Off by default, like [`Self::with_host_realms`] and for ADR 0031's reason: a program does
+    /// not acquire a second thread because it happened to be run by a runner that has one.
+    pub const fn with_host_agents(mut self, prelude: &'static str) -> Self {
+        self.host_agents = Some(prelude);
+        self
+    }
+
+    pub const fn host_agents(self) -> Option<&'static str> {
+        self.host_agents
     }
 }
 
@@ -6854,6 +6946,11 @@ pub enum ExecutionError {
         steps: u64,
         limit: u64,
     },
+    /// This agent's group is shutting down and it must stop where it is.
+    ///
+    /// Never seen by the main agent's program: it is how an agent thread unwinds when the case
+    /// that started it has finished, so that the thread can be joined rather than leaked.
+    AgentTerminated,
     InvalidInstructionPointer {
         instruction: usize,
     },
@@ -7219,6 +7316,7 @@ impl fmt::Display for ExecutionError {
                     "execution exceeded {limit} steps after {steps} steps"
                 )
             }
+            Self::AgentTerminated => write!(formatter, "the agent was stopped"),
             Self::InvalidInstructionPointer { instruction } => {
                 write!(formatter, "invalid instruction pointer {instruction}")
             }
@@ -9067,6 +9165,9 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// Whether this execution's host allows a second realm, and therefore publishes the hook
     /// that makes one. False for every ordinary run.
     host_realms: bool,
+    /// The text a new agent's realm is given before the program's own source, when this
+    /// execution's host granted agents at all. `None` disables `$262AgentStart` and its siblings.
+    host_agents: Option<&'static str>,
     module_loader: Option<ModuleLoader>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
@@ -9119,6 +9220,23 @@ struct Vm<'host, H: HostOps + ?Sized> {
     entropy: EntropyCapability,
     random_state: u64,
     steps: u64,
+    /// The step count at which the dispatch loop stops to think.
+    ///
+    /// `min(max_steps, this quantum's end)`. For a program with one agent it *is* `max_steps`,
+    /// so the loop pays exactly the comparison it always paid; for a program with two, it is the
+    /// point the baton moves. Ordering the two boundaries into one number is what keeps the
+    /// agent scheduler off the hot path of every program that has no second agent.
+    checkpoint: u64,
+    /// The agents of this program, once its host has granted any.
+    ///
+    /// Present on the main agent's machine and on every agent's, because `Atomics.wait` is asked
+    /// from either side. `None` for every execution whose host did not ask for agents, which is
+    /// every execution but a conformance run.
+    agents: Option<Arc<AgentGroup>>,
+    /// This machine's agent, zero for the main one.
+    agent_id: usize,
+    /// Held only by the main agent, and only so that dropping the machine stops the threads.
+    agent_owner: Option<AgentOwner>,
     /// Serial for the next `Symbol(...)`. Monotonic per execution, which is all the identity a
     /// symbol needs: it never leaves the run that made it.
     symbol_serial: u64,
@@ -9216,6 +9334,12 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         let timezone = resolve_timezone(host, &capabilities.timezone)?;
         let default_locale = resolve_locale(host, &capabilities.locale)?;
         let entropy = capabilities.entropy;
+        // One group per execution, made here so that every entry point gets it and none has to
+        // remember to. An agent's own machine replaces this with the group it was started from;
+        // the empty one it was given costs a mutex and stops nothing when it is dropped.
+        let agents = execution
+            .host_agents()
+            .map(|_| AgentGroup::new(execution, limits));
         Ok(Self {
             program,
             strict: strictness.body,
@@ -9244,6 +9368,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             global_base: 0,
             instruction: 0,
             steps: 0,
+            checkpoint: limits.max_steps,
+            agent_owner: agents.clone().map(AgentOwner),
+            agents,
+            agent_id: 0,
             symbol_serial: 0,
             realm: Realm::new(),
             clock_capability: capabilities.clock,
@@ -9252,6 +9380,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             source_compiler: execution.source_compiler(),
             module_loader: execution.module_loader(),
             host_realms: execution.host_realms(),
+            host_agents: execution.host_agents(),
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
@@ -12863,6 +12992,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         Ok(())
     }
+    /// The dispatch loop reached [`Self::checkpoint`]: find out which boundary that was.
+    ///
+    /// Deliberately not inlined into the loop. Everything here is either the end of the program
+    /// or the end of a turn, and both are rare next to the instruction that got here.
+    #[cold]
+    fn reach_checkpoint(&mut self) -> Result<(), ExecutionError> {
+        if self.steps >= self.limits.max_steps {
+            return Err(ExecutionError::StepLimitExceeded {
+                steps: self.steps,
+                limit: self.limits.max_steps,
+            });
+        }
+        // A quantum, then. Hand the baton on and take it back before the next instruction runs:
+        // this agent's Rust stack, frames and operand stack all stay exactly where they are,
+        // which is the whole reason an agent is a thread rather than a continuation.
+        if let Some(group) = &self.agents
+            && group.concurrent()
+        {
+            let group = Arc::clone(group);
+            group
+                .tick(self.agent_id)
+                .map_err(|_| ExecutionError::AgentTerminated)?;
+        }
+        self.checkpoint = self.next_checkpoint();
+        Ok(())
+    }
+
+    /// Where the dispatch loop should stop next.
+    fn next_checkpoint(&self) -> u64 {
+        match &self.agents {
+            Some(group) if group.concurrent() => self
+                .steps
+                .saturating_add(agent::QUANTUM_STEPS)
+                .min(self.limits.max_steps),
+            _ => self.limits.max_steps,
+        }
+    }
+
     fn run(&mut self) -> Result<ExecutionResult, ExecutionError> {
         // `usize::MAX` never matches a real frame depth, so the loop ends only at the outermost
         // `Return` -- the end of the program.
@@ -12906,11 +13073,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             if !self.self_bindings.is_empty() || !self.self_namespaces.is_empty() {
                 self.refresh_self_imports();
             }
-            if self.steps >= self.limits.max_steps {
-                return Err(ExecutionError::StepLimitExceeded {
-                    steps: self.steps,
-                    limit: self.limits.max_steps,
-                });
+            // One comparison, two boundaries. `checkpoint` is `max_steps` for every program that
+            // has no second agent, so this is the step-limit check it always was; when a second
+            // agent exists it is also the end of this agent's quantum, and the slow path decides
+            // which of the two arrived.
+            if self.steps >= self.checkpoint {
+                self.reach_checkpoint()?;
             }
             // Ordered so the ordinary run pays one comparison against a constant: `stop_before`
             // is unreachable then, and the frame depth is never looked at.
@@ -15361,6 +15529,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if native == Native::ErrorCaptureStackTrace {
             return self.capture_stack_trace(arguments, instruction);
+        }
+        if let Native::HostAgent(op) = native {
+            return self.host_agent(op, arguments, instruction);
         }
         if native == Native::HostCreateRealm {
             return self.create_realm();
@@ -18212,7 +18383,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         let Some(max) = max else {
             return Ok(Value::ArrayBuffer(Rc::new(BufferData {
-                bytes: RefCell::new(vec![0; length]),
+                bytes: Bytes::new(shared, vec![0; length]),
                 max_byte_length: None,
                 shared,
                 detached: std::cell::Cell::new(false),
@@ -18238,7 +18409,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             });
         }
         Ok(Value::ArrayBuffer(Rc::new(BufferData {
-            bytes: RefCell::new(vec![0; length]),
+            bytes: Bytes::new(shared, vec![0; length]),
             max_byte_length: Some(max),
             shared,
             detached: std::cell::Cell::new(false),
@@ -25459,6 +25630,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Value::Native(Native::HostEvalScript, realm),
             );
         }
+        // The agent protocol, on the same terms: published only because the host asked, and only
+        // as the eight operations. A realm made by `$262.createRealm` gets them too -- an agent
+        // is a property of the *agent*, not of one of its realms, and a program that made a
+        // second realm and then started an agent from it is asking the same host the same thing.
+        if self.host_agents.is_some() {
+            for op in AgentOp::ALL {
+                object.borrow_mut().set_non_enumerable(
+                    op.hook_name(),
+                    Value::Native(Native::HostAgent(op), realm),
+                );
+            }
+        }
         self.global_objects[realm.0 as usize] = Some(value.clone());
         value
     }
@@ -30850,13 +31033,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         if op == AtomicsOp::Wait {
             let settled = match answer {
-                Some(answer) => answer,
-                None => {
-                    Self::atomics_sleep(timeout);
-                    "timed-out"
-                }
+                Some(answer) => answer.to_owned(),
+                None => self.atomics_block(&view, index, timeout)?,
             };
-            return Ok(Value::String(settled.to_owned()));
+            return Ok(Value::String(settled));
         }
         // `waitAsync` reports whether it had to wait at all, beside either the answer itself or
         // the promise that will carry it.
@@ -30887,12 +31067,43 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Object(Rc::new(RefCell::new(result))))
     }
 
+    /// Suspend this agent on the cell it is waiting for, and answer with how the wait ended.
+    ///
+    /// This is the operation `Atomics.wait` exists to be, and until there was a second agent it
+    /// could not be written: the value has already been compared against the cell, and no other
+    /// agent has run since, because no other agent runs until this one gives the baton up here.
+    /// That is the specification's atomic compare-and-block, obtained from the scheduler rather
+    /// than from a lock on the bytes.
+    ///
+    /// A host that granted no agents keeps the old answer, because it is still the true one:
+    /// nothing can reach the waiter list, so the wait can only run out.
+    fn atomics_block(
+        &mut self,
+        view: &Rc<TypedArrayData>,
+        index: usize,
+        timeout: f64,
+    ) -> Result<String, ExecutionError> {
+        let store = view.buffer.bytes.store().map(Arc::clone);
+        let (Some(group), Some(store)) = (self.agents.clone(), store) else {
+            Self::atomics_sleep(timeout);
+            return Ok("timed-out".to_owned());
+        };
+        let address = agent::address(&store, view.offset + index * view.kind.width());
+        let outcome = group
+            .wait(self.agent_id, address, timeout)
+            .map_err(|_| ExecutionError::AgentTerminated)?;
+        // Another agent has run since, so this one's quantum has to start again from here.
+        self.checkpoint = self.next_checkpoint();
+        Ok(outcome.as_str().to_owned())
+    }
+
     /// Sleep out a wait that nothing will ever interrupt.
     ///
     /// A wait with no limit is a deadlock in a realm with one agent: the only code that could
     /// call `notify` is the code that is blocked. Rather than hang the process on a program no
-    /// engine could have finished either, the wait is bounded -- a limit of this realm, and the
-    /// only place its single-agent shape shows through.
+    /// engine could have finished either, the wait is bounded -- a limit of this realm, reached
+    /// only by a host that granted no agents at all. A host that did gets the scheduler's answer
+    /// instead, which costs no wall-clock time because its clock is virtual.
     fn atomics_sleep(timeout: f64) {
         let milliseconds = if timeout.is_finite() {
             timeout.min(ATOMICS_UNBOUNDED_WAIT_MS)
@@ -30906,9 +31117,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
     /// `Atomics.notify`: how many waiters were woken.
     ///
-    /// Always none. One agent cannot be waiting and notifying at the same time, so the waiter
-    /// list this would read is empty whenever a program can ask -- but the validation in front
-    /// of it is real, and is most of what the operation is.
+    /// The count is exactly how many agents were sitting on this cell, and it is the same on
+    /// every run: the schedule that put them there is decided by an instruction quantum and a
+    /// virtual clock rather than by the machine's mood. Zero when this host granted no agents,
+    /// or when the view is over an ordinary buffer, which nothing can wait on.
     fn atomics_notify(
         &mut self,
         arguments: &[Value],
@@ -30925,8 +31137,108 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Self::to_integer_or_infinity(self.as_number_argument(value, instruction)?).max(0.0)
             }
         };
-        let _ = count;
-        Ok(Value::Number(0.0))
+        // The conversion above can have run the program's own `valueOf`, and that code may have
+        // detached or resized the buffer under this view. A wake into a window that is no longer
+        // there wakes nobody, which is what the specification's re-validation amounts to here.
+        if view.out_of_bounds() || index >= view.len() {
+            return Ok(Value::Number(0.0));
+        }
+        let store = view.buffer.bytes.store().map(Arc::clone);
+        let (Some(group), Some(store)) = (self.agents.clone(), store) else {
+            return Ok(Value::Number(0.0));
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let wanted = if count.is_finite() {
+            count.min(usize::MAX as f64) as usize
+        } else {
+            usize::MAX
+        };
+        let address = agent::address(&store, view.offset + index * view.kind.width());
+        #[allow(clippy::cast_precision_loss)]
+        Ok(Value::Number(group.notify(address, wanted) as f64))
+    }
+
+    /// One operation of Test262's agent protocol.
+    ///
+    /// Published only when the host asked for agents, so reaching here means it did. Every arm
+    /// that can block goes through the scheduler in [`agent`] rather than through the operating
+    /// system, which is what makes a run of the agent tests reproducible.
+    fn host_agent(
+        &mut self,
+        op: AgentOp,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Some(group) = self.agents.clone() else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "kiln: this execution has no agents".to_owned(),
+            });
+        };
+        let first = arguments.first().cloned().unwrap_or(Value::Undefined);
+        match op {
+            AgentOp::Start => {
+                let source = self.as_string(&first, instruction)?;
+                // The host's prelude first: a new realm has never heard of `$262`, and the
+                // source it was given assumes it has.
+                let prelude = self.host_agents.unwrap_or_default();
+                group.start(format!(
+                    "{prelude}
+{source}"
+                ))?;
+                self.checkpoint = self.next_checkpoint();
+                Ok(Value::Undefined)
+            }
+            AgentOp::Broadcast => {
+                let Value::ArrayBuffer(buffer) = &first else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "$262.agent.broadcast requires a SharedArrayBuffer".to_owned(),
+                    });
+                };
+                let Some(store) = buffer.bytes.store().map(Arc::clone) else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "$262.agent.broadcast requires a SharedArrayBuffer".to_owned(),
+                    });
+                };
+                group
+                    .broadcast(self.agent_id, &store, buffer.max_byte_length)
+                    .map_err(|_| ExecutionError::AgentTerminated)?;
+                self.checkpoint = self.next_checkpoint();
+                Ok(Value::Undefined)
+            }
+            // `null` rather than `undefined` when there is nothing: Test262's own wrapper loops
+            // `while ((r = getReport()) == null)`, and an agent that reported the empty string
+            // has still reported.
+            AgentOp::GetReport => Ok(group.take_report().map_or(Value::Null, Value::String)),
+            AgentOp::Sleep => {
+                let milliseconds = self.as_number_argument(Some(&first), instruction)?;
+                group
+                    .sleep(self.agent_id, milliseconds)
+                    .map_err(|_| ExecutionError::AgentTerminated)?;
+                self.checkpoint = self.next_checkpoint();
+                Ok(Value::Undefined)
+            }
+            AgentOp::MonotonicNow => Ok(Value::Number(group.now_ms())),
+            AgentOp::ReceiveBroadcast => {
+                let payload = group
+                    .receive_broadcast(self.agent_id)
+                    .map_err(|_| ExecutionError::AgentTerminated)?;
+                self.checkpoint = self.next_checkpoint();
+                // The same bytes, seen through this realm's own `SharedArrayBuffer`. Not a copy:
+                // a copy would make every `Atomics` operation in the agent test suite agree with
+                // itself and with nobody else.
+                let buffer = agent::adopt_broadcast(&payload);
+                self.call_value(&first, Value::Undefined, vec![buffer], instruction)?;
+                Ok(Value::Undefined)
+            }
+            AgentOp::Report => {
+                let text = self.as_string(&first, instruction)?;
+                group.report(text);
+                Ok(Value::Undefined)
+            }
+            // Nothing to do: an agent's script ending is what leaving *is*, and the scheduler
+            // learns of it when the thread finishes. The hook exists because Test262 calls it.
+            AgentOp::Leaving => Ok(Value::Undefined),
+        }
     }
 
     /// Allocate a `Symbol(description)` and remember it by serial.
@@ -34161,7 +34473,7 @@ fn call_native(
         // machine. Arriving here would mean the two dispatch paths disagree.
         // Making a realm is `Vm::create_realm`'s: it has to extend the machine's realm tables,
         // and this path has no machine. Arriving here would mean the two dispatch paths disagree.
-        Native::HostCreateRealm | Native::HostEvalScript => {
+        Native::HostCreateRealm | Native::HostEvalScript | Native::HostAgent(_) => {
             return Err(ExecutionError::TypeErrorMessage {
                 message: "a $262 host facility reached the machine-free dispatch path".to_owned(),
             });
@@ -34915,7 +35227,7 @@ fn call_native(
             let mut bytes = buffer.detach();
             bytes.resize(length, 0);
             Value::ArrayBuffer(Rc::new(BufferData {
-                bytes: RefCell::new(bytes),
+                bytes: Bytes::new(false, bytes),
                 max_byte_length,
                 shared: false,
                 detached: std::cell::Cell::new(false),
@@ -34946,7 +35258,7 @@ fn call_native(
             // it falls on.
             bytes.resize(length, 0);
             Value::ArrayBuffer(Rc::new(BufferData {
-                bytes: RefCell::new(bytes),
+                bytes: Bytes::new(false, bytes),
                 max_byte_length: None,
                 shared: false,
                 detached: std::cell::Cell::new(false),
@@ -34970,7 +35282,7 @@ fn call_native(
             let bytes = buffer.bytes.borrow();
             let (start, end) = slice_bounds(arguments, bytes.len());
             Value::ArrayBuffer(Rc::new(BufferData {
-                bytes: RefCell::new(bytes[start..end].to_vec()),
+                bytes: Bytes::new(false, bytes[start..end].to_vec()),
                 max_byte_length: None,
                 shared: false,
                 detached: std::cell::Cell::new(false),
@@ -34991,7 +35303,7 @@ fn call_native(
             let bytes = buffer.bytes.borrow();
             let (start, end) = slice_bounds(arguments, bytes.len());
             Value::ArrayBuffer(Rc::new(BufferData {
-                bytes: RefCell::new(bytes[start..end].to_vec()),
+                bytes: Bytes::new(buffer.shared, bytes[start..end].to_vec()),
                 max_byte_length: None,
                 // A slice of a shared buffer is itself shared, and a slice of an unshared one is
                 // not: the specification builds the result with the *receiver's* constructor,
@@ -36822,7 +37134,7 @@ fn node_host_value(value: AsyncHostValue) -> Result<Value, ExecutionError> {
             Value::TypedArray(Rc::new(TypedArrayData {
                 kind: TypedKind::Uint8,
                 buffer: Rc::new(BufferData {
-                    bytes: RefCell::new(bytes),
+                    bytes: Bytes::new(false, bytes),
                     max_byte_length: None,
                     shared: false,
                     detached: std::cell::Cell::new(false),
@@ -42346,6 +42658,9 @@ fn function_identity(value: &Value) -> Option<(String, f64)> {
 )]
 const fn native_length(native: Native) -> Option<f64> {
     if let Native::AtomicsOp(op) = native {
+        return Some(op.arity());
+    }
+    if let Native::HostAgent(op) = native {
         return Some(op.arity());
     }
     use Native as N;
@@ -47995,7 +48310,7 @@ mod tests {
 
     fn test_buffer(bytes: &[u8], max_byte_length: Option<usize>, shared: bool) -> Value {
         Value::ArrayBuffer(Rc::new(BufferData {
-            bytes: RefCell::new(bytes.to_vec()),
+            bytes: Bytes::new(shared, bytes.to_vec()),
             max_byte_length,
             shared,
             detached: std::cell::Cell::new(false),

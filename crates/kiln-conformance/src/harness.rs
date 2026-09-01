@@ -44,11 +44,16 @@ pub const HOST_CAPABILITY_MARKER: &str = "kiln: host capability not provided:";
 /// the host's statement to make and not the engine's: `evalScript` and `gc` refuse there for
 /// exactly the reasons they refuse here.
 ///
-/// `$262.agent` is an object of throwing methods rather than `undefined` for the same reason.
-/// Kiln has no second agent to start, but a test that reads `$262.agent.start` and gets a
-/// `TypeError` about reading a property of `undefined` reports a *language* failure for a
-/// *host* gap -- two hundred of them, every one of them a lie about the engine. Refusing by
-/// name is honest and costs nothing: the classifier reads the marker and answers `Unsupported`.
+/// `$262.agent` is real when the runner asked the engine for agents, and refuses by name when it
+/// did not -- the same shape as `createRealm`, and for the same reason. A test that reads
+/// `$262.agent.start` and gets a `TypeError` about reading a property of `undefined` reports a
+/// *language* failure for a *host* gap, and there are two hundred of those.
+///
+/// This same text is what a *new* agent's realm evaluates before the source it was started with,
+/// because a new realm has never heard of `$262` and the source it was given assumes it has. The
+/// engine takes it as a capability (`ExecutionCapabilities::with_host_agents`) rather than
+/// carrying a copy, so what a host can do stays the host's statement to make even for an agent
+/// the host never sees.
 /// The harness file Test262 requires for every `async` test, per INTERPRETING.md.
 pub const ASYNC_INCLUDE: &str = "doneprintHandle.js";
 
@@ -83,29 +88,53 @@ function $262For(realmGlobal) {
 var $262 = {
   global: globalThis,
   agent: {
-    start: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.start");
+    start: function (source) {
+      if (typeof $262AgentStart !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.start");
+      }
+      return $262AgentStart(source);
     },
-    broadcast: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.broadcast");
+    broadcast: function (buffer) {
+      if (typeof $262AgentBroadcast !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.broadcast");
+      }
+      return $262AgentBroadcast(buffer);
     },
     getReport: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.getReport");
+      if (typeof $262AgentGetReport !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.getReport");
+      }
+      return $262AgentGetReport();
     },
-    sleep: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.sleep");
+    sleep: function (milliseconds) {
+      if (typeof $262AgentSleep !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.sleep");
+      }
+      return $262AgentSleep(milliseconds);
     },
     monotonicNow: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.monotonicNow");
+      if (typeof $262AgentMonotonicNow !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.monotonicNow");
+      }
+      return $262AgentMonotonicNow();
     },
-    receiveBroadcast: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.receiveBroadcast");
+    receiveBroadcast: function (callback) {
+      if (typeof $262AgentReceiveBroadcast !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.receiveBroadcast");
+      }
+      return $262AgentReceiveBroadcast(callback);
     },
-    report: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.report");
+    report: function (text) {
+      if (typeof $262AgentReport !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.report");
+      }
+      return $262AgentReport(text);
     },
     leaving: function () {
-      throw new Error("kiln: host capability not provided: $262.agent.leaving");
+      if (typeof $262AgentLeaving !== "function") {
+        throw new Error("kiln: host capability not provided: $262.agent.leaving");
+      }
+      return $262AgentLeaving();
     }
   },
   createRealm: function () {
@@ -276,6 +305,9 @@ mod tests {
 
     #[test]
     fn host_prelude_refuses_agent_by_name_rather_than_leaving_it_undefined() {
+        // The refusal has to survive the capability existing, exactly as `createRealm`'s does: a
+        // runner that does not ask the engine for agents must still get the marker rather than a
+        // `TypeError` about calling `undefined`.
         assert!(!HOST_OBJECT_PRELUDE.contains("agent: undefined"));
         for method in [
             "start",
@@ -292,6 +324,40 @@ mod tests {
                 "`$262.agent.{method}` must refuse with the host-capability marker"
             );
         }
+    }
+
+    #[test]
+    fn host_prelude_reaches_the_engines_agent_hooks_when_they_are_published() {
+        // Eight hooks, spelled the way the engine publishes them and the C backend refuses them.
+        // A typo here would not fail: it would refuse by name, and the whole subtree would read
+        // as an unimplemented host capability rather than as a broken runner.
+        for hook in [
+            "$262AgentStart",
+            "$262AgentBroadcast",
+            "$262AgentGetReport",
+            "$262AgentSleep",
+            "$262AgentMonotonicNow",
+            "$262AgentReceiveBroadcast",
+            "$262AgentReport",
+            "$262AgentLeaving",
+        ] {
+            assert!(
+                HOST_OBJECT_PRELUDE.contains(&format!("typeof {hook} !== \"function\"")),
+                "`{hook}` must be feature-detected before it is called"
+            );
+            assert!(
+                HOST_OBJECT_PRELUDE.contains(&format!("return {hook}(")),
+                "`{hook}` must actually be called when it is there"
+            );
+        }
+    }
+
+    #[test]
+    fn a_new_agent_evaluates_the_same_host_object_the_main_one_did() {
+        // The prelude is handed to the engine as the text a new agent's realm runs first, so it
+        // has to be self-contained: nothing in it may depend on having been evaluated before.
+        assert!(HOST_OBJECT_PRELUDE.contains("var $262 = {"));
+        assert!(HOST_OBJECT_PRELUDE.starts_with("var print ="));
     }
 
     #[test]

@@ -1551,7 +1551,12 @@ mod tests {
 
         // The host prelude deliberately throws an Error-shaped value for unavailable facilities;
         // this must remain Unsupported rather than satisfying a runtime-negative `Error` case.
-        let mut host_refusal = case("$262.agent.start();");
+        //
+        // The example has to be a facility this runner really does not provide, so it moves as
+        // the runner grows: it was `$262.agent.start` until agents arrived. `$262.gc` is the
+        // remaining one, and it is refused because a collector is not something a program may
+        // ask this engine to run rather than because nobody has written it.
+        let mut host_refusal = case("$262.gc();");
         host_refusal.metadata.negative = Some(NegativeExpectation {
             phase: Phase::Runtime,
             type_name: "Error".to_owned(),
@@ -1603,6 +1608,89 @@ mod tests {
         let result = run_case(&probe, RunMode::Interpreter);
         assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
         assert_eq!(result.stdout, "realms\n");
+    }
+
+    #[test]
+    fn a_second_agent_shares_memory_and_answers_a_wait() {
+        // Spelled with the engine's own hooks rather than through `$262`, because a `raw` case
+        // gets no host prelude -- the same shape `a_second_realm_owns_its_intrinsics` uses. The
+        // agent's *own* source does get one, which is what its `$262.agent.report` reaches.
+        //
+        // The three things a second agent is, asked once each: it runs, it sees the *same* bytes
+        // through a broadcast `SharedArrayBuffer` rather than a copy, and an `Atomics.wait` in
+        // one agent is ended by an `Atomics.notify` in the other. Every one of them answers
+        // "timed-out" and 0 in an engine with a single agent, which is the state this replaces --
+        // so a regression here would look like nothing at all in the aggregate.
+        let mut probe = case(
+            "var i32a = new Int32Array(new SharedArrayBuffer(8));
+             $262AgentStart(`
+               $262.agent.receiveBroadcast(function (sab) {
+                 var view = new Int32Array(sab);
+                 Atomics.add(view, 1, 1);
+                 $262.agent.report(Atomics.wait(view, 0, 0));
+                 $262.agent.leaving();
+               });
+             `);
+             $262AgentBroadcast(i32a.buffer);
+             while (Atomics.load(i32a, 1) !== 1) { /* the agent is starting */ }
+             $262AgentSleep(10);
+             if (Atomics.notify(i32a, 0, 1) !== 1) throw new Error('notify woke nobody');
+             var report;
+             while ((report = $262AgentGetReport()) === null) { $262AgentSleep(1); }
+             console.log(report);",
+        );
+        probe.metadata.flags.push("raw".to_owned());
+        let result = run_case(&probe, RunMode::Interpreter);
+        assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+        assert_eq!(result.stdout, "ok\n");
+    }
+
+    #[test]
+    fn two_agents_interleave_the_same_way_every_time() {
+        // The property the whole design exists for. A wall-clock race between two OS threads
+        // would answer this differently on a loaded machine, and a conformance number that moves
+        // with the machine's load is not a measurement (ADR 0020). The schedule here is decided
+        // by an instruction quantum and a virtual clock, so ten runs give one answer -- and the
+        // program is the one Test262 writes: three agents wait, exactly one is woken.
+        let source = "var i32a = new Int32Array(new SharedArrayBuffer(16));
+             for (var i = 0; i < 3; i++) {
+               $262AgentStart(`
+                 $262.agent.receiveBroadcast(function (sab) {
+                   var view = new Int32Array(sab);
+                   Atomics.add(view, 1, 1);
+                   $262.agent.report(Atomics.wait(view, 0, 0, 1000));
+                   $262.agent.leaving();
+                 });
+               `);
+             }
+             $262AgentBroadcast(i32a.buffer);
+             while (Atomics.load(i32a, 1) !== 3) { /* the agents are starting */ }
+             $262AgentSleep(100);
+             console.log(Atomics.notify(i32a, 0, 1));
+             $262AgentSleep(2000);
+             var reports = [];
+             for (var i = 0; i < 3; i++) {
+               var report;
+               while ((report = $262AgentGetReport()) === null) { $262AgentSleep(1); }
+               reports.push(report);
+             }
+             reports.sort();
+             console.log(reports.join(','));";
+        let mut answers = std::collections::BTreeSet::new();
+        for _ in 0..10 {
+            let mut probe = case(source);
+            probe.metadata.flags.push("raw".to_owned());
+            let result = run_case(&probe, RunMode::Interpreter);
+            assert_eq!(result.outcome, Outcome::Pass, "{:?}", result.diagnostics);
+            answers.insert(result.stdout);
+        }
+        assert_eq!(
+            answers,
+            ["1\nok,timed-out,timed-out\n".to_owned()]
+                .into_iter()
+                .collect(),
+            "the same program produced more than one interleaving"
+        );
     }
 
     #[test]
