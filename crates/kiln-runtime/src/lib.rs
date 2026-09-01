@@ -607,9 +607,21 @@ pub struct RuntimeMetricsSnapshot {
 ///
 /// `drive` accepts generic caller-owned microtask and timer payloads. Timer payloads must be
 /// [`Clone`] when driven because an interval re-arms the same callback before returning it.
-pub struct RealmRuntime<H: RealmHostProvider = TokioHost> {
+/// The Tokio executor, owning nothing a drive mutates.
+///
+/// Separated from [`RealmState`] so that a drive can hold the state for its whole lifetime while
+/// the executor is held alongside it. That is the one thing the previous single struct could not
+/// express, and the reason the native adapter re-entered the executor for every small step
+/// instead of running inside it once. See ADR 0040.
+struct Executor {
     runtime: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
+}
+
+/// Everything a drive reads and writes, owning nothing that runs futures.
+/// Everything a realm owns that is not the executor: the host, its capabilities, the
+/// HTTP connection table, and the metrics stream. See ADR 0040.
+pub struct RealmState<H> {
     runtime_metrics: tokio_metrics::RuntimeIntervals,
     time_paused: bool,
     host: H,
@@ -617,6 +629,11 @@ pub struct RealmRuntime<H: RealmHostProvider = TokioHost> {
     http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
     http_agent: HttpAgent,
     lifecycle: RealmRuntimeLifecycle,
+}
+
+pub struct RealmRuntime<H: RealmHostProvider = TokioHost> {
+    executor: Executor,
+    state: RealmState<H>,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
     // executor. `Runtime` itself can be moved, but the realm's language state cannot.
     _not_send: PhantomData<Rc<()>>,
@@ -633,8 +650,8 @@ impl<H: RealmHostProvider> std::fmt::Debug for RealmRuntime<H> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("RealmRuntime")
-            .field("time_paused", &self.time_paused)
-            .field("lifecycle", &self.lifecycle)
+            .field("time_paused", &self.state.time_paused)
+            .field("lifecycle", &self.state.lifecycle)
             .finish_non_exhaustive()
     }
 }
@@ -673,48 +690,474 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .map_err(RuntimeBuildError)?;
         let runtime_metrics = tokio_metrics::RuntimeMonitor::new(runtime.handle()).intervals();
         Ok(Self {
-            runtime,
-            local: tokio::task::LocalSet::new(),
-            runtime_metrics,
-            time_paused: false,
-            host,
-            capabilities,
-            http_connections: BTreeMap::new(),
-            http_agent: HttpAgent::default(),
-            lifecycle: RealmRuntimeLifecycle::Open,
+            executor: Executor {
+                runtime,
+                local: tokio::task::LocalSet::new(),
+            },
+            state: RealmState {
+                runtime_metrics,
+                time_paused: false,
+                host,
+                capabilities,
+                http_connections: BTreeMap::new(),
+                http_agent: HttpAgent::default(),
+                lifecycle: RealmRuntimeLifecycle::Open,
+            },
             _not_send: PhantomData,
         })
     }
 
-    pub fn capabilities(&self) -> &RealmCapabilities {
-        &self.capabilities
+    /// Borrow the executor and the realm state at once, disjointly.
+    ///
+    /// This is the whole point of the split, and the one thing the previous single struct could
+    /// not express. A drive needs the state for its entire lifetime *and* needs the executor to
+    /// run it; with both behind one `&mut self` those two borrows conflict, so the native adapter
+    /// re-entered the executor for each small step. Two fields borrow independently, so a caller
+    /// can hold `&mut RealmState` across an `await` while the executor drives it. See ADR 0040.
+    ///
+    /// Nothing here runs a future yet; step 1 of the sequence is the split alone.
+    #[allow(dead_code)]
+    fn split(&mut self) -> (&Executor, &mut RealmState<H>) {
+        (&self.executor, &mut self.state)
     }
 
-    /// Samples stable whole-runtime counters accumulated since the previous call.
+    /// Try to start one host operation, rejecting admission after teardown begins.
+    pub fn try_start_host_op(
+        &mut self,
+        operation: AsyncHostOp,
+        referenced: bool,
+    ) -> Option<RequestId> {
+        if self.is_shutdown() {
+            return None;
+        }
+        Some(self.executor.local.block_on(&self.executor.runtime, async {
+            RealmHostProvider::start_on_realm(&mut self.state.host, operation, referenced)
+        }))
+    }
+
+    /// Starts one asynchronous host operation on this realm's Tokio runtime.
+    pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
+        self.try_start_host_op(operation, referenced)
+            .expect("a shut down realm cannot start host work")
+    }
+
+    /// Starts a host operation while the caller is already executing inside this realm runtime.
     ///
-    /// These are developer diagnostics, not JavaScript-observable time or scheduler state. The
-    /// sample's `elapsed` and durations use wall time even though realm timers use paused Tokio
-    /// time for deterministic execution.
-    pub fn sample_runtime_metrics(&mut self) -> RuntimeMetricsSnapshot {
-        let metrics = self
-            .runtime_metrics
-            .next()
-            .expect("Tokio runtime metric intervals are infinite");
-        RuntimeMetricsSnapshot {
-            elapsed: metrics.elapsed,
-            workers: metrics.workers_count,
-            live_tasks: metrics.live_tasks_count,
-            global_queue_depth: metrics.global_queue_depth,
-            park_count: metrics.total_park_count,
-            busy_duration: metrics.total_busy_duration,
+    /// Language adapters use this path from native calls. It must not re-enter `block_on`; Tokio
+    /// forbids nesting a runtime, and `spawn_local` already sees the active `LocalSet` here.
+    pub fn start_host_op_in_context(
+        &mut self,
+        operation: AsyncHostOp,
+        referenced: bool,
+    ) -> RequestId {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot start host work"
+        );
+        RealmHostProvider::start_on_realm(&mut self.state.host, operation, referenced)
+    }
+
+    /// Waits for the next asynchronous host completion on this realm's Tokio runtime.
+    pub fn next_host_completion(&mut self) -> Result<Option<Completion>, RuntimeFailure> {
+        if let Some(failure) = self.state.host.runtime_failure() {
+            return Err(failure.clone());
+        }
+        if !self.state.host.has_pending_work() {
+            return Ok(None);
+        }
+        self.executor.local.block_on(
+            &self.executor.runtime,
+            self.state.host.next_completion_async(),
+        )
+    }
+
+    /// Wait for either the next host completion or the realm's next timer.
+    ///
+    /// This is the sole blocking ingress used by Node execution. Waiting on I/O first would
+    /// starve timeouts behind an open socket; running virtual timers first would make every
+    /// timeout beat already-ready I/O. Tokio polls both, and biased selection gives an already
+    /// queued completion the checkpoint priority before virtual time advances.
+    pub fn next_turn<M, T>(&mut self, realm: &mut Realm<M, T>) -> Option<RuntimeTurn<M, T>>
+    where
+        T: Clone,
+    {
+        if self.is_shutdown() {
+            return None;
+        }
+        if !self.state.time_paused {
+            self.executor.local.block_on(&self.executor.runtime, async {
+                tokio::time::pause();
+            });
+            self.state.time_paused = true;
+        }
+        if let Some(failure) = self.state.host.runtime_failure() {
+            return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        if let Some(completion) = AsyncHostOps::next_completion(&mut self.state.host) {
+            return Some(RuntimeTurn::Completion(completion));
+        }
+        if let Some(failure) = self.state.host.runtime_failure() {
+            return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        let deadline = realm.next_timer_deadline();
+        if !self.state.host.has_pending_work() {
+            return self.next_timer(realm).map(RuntimeTurn::Timer);
+        }
+        self.executor.local.block_on(&self.executor.runtime, async {
+            match deadline {
+                Some(deadline) => {
+                    let delay = deadline.saturating_sub(realm.now);
+                    tokio::select! {
+                        biased;
+                        completion = self.state.host.next_completion_async() => {
+                            match completion {
+                                Ok(Some(completion)) => Some(RuntimeTurn::Completion(completion)),
+                                Ok(None) => None,
+                                Err(failure) => Some(RuntimeTurn::Failure(failure)),
+                            }
+                        }
+                        _ = tokio::time::sleep(delay) => {
+                            realm.run_next_timer().map(RuntimeTurn::Timer)
+                        }
+                    }
+                }
+                None => match self.state.host.next_completion_async().await {
+                    Ok(Some(completion)) => Some(RuntimeTurn::Completion(completion)),
+                    Ok(None) => None,
+                    Err(failure) => Some(RuntimeTurn::Failure(failure)),
+                },
+            }
+        })
+    }
+
+    /// Select a turn only while referenced host work or a realm timer can keep execution alive.
+    /// Unreferenced I/O remains registered and may still complete at later checkpoints, but does
+    /// not make a Node realm wait indefinitely on an idle keep-alive socket.
+    pub fn next_referenced_turn<M, T>(
+        &mut self,
+        realm: &mut Realm<M, T>,
+    ) -> Option<RuntimeTurn<M, T>>
+    where
+        T: Clone,
+    {
+        if self.is_shutdown() {
+            return None;
+        }
+        if let Some(failure) = self.state.host.runtime_failure() {
+            return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        if !self.state.host.has_referenced_work() && realm.next_timer_deadline().is_none() {
+            return None;
+        }
+        self.next_turn(realm)
+    }
+
+    /// Runs one synchronous realm operation as the current Tokio task.
+    ///
+    /// Interpreted bytecode and native continuation calls use this entry rather than executing
+    /// beside the runtime that owns their timers and future I/O. The operation stays synchronous
+    /// until HostOps grows requests, but it is polled by the same explicit runtime owner now.
+    pub fn enter<F, R>(&mut self, operation: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        assert!(!self.is_shutdown(), "a shut down realm cannot be entered");
+        self.executor
+            .local
+            .block_on(&self.executor.runtime, async move { operation() })
+    }
+
+    /// Install one Hyper HTTP/1 connection on an existing portable TCP resource.
+    pub fn start_http1_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
+        self.start_http1_connection_with_options(resource, false)
+    }
+
+    pub fn start_http1_connection_with_options(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+    ) -> Vec<HttpStreamAction> {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot start an HTTP connection"
+        );
+        assert!(
+            !self.state.http_connections.contains_key(&resource),
+            "an HTTP connection is already registered for resource {resource:?}"
+        );
+        // The listening server is the Node-visible resource that keeps the realm alive. Accepted
+        // HTTP keep-alive sockets are Hyper-owned implementation resources; their reads remain
+        // registered for reuse but must not outlive `server.close()` merely because they inherited
+        // the listener's referenced flag at accept time. Referenced writes and close operations
+        // still keep active work alive through their individual HostOps requests.
+        let _ = self.state.host.set_resource_referenced_now(resource, false);
+        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
+        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let (response_sender, response_receiver) = mpsc::unbounded_channel();
+        let task = self
+            .executor
+            .local
+            .spawn_local(hyper_http::event_connection(
+                io,
+                allow_half_close,
+                event_sender,
+                response_receiver,
+            ));
+        let actions = transport.start();
+        self.state.http_connections.insert(
+            resource,
+            RuntimeHttpConnection {
+                transport,
+                task,
+                events: Some(event_receiver),
+                responses: Some(response_sender),
+                response_bodies: BTreeMap::new(),
+                body_events: BTreeMap::new(),
+                close_when_responses_finish: false,
+                protocol_closed: false,
+                close_after_response: HashSet::new(),
+                client_requests: None,
+                client_events: None,
+                client_bodies: BTreeMap::new(),
+                client_body_events: BTreeMap::new(),
+                completed_client_requests: HashSet::new(),
+            },
+        );
+        actions
+    }
+
+    pub fn start_http1_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
+        assert!(
+            !self.is_shutdown(),
+            "a shut down realm cannot start an HTTP connection"
+        );
+        assert!(
+            !self.state.http_connections.contains_key(&resource),
+            "an HTTP connection is already registered for resource {resource:?}"
+        );
+        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
+        let (request_sender, request_receiver) = mpsc::unbounded_channel();
+        let (event_sender, event_receiver) = mpsc::unbounded_channel();
+        let task = self
+            .executor
+            .local
+            .spawn_local(hyper_http::client_connection(
+                io,
+                request_receiver,
+                event_sender,
+            ));
+        let actions = transport.start();
+        self.state.http_connections.insert(
+            resource,
+            RuntimeHttpConnection {
+                transport,
+                task,
+                events: None,
+                responses: None,
+                response_bodies: BTreeMap::new(),
+                body_events: BTreeMap::new(),
+                close_when_responses_finish: false,
+                protocol_closed: false,
+                close_after_response: HashSet::new(),
+                client_requests: Some(request_sender),
+                client_events: Some(event_receiver),
+                client_bodies: BTreeMap::new(),
+                client_body_events: BTreeMap::new(),
+                completed_client_requests: HashSet::new(),
+            },
+        );
+        actions
+    }
+
+    /// Consume and register the raw close selected by an HTTP transport.
+    ///
+    /// HTTP actions cannot express `AsyncHostOp::CloseResource` directly. Keeping the conversion
+    /// here ensures adapters cannot bypass the protocol drain/abort decision accidentally.
+    #[doc(hidden)]
+    pub fn start_http_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId> {
+        self.start_http_connection_close_with_context(close, false)
+    }
+
+    /// Consume an authorized HTTP close while already executing inside this realm runtime.
+    #[doc(hidden)]
+    pub fn start_http_connection_close_in_context(
+        &mut self,
+        close: HttpCloseCapability,
+    ) -> Option<RequestId> {
+        self.start_http_connection_close_with_context(close, true)
+    }
+
+    fn start_http_connection_close_with_context(
+        &mut self,
+        close: HttpCloseCapability,
+        in_context: bool,
+    ) -> Option<RequestId> {
+        let resource = close.into_resource();
+        let raw = resource.resource();
+        if !self.state.http_connections.contains_key(&raw) {
+            return None;
+        }
+        let operation = AsyncHostOp::CloseResource { resource: raw };
+        let request = if in_context {
+            self.start_host_op_in_context(operation, true)
+        } else {
+            self.start_host_op(operation, true)
+        };
+        let accepted = self
+            .state
+            .http_connections
+            .get_mut(&raw)
+            .is_some_and(|connection| connection.transport.close_started(request));
+        if accepted {
+            Some(request)
+        } else {
+            self.cancel_host_op(request);
+            None
         }
     }
 
-    #[cfg(test)]
-    fn host(&mut self) -> &mut H {
-        &mut self.host
+    /// Poll woken Hyper tasks and return bytes they selected for the existing HostOps stream.
+    #[doc(hidden)]
+    pub fn poll_http_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>> {
+        self.poll_http_tasks();
+        self.state
+            .http_connections
+            .get_mut(&resource)
+            .map(|connection| connection.transport.pump_write())
     }
 
+    /// Return transport writes while the caller is already executing inside this realm runtime.
+    ///
+    /// Sending a response command wakes Hyper on the same `LocalSet`; the task is polled when the
+    /// current synchronous language callback yields back to Tokio. This method must not nest
+    /// `block_on`, so it only collects bytes already selected at the current checkpoint.
+    pub fn poll_http_connection_in_context(
+        &mut self,
+        resource: ResourceId,
+    ) -> Option<Vec<HttpStreamAction>> {
+        self.state
+            .http_connections
+            .get_mut(&resource)
+            .map(|connection| connection.transport.pump_write())
+    }
+
+    /// Poll every realm-owned HTTP task once before the event loop blocks on HostOps.
+    ///
+    /// A protocol task can become runnable without another socket completion: supplying the
+    /// response head for one HTTP/1 request lets Hyper dispatch the next request already buffered
+    /// in that connection. This checkpoint keeps that work under Tokio's scheduler while making
+    /// it visible to the synchronous language adapter before it waits on an otherwise-idle read.
+    /// One cooperative turn, for a caller that repeats until the checkpoint stops progressing.
+    ///
+    /// [`Self::poll_http_tasks`] drains a fixed four turns because its caller had no way to ask
+    /// whether another was needed. A caller that loops on its own progress does, and one turn per
+    /// round is both cheaper and strictly more thorough: it stops at quiescence rather than at
+    /// four, and it keeps going past four when a connection still has work.
+    /// Advances the local tasks that are already runnable, without parking the thread.
+    ///
+    /// The checkpoint calls this several times per request, so what it costs per call matters.
+    /// `block_on` around a `yield_now` would do the same scheduling work, but it also arms and
+    /// disarms the I/O driver each time, and that is a `kevent` per call. A run of 14,175
+    /// requests parked for real 13 times: the driver was almost always being armed only to find
+    /// work already waiting.
+    ///
+    /// Polling the `LocalSet` directly runs exactly the tasks that are ready and returns. It
+    /// deliberately does not turn the reactor, so readiness that has not arrived yet will not be
+    /// discovered here. That is not a gap the checkpoint has to cover. A round that applies no
+    /// actions and drains no events ends the checkpoint, control returns to the drive, and the
+    /// drive's own await parks and turns the reactor; the work resumes through
+    /// [`Self::poll_http_tasks_after_wake`]. Progress that needs the kernel still waits for the
+    /// kernel, in the one place that was already going to park.
+    pub fn poll_http_tasks_once(&mut self) {
+        let _entered = self.executor.runtime.enter();
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        let _ = std::pin::Pin::new(&mut self.executor.local).poll(&mut context);
+    }
+
+    pub fn poll_http_tasks(&mut self) {
+        if self.is_shutdown() {
+            return;
+        }
+        self.executor.local.block_on(&self.executor.runtime, async {
+            // Hyper commonly needs more than one cooperative turn: a body wake schedules the
+            // connection, which schedules transport output or a service response. A zero-length
+            // timeout races the first poll and made progress depend on executor polling details.
+            // A small fixed drain advances no clock and keeps the checkpoint reproducible while
+            // allowing each already-runnable layer to hand work to the next.
+            for _ in 0..4 {
+                tokio::task::yield_now().await;
+            }
+        });
+    }
+
+    /// Advance protocol tasks after the caller has just delivered a completion or command that
+    /// woke them. Unlike [`Self::poll_http_tasks`], this path may await one scheduler yield: the
+    /// concrete wake guarantees progress and the adapter immediately drains the resulting events.
+    #[doc(hidden)]
+    pub fn poll_http_tasks_after_wake(&mut self) {
+        self.poll_http_tasks();
+    }
+
+    /// Drives `realm` until it has no microtasks or timers left.
+    ///
+    /// Tokio's paused clock is enabled lazily so a runtime can be constructed before any realm
+    /// work is queued. This method must not be called from another Tokio runtime's synchronous
+    /// context; the runtime is deliberately an explicit owner rather than an ambient handle.
+    pub fn drive<M, T, F, C, E>(
+        &mut self,
+        realm: &mut Realm<M, T>,
+        mut execute: F,
+        mut checkpoint: C,
+    ) -> Result<(), E>
+    where
+        T: Clone,
+        F: FnMut(&mut Realm<M, T>, WorkItem<M, T>) -> Result<(), E>,
+        C: FnMut(&mut Realm<M, T>) -> Result<(), E>,
+    {
+        assert!(!self.is_shutdown(), "a shut down realm cannot be driven");
+        if !self.state.time_paused {
+            self.executor.local.block_on(&self.executor.runtime, async {
+                tokio::time::pause();
+            });
+            self.state.time_paused = true;
+        }
+        self.executor.local.block_on(
+            &self.executor.runtime,
+            drive_realm(realm, &mut execute, &mut checkpoint),
+        )
+    }
+
+    /// Waits for and removes the next timer after the caller has drained its microtasks.
+    ///
+    /// This lower-level entry point is for machines whose work executor already owns `realm` as
+    /// one of its fields. Returning the payload ends the field borrow before the machine invokes
+    /// arbitrary language callbacks, so those callbacks can enqueue more work directly into the
+    /// same realm. [`Self::drive`] remains the convenient all-in-one path for other callers.
+    pub fn next_timer<M, T>(&mut self, realm: &mut Realm<M, T>) -> Option<WorkItem<M, T>>
+    where
+        T: Clone,
+    {
+        if self.is_shutdown() {
+            return None;
+        }
+        if !self.state.time_paused {
+            self.executor.local.block_on(&self.executor.runtime, async {
+                tokio::time::pause();
+            });
+            self.state.time_paused = true;
+        }
+        self.executor
+            .local
+            .block_on(&self.executor.runtime, next_timer(realm))
+    }
+}
+
+/// Realm operations that need no executor.
+///
+/// Splitting these off is what makes the nesting rule structural rather than a runtime
+/// check: a drive holding `&mut RealmState` cannot name a method that would park the
+/// thread, because those live on [`RealmRuntime`] and need its executor. See ADR 0040.
+impl<H: RealmHostProvider> RealmState<H> {
     /// Returns whether terminal realm teardown has begun.
     pub fn is_shutdown(&self) -> bool {
         self.lifecycle != RealmRuntimeLifecycle::Open
@@ -747,52 +1190,33 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         true
     }
 
-    /// Try to start one host operation, rejecting admission after teardown begins.
-    pub fn try_start_host_op(
-        &mut self,
-        operation: AsyncHostOp,
-        referenced: bool,
-    ) -> Option<RequestId> {
-        if self.is_shutdown() {
-            return None;
-        }
-        Some(self.local.block_on(&self.runtime, async {
-            RealmHostProvider::start_on_realm(&mut self.host, operation, referenced)
-        }))
+    pub fn capabilities(&self) -> &RealmCapabilities {
+        &self.capabilities
     }
 
-    /// Starts one asynchronous host operation on this realm's Tokio runtime.
-    pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
-        self.try_start_host_op(operation, referenced)
-            .expect("a shut down realm cannot start host work")
-    }
-
-    /// Starts a host operation while the caller is already executing inside this realm runtime.
+    /// Samples stable whole-runtime counters accumulated since the previous call.
     ///
-    /// Language adapters use this path from native calls. It must not re-enter `block_on`; Tokio
-    /// forbids nesting a runtime, and `spawn_local` already sees the active `LocalSet` here.
-    pub fn start_host_op_in_context(
-        &mut self,
-        operation: AsyncHostOp,
-        referenced: bool,
-    ) -> RequestId {
-        assert!(
-            !self.is_shutdown(),
-            "a shut down realm cannot start host work"
-        );
-        RealmHostProvider::start_on_realm(&mut self.host, operation, referenced)
+    /// These are developer diagnostics, not JavaScript-observable time or scheduler state. The
+    /// sample's `elapsed` and durations use wall time even though realm timers use paused Tokio
+    /// time for deterministic execution.
+    pub fn sample_runtime_metrics(&mut self) -> RuntimeMetricsSnapshot {
+        let metrics = self
+            .runtime_metrics
+            .next()
+            .expect("Tokio runtime metric intervals are infinite");
+        RuntimeMetricsSnapshot {
+            elapsed: metrics.elapsed,
+            workers: metrics.workers_count,
+            live_tasks: metrics.live_tasks_count,
+            global_queue_depth: metrics.global_queue_depth,
+            park_count: metrics.total_park_count,
+            busy_duration: metrics.total_busy_duration,
+        }
     }
 
-    /// Waits for the next asynchronous host completion on this realm's Tokio runtime.
-    pub fn next_host_completion(&mut self) -> Result<Option<Completion>, RuntimeFailure> {
-        if let Some(failure) = self.host.runtime_failure() {
-            return Err(failure.clone());
-        }
-        if !self.host.has_pending_work() {
-            return Ok(None);
-        }
-        self.local
-            .block_on(&self.runtime, self.host.next_completion_async())
+    #[cfg(test)]
+    fn host(&mut self) -> &mut H {
+        &mut self.host
     }
 
     /// Returns whether this realm still owns an asynchronous host request.
@@ -817,200 +1241,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         RealmHostProvider::cancel_on_realm(&mut self.host, request)
     }
 
-    /// Wait for either the next host completion or the realm's next timer.
-    ///
-    /// This is the sole blocking ingress used by Node execution. Waiting on I/O first would
-    /// starve timeouts behind an open socket; running virtual timers first would make every
-    /// timeout beat already-ready I/O. Tokio polls both, and biased selection gives an already
-    /// queued completion the checkpoint priority before virtual time advances.
-    pub fn next_turn<M, T>(&mut self, realm: &mut Realm<M, T>) -> Option<RuntimeTurn<M, T>>
-    where
-        T: Clone,
-    {
-        if self.is_shutdown() {
-            return None;
-        }
-        if !self.time_paused {
-            self.local.block_on(&self.runtime, async {
-                tokio::time::pause();
-            });
-            self.time_paused = true;
-        }
-        if let Some(failure) = self.host.runtime_failure() {
-            return Some(RuntimeTurn::Failure(failure.clone()));
-        }
-        if let Some(completion) = AsyncHostOps::next_completion(&mut self.host) {
-            return Some(RuntimeTurn::Completion(completion));
-        }
-        if let Some(failure) = self.host.runtime_failure() {
-            return Some(RuntimeTurn::Failure(failure.clone()));
-        }
-        let deadline = realm.next_timer_deadline();
-        if !self.host.has_pending_work() {
-            return self.next_timer(realm).map(RuntimeTurn::Timer);
-        }
-        self.local.block_on(&self.runtime, async {
-            match deadline {
-                Some(deadline) => {
-                    let delay = deadline.saturating_sub(realm.now);
-                    tokio::select! {
-                        biased;
-                        completion = self.host.next_completion_async() => {
-                            match completion {
-                                Ok(Some(completion)) => Some(RuntimeTurn::Completion(completion)),
-                                Ok(None) => None,
-                                Err(failure) => Some(RuntimeTurn::Failure(failure)),
-                            }
-                        }
-                        _ = tokio::time::sleep(delay) => {
-                            realm.run_next_timer().map(RuntimeTurn::Timer)
-                        }
-                    }
-                }
-                None => match self.host.next_completion_async().await {
-                    Ok(Some(completion)) => Some(RuntimeTurn::Completion(completion)),
-                    Ok(None) => None,
-                    Err(failure) => Some(RuntimeTurn::Failure(failure)),
-                },
-            }
-        })
-    }
-
-    /// Select a turn only while referenced host work or a realm timer can keep execution alive.
-    /// Unreferenced I/O remains registered and may still complete at later checkpoints, but does
-    /// not make a Node realm wait indefinitely on an idle keep-alive socket.
-    pub fn next_referenced_turn<M, T>(
-        &mut self,
-        realm: &mut Realm<M, T>,
-    ) -> Option<RuntimeTurn<M, T>>
-    where
-        T: Clone,
-    {
-        if self.is_shutdown() {
-            return None;
-        }
-        if let Some(failure) = self.host.runtime_failure() {
-            return Some(RuntimeTurn::Failure(failure.clone()));
-        }
-        if !self.host.has_referenced_work() && realm.next_timer_deadline().is_none() {
-            return None;
-        }
-        self.next_turn(realm)
-    }
-
-    /// Runs one synchronous realm operation as the current Tokio task.
-    ///
-    /// Interpreted bytecode and native continuation calls use this entry rather than executing
-    /// beside the runtime that owns their timers and future I/O. The operation stays synchronous
-    /// until HostOps grows requests, but it is polled by the same explicit runtime owner now.
-    pub fn enter<F, R>(&mut self, operation: F) -> R
-    where
-        F: FnOnce() -> R,
-    {
-        assert!(!self.is_shutdown(), "a shut down realm cannot be entered");
-        self.local
-            .block_on(&self.runtime, async move { operation() })
-    }
-
     #[cfg(test)]
     fn host_mut(&mut self) -> &mut H {
         &mut self.host
-    }
-
-    /// Install one Hyper HTTP/1 connection on an existing portable TCP resource.
-    pub fn start_http1_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
-        self.start_http1_connection_with_options(resource, false)
-    }
-
-    pub fn start_http1_connection_with_options(
-        &mut self,
-        resource: ResourceId,
-        allow_half_close: bool,
-    ) -> Vec<HttpStreamAction> {
-        assert!(
-            !self.is_shutdown(),
-            "a shut down realm cannot start an HTTP connection"
-        );
-        assert!(
-            !self.http_connections.contains_key(&resource),
-            "an HTTP connection is already registered for resource {resource:?}"
-        );
-        // The listening server is the Node-visible resource that keeps the realm alive. Accepted
-        // HTTP keep-alive sockets are Hyper-owned implementation resources; their reads remain
-        // registered for reuse but must not outlive `server.close()` merely because they inherited
-        // the listener's referenced flag at accept time. Referenced writes and close operations
-        // still keep active work alive through their individual HostOps requests.
-        let _ = self.host.set_resource_referenced_now(resource, false);
-        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        let (response_sender, response_receiver) = mpsc::unbounded_channel();
-        let task = self.local.spawn_local(hyper_http::event_connection(
-            io,
-            allow_half_close,
-            event_sender,
-            response_receiver,
-        ));
-        let actions = transport.start();
-        self.http_connections.insert(
-            resource,
-            RuntimeHttpConnection {
-                transport,
-                task,
-                events: Some(event_receiver),
-                responses: Some(response_sender),
-                response_bodies: BTreeMap::new(),
-                body_events: BTreeMap::new(),
-                close_when_responses_finish: false,
-                protocol_closed: false,
-                close_after_response: HashSet::new(),
-                client_requests: None,
-                client_events: None,
-                client_bodies: BTreeMap::new(),
-                client_body_events: BTreeMap::new(),
-                completed_client_requests: HashSet::new(),
-            },
-        );
-        actions
-    }
-
-    pub fn start_http1_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
-        assert!(
-            !self.is_shutdown(),
-            "a shut down realm cannot start an HTTP connection"
-        );
-        assert!(
-            !self.http_connections.contains_key(&resource),
-            "an HTTP connection is already registered for resource {resource:?}"
-        );
-        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
-        let (request_sender, request_receiver) = mpsc::unbounded_channel();
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        let task = self.local.spawn_local(hyper_http::client_connection(
-            io,
-            request_receiver,
-            event_sender,
-        ));
-        let actions = transport.start();
-        self.http_connections.insert(
-            resource,
-            RuntimeHttpConnection {
-                transport,
-                task,
-                events: None,
-                responses: None,
-                response_bodies: BTreeMap::new(),
-                body_events: BTreeMap::new(),
-                close_when_responses_finish: false,
-                protocol_closed: false,
-                close_after_response: HashSet::new(),
-                client_requests: Some(request_sender),
-                client_events: Some(event_receiver),
-                client_bodies: BTreeMap::new(),
-                client_body_events: BTreeMap::new(),
-                completed_client_requests: HashSet::new(),
-            },
-        );
-        actions
     }
 
     #[doc(hidden)]
@@ -1023,52 +1256,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.http_connections
             .get_mut(&resource)
             .is_some_and(|connection| connection.transport.started(operation, request))
-    }
-
-    /// Consume and register the raw close selected by an HTTP transport.
-    ///
-    /// HTTP actions cannot express `AsyncHostOp::CloseResource` directly. Keeping the conversion
-    /// here ensures adapters cannot bypass the protocol drain/abort decision accidentally.
-    #[doc(hidden)]
-    pub fn start_http_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId> {
-        self.start_http_connection_close_with_context(close, false)
-    }
-
-    /// Consume an authorized HTTP close while already executing inside this realm runtime.
-    #[doc(hidden)]
-    pub fn start_http_connection_close_in_context(
-        &mut self,
-        close: HttpCloseCapability,
-    ) -> Option<RequestId> {
-        self.start_http_connection_close_with_context(close, true)
-    }
-
-    fn start_http_connection_close_with_context(
-        &mut self,
-        close: HttpCloseCapability,
-        in_context: bool,
-    ) -> Option<RequestId> {
-        let resource = close.into_resource();
-        let raw = resource.resource();
-        if !self.http_connections.contains_key(&raw) {
-            return None;
-        }
-        let operation = AsyncHostOp::CloseResource { resource: raw };
-        let request = if in_context {
-            self.start_host_op_in_context(operation, true)
-        } else {
-            self.start_host_op(operation, true)
-        };
-        let accepted = self
-            .http_connections
-            .get_mut(&raw)
-            .is_some_and(|connection| connection.transport.close_started(request));
-        if accepted {
-            Some(request)
-        } else {
-            self.cancel_host_op(request);
-            None
-        }
     }
 
     #[doc(hidden)]
@@ -1094,59 +1281,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             actions.retain(|action| !matches!(action, HttpStreamAction::Error(_)));
         }
         Some(actions)
-    }
-
-    /// Poll woken Hyper tasks and return bytes they selected for the existing HostOps stream.
-    #[doc(hidden)]
-    pub fn poll_http_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>> {
-        self.poll_http_tasks();
-        self.http_connections
-            .get_mut(&resource)
-            .map(|connection| connection.transport.pump_write())
-    }
-
-    /// Return transport writes while the caller is already executing inside this realm runtime.
-    ///
-    /// Sending a response command wakes Hyper on the same `LocalSet`; the task is polled when the
-    /// current synchronous language callback yields back to Tokio. This method must not nest
-    /// `block_on`, so it only collects bytes already selected at the current checkpoint.
-    pub fn poll_http_connection_in_context(
-        &mut self,
-        resource: ResourceId,
-    ) -> Option<Vec<HttpStreamAction>> {
-        self.http_connections
-            .get_mut(&resource)
-            .map(|connection| connection.transport.pump_write())
-    }
-
-    /// Poll every realm-owned HTTP task once before the event loop blocks on HostOps.
-    ///
-    /// A protocol task can become runnable without another socket completion: supplying the
-    /// response head for one HTTP/1 request lets Hyper dispatch the next request already buffered
-    /// in that connection. This checkpoint keeps that work under Tokio's scheduler while making
-    /// it visible to the synchronous language adapter before it waits on an otherwise-idle read.
-    pub fn poll_http_tasks(&mut self) {
-        if self.is_shutdown() {
-            return;
-        }
-        self.local.block_on(&self.runtime, async {
-            // Hyper commonly needs more than one cooperative turn: a body wake schedules the
-            // connection, which schedules transport output or a service response. A zero-length
-            // timeout races the first poll and made progress depend on executor polling details.
-            // A small fixed drain advances no clock and keeps the checkpoint reproducible while
-            // allowing each already-runnable layer to hand work to the next.
-            for _ in 0..4 {
-                tokio::task::yield_now().await;
-            }
-        });
-    }
-
-    /// Advance protocol tasks after the caller has just delivered a completion or command that
-    /// woke them. Unlike [`Self::poll_http_tasks`], this path may await one scheduler yield: the
-    /// concrete wake guarantees progress and the adapter immediately drains the resulting events.
-    #[doc(hidden)]
-    pub fn poll_http_tasks_after_wake(&mut self) {
-        self.poll_http_tasks();
     }
 
     /// Retire an HTTP transport after Hyper has completed its connection future.
@@ -1442,56 +1576,22 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         }
         events
     }
+}
 
-    /// Drives `realm` until it has no microtasks or timers left.
-    ///
-    /// Tokio's paused clock is enabled lazily so a runtime can be constructed before any realm
-    /// work is queued. This method must not be called from another Tokio runtime's synchronous
-    /// context; the runtime is deliberately an explicit owner rather than an ambient handle.
-    pub fn drive<M, T, F, C, E>(
-        &mut self,
-        realm: &mut Realm<M, T>,
-        mut execute: F,
-        mut checkpoint: C,
-    ) -> Result<(), E>
-    where
-        T: Clone,
-        F: FnMut(&mut Realm<M, T>, WorkItem<M, T>) -> Result<(), E>,
-        C: FnMut(&mut Realm<M, T>) -> Result<(), E>,
-    {
-        assert!(!self.is_shutdown(), "a shut down realm cannot be driven");
-        if !self.time_paused {
-            self.local.block_on(&self.runtime, async {
-                tokio::time::pause();
-            });
-            self.time_paused = true;
-        }
-        self.local.block_on(
-            &self.runtime,
-            drive_realm(realm, &mut execute, &mut checkpoint),
-        )
+/// A realm is its state plus the executor that drives it, so callers that only reach for
+/// state read through the runtime unchanged. The conversion is deliberately one-way: state
+/// cannot reach back to the executor.
+impl<H: RealmHostProvider> std::ops::Deref for RealmRuntime<H> {
+    type Target = RealmState<H>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
     }
+}
 
-    /// Waits for and removes the next timer after the caller has drained its microtasks.
-    ///
-    /// This lower-level entry point is for machines whose work executor already owns `realm` as
-    /// one of its fields. Returning the payload ends the field borrow before the machine invokes
-    /// arbitrary language callbacks, so those callbacks can enqueue more work directly into the
-    /// same realm. [`Self::drive`] remains the convenient all-in-one path for other callers.
-    pub fn next_timer<M, T>(&mut self, realm: &mut Realm<M, T>) -> Option<WorkItem<M, T>>
-    where
-        T: Clone,
-    {
-        if self.is_shutdown() {
-            return None;
-        }
-        if !self.time_paused {
-            self.local.block_on(&self.runtime, async {
-                tokio::time::pause();
-            });
-            self.time_paused = true;
-        }
-        self.local.block_on(&self.runtime, next_timer(realm))
+impl<H: RealmHostProvider> std::ops::DerefMut for RealmRuntime<H> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
     }
 }
 
@@ -1569,9 +1669,9 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
             !self.is_shutdown(),
             "a shut down realm cannot acquire an HTTP connection"
         );
-        let decision = self.http_agent.acquire(origin, request);
+        let decision = self.state.http_agent.acquire(origin, request);
         if let AgentDecision::Reuse(resource) = decision {
-            let _ = self.host.set_resource_referenced_now(resource, true);
+            let _ = self.state.host.set_resource_referenced_now(resource, true);
         }
         decision
     }
@@ -1585,16 +1685,16 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         if self.is_shutdown() {
             return false;
         }
-        self.http_agent.connected(origin, resource, request)
+        self.state.http_agent.connected(origin, resource, request)
     }
 
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease {
         if self.is_shutdown() {
             return AgentRelease::Retire;
         }
-        let release = self.http_agent.release(resource, reusable);
+        let release = self.state.http_agent.release(resource, reusable);
         if release == AgentRelease::Idle {
-            let _ = self.host.set_resource_referenced_now(resource, false);
+            let _ = self.state.host.set_resource_referenced_now(resource, false);
         }
         release
     }
@@ -1603,14 +1703,14 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         if self.is_shutdown() {
             return AgentFailure::Empty;
         }
-        self.http_agent.connect_failed(origin)
+        self.state.http_agent.connect_failed(origin)
     }
 
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64> {
         if self.is_shutdown() {
             return None;
         }
-        self.http_agent.closed(resource)
+        self.state.http_agent.closed(resource)
     }
 
     fn start_connection(
@@ -1756,7 +1856,7 @@ impl<H: RealmHostProvider> ActiveAsyncHostOps for RealmRuntime<H> {
     }
 
     fn cancel(&mut self, request: RequestId) -> bool {
-        RealmHostProvider::cancel_on_realm(&mut self.host, request)
+        RealmHostProvider::cancel_on_realm(&mut self.state.host, request)
     }
 }
 
@@ -2981,9 +3081,12 @@ mod tests {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         // This is the same trait object the interpreter calls from inside `RealmRuntime::enter`.
         // Unlike the old Node-only seam, the generic host protocol admits resource operations.
-        let request = runtime.local.block_on(&runtime.runtime, async {
-            submit_listener(&mut runtime.host)
-        });
+        let request = runtime
+            .executor
+            .local
+            .block_on(&runtime.executor.runtime, async {
+                submit_listener(&mut runtime.state.host)
+            });
         let resource = match next_host_completion(&mut runtime)
             .expect("listen completes")
             .result
@@ -2993,7 +3096,10 @@ mod tests {
             other => panic!("expected listener resource, got {other:?}"),
         };
         assert_eq!(resource.kind, ResourceKind::TcpListener);
-        assert!(!ActiveAsyncHostOps::cancel(&mut runtime.host, request));
+        assert!(!ActiveAsyncHostOps::cancel(
+            &mut runtime.state.host,
+            request
+        ));
 
         runtime.start_host_op(
             AsyncHostOp::CloseResource {
@@ -3189,8 +3295,11 @@ mod tests {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         let failed = RequestId::new(90);
         let sibling = RequestId::new(91);
-        let (local, tokio_runtime, host) =
-            (&mut runtime.local, &runtime.runtime, &mut runtime.host);
+        let (local, tokio_runtime, host) = (
+            &mut runtime.executor.local,
+            &runtime.executor.runtime,
+            &mut runtime.state.host,
+        );
         local.block_on(tokio_runtime, async {
             host.spawn_task(failed, 90, true, async {
                 panic!("supervised task panic");
@@ -4837,9 +4946,12 @@ mod tests {
         assert!(runtime.host.resources.is_empty());
         assert!(runtime.host.tasks.is_empty());
 
-        runtime.local.block_on(&runtime.runtime, async {
-            tokio::task::yield_now().await;
-        });
+        runtime
+            .executor
+            .local
+            .block_on(&runtime.executor.runtime, async {
+                tokio::task::yield_now().await;
+            });
         assert_eq!(
             runtime
                 .next_host_completion()
@@ -5674,5 +5786,47 @@ mod tests {
         host.call(HostOp::WriteStdout, &[HostValue::String("two".into())])
             .expect("write succeeds");
         assert_eq!(host.into_stdout(), "two\n");
+    }
+
+    /// ADR 0040: state operations must not park the thread, because the drive calls them from
+    /// inside a task that is already running on the executor and a nested park deadlocks.
+    ///
+    /// The type system carries most of this already — `RealmState` has no executor field, so it
+    /// cannot reach `Runtime::block_on` through `self`. This closes the remaining door, which is
+    /// reaching the ambient runtime through `Handle::current` or spawning onto it.
+    #[test]
+    fn realm_state_operations_never_park_the_thread() {
+        let source = include_str!("lib.rs");
+        let header = "impl<H: RealmHostProvider> RealmState<H> {";
+        let start = source
+            .find(header)
+            .expect("the RealmState operations block should exist");
+        let mut depth = 0usize;
+        let mut end = start;
+        for (offset, character) in source[start..].char_indices() {
+            match character {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = start + offset;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert!(end > start, "the RealmState operations block should close");
+        let block = &source[start..end];
+
+        for forbidden in ["block_on", "Handle::current", "self.executor"] {
+            assert!(
+                !block.contains(forbidden),
+                "`{forbidden}` appears in the RealmState operations block. These operations run \
+                 inside a task on the executor, so parking there deadlocks the drive. Either keep \
+                 the operation non-blocking or move it onto RealmRuntime, which owns the executor \
+                 and is only reachable from outside a turn. See ADR 0040."
+            );
+        }
     }
 }

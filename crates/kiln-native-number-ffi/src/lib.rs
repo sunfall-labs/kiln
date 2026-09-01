@@ -973,149 +973,114 @@ mod realm {
 
     fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> Result<usize, i32> {
         let mut event_count: usize = 0;
-        if !in_context {
-            // A response command can wake Hyper and make a pipelined request runnable without
-            // another HostOps completion. Advance the one Tokio scheduler before inspecting
-            // per-connection events, matching the interpreted adapter's checkpoint contract.
-            realm.runtime.borrow_mut().poll_http_tasks();
-        }
-        let resources = realm
-            .http_connections
-            .borrow()
-            .keys()
-            .copied()
-            .collect::<Vec<_>>();
-        for resource in resources {
-            loop {
-                let actions = if in_context {
-                    let Some(runtime) = active_runtime() else {
-                        return Err(INVALID_ARGUMENT);
-                    };
-                    // SAFETY: this is the current realm runtime; this poll never nests block_on.
-                    unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
-                } else {
-                    realm.runtime.borrow_mut().poll_http_connection(resource)
-                };
-                let Some(actions) = actions else { break };
-                let had_actions = !actions.is_empty();
-                let status = apply_http_actions(realm, resource, actions, in_context);
-                if status != 0 {
-                    return Err(status);
-                }
-                let (owner, role) = {
-                    let connections = realm.http_connections.borrow();
-                    let Some(connection) = connections.get(&resource) else {
-                        break;
-                    };
-                    (Rc::clone(&connection.events), connection.role)
-                };
-                let mut payloads = Vec::new();
-                let mut close_transport = false;
-                let mut close_mode = HttpCloseMode::Graceful;
-                match role {
-                    HttpRole::Server => {
-                        let events = if in_context {
-                            let Some(runtime) = active_runtime() else {
-                                return Err(INVALID_ARGUMENT);
-                            };
-                            // SAFETY: event extraction is synchronous on the active runtime.
-                            unsafe { &mut *runtime }.take_http_events(resource)
-                        } else {
-                            realm.runtime.borrow_mut().take_http_events(resource)
+        // Repeat while a round changes something, rather than draining a fixed number of
+        // scheduler turns and hoping it was enough. Each round advances the scheduler once; a
+        // round that applies no actions and drains no events is quiescence and ends the
+        // checkpoint. This is what the fixed four-turn drain was standing in for, and unlike a
+        // constant it neither stops early when a connection still has work nor keeps paying for
+        // turns after everything has gone quiet.
+        loop {
+            let mut progressed = false;
+            if !in_context {
+                // A response command can wake Hyper and make a pipelined request runnable without
+                // another HostOps completion. Advance the one Tokio scheduler before inspecting
+                // per-connection events, matching the interpreted adapter's checkpoint contract.
+                realm.runtime.borrow_mut().poll_http_tasks_once();
+            }
+            let resources = realm
+                .http_connections
+                .borrow()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>();
+            for resource in resources {
+                loop {
+                    let actions = if in_context {
+                        let Some(runtime) = active_runtime() else {
+                            return Err(INVALID_ARGUMENT);
                         };
-                        for event in events {
-                            let payload = match event {
-                                RuntimeHttpEvent::RequestHead { id, request } => HttpEventPayload {
-                                    owner: Rc::clone(&owner),
-                                    kind: HTTP_EVENT_REQUEST_HEAD,
-                                    flags: u32::from(request.keep_alive),
-                                    id,
-                                    status: 0,
-                                    version_minor: u8::from(matches!(
-                                        request.version,
-                                        kiln_runtime::node_http::HttpVersion::Http11
-                                    )),
-                                    method: request.method.into_bytes(),
-                                    target: request.target.into_bytes(),
-                                    reason: Vec::new(),
-                                    headers: flatten_headers(&request.headers),
-                                    data: Vec::new(),
-                                },
-                                RuntimeHttpEvent::RequestData { id, data } => HttpEventPayload {
-                                    owner: Rc::clone(&owner),
-                                    kind: HTTP_EVENT_REQUEST_DATA,
-                                    flags: 0,
-                                    id,
-                                    status: 0,
-                                    version_minor: 0,
-                                    method: Vec::new(),
-                                    target: Vec::new(),
-                                    reason: Vec::new(),
-                                    headers: Vec::new(),
-                                    data,
-                                },
-                                RuntimeHttpEvent::RequestEnd { id } => HttpEventPayload {
-                                    owner: Rc::clone(&owner),
-                                    kind: HTTP_EVENT_REQUEST_END,
-                                    flags: 0,
-                                    id,
-                                    status: 0,
-                                    version_minor: 0,
-                                    method: Vec::new(),
-                                    target: Vec::new(),
-                                    reason: Vec::new(),
-                                    headers: Vec::new(),
-                                    data: Vec::new(),
-                                },
-                                RuntimeHttpEvent::Drain { id } => HttpEventPayload {
-                                    owner: Rc::clone(&owner),
-                                    kind: HTTP_EVENT_DRAIN,
-                                    flags: 0,
-                                    id,
-                                    status: 0,
-                                    version_minor: 0,
-                                    method: Vec::new(),
-                                    target: Vec::new(),
-                                    reason: Vec::new(),
-                                    headers: Vec::new(),
-                                    data: Vec::new(),
-                                },
-                                RuntimeHttpEvent::Finish { id } => HttpEventPayload {
-                                    owner: Rc::clone(&owner),
-                                    kind: HTTP_EVENT_FINISH,
-                                    flags: 0,
-                                    id,
-                                    status: 0,
-                                    version_minor: 0,
-                                    method: Vec::new(),
-                                    target: Vec::new(),
-                                    reason: Vec::new(),
-                                    headers: Vec::new(),
-                                    data: Vec::new(),
-                                },
-                                RuntimeHttpEvent::Error { id, message } => HttpEventPayload {
-                                    owner: Rc::clone(&owner),
-                                    kind: HTTP_EVENT_ERROR,
-                                    flags: 0,
-                                    id,
-                                    status: 0,
-                                    version_minor: 0,
-                                    method: Vec::new(),
-                                    target: Vec::new(),
-                                    reason: Vec::new(),
-                                    headers: Vec::new(),
-                                    data: message.into_bytes(),
-                                },
-                                RuntimeHttpEvent::Closed => {
-                                    // Server protocol completion can race the final response
-                                    // write. Keep the default graceful mode so that write is
-                                    // acknowledged before the portable resource is retired.
-                                    close_transport = true;
-                                    HttpEventPayload {
+                        // SAFETY: this is the current realm runtime; this poll never nests block_on.
+                        unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
+                    } else {
+                        // Pump this connection's already-selected bytes without re-driving the
+                        // scheduler. `checkpoint_http` drives it once before this loop, and
+                        // `poll_http_tasks_after_wake` drives it again after every iteration that
+                        // did anything, so a drive here only repeats one of those -- once per open
+                        // connection, after every microtask. That is where the server's cost went
+                        // quadratic: idle connections each paid a full scheduler drive to report
+                        // that they had nothing to say.
+                        realm
+                            .runtime
+                            .borrow_mut()
+                            .poll_http_connection_in_context(resource)
+                    };
+                    let Some(actions) = actions else { break };
+                    let had_actions = !actions.is_empty();
+                    let status = apply_http_actions(realm, resource, actions, in_context);
+                    if status != 0 {
+                        return Err(status);
+                    }
+                    let (owner, role) = {
+                        let connections = realm.http_connections.borrow();
+                        let Some(connection) = connections.get(&resource) else {
+                            break;
+                        };
+                        (Rc::clone(&connection.events), connection.role)
+                    };
+                    let mut payloads = Vec::new();
+                    let mut close_transport = false;
+                    let mut close_mode = HttpCloseMode::Graceful;
+                    match role {
+                        HttpRole::Server => {
+                            let events = if in_context {
+                                let Some(runtime) = active_runtime() else {
+                                    return Err(INVALID_ARGUMENT);
+                                };
+                                // SAFETY: event extraction is synchronous on the active runtime.
+                                unsafe { &mut *runtime }.take_http_events(resource)
+                            } else {
+                                realm.runtime.borrow_mut().take_http_events(resource)
+                            };
+                            for event in events {
+                                let payload = match event {
+                                    RuntimeHttpEvent::RequestHead { id, request } => {
+                                        HttpEventPayload {
+                                            owner: Rc::clone(&owner),
+                                            kind: HTTP_EVENT_REQUEST_HEAD,
+                                            flags: u32::from(request.keep_alive),
+                                            id,
+                                            status: 0,
+                                            version_minor: u8::from(matches!(
+                                                request.version,
+                                                kiln_runtime::node_http::HttpVersion::Http11
+                                            )),
+                                            method: request.method.into_bytes(),
+                                            target: request.target.into_bytes(),
+                                            reason: Vec::new(),
+                                            headers: flatten_headers(&request.headers),
+                                            data: Vec::new(),
+                                        }
+                                    }
+                                    RuntimeHttpEvent::RequestData { id, data } => {
+                                        HttpEventPayload {
+                                            owner: Rc::clone(&owner),
+                                            kind: HTTP_EVENT_REQUEST_DATA,
+                                            flags: 0,
+                                            id,
+                                            status: 0,
+                                            version_minor: 0,
+                                            method: Vec::new(),
+                                            target: Vec::new(),
+                                            reason: Vec::new(),
+                                            headers: Vec::new(),
+                                            data,
+                                        }
+                                    }
+                                    RuntimeHttpEvent::RequestEnd { id } => HttpEventPayload {
                                         owner: Rc::clone(&owner),
-                                        kind: HTTP_EVENT_CLOSED,
+                                        kind: HTTP_EVENT_REQUEST_END,
                                         flags: 0,
-                                        id: 0,
+                                        id,
                                         status: 0,
                                         version_minor: 0,
                                         method: Vec::new(),
@@ -1123,174 +1088,236 @@ mod realm {
                                         reason: Vec::new(),
                                         headers: Vec::new(),
                                         data: Vec::new(),
+                                    },
+                                    RuntimeHttpEvent::Drain { id } => HttpEventPayload {
+                                        owner: Rc::clone(&owner),
+                                        kind: HTTP_EVENT_DRAIN,
+                                        flags: 0,
+                                        id,
+                                        status: 0,
+                                        version_minor: 0,
+                                        method: Vec::new(),
+                                        target: Vec::new(),
+                                        reason: Vec::new(),
+                                        headers: Vec::new(),
+                                        data: Vec::new(),
+                                    },
+                                    RuntimeHttpEvent::Finish { id } => HttpEventPayload {
+                                        owner: Rc::clone(&owner),
+                                        kind: HTTP_EVENT_FINISH,
+                                        flags: 0,
+                                        id,
+                                        status: 0,
+                                        version_minor: 0,
+                                        method: Vec::new(),
+                                        target: Vec::new(),
+                                        reason: Vec::new(),
+                                        headers: Vec::new(),
+                                        data: Vec::new(),
+                                    },
+                                    RuntimeHttpEvent::Error { id, message } => HttpEventPayload {
+                                        owner: Rc::clone(&owner),
+                                        kind: HTTP_EVENT_ERROR,
+                                        flags: 0,
+                                        id,
+                                        status: 0,
+                                        version_minor: 0,
+                                        method: Vec::new(),
+                                        target: Vec::new(),
+                                        reason: Vec::new(),
+                                        headers: Vec::new(),
+                                        data: message.into_bytes(),
+                                    },
+                                    RuntimeHttpEvent::Closed => {
+                                        // Server protocol completion can race the final response
+                                        // write. Keep the default graceful mode so that write is
+                                        // acknowledged before the portable resource is retired.
+                                        close_transport = true;
+                                        HttpEventPayload {
+                                            owner: Rc::clone(&owner),
+                                            kind: HTTP_EVENT_CLOSED,
+                                            flags: 0,
+                                            id: 0,
+                                            status: 0,
+                                            version_minor: 0,
+                                            method: Vec::new(),
+                                            target: Vec::new(),
+                                            reason: Vec::new(),
+                                            headers: Vec::new(),
+                                            data: Vec::new(),
+                                        }
                                     }
-                                }
+                                };
+                                payloads.push(payload);
+                            }
+                        }
+                        HttpRole::Client => {
+                            let events = if in_context {
+                                let Some(runtime) = active_runtime() else {
+                                    return Err(INVALID_ARGUMENT);
+                                };
+                                // SAFETY: event extraction is synchronous on the active runtime.
+                                unsafe { &mut *runtime }.take_http1_client_events(resource)
+                            } else {
+                                realm
+                                    .runtime
+                                    .borrow_mut()
+                                    .take_http1_client_events(resource)
                             };
-                            payloads.push(payload);
+                            for event in events {
+                                let (id, kind, flags, status, reason, headers, data) = match event {
+                                    RuntimeHttpClientEvent::Drain { id } => (
+                                        id,
+                                        HTTP_EVENT_DRAIN,
+                                        0,
+                                        0,
+                                        Vec::new(),
+                                        Vec::new(),
+                                        Vec::new(),
+                                    ),
+                                    RuntimeHttpClientEvent::Finish { id } => (
+                                        id,
+                                        HTTP_EVENT_FINISH,
+                                        0,
+                                        0,
+                                        Vec::new(),
+                                        Vec::new(),
+                                        Vec::new(),
+                                    ),
+                                    RuntimeHttpClientEvent::ResponseHead {
+                                        id,
+                                        status,
+                                        reason,
+                                        headers,
+                                    } => (
+                                        id,
+                                        HTTP_EVENT_RESPONSE_HEAD,
+                                        0,
+                                        status,
+                                        reason.into_bytes(),
+                                        flatten_headers(&headers),
+                                        Vec::new(),
+                                    ),
+                                    RuntimeHttpClientEvent::ResponseData { id, data } => (
+                                        id,
+                                        HTTP_EVENT_RESPONSE_DATA,
+                                        0,
+                                        0,
+                                        Vec::new(),
+                                        Vec::new(),
+                                        data,
+                                    ),
+                                    RuntimeHttpClientEvent::ResponseEnd { id, reusable } => (
+                                        id,
+                                        HTTP_EVENT_RESPONSE_END,
+                                        u32::from(reusable),
+                                        0,
+                                        Vec::new(),
+                                        Vec::new(),
+                                        Vec::new(),
+                                    ),
+                                    RuntimeHttpClientEvent::Error { id, message } => (
+                                        id,
+                                        HTTP_EVENT_ERROR,
+                                        0,
+                                        0,
+                                        Vec::new(),
+                                        Vec::new(),
+                                        message.into_bytes(),
+                                    ),
+                                    RuntimeHttpClientEvent::Closed => {
+                                        // A client connection disappearing is an abort: pending
+                                        // request/response writes must be cancelled before close.
+                                        close_transport = true;
+                                        close_mode = HttpCloseMode::Abort;
+                                        (
+                                            0,
+                                            HTTP_EVENT_CLOSED,
+                                            0,
+                                            0,
+                                            Vec::new(),
+                                            Vec::new(),
+                                            Vec::new(),
+                                        )
+                                    }
+                                };
+                                payloads.push(HttpEventPayload {
+                                    owner: Rc::clone(&owner),
+                                    kind,
+                                    flags,
+                                    id,
+                                    status,
+                                    version_minor: 0,
+                                    method: Vec::new(),
+                                    target: Vec::new(),
+                                    reason,
+                                    headers,
+                                    data,
+                                });
+                            }
                         }
                     }
-                    HttpRole::Client => {
-                        let events = if in_context {
+                    let had_events = !payloads.is_empty();
+                    event_count = event_count.saturating_add(payloads.len());
+                    for payload in payloads {
+                        let status = queue_http_event(realm, payload);
+                        if status != 0 {
+                            return Err(status);
+                        }
+                    }
+                    if close_transport {
+                        let actions = if in_context {
                             let Some(runtime) = active_runtime() else {
                                 return Err(INVALID_ARGUMENT);
                             };
-                            // SAFETY: event extraction is synchronous on the active runtime.
-                            unsafe { &mut *runtime }.take_http1_client_events(resource)
+                            // Hyper may publish `Closed` in the same poll that queued its final
+                            // response bytes. Drain those bytes before asking the transport to close
+                            // so shutdown is ordered after the final HostOps write.
+                            unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
+                        } else {
+                            realm.runtime.borrow_mut().poll_http_connection(resource)
+                        };
+                        let Some(actions) = actions else {
+                            return Err(RUNTIME_ERROR);
+                        };
+                        let status = apply_http_actions(realm, resource, actions, in_context);
+                        if status != 0 {
+                            return Err(status);
+                        }
+                        let actions = if in_context {
+                            let Some(runtime) = active_runtime() else {
+                                return Err(INVALID_ARGUMENT);
+                            };
+                            // SAFETY: this is the current realm's exclusively active runtime.
+                            unsafe { &mut *runtime }.close_http_connection(resource, close_mode)
                         } else {
                             realm
                                 .runtime
                                 .borrow_mut()
-                                .take_http1_client_events(resource)
+                                .close_http_connection(resource, close_mode)
                         };
-                        for event in events {
-                            let (id, kind, flags, status, reason, headers, data) = match event {
-                                RuntimeHttpClientEvent::Drain { id } => (
-                                    id,
-                                    HTTP_EVENT_DRAIN,
-                                    0,
-                                    0,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ),
-                                RuntimeHttpClientEvent::Finish { id } => (
-                                    id,
-                                    HTTP_EVENT_FINISH,
-                                    0,
-                                    0,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ),
-                                RuntimeHttpClientEvent::ResponseHead {
-                                    id,
-                                    status,
-                                    reason,
-                                    headers,
-                                } => (
-                                    id,
-                                    HTTP_EVENT_RESPONSE_HEAD,
-                                    0,
-                                    status,
-                                    reason.into_bytes(),
-                                    flatten_headers(&headers),
-                                    Vec::new(),
-                                ),
-                                RuntimeHttpClientEvent::ResponseData { id, data } => (
-                                    id,
-                                    HTTP_EVENT_RESPONSE_DATA,
-                                    0,
-                                    0,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    data,
-                                ),
-                                RuntimeHttpClientEvent::ResponseEnd { id, reusable } => (
-                                    id,
-                                    HTTP_EVENT_RESPONSE_END,
-                                    u32::from(reusable),
-                                    0,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    Vec::new(),
-                                ),
-                                RuntimeHttpClientEvent::Error { id, message } => (
-                                    id,
-                                    HTTP_EVENT_ERROR,
-                                    0,
-                                    0,
-                                    Vec::new(),
-                                    Vec::new(),
-                                    message.into_bytes(),
-                                ),
-                                RuntimeHttpClientEvent::Closed => {
-                                    // A client connection disappearing is an abort: pending
-                                    // request/response writes must be cancelled before close.
-                                    close_transport = true;
-                                    close_mode = HttpCloseMode::Abort;
-                                    (
-                                        0,
-                                        HTTP_EVENT_CLOSED,
-                                        0,
-                                        0,
-                                        Vec::new(),
-                                        Vec::new(),
-                                        Vec::new(),
-                                    )
-                                }
-                            };
-                            payloads.push(HttpEventPayload {
-                                owner: Rc::clone(&owner),
-                                kind,
-                                flags,
-                                id,
-                                status,
-                                version_minor: 0,
-                                method: Vec::new(),
-                                target: Vec::new(),
-                                reason,
-                                headers,
-                                data,
-                            });
+                        let Some(actions) = actions else {
+                            return Err(RUNTIME_ERROR);
+                        };
+                        let status = apply_http_actions(realm, resource, actions, in_context);
+                        if status != 0 {
+                            return Err(status);
                         }
                     }
-                }
-                let had_events = !payloads.is_empty();
-                event_count = event_count.saturating_add(payloads.len());
-                for payload in payloads {
-                    let status = queue_http_event(realm, payload);
-                    if status != 0 {
-                        return Err(status);
+                    if !had_actions && !had_events {
+                        break;
+                    }
+                    progressed = true;
+                    if !in_context {
+                        // Applying actions and draining body events can wake the connection future
+                        // again (Finish releases the next buffered HTTP/1 request). Advance that
+                        // concrete progress before deciding the checkpoint is quiescent.
+                        realm.runtime.borrow_mut().poll_http_tasks_once();
                     }
                 }
-                if close_transport {
-                    let actions = if in_context {
-                        let Some(runtime) = active_runtime() else {
-                            return Err(INVALID_ARGUMENT);
-                        };
-                        // Hyper may publish `Closed` in the same poll that queued its final
-                        // response bytes. Drain those bytes before asking the transport to close
-                        // so shutdown is ordered after the final HostOps write.
-                        unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
-                    } else {
-                        realm.runtime.borrow_mut().poll_http_connection(resource)
-                    };
-                    let Some(actions) = actions else {
-                        return Err(RUNTIME_ERROR);
-                    };
-                    let status = apply_http_actions(realm, resource, actions, in_context);
-                    if status != 0 {
-                        return Err(status);
-                    }
-                    let actions = if in_context {
-                        let Some(runtime) = active_runtime() else {
-                            return Err(INVALID_ARGUMENT);
-                        };
-                        // SAFETY: this is the current realm's exclusively active runtime.
-                        unsafe { &mut *runtime }.close_http_connection(resource, close_mode)
-                    } else {
-                        realm
-                            .runtime
-                            .borrow_mut()
-                            .close_http_connection(resource, close_mode)
-                    };
-                    let Some(actions) = actions else {
-                        return Err(RUNTIME_ERROR);
-                    };
-                    let status = apply_http_actions(realm, resource, actions, in_context);
-                    if status != 0 {
-                        return Err(status);
-                    }
-                }
-                if !had_actions && !had_events {
-                    break;
-                }
-                if !in_context {
-                    // Applying actions and draining body events can wake the connection future
-                    // again (Finish releases the next buffered HTTP/1 request). Advance that
-                    // concrete progress before deciding the checkpoint is quiescent.
-                    realm.runtime.borrow_mut().poll_http_tasks_after_wake();
-                }
+            }
+            if !progressed {
+                break;
             }
         }
         Ok(event_count)
@@ -1354,13 +1381,16 @@ mod realm {
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
         loop {
+            // Neither lane checkpoints between items. A checkpoint drives the Tokio scheduler,
+            // and doing that after every microtask made the per-request cost scale with how many
+            // microtasks a request happens to enqueue rather than with the work it does. The
+            // checkpoint below still runs before the loop can block, so nothing a callback wrote
+            // waits on a socket: it is deferred to the end of the drain, not past it. Batching it
+            // also lets one flush carry the writes of a whole turn.
             let next_tick = realm.work.borrow_mut().pop_next_tick();
             if let Some(work) = next_tick {
                 let status = run_in_runtime(realm, || work.run(host, thrown));
                 if status != 0 {
-                    return status;
-                }
-                if let Err(status) = checkpoint_http(realm, false) {
                     return status;
                 }
                 continue;
@@ -1370,9 +1400,6 @@ mod realm {
             if let Some(work) = microtask {
                 let status = run_in_runtime(realm, || work.run(host, thrown));
                 if status != 0 {
-                    return status;
-                }
-                if let Err(status) = checkpoint_http(realm, false) {
                     return status;
                 }
                 continue;

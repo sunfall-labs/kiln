@@ -82,14 +82,14 @@ env -u CARGO_ENCODED_RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
 	CARGO_BUILD_RUSTC_WRAPPER= CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER= \
 	RUSTC="$KILN_PROVIDER_RUSTC" CARGO_BUILD_RUSTC="$KILN_PROVIDER_RUSTC" \
 	RUSTFLAGS="$KILN_PROVIDER_RUSTFLAGS" "$KILN_PROVIDER_CARGO" rustc --locked \
-	-p kiln-native-number-ffi --release --features regexp,bigint,temporal \
+	-p kiln-native-number-ffi --profile provider --features regexp,bigint,temporal \
 	--target "$KILN_PROVIDER_TARGET" --crate-type staticlib
 
 KILN_PROVIDER_TARGET_DIR="${CARGO_TARGET_DIR:-target}"
 if [[ $KILN_PROVIDER_TARGET_DIR != /* ]]; then
 	KILN_PROVIDER_TARGET_DIR="$(kiln_repo_root)/$KILN_PROVIDER_TARGET_DIR"
 fi
-KILN_PROVIDER_BUILT_ARCHIVE="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/release/libkiln_native_number_ffi.a"
+KILN_PROVIDER_BUILT_ARCHIVE="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/provider/libkiln_native_number_ffi.a"
 if [[ ! -f $KILN_PROVIDER_BUILT_ARCHIVE ]]; then
 	printf 'number provider archive was not produced at %s\n' \
 		"$KILN_PROVIDER_BUILT_ARCHIVE" >&2
@@ -247,7 +247,7 @@ printf '%s\n' \
 	"  \"archive\": \"$KILN_PROVIDER_ARCHIVE_NAME\"," \
 	'  "linkage": "static",' \
 	'  "pic": true,' \
-	'  "profile": "release",' \
+	'  "profile": "provider",' \
 	'  "cpu_features": "generic",' \
 	"  \"deployment\": \"$KILN_PROVIDER_DEPLOYMENT\"," \
 	"  \"libc_baseline\": \"$KILN_PROVIDER_LIBC\"," \
