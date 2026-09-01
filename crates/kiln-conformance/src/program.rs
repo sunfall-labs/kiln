@@ -692,6 +692,21 @@ server.listen(0, '127.0.0.1', () => {
     }
 
     #[test]
+    fn pinned_node_net_close_projects_closed_state_before_the_event() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/node");
+        let test = crate::discover(&root)
+            .expect("discover pinned Node corpus")
+            .into_iter()
+            .find(|test| test.id() == "node-v24.7.0/net/socket-set-encoding")
+            .expect("pinned node:net socket case is present");
+
+        let results = test.run(RunMode::Node);
+        assert_eq!(results.len(), 1, "manifest cases have one execution");
+        assert_eq!(results[0].result.outcome, Outcome::Pass, "{results:#?}");
+        assert_eq!(results[0].result.stdout, "pass\n");
+    }
+
+    #[test]
     fn fastify_server_case_runs_through_the_production_graph_when_installed() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/server/packages");
         if !root.join("node_modules/fastify/fastify.js").is_file() {
