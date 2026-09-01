@@ -902,6 +902,13 @@ pub enum Native {
     ObjectIsPrototypeOf,
     ObjectPropertyIsEnumerable,
     ObjectToStringTag,
+    /// `Object.prototype.toLocaleString`, which is `Invoke(ToObject(this), "toString")`.
+    ///
+    /// Distinct from `ObjectToStringTag`, which the two shared: this one *calls* whatever
+    /// `toString` the receiver's chain answers with, so a class that overrides `toString` is the
+    /// one that runs. Sharing the variant meant `Object.prototype.toLocaleString` ignored the
+    /// override, answered `[object Object]`, and reported its own name as `toString`.
+    ObjectToLocaleString,
     ObjectValueOf,
     /// `ToString` of the receiver, which is what a primitive's `toString` returns.
     PrimitiveToString,
@@ -16533,7 +16540,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 {
                     return self.object_assign_with_proxies(arguments, instruction);
                 }
-                let target = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // `ToObject(target)`: `Object.assign(1, { a: 2 })` copies onto a boxed number
+                // and hands it back. Writing straight to the primitive raised "cannot set a
+                // property on a number", which is the assignment's error, not this one's.
+                let given = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let Some(target) = to_object(&given) else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Cannot convert undefined or null to object".to_owned(),
+                    });
+                };
                 for source in arguments.iter().skip(1) {
                     for (key, property) in own_properties(&self.intrinsics, source) {
                         let value = match property {
@@ -16707,7 +16722,32 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                 )
             }
+            // `Object.prototype.toLocaleString()` is `Invoke(this, "toString")`: it calls the
+            // receiver's own `toString`, wherever on the chain that is, rather than producing the
+            // tag itself. A class that overrides `toString` for display is the reason the method
+            // exists at all.
+            Native::ObjectToLocaleString => {
+                if matches!(receiver, Value::Undefined | Value::Null) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Cannot convert undefined or null to object".to_owned(),
+                    });
+                }
+                let method = self.read_property(receiver, "toString", instruction)?;
+                if !is_callable(&method) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "toString is not a function".to_owned(),
+                    });
+                }
+                self.call_value(&method, receiver.clone(), Vec::new(), instruction)
+            }
             Native::ObjectIsPrototypeOf => {
+                // `ToObject(this)` before the argument is even looked at, so `undefined` is a
+                // `TypeError` rather than the `false` that reads like a real answer.
+                if matches!(receiver, Value::Undefined | Value::Null) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Cannot convert undefined or null to object".to_owned(),
+                    });
+                }
                 let target = arguments.first().cloned().unwrap_or(Value::Undefined);
                 self.is_prototype_of(&target, receiver, instruction)
             }
@@ -32930,6 +32970,17 @@ fn call_native(
                 _ => return Err(ExecutionError::RadixOutOfRange),
             }
         }
+        // Each of the three below is `ToObject(this)` before anything else. Answering `false`
+        // for `undefined` reads, to a feature-detect, exactly like "the property is not there".
+        Native::ObjectHasOwnProperty
+        | Native::ObjectPropertyIsEnumerable
+        | Native::ObjectIsPrototypeOf
+            if matches!(receiver, Value::Undefined | Value::Null) =>
+        {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Cannot convert undefined or null to object".to_owned(),
+            });
+        }
         Native::ObjectHasOwnProperty => Value::Boolean(match receiver {
             // A function has an own property store of its own -- a class's static members live
             // in it -- plus the `name`, `length` and `prototype` every callable owns. A built-in
@@ -33029,10 +33080,18 @@ fn call_native(
                 _ => "Object",
             }
         )),
-        // `Object.prototype.valueOf` returns the receiver unchanged, which is the identity that
-        // makes `ToPrimitive` fall through to `toString` for a plain object. A wrapper is the
-        // exception, and it is opened before this arm is reached.
-        Native::ObjectValueOf => receiver.clone(),
+        // `Object.prototype.valueOf` is `ToObject(this)`, which for an object is the identity
+        // that makes `ToPrimitive` fall through to `toString`, and for a primitive is the box.
+        // A wrapper reaches here closed, which is what makes `valueOf` on one answer the object
+        // rather than what is in it.
+        Native::ObjectValueOf => match to_object(receiver) {
+            Some(object) => object,
+            None => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Cannot convert undefined or null to object".to_owned(),
+                });
+            }
+        },
         Native::PrimitiveToString => Value::String(receiver.to_display_string()),
         // `Function.prototype.toString` is one of the few built-ins that checks what it was
         // called on: the specification throws for a receiver that is not callable rather than
@@ -33403,12 +33462,17 @@ fn call_native(
                 // `entries` rather than `keys`: this reports what is *enumerated*, where
                 // `getOwnPropertyNames` reports everything. An error's own properties are the
                 // case where the two differ.
-                Some(Value::Object(object)) => object
-                    .borrow()
-                    .entries()
-                    .map(|(key, _)| key)
-                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
-                    .map(|key| Value::String(key.to_owned()))
+                Some(target @ Value::Object(object)) => string_wrapper_entries(target)
+                    .into_iter()
+                    .map(|(key, _)| Value::String(key))
+                    .chain(
+                        object
+                            .borrow()
+                            .entries()
+                            .map(|(key, _)| key)
+                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .map(|key| Value::String(key.to_owned())),
+                    )
                     .collect(),
                 // A built-in's own enumerated properties are the ones a program added -- the
                 // tables' own are non-enumerable, exactly as the specification defines them --
@@ -33891,8 +33955,17 @@ fn call_native(
             }
             target
         }
+        // `ToObject` first: `Object.getPrototypeOf("")` is `String.prototype`, not null. A
+        // primitive has no chain of its own, which is why `prototype_of` answers null for one and
+        // why this cannot ask it directly.
         Native::ObjectGetPrototypeOf => {
-            prototype_of(arguments.first().unwrap_or(&Value::Undefined))
+            let target = arguments.first().unwrap_or(&Value::Undefined);
+            let Some(object) = to_object(target) else {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: "Cannot convert undefined or null to object".to_owned(),
+                });
+            };
+            prototype_of(&object)
         }
         // Both read the clock, which lives on the machine and is virtual -- see ADR 0015.
         Native::SymbolFor | Native::SymbolKeyFor => {
@@ -33901,6 +33974,7 @@ fn call_native(
         // Each of these *reads* a property, which for an accessor is a call, or calls back into
         // the program outright.
         Native::ObjectAssign
+        | Native::ObjectToLocaleString
         | Native::ObjectEntries
         | Native::ObjectValues
         | Native::ObjectDefineProperty
@@ -35792,6 +35866,14 @@ fn prototype_of(value: &Value) -> Value {
         Value::Native(Native::Error(kind)) if *kind != ErrorKind::Error => {
             Value::Native(Native::Error(ErrorKind::Error))
         }
+        // `Math`, `JSON`, `Reflect` and `Atomics` are ordinary objects, not functions: none of
+        // them is callable, and `Object.getPrototypeOf(Math)` is `Object.prototype`. Spelled as
+        // natives here, they were taking the callable arm below and claiming `Function.prototype`
+        // -- which made `Math instanceof Function` true and put `call` and `apply` on a value
+        // that has no call behaviour to bind.
+        Value::Native(native) if namespace_name(native).is_some() => {
+            Value::Native(Native::PrototypeOf(PrototypeTable::Object))
+        }
         // Every callable inherits `Function.prototype`, and every ordinary object
         // `Object.prototype`. A primitive has no chain of its own to walk.
         Value::Native(_) | Value::Bound(_) | Value::Callback(_) | Value::Function(_) => {
@@ -37369,10 +37451,14 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             entries
         }
         Value::Callback(_) => intrinsics.enumerable_entries(value),
-        Value::Object(object) => object
-            .borrow()
-            .entries()
-            .map(|(key, property)| (key.to_owned(), property.clone()))
+        Value::Object(object) => string_wrapper_entries(value)
+            .into_iter()
+            .chain(
+                object
+                    .borrow()
+                    .entries()
+                    .map(|(key, property)| (key.to_owned(), property.clone())),
+            )
             .collect(),
         Value::Array(items) => items
             .borrow()
@@ -39619,7 +39705,8 @@ fn object_property(name: &str) -> Value {
         "hasOwnProperty" => Value::Native(Native::ObjectHasOwnProperty),
         "isPrototypeOf" => Value::Native(Native::ObjectIsPrototypeOf),
         "propertyIsEnumerable" => Value::Native(Native::ObjectPropertyIsEnumerable),
-        "toString" | "toLocaleString" => Value::Native(Native::ObjectToStringTag),
+        "toString" => Value::Native(Native::ObjectToStringTag),
+        "toLocaleString" => Value::Native(Native::ObjectToLocaleString),
         "valueOf" => Value::Native(Native::ObjectValueOf),
         // Annex B's four, which predate `Object.defineProperty` and are still how a great deal
         // of shipped code installs an accessor.
@@ -40514,6 +40601,46 @@ fn wrapped_primitive(value: &Value) -> Option<Value> {
     }
 }
 
+/// `ToObject(value)`: the object a value stands for, or `None` for the two that stand for none.
+///
+/// Every `Object` static and every `Object.prototype` method begins with this step, and skipping
+/// it is visible twice over: `Object.assign(1, { a: 2 })` raised "cannot set a property on a
+/// number" where the specification boxes the number and copies onto the box, and
+/// `Object.prototype.hasOwnProperty.call(undefined, "x")` answered `false` where it owes a
+/// `TypeError` -- an answer a feature-detect reads as "no such property".
+fn to_object(value: &Value) -> Option<Value> {
+    match value {
+        Value::Undefined | Value::Null => None,
+        Value::Boolean(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Symbol(_)
+        | Value::BigInt(_) => Some(wrap_primitive(value.clone())),
+        other => Some(other.clone()),
+    }
+}
+
+/// The characters a String wrapper owns, as enumerable own properties.
+///
+/// They are held in the boxed string rather than in the store beside it, so every walk over own
+/// properties has to ask for them separately. `Object.keys(Object("abc"))` was `[]` while
+/// `Object.getOwnPropertyNames` of the same object listed all three, which is the two walks
+/// disagreeing about one object.
+fn string_wrapper_entries(value: &Value) -> Vec<(String, Property)> {
+    let Some(Value::String(text)) = wrapped_primitive(value) else {
+        return Vec::new();
+    };
+    text.chars()
+        .enumerate()
+        .map(|(index, character)| {
+            (
+                index.to_string(),
+                Property::Value(Value::String(character.to_string())),
+            )
+        })
+        .collect()
+}
+
 /// `new String("x")`, `new Number(1)`, `new Boolean(true)`, and the `Object(primitive)` that
 /// builds the same thing.
 ///
@@ -40785,6 +40912,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::DateNow
         | N::PerformanceNow
         | N::NumberValueOf
+        | N::ObjectToLocaleString
         | N::ObjectValueOf
         | N::ObjectToStringTag
         | N::PrimitiveToString
