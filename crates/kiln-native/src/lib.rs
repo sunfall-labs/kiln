@@ -1944,7 +1944,14 @@ fn native_builtin_supported_exports(
     match builtin {
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
-        NodeBuiltin::Http => &["Server", "createServer", "default", "get", "request"],
+        NodeBuiltin::Http => &[
+            "Server",
+            "ServerResponse",
+            "createServer",
+            "default",
+            "get",
+            "request",
+        ],
         NodeBuiltin::Util => &[
             "debuglog",
             "default",
@@ -2070,10 +2077,11 @@ exports[3] = namespace;"#,
         //
         // `native_builtin_slots_match_the_shared_export_table` now pins this, so the next
         // addition to the table fails a test here instead of miscompiling a server. The three
-        // gated names hold `undefined` because `native_builtin_supports_export` refuses them as
-        // named imports; they are slots to keep the alignment, not exports.
+        // Remaining gated names hold `undefined` because `native_builtin_supports_export`
+        // refuses them as named imports; they are slots to keep alignment, not exports.
         NodeBuiltin::Http => Some(
             r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER);
+kiln_value server_response = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE);
 kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
 kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
 kiln_value request = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_REQUEST);
@@ -2081,6 +2089,8 @@ kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "Server", 6, server, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "ServerResponse", 14, server_response, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
 if (status != KILN_C99_OK) return status;
@@ -2091,7 +2101,7 @@ if (status != KILN_C99_OK) return status;
 exports[0] = kiln_c99_undefined();
 exports[1] = kiln_c99_undefined();
 exports[2] = server;
-exports[3] = kiln_c99_undefined();
+exports[3] = server_response;
 exports[4] = create_server;
 exports[5] = namespace;
 exports[6] = get;
@@ -5187,14 +5197,19 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
         assert!(body.contains("exports[0] = kiln_c99_undefined();"));
         assert!(body.contains("exports[1] = kiln_c99_undefined();"));
         assert!(body.contains("exports[2] = server;"));
-        assert!(body.contains("exports[3] = kiln_c99_undefined();"));
+        assert!(body.contains("exports[3] = server_response;"));
         assert!(body.contains("exports[4] = create_server;"));
         assert!(body.contains("exports[5] = namespace;"));
         assert!(body.contains("exports[6] = get;"));
         assert!(body.contains("exports[7] = request;"));
         assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER"));
+        assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE"));
         assert!(body.contains("KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER"));
         assert!(native_builtin_supports_export(NodeBuiltin::Http, "Server"));
+        assert!(native_builtin_supports_export(
+            NodeBuiltin::Http,
+            "ServerResponse"
+        ));
     }
 
     #[test]

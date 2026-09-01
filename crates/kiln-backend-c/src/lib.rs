@@ -308,6 +308,100 @@ struct MethodId {
     groups: u32,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativePrototypeSurface {
+    EventEmitter,
+    Readable,
+    Writable,
+    ServerResponse,
+}
+
+#[derive(Clone, Copy)]
+struct NativeConstructor {
+    method: u16,
+    parent: Option<u16>,
+    surface: NativePrototypeSurface,
+}
+
+const fn validate_native_constructors(constructors: &[NativeConstructor], methods: &[MethodId]) {
+    let mut index = 0;
+    while index < constructors.len() {
+        let constructor = constructors[index];
+        let mut method_found = false;
+        let mut method_index = 0;
+        while method_index < methods.len() {
+            if methods[method_index].value == constructor.method {
+                method_found = true;
+                break;
+            }
+            method_index += 1;
+        }
+        assert!(
+            method_found,
+            "native constructor is not a registered method"
+        );
+
+        let mut other = index + 1;
+        while other < constructors.len() {
+            assert!(
+                constructors[other].method != constructor.method,
+                "duplicate native constructor"
+            );
+            other += 1;
+        }
+
+        if let Some(parent) = constructor.parent {
+            let mut parent_index = 0;
+            let mut parent_found = false;
+            while parent_index < index {
+                if constructors[parent_index].method == parent {
+                    parent_found = true;
+                    break;
+                }
+                parent_index += 1;
+            }
+            assert!(
+                parent_found,
+                "native constructor parent must be declared before its child"
+            );
+        }
+        index += 1;
+    }
+}
+
+fn render_native_constructor_table() -> String {
+    let mut table =
+        String::from("static kiln_native_constructor kiln_c99_native_constructors[] = {\n");
+    for constructor in NATIVE_CONSTRUCTORS {
+        let parent = constructor.parent.unwrap_or(0);
+        let surface = match constructor.surface {
+            NativePrototypeSurface::EventEmitter => "KILN_C99_NATIVE_EVENT_EMITTER",
+            NativePrototypeSurface::Readable => "KILN_C99_NATIVE_READABLE",
+            NativePrototypeSurface::Writable => "KILN_C99_NATIVE_WRITABLE",
+            NativePrototypeSurface::ServerResponse => "KILN_C99_NATIVE_SERVER_RESPONSE",
+        };
+        use std::fmt::Write as _;
+        writeln!(
+            table,
+            "    {{ UINT64_C({}), UINT64_C({parent}), {surface}, {{KILN_VALUE_UNDEFINED, 0, 0, NULL, 0}} }},",
+            constructor.method
+        )
+        .expect("writing to String cannot fail");
+    }
+    table.push_str("};\n");
+    table
+}
+
+macro_rules! native_constructor {
+    ($method:ident, $parent:expr, $surface:ident) => {
+        NativeConstructor {
+            method: method_value!($method),
+            parent: $parent,
+            surface: NativePrototypeSurface::$surface,
+        }
+    };
+}
+
 macro_rules! method_group_bit {
     (Direct) => {
         1u32 << 0
@@ -468,6 +562,10 @@ macro_rules! method_ids {
             $(($name) => {
                 concat!("#define ", stringify!($name), " ", stringify!($value), "\n")
             };)*
+        }
+
+        macro_rules! method_value {
+            $(($name) => { $value };)*
         }
 
         const METHOD_IDS: &[MethodId] = &[
@@ -1098,6 +1196,7 @@ method_ids! {
     (KILN_C99_METHOD_ABORT_SIGNAL_SETTLE, 423, Generic),
     (KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW, 424, Generic),
     (KILN_C99_METHOD_TEXT_ENCODER_ENCODE, 425, Generic),
+    (KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE, 426, Direct, NodeHttp),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1123,7 +1222,27 @@ method_ids! {
     (KILN_C99_METHOD_SET_MILLISECONDS, 184, Generic, DateSetter),
 }
 
+const NATIVE_CONSTRUCTORS: &[NativeConstructor] = &[
+    native_constructor!(KILN_C99_METHOD_NODE_EVENT_EMITTER, None, EventEmitter),
+    native_constructor!(
+        KILN_C99_METHOD_NODE_READABLE,
+        Some(method_value!(KILN_C99_METHOD_NODE_EVENT_EMITTER)),
+        Readable
+    ),
+    native_constructor!(
+        KILN_C99_METHOD_NODE_WRITABLE,
+        Some(method_value!(KILN_C99_METHOD_NODE_EVENT_EMITTER)),
+        Writable
+    ),
+    native_constructor!(
+        KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE,
+        Some(method_value!(KILN_C99_METHOD_NODE_WRITABLE)),
+        ServerResponse
+    ),
+];
+
 const _: () = validate_method_ids(METHOD_IDS);
+const _: () = validate_native_constructors(NATIVE_CONSTRUCTORS, METHOD_IDS);
 
 const HEADER: &str = concat!(
     r#"/* Kiln C99 backend: deterministic scalar unit. */
@@ -1691,6 +1810,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
     emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
     emit_method_define!(KILN_C99_METHOD_TEXT_ENCODER_ENCODE),
+    emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     r#"
 /* `Object.is`: `===` except that it separates the two zeroes and finds NaN. */
 "#,
@@ -2077,6 +2197,24 @@ typedef struct kiln_method_store {
     kiln_value properties;
     struct kiln_method_store *next;
 } kiln_method_store;
+
+typedef enum kiln_native_prototype_surface {
+    KILN_C99_NATIVE_EVENT_EMITTER,
+    KILN_C99_NATIVE_READABLE,
+    KILN_C99_NATIVE_WRITABLE,
+    KILN_C99_NATIVE_SERVER_RESPONSE
+} kiln_native_prototype_surface;
+
+/* Generated from the checked Rust constructor graph. The prototype value is the only mutable
+ * field: constructor identity, parentage, and surface cannot drift from the compiler registry. */
+typedef struct kiln_native_constructor {
+    uint64_t method;
+    uint64_t parent;
+    kiln_native_prototype_surface surface;
+    kiln_value prototype;
+} kiln_native_constructor;
+
+/* KILN_NATIVE_CONSTRUCTOR_TABLE */
 
 /* A plain data object: own string-keyed properties, scanned linearly.
  *
@@ -2959,6 +3097,9 @@ static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);
 static int kiln_c99_install_event_emitter_methods(kiln_value target);
+static int kiln_c99_install_readable_methods(kiln_value target);
+static int kiln_c99_install_writable_methods(kiln_value target);
+static int kiln_c99_install_server_response_methods(kiln_value target);
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count);
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count);
 static const char *kiln_c99_method_name(uint64_t code);
@@ -3228,21 +3369,10 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "@@node:readable", 15, queue, 0, NULL);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "readableEnded", 13, kiln_c99_boolean(0), 0, NULL);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "destroyed", 9, kiln_c99_boolean(0), 0, NULL);
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "push", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PUSH));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "read", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_READ));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "destroy", 7, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_DESTROY));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "pause", 5, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PAUSE));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "resume", 6, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_RESUME));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "setEncoding", 11, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "pipe", 4, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_PIPE));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "unpipe", 6, kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_UNPIPE));
         } else if (code == KILN_C99_METHOD_NODE_WRITABLE) {
             status = kiln_c99_put(NULL, object, "writableEnded", 13, kiln_c99_boolean(0), 0, NULL);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "writableFinished", 16, kiln_c99_boolean(0), 0, NULL);
             if (status == KILN_C99_OK) status = kiln_c99_put(NULL, object, "destroyed", 9, kiln_c99_boolean(0), 0, NULL);
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "write", 5, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_WRITE));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "end", 3, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_END));
-            if (status == KILN_C99_OK) status = kiln_c99_define_method(object, "destroy", 7, kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE_DESTROY));
         }
         *result = object;
         return status;
@@ -7954,25 +8084,53 @@ static int kiln_c99_prototype_object(kiln_value function, kiln_value *out) {
  * objects. Keeping that distinction behind this helper prevents a METHOD id from ever being
  * mistaken for a kiln_closure pointer by reflection, `util.inherits`, or `instanceof`. */
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out) {
-    static kiln_value event_emitter_prototype;
+    size_t index;
     int status;
     if (callable.tag == KILN_VALUE_FUNCTION) {
         return kiln_c99_prototype_object(callable, out);
     }
-    if (callable.tag != KILN_VALUE_METHOD ||
-        callable.bits != KILN_C99_METHOD_NODE_EVENT_EMITTER) {
-        return KILN_C99_CONTROL_ERROR;
+    if (callable.tag != KILN_VALUE_METHOD) return KILN_C99_CONTROL_ERROR;
+    for (index = 0;
+         index < sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors;
+         ++index) {
+        kiln_native_constructor *constructor = &kiln_c99_native_constructors[index];
+        if (constructor->method != callable.bits) continue;
+        if (constructor->prototype.tag == KILN_VALUE_UNDEFINED) {
+            status = kiln_c99_new_object(&constructor->prototype);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_define_method(constructor->prototype, "constructor", 11, callable);
+            if (status != KILN_C99_OK) return status;
+            if (constructor->parent != 0) {
+                kiln_value parent;
+                status = kiln_c99_callable_prototype(kiln_c99_method(constructor->parent),
+                                                     &parent);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_set_prototype(constructor->prototype, parent);
+                if (status != KILN_C99_OK) return status;
+            }
+            switch (constructor->surface) {
+            case KILN_C99_NATIVE_EVENT_EMITTER:
+                status = kiln_c99_install_event_emitter_methods(constructor->prototype);
+                break;
+            case KILN_C99_NATIVE_READABLE:
+                status = kiln_c99_install_readable_methods(constructor->prototype);
+                break;
+            case KILN_C99_NATIVE_WRITABLE:
+                status = kiln_c99_install_writable_methods(constructor->prototype);
+                break;
+            case KILN_C99_NATIVE_SERVER_RESPONSE:
+                status = kiln_c99_install_server_response_methods(constructor->prototype);
+                break;
+            default:
+                status = KILN_C99_CONTROL_ERROR;
+                break;
+            }
+            if (status != KILN_C99_OK) return status;
+        }
+        *out = constructor->prototype;
+        return KILN_C99_OK;
     }
-    if (event_emitter_prototype.tag == KILN_VALUE_UNDEFINED) {
-        status = kiln_c99_new_object(&event_emitter_prototype);
-        if (status != KILN_C99_OK) return status;
-        status = kiln_c99_define_method(event_emitter_prototype, "constructor", 11, callable);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_install_event_emitter_methods(event_emitter_prototype);
-        if (status != KILN_C99_OK) return status;
-    }
-    *out = event_emitter_prototype;
-    return KILN_C99_OK;
+    return KILN_C99_CONTROL_ERROR;
 }
 
 /* The store `f.x = 1` writes into. Separate from the prototype object: a static belongs to the
@@ -9243,9 +9401,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = target;
             return KILN_C99_OK;
         }
-        if (target.tag == KILN_VALUE_METHOD &&
-            target.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER &&
-            kiln_c99_same_name(key, key_len, "prototype")) {
+        if (target.tag == KILN_VALUE_METHOD && kiln_c99_same_name(key, key_len, "prototype")) {
             return kiln_c99_callable_prototype(target, out);
         }
         stored = kiln_c99_callable_store(target, &store, 0);
@@ -11227,6 +11383,61 @@ static int kiln_c99_install_event_emitter_methods(kiln_value target) {
         {"off", 3, KILN_C99_METHOD_NODE_EVENT_REMOVE_LISTENER},
         {"removeAllListeners", 18, KILN_C99_METHOD_NODE_EVENT_REMOVE_ALL_LISTENERS},
         {"setMaxListeners", 15, KILN_C99_METHOD_NODE_EVENT_SET_MAX_LISTENERS},
+    };
+    size_t index;
+    int status = KILN_C99_OK;
+    for (index = 0; status == KILN_C99_OK && index < sizeof methods / sizeof *methods; ++index) {
+        status = kiln_c99_define_method(target, methods[index].name, methods[index].length,
+                                        kiln_c99_method(methods[index].code));
+    }
+    return status;
+}
+
+static int kiln_c99_install_readable_methods(kiln_value target) {
+    static const struct { const char *name; size_t length; uint64_t code; } methods[] = {
+        {"push", 4, KILN_C99_METHOD_NODE_READABLE_PUSH},
+        {"read", 4, KILN_C99_METHOD_NODE_READABLE_READ},
+        {"destroy", 7, KILN_C99_METHOD_NODE_READABLE_DESTROY},
+        {"pause", 5, KILN_C99_METHOD_NODE_READABLE_PAUSE},
+        {"resume", 6, KILN_C99_METHOD_NODE_READABLE_RESUME},
+        {"setEncoding", 11, KILN_C99_METHOD_NODE_READABLE_SET_ENCODING},
+        {"pipe", 4, KILN_C99_METHOD_NODE_READABLE_PIPE},
+        {"unpipe", 6, KILN_C99_METHOD_NODE_READABLE_UNPIPE},
+    };
+    size_t index;
+    int status = KILN_C99_OK;
+    for (index = 0; status == KILN_C99_OK && index < sizeof methods / sizeof *methods; ++index) {
+        status = kiln_c99_define_method(target, methods[index].name, methods[index].length,
+                                        kiln_c99_method(methods[index].code));
+    }
+    return status;
+}
+
+static int kiln_c99_install_writable_methods(kiln_value target) {
+    static const struct { const char *name; size_t length; uint64_t code; } methods[] = {
+        {"write", 5, KILN_C99_METHOD_NODE_WRITABLE_WRITE},
+        {"end", 3, KILN_C99_METHOD_NODE_WRITABLE_END},
+        {"destroy", 7, KILN_C99_METHOD_NODE_WRITABLE_DESTROY},
+    };
+    size_t index;
+    int status = KILN_C99_OK;
+    for (index = 0; status == KILN_C99_OK && index < sizeof methods / sizeof *methods; ++index) {
+        status = kiln_c99_define_method(target, methods[index].name, methods[index].length,
+                                        kiln_c99_method(methods[index].code));
+    }
+    return status;
+}
+
+static int kiln_c99_install_server_response_methods(kiln_value target) {
+    static const struct { const char *name; size_t length; uint64_t code; } methods[] = {
+        {"setHeader", 9, KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER},
+        {"getHeader", 9, KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER},
+        {"getHeaders", 10, KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS},
+        {"hasHeader", 9, KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER},
+        {"removeHeader", 12, KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER},
+        {"writeHead", 9, KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD},
+        {"write", 5, KILN_C99_METHOD_NODE_RESPONSE_WRITE},
+        {"end", 3, KILN_C99_METHOD_NODE_RESPONSE_END},
     };
     size_t index;
     int status = KILN_C99_OK;
@@ -21764,6 +21975,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
          callee.bits == KILN_C99_METHOD_NODE_STREAM ||
          callee.bits == KILN_C99_METHOD_NODE_READABLE ||
          callee.bits == KILN_C99_METHOD_NODE_WRITABLE ||
+         callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE ||
          callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER)) {
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
@@ -21789,8 +22001,26 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
                 status = kiln_c99_set_prototype(*result, prototype);
             return status;
         }
-        return kiln_c99_node_stream(host, result, callee.bits, kiln_c99_undefined(), args, argc,
-                                    depth, thrown);
+        if (callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE) {
+            status = kiln_c99_node_stream(host, result, KILN_C99_METHOD_NODE_WRITABLE,
+                                          kiln_c99_undefined(), args, argc, depth, thrown);
+            if (status == KILN_C99_OK) {
+                kiln_value prototype;
+                status = kiln_c99_callable_prototype(callee, &prototype);
+                if (status == KILN_C99_OK) status = kiln_c99_set_prototype(*result, prototype);
+            }
+            return status;
+        }
+        status = kiln_c99_node_stream(host, result, callee.bits, kiln_c99_undefined(), args, argc,
+                                      depth, thrown);
+        if (status == KILN_C99_OK &&
+            (callee.bits == KILN_C99_METHOD_NODE_READABLE ||
+             callee.bits == KILN_C99_METHOD_NODE_WRITABLE)) {
+            kiln_value prototype;
+            status = kiln_c99_callable_prototype(callee, &prototype);
+            if (status == KILN_C99_OK) status = kiln_c99_set_prototype(*result, prototype);
+        }
+        return status;
     }
     if (callee.tag == KILN_VALUE_BUILTIN && (callee.bits == KILN_C99_BUILTIN_STRING ||
                                              callee.bits == KILN_C99_BUILTIN_NUMBER ||
@@ -24212,6 +24442,10 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 64);
     render_emission_policy(&mut output, policy);
     output.push_str(HEADER);
+    output = output.replace(
+        "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+        &render_native_constructor_table(),
+    );
     writeln!(
         output,
         "/* Program hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}. */"
@@ -24317,6 +24551,10 @@ fn render_module(
     let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
     render_emission_policy(&mut output, policy);
     output.push_str(HEADER);
+    output = output.replace(
+        "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+        &render_native_constructor_table(),
+    );
     writeln!(
         output,
         "/* Module hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}; imports: {}; exports: {}. */",
@@ -24451,6 +24689,10 @@ fn render_runtime_module(
 ) -> String {
     let mut output = String::with_capacity(HEADER.len() + body.len() + 1024);
     output.push_str(HEADER);
+    output = output.replace(
+        "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+        &render_native_constructor_table(),
+    );
     writeln!(
         output,
         "/* Runtime module hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}; imports: {}; exports: {}. */",
@@ -26318,6 +26560,104 @@ int main(void) {{
         assert!(
             run.status.success(),
             "runtime EventEmitter failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_runtime_readable_has_a_checked_native_prototype_graph() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+static int readable_child(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
+                          kiln_value *thrown, kiln_generator *frame) {
+    (void)host; (void)upvalues; (void)args; (void)argc; (void)depth; (void)thrown; (void)frame;
+    *result = receiver;
+    return KILN_C99_OK;
+}
+int main(void) {
+    kiln_value readable = kiln_c99_method(KILN_C99_METHOD_NODE_READABLE);
+    kiln_value child;
+    kiln_value result;
+    kiln_value instance;
+    kiln_value method;
+    kiln_value readable_prototype;
+    kiln_value emitter_prototype;
+    kiln_value arguments[2];
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_callable_prototype(readable, &readable_prototype) != KILN_C99_OK) return 1;
+    if (kiln_c99_callable_prototype(kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER),
+                                    &emitter_prototype) != KILN_C99_OK) return 2;
+    if (kiln_c99_object_of(readable_prototype)->prototype.bits != emitter_prototype.bits) return 3;
+    if (kiln_c99_get(NULL, readable_prototype, "push", 4, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 4;
+    if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
+    if (kiln_c99_make_closure(&child, readable_child, "Child", 5, 0, 0, 0, 0, 0, 0,
+                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              NULL, 0) != KILN_C99_OK) return 6;
+    arguments[0] = child;
+    arguments[1] = readable;
+    if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_INHERITS, arguments, 2, 0,
+                           &thrown) != KILN_C99_OK) return 7;
+    if (kiln_c99_construct(NULL, &instance, child, NULL, 0, 0, &thrown) != KILN_C99_OK) return 8;
+    if (kiln_c99_get(NULL, instance, "push", 4, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 9;
+    if (kiln_c99_get(NULL, instance, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 10;
+    return 0;
+}
+"#;
+        let run = run_with_main(&generated, wrapper, "native-readable-prototype-graph");
+        assert!(
+            run.status.success(),
+            "native Readable prototype graph failed ({:?}): {}",
+            run.status.code(),
+            String::from_utf8_lossy(&run.stderr)
+        );
+    }
+
+    #[test]
+    fn executable_server_response_inherits_writable_through_the_native_graph() {
+        let generated = emit(&program(vec![], vec![Instruction::Return], 0))
+            .expect("empty program emits runtime prelude");
+        let wrapper = r#"
+int main(void) {
+    kiln_value constructor = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE);
+    kiln_value prototype;
+    kiln_value writable_prototype;
+    kiln_value instance;
+    kiln_value method;
+    kiln_value thrown = kiln_c99_undefined();
+    if (kiln_c99_callable_prototype(constructor, &prototype) != KILN_C99_OK) return 1;
+    if (kiln_c99_callable_prototype(kiln_c99_method(KILN_C99_METHOD_NODE_WRITABLE),
+                                    &writable_prototype) != KILN_C99_OK) return 2;
+    if (kiln_c99_object_of(prototype)->prototype.bits != writable_prototype.bits) return 3;
+    if (kiln_c99_get(NULL, prototype, "writeHead", 9, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD) return 4;
+    if (kiln_c99_get(NULL, prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
+    if (kiln_c99_construct(NULL, &instance, constructor, NULL, 0, 0, &thrown) != KILN_C99_OK)
+        return 6;
+    if (kiln_c99_get(NULL, instance, "write", 5, &method, 0, &thrown) != KILN_C99_OK ||
+        method.tag != KILN_VALUE_METHOD ||
+        method.bits != KILN_C99_METHOD_NODE_RESPONSE_WRITE) return 7;
+    return 0;
+}
+"#;
+        let run = run_with_main(
+            &generated,
+            wrapper,
+            "native-server-response-prototype-graph",
+        );
+        assert!(
+            run.status.success(),
+            "native ServerResponse prototype graph failed ({:?}): {}",
             run.status.code(),
             String::from_utf8_lossy(&run.stderr)
         );
