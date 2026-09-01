@@ -1137,6 +1137,7 @@ expected_stdout = "ok\n"
             .request(&Request::Test {
                 root: test_root,
                 mode: TestMode::Parse,
+                changed_root: None,
                 changed_paths: None,
                 previously_failed: Vec::new(),
             })

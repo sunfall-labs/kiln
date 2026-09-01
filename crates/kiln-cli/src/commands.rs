@@ -802,6 +802,7 @@ pub fn test(
     let changed_paths = changed
         .then(|| git_changed_paths(project_root))
         .transpose()?;
+    let changed_root = changed.then(|| canonical_path(project_root)).transpose()?;
     let mode = if parse_only {
         TestMode::Parse
     } else if node {
@@ -812,6 +813,7 @@ pub fn test(
     let summary = backend.test(
         corpus.clone(),
         mode,
+        changed_root,
         changed_paths,
         previous.iter().cloned().collect(),
     )?;
@@ -1100,11 +1102,8 @@ mod tests {
             selected,
             passed,
             failed,
-            unsupported: 0,
             skipped,
-            elapsed_millis: 0,
-            cases: Vec::new(),
-            reasons: Vec::new(),
+            ..TestSummary::default()
         }
     }
 

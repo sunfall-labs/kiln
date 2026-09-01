@@ -97,6 +97,7 @@ struct Shared {
     /// Without this a client that connects and says nothing keeps `serve` from ever returning.
     live: Mutex<HashMap<u64, UnixStream>>,
     next_connection: AtomicU64,
+    tests: crate::testing::ConformanceCoordinator,
 }
 
 impl Shared {
@@ -209,6 +210,7 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
                 socket: socket.to_path_buf(),
                 live: Mutex::new(HashMap::new()),
                 next_connection: AtomicU64::new(0),
+                tests: crate::testing::ConformanceCoordinator::default(),
             }),
             state: Arc::new(Mutex::new(DaemonState {
                 engine,
@@ -380,7 +382,7 @@ fn serve_connection<E: QueryEngine>(
         };
 
         let (response, next) = match serde_json::from_str::<Request>(&frame) {
-            Ok(request) => handle(state, &mut pending, &mut next_sync_id, request),
+            Ok(request) => handle(state, shared, &mut pending, &mut next_sync_id, request),
             // Line framing resynchronises on its own, so a garbled request costs one response,
             // not the connection.
             Err(error) => (
@@ -680,6 +682,7 @@ fn next_source_view(current: SourceView) -> Result<SourceView, String> {
 /// recomputable, so the next query rebuilds them.
 fn handle<E: QueryEngine>(
     state: &Mutex<DaemonState<E>>,
+    shared: &Shared,
     pending: &mut Option<PendingSync>,
     next_sync_id: &mut u64,
     request: Request,
@@ -736,12 +739,16 @@ fn handle<E: QueryEngine>(
         Request::Test {
             root,
             mode,
+            changed_root,
             changed_paths,
             previously_failed,
         } => run_without_engine_lock(|| {
             #[cfg(test)]
             crate::dispatch::wait_for_test_gate(&root);
-            match crate::testing::run(&root, mode, changed_paths, previously_failed) {
+            match shared
+                .tests
+                .run(&root, mode, changed_root, changed_paths, previously_failed)
+            {
                 Ok(summary) => Response::Tested(summary),
                 Err(message) => Response::Error { message },
             }

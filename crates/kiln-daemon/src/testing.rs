@@ -3,7 +3,8 @@
 
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use kiln_conformance::{
@@ -17,18 +18,153 @@ use rayon::prelude::*;
 
 const MODULE_GRAPH_FEATURES: &[&str] = &["modules", "module-graph"];
 const MODULE_RESOLVER_FEATURES: &[&str] = &["builtin-modules", "node-packages", "node-resolution"];
+const MAX_CACHED_CORPORA: usize = 8;
 
+/// Process-lifetime conformance inventory owned by one resident daemon.
+///
+/// A changed-test request caused by compiler/runtime code can reuse the same parsed frontmatter,
+/// manifest, and Test262 harness. Changes that may alter the corpus deliberately rediscover it;
+/// a request without change provenance does too, because the daemon cannot prove the files stayed
+/// unchanged. Execution remains per-request and every case still creates a fresh realm.
+#[derive(Default)]
+pub(crate) struct ConformanceCoordinator {
+    catalog: Mutex<ConformanceCatalog>,
+}
+
+#[derive(Default)]
+struct ConformanceCatalog {
+    clock: u64,
+    corpora: BTreeMap<PathBuf, CachedCorpus>,
+}
+
+struct CachedCorpus {
+    tests: Arc<Vec<ConformanceTest>>,
+    last_used: u64,
+}
+
+struct CatalogLookup {
+    tests: Arc<Vec<ConformanceTest>>,
+    cache_hit: bool,
+}
+
+impl ConformanceCoordinator {
+    pub(crate) fn run(
+        &self,
+        root: &str,
+        mode: TestMode,
+        changed_root: Option<String>,
+        changed_paths: Option<Vec<String>>,
+        previously_failed: Vec<String>,
+    ) -> Result<TestSummary, String> {
+        let root = Path::new(root);
+        let discovered = self.discover(
+            root,
+            changed_root.as_deref().map(Path::new),
+            changed_paths.as_deref(),
+        )?;
+        run_discovered(
+            discovered.tests.as_slice(),
+            mode,
+            changed_paths,
+            previously_failed,
+            discovered.cache_hit,
+        )
+    }
+
+    fn discover(
+        &self,
+        root: &Path,
+        changed_root: Option<&Path>,
+        changed_paths: Option<&[String]>,
+    ) -> Result<CatalogLookup, String> {
+        let key = root.canonicalize().map_err(|error| {
+            format!(
+                "canonicalizing conformance root {}: {error}",
+                root.display()
+            )
+        })?;
+        let mut catalog = self.catalog.lock().unwrap_or_else(PoisonError::into_inner);
+        catalog.clock = catalog.clock.wrapping_add(1);
+        let now = catalog.clock;
+        let changed_root = changed_root.and_then(|root| root.canonicalize().ok());
+        if let (Some(changed_root), Some(paths), Some(cached)) = (
+            changed_root.as_deref(),
+            changed_paths,
+            catalog.corpora.get_mut(&key),
+        ) && key.starts_with(changed_root)
+            && !corpus_inputs_changed(&key, changed_root, &cached.tests, paths)
+        {
+            cached.last_used = now;
+            return Ok(CatalogLookup {
+                tests: Arc::clone(&cached.tests),
+                cache_hit: true,
+            });
+        }
+
+        // Keep the small cache lock across discovery so two clients asking for the same cold
+        // corpus cannot both pay to read and parse it. Test execution happens after this guard is
+        // released, so independent batches still run concurrently.
+        let discovered =
+            Arc::new(kiln_conformance::discover(&key).map_err(|error| error.to_string())?);
+        catalog.corpora.insert(
+            key,
+            CachedCorpus {
+                tests: Arc::clone(&discovered),
+                last_used: now,
+            },
+        );
+        while catalog.corpora.len() > MAX_CACHED_CORPORA {
+            let Some(oldest) = catalog
+                .corpora
+                .iter()
+                .min_by_key(|(path, cached)| (cached.last_used, *path))
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            catalog.corpora.remove(&oldest);
+        }
+        Ok(CatalogLookup {
+            tests: discovered,
+            cache_hit: false,
+        })
+    }
+}
+
+#[cfg(test)]
 pub fn run(
     root: &str,
     mode: TestMode,
     changed_paths: Option<Vec<String>>,
     previously_failed: Vec<String>,
 ) -> Result<TestSummary, String> {
+    run_with_changed_root(root, mode, None, changed_paths, previously_failed)
+}
+
+pub fn run_with_changed_root(
+    root: &str,
+    mode: TestMode,
+    changed_root: Option<String>,
+    changed_paths: Option<Vec<String>>,
+    previously_failed: Vec<String>,
+) -> Result<TestSummary, String> {
+    ConformanceCoordinator::default().run(
+        root,
+        mode,
+        changed_root,
+        changed_paths,
+        previously_failed,
+    )
+}
+
+fn run_discovered(
+    discovered: &[ConformanceTest],
+    mode: TestMode,
+    changed_paths: Option<Vec<String>>,
+    previously_failed: Vec<String>,
+    discovery_cache_hit: bool,
+) -> Result<TestSummary, String> {
     let started = Instant::now();
-    let root = Path::new(root);
-    // Discovery reads whichever convention the corpus declares itself in - Test262 frontmatter or
-    // a manifest beside the files - and hands back one shape, so nothing below here branches on it.
-    let discovered = kiln_conformance::discover(root).map_err(|error| error.to_string())?;
     let run_mode = match mode {
         TestMode::Parse => RunMode::Parse,
         TestMode::Interpreter => RunMode::Interpreter,
@@ -38,13 +174,13 @@ pub fn run(
     let mut tests_by_id = BTreeMap::new();
     let mut metadata = Vec::with_capacity(discovered.len());
     for test in discovered {
-        metadata.push(selector_metadata(&test, mode));
+        metadata.push(selector_metadata(test, mode));
         tests_by_id.insert(test.id().to_owned(), test);
     }
 
     let changes = changed_paths
         .as_deref()
-        .map(|paths| change_set_for_tests(paths, tests_by_id.values()))
+        .map(|paths| change_set_for_tests(paths, tests_by_id.values().copied()))
         .unwrap_or_else(ChangeSet::full_run);
     let failures =
         FailureState::from_failing(previously_failed.iter().map(|id| TestId::new(file_id(id))));
@@ -52,6 +188,7 @@ pub fn run(
 
     let mut summary = TestSummary {
         discovered: tests_by_id.len(),
+        discovery_cache_hit,
         ..TestSummary::default()
     };
     // Resolve the selection into a dense list once, in selection order. Every stage below indexes
@@ -63,6 +200,7 @@ pub fn run(
         .filter_map(|selected| {
             tests_by_id
                 .get(selected.id.as_str())
+                .copied()
                 .map(|test| (selected.id.to_string(), test))
         })
         .collect::<Vec<_>>();
@@ -190,6 +328,66 @@ fn has_any_feature(test: &ConformanceTest, features: &[&str]) -> bool {
     test.features()
         .iter()
         .any(|feature| features.contains(&feature.as_str()))
+}
+
+fn corpus_inputs_changed(
+    root: &Path,
+    changed_root: &Path,
+    tests: &[ConformanceTest],
+    paths: &[String],
+) -> bool {
+    let normalized_root = normalize_path(root);
+    let repository_relative_root = root
+        .strip_prefix(changed_root)
+        .ok()
+        .map(normalize_path)
+        .unwrap_or_default();
+    let test_paths = tests
+        .iter()
+        .map(|test| {
+            (
+                normalize_path(test.source_path()),
+                normalize_path(test.path()),
+                test.bundle_input_paths()
+                    .iter()
+                    .map(|path| normalize_path(path))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    paths.iter().any(|path| {
+        let normalized = normalize_path(Path::new(path));
+        let components = normalized.split('/').collect::<Vec<_>>();
+        let inside_absolute_root = path_is_within(&normalized, &normalized_root);
+        let inside_repository_root = repository_relative_root.is_empty()
+            || path_is_within(&normalized, &repository_relative_root);
+        let manifest_changed = components.last() == Some(&"manifest.toml");
+        let harness_changed = components.contains(&"harness")
+            && Path::new(&normalized)
+                .extension()
+                .is_some_and(|extension| extension == "js");
+        let known_input_changed =
+            test_paths
+                .iter()
+                .any(|(source_path, program_path, bundle_input_paths)| {
+                    path_matches(&normalized, source_path)
+                        || path_matches(&normalized, program_path)
+                        || bundle_input_paths
+                            .iter()
+                            .any(|input| path_matches(&normalized, input))
+                });
+
+        inside_absolute_root
+            || inside_repository_root
+            || manifest_changed
+            || harness_changed
+            || known_input_changed
+    })
+}
+
+fn path_is_within(path: &str, root: &str) -> bool {
+    !root.is_empty() && (path == root || path.starts_with(&format!("{root}/")))
 }
 
 fn change_set_for_tests<'a, I>(paths: &[String], tests: I) -> ChangeSet
@@ -396,6 +594,141 @@ expected_stdout = "bundle\n"
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
         }
+    }
+
+    #[test]
+    fn resident_catalog_reuses_compiler_only_runs_and_refreshes_corpus_inputs() {
+        let corpus = TemporaryCorpus::new();
+        let root = corpus.path.to_string_lossy().into_owned();
+        let changed_root_path = corpus.path.parent().expect("temporary corpus parent");
+        let changed_root = changed_root_path.to_string_lossy().into_owned();
+        let corpus_relative = corpus
+            .path
+            .file_name()
+            .expect("temporary corpus name")
+            .to_string_lossy();
+        let coordinator = ConformanceCoordinator::default();
+        let compiler_change = Some(vec!["crates/kiln-ir/src/lib.rs".to_owned()]);
+
+        let cold = coordinator
+            .run(
+                &root,
+                TestMode::Parse,
+                Some(changed_root.clone()),
+                compiler_change.clone(),
+                Vec::new(),
+            )
+            .expect("cold discovery succeeds");
+        assert!(!cold.discovery_cache_hit);
+
+        let warm = coordinator
+            .run(
+                &root,
+                TestMode::Parse,
+                Some(changed_root.clone()),
+                compiler_change.clone(),
+                Vec::new(),
+            )
+            .expect("compiler-only rerun reuses discovery");
+        assert!(warm.discovery_cache_hit);
+
+        let source_edit = coordinator
+            .run(
+                &root,
+                TestMode::Parse,
+                Some(changed_root.clone()),
+                Some(vec![format!("{corpus_relative}/effect/src/one.ts")]),
+                Vec::new(),
+            )
+            .expect("authored source edit refreshes discovery");
+        assert!(!source_edit.discovery_cache_hit);
+
+        let manifest_edit = coordinator
+            .run(
+                &root,
+                TestMode::Parse,
+                Some(changed_root.clone()),
+                Some(vec![format!("{corpus_relative}/manifest.toml")]),
+                Vec::new(),
+            )
+            .expect("manifest edit refreshes discovery");
+        assert!(!manifest_edit.discovery_cache_hit);
+
+        let discovered = kiln_conformance::discover(&corpus.path).expect("fixture discovery");
+        assert!(corpus_inputs_changed(
+            &corpus.path,
+            changed_root_path,
+            &discovered,
+            &["test262/harness/assert.js".to_owned()]
+        ));
+        assert!(corpus_inputs_changed(
+            &corpus.path,
+            changed_root_path,
+            &discovered,
+            &[corpus
+                .path
+                .join("new-case.js")
+                .to_string_lossy()
+                .into_owned()]
+        ));
+    }
+
+    #[test]
+    fn external_corpus_never_reuses_project_change_provenance() {
+        let external = TemporaryCorpus::new();
+        let project = TemporaryCorpus::new();
+        let root = external.path.to_string_lossy().into_owned();
+        let changed_root = project.path.to_string_lossy().into_owned();
+        let coordinator = ConformanceCoordinator::default();
+        let compiler_change = Some(vec!["crates/kiln-ir/src/lib.rs".to_owned()]);
+
+        for _ in 0..2 {
+            let summary = coordinator
+                .run(
+                    &root,
+                    TestMode::Parse,
+                    Some(changed_root.clone()),
+                    compiler_change.clone(),
+                    Vec::new(),
+                )
+                .expect("external corpus discovery succeeds");
+            assert!(
+                !summary.discovery_cache_hit,
+                "project-relative paths cannot prove an external corpus unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn resident_catalog_has_a_fixed_lru_bound() {
+        let corpora = (0..=MAX_CACHED_CORPORA)
+            .map(|_| TemporaryCorpus::new())
+            .collect::<Vec<_>>();
+        let coordinator = ConformanceCoordinator::default();
+        for corpus in &corpora {
+            coordinator
+                .discover(
+                    &corpus.path,
+                    corpus.path.parent(),
+                    Some(&["crates/kiln-ir/src/lib.rs".to_owned()]),
+                )
+                .expect("cache corpus");
+        }
+
+        let catalog = coordinator
+            .catalog
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(catalog.corpora.len(), MAX_CACHED_CORPORA);
+        assert!(
+            !catalog.corpora.contains_key(
+                &corpora[0]
+                    .path
+                    .canonicalize()
+                    .expect("canonical first root")
+            ),
+            "the least recently used corpus is evicted"
+        );
     }
 
     #[test]

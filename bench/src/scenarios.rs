@@ -660,11 +660,16 @@ pub fn targeted_node_net_conformance(budget: Budget) -> Result<Measurement, Stri
     let mut fixture = ConformanceDaemonFixture::new()?;
     let mut durations = Vec::with_capacity(iters);
 
+    // Catalog construction is cold daemon setup, not the steady-state language-developer loop.
+    // Prime it outside the sample and require every measured request to prove reuse explicitly.
+    let cold = fixture.run_node_net(&root)?;
+    require_node_net_selection(&cold, false)?;
+
     for iteration in 0..warmup + iters {
         let started = Instant::now();
         let summary = fixture.run_node_net(&root)?;
         let elapsed = started.elapsed();
-        require_node_net_selection(&summary)?;
+        require_node_net_selection(&summary, true)?;
         if iteration >= warmup {
             durations.push(elapsed);
         }
@@ -684,24 +689,29 @@ pub fn targeted_node_net_conformance(budget: Budget) -> Result<Measurement, Stri
     ))
 }
 
-fn require_node_net_selection(summary: &TestSummary) -> Result<(), String> {
+fn require_node_net_selection(
+    summary: &TestSummary,
+    expected_cache_hit: bool,
+) -> Result<(), String> {
     if summary.discovered == 35
         && summary.selected == 5
         && summary.passed == 5
         && summary.failed == 0
         && summary.unsupported == 0
         && summary.skipped == 0
+        && summary.discovery_cache_hit == expected_cache_hit
     {
         return Ok(());
     }
     Err(format!(
-        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={}, expected 35/5/5/0/0/0",
+        "changed node:net batch was discovered={} selected={} pass={} fail={} unsupported={} skipped={} discovery_cache_hit={}, expected 35/5/5/0/0/0/{expected_cache_hit}",
         summary.discovered,
         summary.selected,
         summary.passed,
         summary.failed,
         summary.unsupported,
         summary.skipped,
+        summary.discovery_cache_hit,
     ))
 }
 
@@ -744,6 +754,14 @@ impl ConformanceDaemonFixture {
             .request(&Request::Test {
                 root: root.to_owned(),
                 mode: TestMode::Node,
+                changed_root: Some(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("..")
+                        .canonicalize()
+                        .map_err(|error| format!("canonicalizing benchmark project: {error}"))?
+                        .display()
+                        .to_string(),
+                ),
                 changed_paths: Some(vec!["crates/kiln-runtime/src/node_net.rs".to_owned()]),
                 previously_failed: Vec::new(),
             })
