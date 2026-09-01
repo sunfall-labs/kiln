@@ -585,6 +585,7 @@ mod realm {
         symbol_keys: RefCell<HashMap<u64, Vec<u8>>>,
         callable_stores: RefCell<HashMap<(u32, u64), CallableStore>>,
         value_slots: RefCell<HashMap<u32, Box<[u64; 4]>>>,
+        entropy: Cell<Option<(u64, u64)>>,
         heap_allocations: RefCell<Vec<OwnedHeapAllocation>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
@@ -644,6 +645,7 @@ mod realm {
                 symbol_keys: RefCell::new(HashMap::new()),
                 callable_stores: RefCell::new(HashMap::new()),
                 value_slots: RefCell::new(HashMap::new()),
+                entropy: Cell::new(None),
                 // Server graphs create hundreds of objects and closures during bootstrap.
                 // Reserve one compact pointer/destructor slab so the common path does not keep
                 // reallocating; unlike the former leaks, every entry is released at teardown.
@@ -1776,6 +1778,35 @@ mod realm {
         })
     }
 
+    /// Advances deterministic SplitMix64 state owned by the active realm.
+    ///
+    /// The seed is an explicit generated-artifact capability. It must agree on every draw in a
+    /// realm, preventing separately compiled modules from silently starting independent streams.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_entropy_word(seed: u64, out_word: *mut u64) -> i32 {
+        ffi(|| {
+            if out_word.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            let Some(realm) = active_realm() else {
+                return INVALID_ARGUMENT;
+            };
+            let state = match realm.entropy.get() {
+                Some((configured, _)) if configured != seed => return INVALID_ARGUMENT,
+                Some((_, state)) => state,
+                None => seed,
+            };
+            let state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            realm.entropy.set(Some((seed, state)));
+            let mut mixed = state;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            mixed ^= mixed >> 31;
+            unsafe { out_word.write(mixed) };
+            0
+        })
+    }
+
     /// Transfers one generated-C closure to the active realm for exact-once destruction.
     ///
     /// The provider never dereferences the pointer. This is the ownership seam used while
@@ -2717,6 +2748,58 @@ mod realm {
             assert_ne!(first[0], second[0]);
             assert_eq!(
                 unsafe { kiln_realm_value_slot(1, ptr::null_mut()) },
+                INVALID_ARGUMENT
+            );
+            assert_eq!(kiln_realm_destroy(first_realm), 0);
+            assert_eq!(kiln_realm_destroy(second_realm), 0);
+        }
+
+        unsafe extern "C" fn draws_realm_entropy(context: *mut c_void) -> i32 {
+            let words = unsafe { &mut *context.cast::<[u64; 2]>() };
+            if unsafe { kiln_realm_entropy_word(7, &raw mut words[0]) } != 0
+                || unsafe { kiln_realm_entropy_word(7, &raw mut words[1]) } != 0
+            {
+                return RUNTIME_ERROR;
+            }
+            let mut rejected = 0;
+            i32::from(
+                unsafe { kiln_realm_entropy_word(8, &raw mut rejected) } != INVALID_ARGUMENT
+                    || rejected != 0,
+            )
+        }
+
+        #[test]
+        fn deterministic_entropy_is_one_realm_stream_and_rejects_policy_drift() {
+            let mut first_realm = 0;
+            let mut second_realm = 0;
+            let mut first = [0; 2];
+            let mut second = [0; 2];
+            assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
+            assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        first_realm,
+                        Some(draws_realm_entropy),
+                        (&raw mut first).cast(),
+                    )
+                },
+                0
+            );
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        second_realm,
+                        Some(draws_realm_entropy),
+                        (&raw mut second).cast(),
+                    )
+                },
+                0
+            );
+            assert_ne!(first[0], first[1]);
+            assert_eq!(first, second);
+            assert_eq!(
+                unsafe { kiln_realm_entropy_word(7, ptr::null_mut()) },
                 INVALID_ARGUMENT
             );
             assert_eq!(kiln_realm_destroy(first_realm), 0);
@@ -4681,6 +4764,9 @@ mod realm {
         };
         (realm, kiln_realm_value_slot, realm_value_slot) => {
             const _: unsafe extern "C" fn(u32, *mut *mut c_void) -> i32 = kiln_realm_value_slot;
+        };
+        (realm, kiln_realm_entropy_word, realm_entropy_word) => {
+            const _: unsafe extern "C" fn(u64, *mut u64) -> i32 = kiln_realm_entropy_word;
         };
         (realm, kiln_realm_own_closure, realm_own_closure) => {
             const _: unsafe extern "C" fn(*mut c_void, Option<DropWork>) -> i32 = kiln_realm_own_closure;

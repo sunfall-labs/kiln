@@ -5350,6 +5350,7 @@ mod tests {
                 exported: "marker".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let provider_entry = fs::canonicalize(&entry).expect("canonical entry");
         let graph = ModuleGraph::build_with_typed_policy(
@@ -5457,6 +5458,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
                     local_slot: 1,
                 },
             ],
+            strictness: kiln_ir::Strictness::default(),
         };
         let node = kiln_module_graph::ModuleNode {
             path: PathBuf::from("/.kiln/builtins/events.builtin"),
@@ -7195,6 +7197,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
                 exported: export.to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |_| module.clone())
             .expect("construct one-module graph")
@@ -7277,6 +7280,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7302,6 +7306,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             dependencies: vec!["./dep.js".to_owned()],
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path =
             fs::canonicalize(project.join("dep.js")).expect("canonical dependency");
@@ -7520,6 +7525,7 @@ int main(void) {{
                 exported: "answer".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let barrel = ModuleProgram {
             program: Program {
@@ -7541,6 +7547,7 @@ int main(void) {{
                 exported: format!("{}./origin.js", kiln_ir::STAR_REEXPORT_PREFIX),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7568,6 +7575,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
         let barrel_path = fs::canonicalize(project.join("barrel.js")).expect("canonical barrel");
@@ -7608,6 +7616,7 @@ int main(void) {{
                 exported: "answer".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -7634,6 +7643,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let origin_path = fs::canonicalize(project.join("origin.js")).expect("canonical origin");
         ModuleGraph::build_with_modules(project.join("main.js"), project, move |path| {
@@ -9106,6 +9116,7 @@ int main(void) {{
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let graph = ModuleGraph::build_with_modules(project.join("main.js"), &project, move |_| {
             thrown.clone()
@@ -9429,6 +9440,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9456,6 +9468,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let make_graph = |project: &Path| {
             let entry_path = project.join("main.js");
@@ -9551,6 +9564,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let edited_graph = {
             let entry_path = first_project.join("main.js");
@@ -9712,6 +9726,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9730,6 +9745,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
         let graph =
@@ -9946,6 +9962,7 @@ int main(void) {{
                 exported: "value".into(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let entry = ModuleProgram {
             program: Program {
@@ -9971,6 +9988,7 @@ int main(void) {{
                 local_slot: 0,
             }],
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let dependency_path = fs::canonicalize(project.join("dep.js")).expect("canonical dep");
         let graph =
@@ -10625,6 +10643,58 @@ int main(int argc, char **argv) {{
             host_a.build.module_symbol,
             deterministic.build.module_symbol
         );
+    }
+
+    #[test]
+    fn native_deterministic_entropy_is_one_stream_across_modules() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-graph-entropy");
+        fs::write(root.path.join("package.json"), r#"{"type":"module"}"#)
+            .expect("write package metadata");
+        fs::write(
+            root.path.join("first.mjs"),
+            "export const first = Math.random();",
+        )
+        .expect("write first entropy consumer");
+        let entry = root.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"import { first } from "./first.mjs";
+console.log(first === Math.random());"#,
+        )
+        .expect("write second entropy consumer");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build entropy graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native graph entropy integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        for (name, entropy) in [
+            ("default", NativeEntropyPolicy::Deterministic),
+            ("seeded", NativeEntropyPolicy::Seeded(7)),
+        ] {
+            let report = builder
+                .run_graph(
+                    &graph,
+                    &NativeBuildOptions::new(root.path.join(name), NativeProfile::Dev)
+                        .with_realm_policy(NativeRealmPolicy::default().with_entropy(entropy)),
+                )
+                .unwrap_or_else(|error| panic!("native graph entropy fixture failed: {error}"));
+            assert_eq!(
+                report.exit_code,
+                Some(0),
+                "stderr={}",
+                String::from_utf8_lossy(&report.stderr)
+            );
+            assert_eq!(report.stdout, b"false\n");
+        }
     }
 
     fn scalar_equivalence_programs() -> Vec<(&'static str, Program)> {

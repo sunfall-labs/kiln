@@ -26,6 +26,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_symbol_key_for, realm_symbol_key_for);
             (realm, kiln_realm_callable_store, realm_callable_store);
             (realm, kiln_realm_value_slot, realm_value_slot);
+            (realm, kiln_realm_entropy_word, realm_entropy_word);
             (realm, kiln_realm_own_closure, realm_own_closure);
             (realm, kiln_realm_own_object, realm_own_object);
             (realm, kiln_realm_now, realm_now);
@@ -99,7 +100,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 21;
+pub const PROVIDER_ABI_VERSION: u32 = 22;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -110,8 +111,8 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        assert_eq!(PROVIDER_ABI_VERSION, 21);
-        assert_eq!(PROVIDER_EXPORTS.len(), 72);
+        assert_eq!(PROVIDER_ABI_VERSION, 22);
+        assert_eq!(PROVIDER_EXPORTS.len(), 73);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_temporal_last_error"));
     }

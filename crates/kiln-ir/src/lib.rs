@@ -10,8 +10,8 @@ use std::sync::Arc;
 use kiln_hir::{
     AssignmentOperator, BinaryOperator, CatchClause, Class, ClassField, ExportName, ExportOrigin,
     Expression, ExpressionKind, Function, ImportName, ListElement, Literal, LogicalOperator,
-    Module, ObjectKey, ObjectMember, Pattern, PatternKey, Statement, StatementKind, SwitchCase,
-    UnaryOperator, VariableKind,
+    Module, ObjectKey, ObjectMember, Pattern, PatternKey, SourceGoal, Statement, StatementKind,
+    SwitchCase, UnaryOperator, VariableKind,
 };
 
 /// Re-exported because [`FunctionProto::span`] is one: a consumer of a `Program` has to be able
@@ -327,6 +327,16 @@ pub enum Instruction {
     /// runs is not an error in JavaScript, and real bundles are full of them: feature detection
     /// mentions globals the host may not have. The name is kept so the message can say which.
     ThrowReference(u32),
+    /// Sloppy assignment to a name nothing bound: create or overwrite it on the global object.
+    ///
+    /// `undeclaredGlobal = 1` in sloppy code does not throw -- the unresolvable reference is
+    /// settled against the global object environment record, which creates the property. That is
+    /// how a UMD header installs itself, and it is the one place where an *assignment* to an
+    /// unresolved name is not the `ReferenceError` a *read* of the same name is. Strict code
+    /// never emits this; it keeps [`Instruction::ThrowReference`].
+    ///
+    /// The operand is the name constant. Stack: `[value] -> []`.
+    StoreGlobalBinding(u32),
     /// Push the marker that fills a hole in an array literal.
     ///
     /// Not `undefined`: a hole is *absent*, and `in`, `Object.keys` and every array method that
@@ -886,6 +896,13 @@ pub struct ModuleProgram {
     pub dependencies: Vec<String>,
     pub imports: Vec<ImportBinding>,
     pub exports: Vec<ExportBinding>,
+    /// Which of this module's bodies run as strict code.
+    ///
+    /// An ESM module is strict throughout and reports [`Strictness::always`]. A CommonJS module
+    /// is *not*: node runs it as a sloppy function body, so `this` in a bare call is the global
+    /// object and a write refused by a frozen object is discarded. The linker cannot infer this
+    /// from the bytecode, so the compiler that knew the goal has to say it here.
+    pub strictness: Strictness,
 }
 
 /// What a pattern walk does when it reaches a name.
@@ -1002,8 +1019,12 @@ pub fn compile_with_strictness(
 ) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
     let mut compiler = Compiler::new(module);
     // Either the caller knows -- a Test262 strict variant, a `Function` body -- or the source
-    // opened with the directive itself.
-    compiler.strict = options.strict || module.strict;
+    // opened with the directive itself, or the goal settles it: a Module is strict whatever its
+    // text says. Without the goal this entry point was the one place a module body could be
+    // compiled sloppy, which now decides more than a refused write -- it decides whether an
+    // assignment to an unbound name creates a global.
+    compiler.strict =
+        options.strict || module.strict || matches!(module.source_goal, SourceGoal::Module);
     // The module body has nested functions too, so its own block bindings can be captured.
 
     for requested in module.runtime_requested_modules() {
@@ -1267,12 +1288,15 @@ pub fn compile_module(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagn
         }
     }
 
-    compiler.finish().map(|program| ModuleProgram {
-        program,
-        dependencies,
-        imports,
-        exports,
-    })
+    compiler
+        .finish_with_strictness()
+        .map(|(program, strictness)| ModuleProgram {
+            program,
+            dependencies,
+            imports,
+            exports,
+            strictness,
+        })
 }
 
 /// One parameter's share of `FunctionDeclarationInstantiation`, in declaration order.
@@ -1297,6 +1321,12 @@ enum ParameterStep<'a> {
 pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDiagnostic>> {
     const WRAPPER: [&str; 5] = ["exports", "require", "module", "__filename", "__dirname"];
     let mut compiler = Compiler::new(module);
+    // Node wraps a CommonJS file in an ordinary function, so the body is *sloppy* unless its own
+    // text opens with the directive. That is not a detail: it decides whether `undeclaredGlobal =
+    // 1` installs a global -- which is how a UMD header attaches itself -- and whether `this` in a
+    // bare call inside the module is the global object. A Module goal would be strict whatever
+    // its text said; this goal is the other one, and this is where the difference is recorded.
+    compiler.strict = module.strict;
     // A CommonJS module's values routinely leave their defining module through `module.exports`
     // and are invoked by importers. Module-slot instructions are caller-relative in the VM, so
     // no CommonJS function may depend on one: its defining bindings have to travel as cells.
@@ -1330,12 +1360,15 @@ pub fn compile_commonjs(module: &Module) -> Result<ModuleProgram, Vec<CompileDia
         });
     }
     compiler.compile_body(module);
-    compiler.finish().map(|program| ModuleProgram {
-        program,
-        dependencies: Vec::new(),
-        imports,
-        exports: Vec::new(),
-    })
+    compiler
+        .finish_with_strictness()
+        .map(|(program, strictness)| ModuleProgram {
+            program,
+            dependencies: Vec::new(),
+            imports,
+            exports: Vec::new(),
+            strictness,
+        })
 }
 
 /// Unpatched exits from one loop.
@@ -1821,10 +1854,6 @@ impl Compiler {
         }
         self.code.push(Instruction::LoadLocal(completion));
         self.code.push(Instruction::Return);
-    }
-
-    fn finish(self) -> Result<Program, Vec<CompileDiagnostic>> {
-        Ok(self.finish_with_strictness()?.0)
     }
 
     fn finish_with_strictness(self) -> Result<(Program, Strictness), Vec<CompileDiagnostic>> {
@@ -5077,12 +5106,24 @@ impl Compiler {
                 (Place::Global(slot), local.kind, local.imported)
             }
             Resolution::Unresolved => {
-                // Assigning to a name that does not exist is a `ReferenceError` in a module,
-                // raised where the assignment happens rather than when it is compiled.
                 let _ = span;
                 let name = self.constant_index(Constant::String(target.to_owned()));
-                self.code.push(Instruction::ThrowReference(name));
-                return None;
+                // Sloppy code settles an unresolvable reference against the global object, which
+                // creates the property rather than refusing the write. Strict code raises the
+                // `ReferenceError` where the assignment happens rather than when it is compiled.
+                //
+                // Only the *store* differs. A compound assignment reads first, and reading a name
+                // nothing bound is still a `ReferenceError` in both modes -- `undeclared += 1`
+                // throws in sloppy code too -- so the load stays `ThrowReference`, which is also
+                // the instruction that finds a global the program installed earlier.
+                if self.strict {
+                    self.code.push(Instruction::ThrowReference(name));
+                    return None;
+                }
+                return Some((
+                    Instruction::ThrowReference(name),
+                    Instruction::StoreGlobalBinding(name),
+                ));
             }
         };
         let (load, store): (Instruction, Instruction) = match place {
@@ -8019,7 +8060,10 @@ mod tests {
             source: "".into(),
             strict: false,
             source_kind: kiln_hir::SourceKind::JavaScript,
-            source_goal: kiln_hir::SourceGoal::Module,
+            // Script, because these fixtures are bodies rather than ESM: the goal now decides
+            // strictness, and calling them modules would compile every one of them strict and
+            // quietly stop the sloppy cases below from being sloppy cases.
+            source_goal: kiln_hir::SourceGoal::Script,
             items: Vec::new(),
             body,
             requested_modules: Vec::new(),
