@@ -5914,6 +5914,9 @@ pub struct RegExpData {
     compiled: regress::Regex,
     global: bool,
     sticky: bool,
+    /// The `d` flag. Read once here rather than off `flags` at every match, and kept beside the
+    /// other two for the same reason they are: a flag the matcher consults is not a string search.
+    has_indices: bool,
     /// Where the next `g` or `y` search starts, in UTF-16 units. Mutable and program-visible,
     /// which is why two evaluations of one literal must not share an object.
     last_index: std::cell::Cell<usize>,
@@ -18325,7 +18328,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // being permanently stuck past the end.
                     regexp.last_index.set(0);
                 }
-                if let Some((range, _)) = &found
+                if let Some((range, _, _)) = &found
                     && (regexp.global || regexp.sticky)
                 {
                     regexp.last_index.set(range.end);
@@ -18333,10 +18336,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(native, Native::RegExpTest) {
                     return Ok(Value::Boolean(found.is_some()));
                 }
-                let Some((range, groups)) = found else {
+                let Some((range, groups, names)) = found else {
                     return Ok(Value::Null);
                 };
-                Ok(match_result(&subject, &range, &groups))
+                Ok(match_result(
+                    &subject,
+                    &range,
+                    &groups,
+                    &names,
+                    regexp.has_indices,
+                ))
             }
             Native::StringReplace | Native::StringReplaceAll
                 if matches!(arguments.first(), Some(Value::RegExp(_)))
@@ -18365,7 +18374,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     return Ok(Value::Array(ArrayData::new(parts)));
                 }
-                for (range, groups) in regexp_search_all(regexp, &subject) {
+                for (range, groups, _) in regexp_search_all(regexp, &subject) {
                     // A separator that matches nothing would split between every character
                     // *and* produce an empty piece for each; the specification skips an empty
                     // match at the position the last piece started.
@@ -18406,7 +18415,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // `search` ignores `lastIndex` entirely and always scans from the start.
                 Ok(Value::Number(
                     regexp_search(regexp, &subject, 0)
-                        .map_or(-1.0, |(range, _)| range.start as f64),
+                        .map_or(-1.0, |(range, _, _)| range.start as f64),
                 ))
             }
             Native::StringMatch | Native::StringMatchAll => {
@@ -18424,15 +18433,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !all {
                     // Without `g`, `match` is `exec`: one result with its groups.
                     return Ok(match regexp_search(regexp, &subject, 0) {
-                        Some((range, groups)) => match_result(&subject, &range, &groups),
+                        Some((range, groups, names)) => {
+                            match_result(&subject, &range, &groups, &names, regexp.has_indices)
+                        }
                         None => Value::Null,
                     });
                 }
                 let mut results = Vec::new();
-                for (range, groups) in regexp_search_all(regexp, &subject) {
+                for (range, groups, names) in regexp_search_all(regexp, &subject) {
                     results.push(if matches!(native, Native::StringMatchAll) {
                         // `matchAll` yields full results; `match` with `g` yields only the text.
-                        match_result(&subject, &range, &groups)
+                        match_result(&subject, &range, &groups, &names, regexp.has_indices)
                     } else {
                         Value::String(utf16_slice(&subject, range))
                     });
@@ -28501,7 +28512,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
 
         let mut out = String::new();
         let mut copied = 0;
-        for (range, groups) in matches {
+        for (range, groups, names) in matches {
             push_bounded(&mut out, &utf16_slice(&subject, copied..range.start))?;
             let matched = utf16_slice(&subject, range.clone());
             if callable {
@@ -28516,6 +28527,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 call_arguments.push(Value::Number(range.start as f64));
                 call_arguments.push(Value::String(text.clone()));
+                // The groups object is last, and only for a pattern that has names -- which is
+                // what keeps the replacer's argument count what it has always been otherwise.
+                if !names.is_empty() {
+                    call_arguments.push(named_group_object(&names, |group| match group {
+                        Some(range) => Value::String(utf16_slice(&subject, range.clone())),
+                        None => Value::Undefined,
+                    }));
+                }
                 let produced =
                     self.call_value(&replacement, Value::Undefined, call_arguments, instruction)?;
                 push_bounded(&mut out, &produced.to_display_string())?;
@@ -28527,6 +28546,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &subject,
                         &range,
                         &groups,
+                        &names,
                     )?,
                 )?;
             }
@@ -37231,6 +37251,7 @@ fn call_native(
                                 &subject,
                                 &(start..start + needle.len()),
                                 &[],
+                                &[],
                             )?,
                         )?;
                         at = start + needle.len();
@@ -40723,6 +40744,7 @@ fn build_regexp(pattern: &str, flags: &str) -> Option<Value> {
         compiled,
         global: flags.contains('g'),
         sticky: flags.contains('y'),
+        has_indices: flags.contains('d'),
         last_index: std::cell::Cell::new(0),
         properties: RefCell::new(ObjectData::default()),
     })))
@@ -40742,7 +40764,11 @@ fn regexp_search(regexp: &RegExpData, subject: &[u16], start: usize) -> Option<R
         return None;
     }
     let groups = found.groups().collect();
-    Some((found.range(), groups))
+    let names = found
+        .named_groups()
+        .map(|(name, range)| (name.to_owned(), range))
+        .collect();
+    Some((found.range(), groups, names))
 }
 
 /// `new Array(...)`: a length when given one number, the elements themselves otherwise.
@@ -41655,7 +41681,14 @@ fn is_callable(value: &Value) -> bool {
 ///
 /// Every range is in UTF-16 units, which is what the language counts in and what the engine
 /// reports when matching over UTF-16.
-type RegExpMatch = (std::ops::Range<usize>, Vec<Option<std::ops::Range<usize>>>);
+/// The third element is the pattern's *named* groups, in declaration order and already
+/// de-duplicated by `regress`: the duplicate-named-groups proposal lets two alternatives share a
+/// name, and only one of them can have participated.
+type RegExpMatch = (
+    std::ops::Range<usize>,
+    Vec<Option<std::ops::Range<usize>>>,
+    Vec<(String, Option<std::ops::Range<usize>>)>,
+);
 
 /// Where a literal needle occurs, in the shape a regexp match has, so replacement is one path.
 fn literal_matches(subject: &[u16], needle: &[u16], all: bool) -> Vec<RegExpMatch> {
@@ -41664,7 +41697,8 @@ fn literal_matches(subject: &[u16], needle: &[u16], all: bool) -> Vec<RegExpMatc
     while at + needle.len() <= subject.len() {
         if subject[at..at + needle.len()] == *needle {
             let range = at..at + needle.len();
-            found.push((range.clone(), vec![Some(range)]));
+            // A literal needle has no groups at all, named or otherwise.
+            found.push((range.clone(), vec![Some(range)], Vec::new()));
             if !all {
                 break;
             }
@@ -41692,6 +41726,7 @@ fn expand_replacement(
     subject: &[u16],
     range: &std::ops::Range<usize>,
     groups: &[Option<std::ops::Range<usize>>],
+    names: &[(String, Option<std::ops::Range<usize>>)],
 ) -> Result<String, ExecutionError> {
     let mut out = String::new();
     let characters: Vec<char> = template.chars().collect();
@@ -41744,6 +41779,23 @@ fn expand_replacement(
                 }
                 at += width;
             }
+            // `$<name>` is a group reference only for a pattern that *has* named groups: in
+            // one that does not, the specification leaves the text exactly as written, so
+            // `"x".replace(/x/, "$<a>")` is the literal `$<a>` rather than an empty string.
+            '<' if !names.is_empty() => {
+                let Some(end) = characters[at + 2..].iter().position(|c| *c == '>') else {
+                    push_bounded_char(&mut out, '$')?;
+                    at += 1;
+                    continue;
+                };
+                let name: String = characters[at + 2..at + 2 + end].iter().collect();
+                // A name the pattern does not declare expands to nothing, like a group that did
+                // not participate -- it is not an error, and not the literal text either.
+                if let Some((_, Some(group))) = names.iter().find(|(key, _)| *key == name) {
+                    push_bounded(&mut out, &utf16_slice(subject, group.clone()))?;
+                }
+                at += 3 + end;
+            }
             _ => {
                 push_bounded_char(&mut out, '$')?;
                 at += 1;
@@ -41761,7 +41813,7 @@ fn regexp_search_all(regexp: &RegExpData, subject: &[u16]) -> Vec<RegExpMatch> {
     let mut found = Vec::new();
     let mut at = 0;
     while at <= subject.len() {
-        let Some((range, groups)) = regexp_search(regexp, subject, at) else {
+        let Some((range, groups, names)) = regexp_search(regexp, subject, at) else {
             break;
         };
         at = if range.end == range.start {
@@ -41769,9 +41821,39 @@ fn regexp_search_all(regexp: &RegExpData, subject: &[u16]) -> Vec<RegExpMatch> {
         } else {
             range.end
         };
-        found.push((range, groups));
+        found.push((range, groups, names));
     }
     found
+}
+
+/// A capture range as the two-element array `indices` reports it, or `undefined`.
+fn indices_pair(group: Option<&std::ops::Range<usize>>) -> Value {
+    match group {
+        Some(range) => Value::Array(ArrayData::new(vec![
+            Value::Number(range.start as f64),
+            Value::Number(range.end as f64),
+        ])),
+        None => Value::Undefined,
+    }
+}
+
+/// The object `result.groups` and `result.indices.groups` are: one key per *name*, in declaration
+/// order, and no prototype.
+///
+/// No prototype because the specification says `OrdinaryObjectCreate(null)`, and it is visible:
+/// a pattern with a group called `toString` would otherwise inherit one, and
+/// `result.groups.__proto__` would answer `Object.prototype` where a program checking for a
+/// group of that name expects `undefined`.
+fn named_group_object(
+    names: &[(String, Option<std::ops::Range<usize>>)],
+    value: impl Fn(Option<&std::ops::Range<usize>>) -> Value,
+) -> Value {
+    let mut object = ObjectData::default();
+    object.set_prototype(Value::Null);
+    for (name, range) in names {
+        object.set(name, value(range.as_ref()));
+    }
+    Value::Object(Rc::new(RefCell::new(object)))
 }
 
 /// The array `exec` and `match` produce: the whole match, then each group, with `index` and
@@ -41780,6 +41862,8 @@ fn match_result(
     subject: &[u16],
     range: &std::ops::Range<usize>,
     groups: &[Option<std::ops::Range<usize>>],
+    names: &[(String, Option<std::ops::Range<usize>>)],
+    has_indices: bool,
 ) -> Value {
     let mut items = vec![Value::String(utf16_slice(subject, range.clone()))];
     // The first group `regress` reports is the whole match, which is already element zero.
@@ -41801,13 +41885,37 @@ fn match_result(
         "input",
         Value::String(utf16_slice(subject, 0..subject.len())),
     );
-    // Present and undefined rather than absent: a program reads `m.groups?.name`, and node shows
-    // the key. Named groups themselves are not collected yet, which is why it is always
-    // undefined -- the key being there is what stops that from looking like a different shape.
-    result
-        .properties
-        .borrow_mut()
-        .set("groups", Value::Undefined);
+    // Present and undefined rather than absent when the pattern has no named groups: a program
+    // reads `m.groups?.name`, and node shows the key. With names, it is a real object -- reading
+    // `m.groups.year` off `undefined` was a TypeError from ordinary, widely written code.
+    let named = if names.is_empty() {
+        Value::Undefined
+    } else {
+        named_group_object(names, |group| match group {
+            Some(range) => Value::String(utf16_slice(subject, range.clone())),
+            None => Value::Undefined,
+        })
+    };
+    result.properties.borrow_mut().set("groups", named);
+    // `indices` is the `d` flag's whole observable effect: the same shape as the result itself,
+    // holding `[start, end]` pairs instead of text, and carrying a `groups` of its own.
+    if has_indices {
+        let mut pairs = vec![indices_pair(Some(range))];
+        for group in groups.iter().skip(1) {
+            pairs.push(indices_pair(group.as_ref()));
+        }
+        let indices = ArrayData::new(pairs);
+        let named = if names.is_empty() {
+            Value::Undefined
+        } else {
+            named_group_object(names, indices_pair)
+        };
+        indices.properties.borrow_mut().set("groups", named);
+        result
+            .properties
+            .borrow_mut()
+            .set("indices", Value::Array(indices));
+    }
     Value::Array(result)
 }
 
