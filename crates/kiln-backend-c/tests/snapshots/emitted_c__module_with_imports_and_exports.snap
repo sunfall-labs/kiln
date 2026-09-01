@@ -166,10 +166,11 @@ namespace_failure_without_order:
             if (data->properties[index].key_len == (size_t)13 &&
                 memcmp(data->properties[index].key, "@@toStringTag", (size_t)13) == 0 &&
                 data->properties[index].value.tag == KILN_VALUE_STRING)
-                free((void *)data->properties[index].value.ptr);
+                kiln_c99_gc_release((void *)data->properties[index].value.ptr);
         }
-        free(data->properties);
-        free(data);
+        /* The object is a collected block; releasing it runs the finaliser that owns
+         * `properties`, and unlinks it from the heap the way free() could not. */
+        kiln_c99_gc_release(data);
     }
     return status;
 }
