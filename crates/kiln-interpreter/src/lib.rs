@@ -7980,10 +7980,11 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     // Cloned into an `Rc` because a function value this module exports outlives the run that
     // made it: the importer calls it against *this* table, and holding it by reference would tie
     // every exported function to one module execution.
-    // A Module goal is strict whatever its text says, and so is everything written inside one,
-    // so the table is the constant one rather than something the linker has to carry.
+    // The table comes from the compiler rather than being assumed: an ESM module is strict
+    // throughout, but a CommonJS one is a sloppy function body in node, and assuming `always`
+    // here is what made `this` in a bare call inside a bundle `undefined`.
     let program = Rc::new(module.program.clone());
-    let strictness = Rc::new(Strictness::always(&program));
+    let strictness = Rc::new(module.strictness.clone());
     let mut vm = Vm::with_entropy_seed(
         program,
         strictness,
@@ -13257,6 +13258,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         current,
                     )?;
                     continue;
+                }
+                Instruction::StoreGlobalBinding(name) => {
+                    let name = self.string_constant(*name, current)?;
+                    let value = self.pop(current)?;
+                    // The global object environment record's `SetMutableBinding` with `S = false`
+                    // is an ordinary `[[Set]]` on the global object: it creates the property when
+                    // it is absent, which is what makes the write visible to every later read --
+                    // including the `ThrowReference` fallback that resolves the same name.
+                    let globals = self.global_object();
+                    if let Value::Object(globals) = globals {
+                        globals.borrow_mut().set(&name, value);
+                    }
                 }
                 Instruction::PushHole => self.stack.push(Value::Native(Native::Hole)),
                 Instruction::NewRegExp { pattern, flags } => {
@@ -45089,6 +45102,10 @@ mod tests {
                 exported: "answer".into(),
                 local_slot: 1,
             }],
+            strictness: Strictness {
+                body: true,
+                functions: Vec::new(),
+            },
         };
         let mut host = TestHost {
             calls: Vec::new(),

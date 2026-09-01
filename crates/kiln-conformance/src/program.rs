@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{ExecutionLimits, execute, execute_node};
+use kiln_interpreter::{ExecutionLimits, execute_node_with_strictness, execute_with_strictness};
 use kiln_module_graph::ModuleGraph;
 use kiln_module_resolver::{
     NodeModuleFormat, NodeRuntimeResolver, ResolutionKind, ResolutionPolicy, ResolvedModule,
@@ -202,45 +202,43 @@ fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> 
         return CaseResult::new(Outcome::Pass, Vec::new(), String::new(), started);
     }
 
-    let program = match kiln_ir::compile(&module) {
-        Ok(program) => program,
-        Err(diagnostics) if diagnostics.is_empty() => {
-            return failed(
-                DiagnosticPhase::Compile,
-                "lowering refused the program without saying why",
-                started,
-            );
-        }
-        Err(diagnostics) => {
-            return failed_with(
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| {
-                        Diagnostic::new(
-                            DiagnosticPhase::Compile,
-                            diagnostic.message,
-                            diagnostic.span,
-                        )
-                    })
-                    .collect(),
-                started,
-            );
-        }
-    };
+    // Compiled *and* asked which bodies came out strict. The two halves have to travel together:
+    // the goal decides strictness, and handing the machine `Strictness::sloppy` for a program the
+    // compiler compiled strict makes `this` in a bare call inside an `.mjs` the global object.
+    let (program, strictness) =
+        match kiln_ir::compile_with_strictness(&module, kiln_ir::CompileOptions::default()) {
+            Ok(compiled) => compiled,
+            Err(diagnostics) if diagnostics.is_empty() => {
+                return failed(
+                    DiagnosticPhase::Compile,
+                    "lowering refused the program without saying why",
+                    started,
+                );
+            }
+            Err(diagnostics) => {
+                return failed_with(
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| {
+                            Diagnostic::new(
+                                DiagnosticPhase::Compile,
+                                diagnostic.message,
+                                diagnostic.span,
+                            )
+                        })
+                        .collect(),
+                    started,
+                );
+            }
+        };
 
     let mut host = CaptureHost::new();
+    let program = std::rc::Rc::new(program);
+    let strictness = std::rc::Rc::new(strictness);
     let result = if node {
-        execute_node(
-            std::rc::Rc::new(program),
-            &mut host,
-            ExecutionLimits::default(),
-        )
+        execute_node_with_strictness(program, strictness, &mut host, ExecutionLimits::default())
     } else {
-        execute(
-            std::rc::Rc::new(program),
-            &mut host,
-            ExecutionLimits::default(),
-        )
+        execute_with_strictness(program, strictness, &mut host, ExecutionLimits::default())
     };
     if let Err(error) = result {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);

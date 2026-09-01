@@ -23907,6 +23907,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PopHandler
         | Instruction::Throw
         | Instruction::ThrowReference(_)
+        | Instruction::StoreGlobalBinding(_)
         | Instruction::GetPrivate(_)
         | Instruction::SetPrivate(_)
         | Instruction::Dup2
@@ -24265,6 +24266,16 @@ fn stack_effect(
         // expecting that value. Modelling it as terminal would leave those instructions verified
         // at a height one short of the one the machine actually runs them at.
         Instruction::ThrowReference(_) => Ok((height + 1, false)),
+        // A sloppy assignment to an unbound name. The value is consumed and the property lands on
+        // the global object, so nothing is left behind: the compound and expression-valued forms
+        // duplicate the value themselves before the store.
+        Instruction::StoreGlobalBinding(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
         // A literal produces a fresh object, so it only ever grows the stack.
         Instruction::NewRegExp { .. } => Ok((height + 1, false)),
         Instruction::LoadNewTarget => Ok((height + 1, false)),
@@ -25604,6 +25615,22 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::StoreGlobalBinding(name) => {
+            // Sloppy code settles an unresolvable assignment against the global object, which
+            // creates the property. The interpreter does the same thing through its own global
+            // object; both engines have to, or a UMD header installs itself under one and throws
+            // under the other -- a divergence worse than the shared refusal it replaced.
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {}, member, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                text.len()
+            )
+            .unwrap();
+        }
         Instruction::Const(constant) => match &constants[*constant as usize] {
             Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
             Constant::Null => output.push_str("    stack[sp++] = kiln_c99_null();\n"),
@@ -26701,7 +26728,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::SuperApply => byte(&mut hash, 61),
-            // 62: the next free tag. Never reuse one -- two programs hashing alike would serve
+            // 75: the next free tag. Never reuse one -- two programs hashing alike would serve
             // one's object file for the other.
             Instruction::DirectEval(_) => byte(&mut hash, 62),
             Instruction::DynamicImport => byte(&mut hash, 63),
@@ -26714,6 +26741,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::PushHole => byte(&mut hash, 55),
             Instruction::ThrowReference(value) => {
                 byte(&mut hash, 57);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::StoreGlobalBinding(value) => {
+                byte(&mut hash, 74);
                 word(&mut hash, u64::from(*value));
             }
             Instruction::NewRegExp { pattern, flags } => {
@@ -27204,6 +27235,7 @@ mod tests {
                 exported: "probe".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let emitted = emit_runtime_module_with_logical_path(
             &module,
@@ -27236,6 +27268,7 @@ mod tests {
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated = emit_module_with_logical_path(&module, "src/namespace.js")
             .expect("namespace helper module emits");
@@ -27368,6 +27401,7 @@ int main(void) {{
                 exported: "EventEmitter".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated = emit_runtime_module_with_logical_path(
             &module,
@@ -27835,6 +27869,7 @@ int main(void) {
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated =
             emit_module_with_logical_path(&module, "node_modules/@fastify/error/index.js")
@@ -28133,6 +28168,7 @@ int main(void) {
             dependencies: Vec::new(),
             imports,
             exports,
+            strictness: kiln_ir::Strictness::default(),
         }
     }
 
