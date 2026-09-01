@@ -6909,8 +6909,15 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             response.starts_with("HTTP/1.1 200 OK\r\n"),
             "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
         );
+        // The body arrives whole with `end`, so it is length-declared rather than chunked. What
+        // this test pins is the ordering - the response completes before the close - not the
+        // framing, so both facts are asserted separately.
         assert!(
-            response.ends_with("\r\n7\r\ndelayed\r\n0\r\n\r\n"),
+            response.contains("\r\ncontent-length: 7\r\n"),
+            "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
+        );
+        assert!(
+            response.ends_with("\r\n\r\ndelayed"),
             "response={response:?} status={status} stdout={rest:?} stderr={stderr:?}"
         );
         assert!(status.success(), "server failed: {stderr}");

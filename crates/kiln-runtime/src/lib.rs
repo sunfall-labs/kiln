@@ -916,6 +916,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 close_when_responses_finish: false,
                 protocol_closed: false,
                 close_after_response: HashSet::new(),
+                pending_heads: BTreeMap::new(),
+                head_requests: HashSet::new(),
+                bodyless_responses: HashSet::new(),
                 client_requests: None,
                 client_events: None,
                 client_bodies: BTreeMap::new(),
@@ -959,6 +962,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 close_when_responses_finish: false,
                 protocol_closed: false,
                 close_after_response: HashSet::new(),
+                pending_heads: BTreeMap::new(),
+                head_requests: HashSet::new(),
+                bodyless_responses: HashSet::new(),
                 client_requests: Some(request_sender),
                 client_events: Some(event_receiver),
                 client_bodies: BTreeMap::new(),
@@ -1310,7 +1316,14 @@ impl<H: RealmHostProvider> RealmState<H> {
         // yet, so the transport can have no queued write even though a body is active. Keep the
         // close request as a marker and let the normal checkpoint drain Hyper's writes. Idle
         // connections have no response body to drain and can be retired immediately.
-        if connection.response_bodies.is_empty() || connection.protocol_closed {
+        // A body that Hyper has already finished no longer holds the connection open, whether or
+        // not the realm has drained its `finish` yet. Asking the driver rather than waiting for
+        // `take_http_events` to empty the map keeps `close` from depending on who looked last.
+        let responses_in_flight = connection
+            .response_bodies
+            .values()
+            .any(|body| !body.finished());
+        if !responses_in_flight || connection.protocol_closed {
             Some(connection.transport.close())
         } else {
             connection.close_when_responses_finish = true;
@@ -1346,8 +1359,15 @@ impl<H: RealmHostProvider> RealmState<H> {
         for id in finished_bodies {
             connection.response_bodies.remove(&id);
             connection.body_events.remove(&id);
+            connection.head_requests.remove(&id);
+            connection.bodyless_responses.remove(&id);
         }
-        if connection.close_when_responses_finish && connection.response_bodies.is_empty() {
+        if connection.close_when_responses_finish
+            && connection
+                .response_bodies
+                .values()
+                .all(|body| body.finished())
+        {
             connection.close_when_responses_finish = false;
             connection.transport.close_requested();
         }
@@ -1366,6 +1386,9 @@ impl<H: RealmHostProvider> RealmState<H> {
                 hyper_http::EngineEvent::RequestHead { id, request } => {
                     if !request.keep_alive {
                         connection.close_after_response.insert(id);
+                    }
+                    if request.method.eq_ignore_ascii_case("HEAD") {
+                        connection.head_requests.insert(id);
                     }
                     RuntimeHttpEvent::RequestHead { id, request }
                 }
@@ -1435,21 +1458,25 @@ impl<H: RealmHostProvider> RealmState<H> {
         if connection.response_bodies.contains_key(&id) {
             return false;
         }
-        let body = ResponseBodyDriver::new(high_water_mark);
-        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
-        let command = hyper_http::ResponseCommand {
-            id,
-            status,
-            headers,
-            body: body.body(body_event_sender),
-        };
-        if connection
-            .responses
-            .as_ref()
-            .is_none_or(|responses| responses.send(command).is_err())
-        {
+        if connection.responses.is_none() {
             return false;
         }
+        let body = ResponseBodyDriver::new(high_water_mark);
+        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
+        // The head is parked rather than sent. Hyper decides framing from the head it is given,
+        // and the framing Node would pick is not known until the script either streams a chunk or
+        // ends the response with its whole body. `flush_response_head` sends it either way, and
+        // always within the same JavaScript turn, because a realm only starts a response from
+        // `write` or `end`.
+        connection.pending_heads.insert(
+            id,
+            hyper_http::ResponseCommand {
+                id,
+                status,
+                headers,
+                body: body.body(body_event_sender),
+            },
+        );
         connection.response_bodies.insert(id, body);
         connection.body_events.insert(id, body_event_receiver);
         true
@@ -1461,13 +1488,13 @@ impl<H: RealmHostProvider> RealmState<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        Some(
-            self.http_connections
-                .get_mut(&resource)?
-                .response_bodies
-                .get_mut(&id)?
-                .write(data),
-        )
+        let connection = self.http_connections.get_mut(&resource)?;
+        // A chunk before `end` leaves the length unknown, so the head goes to Hyper as the realm
+        // built it and Hyper chunks the body.
+        if !flush_response_head(connection, id, None) {
+            return None;
+        }
+        Some(connection.response_bodies.get_mut(&id)?.write(data))
     }
 
     pub fn end_http1_response(
@@ -1477,7 +1504,17 @@ impl<H: RealmHostProvider> RealmState<H> {
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
         let connection = self.http_connections.get_mut(&resource)?;
-        let disposition = connection.response_bodies.get_mut(&id)?.end(data);
+        // `end` with the head still parked means this call carries the entire body, which is the
+        // one case where Node declares a length instead of chunking.
+        if !flush_response_head(connection, id, Some(data.len())) {
+            return None;
+        }
+        let bodyless = connection.bodyless_responses.contains(&id);
+        let body = connection.response_bodies.get_mut(&id)?;
+        let disposition = body.end(data);
+        if bodyless {
+            body.finish_without_body();
+        }
         Some(disposition)
     }
 
@@ -1617,11 +1654,71 @@ struct RuntimeHttpConnection {
     close_when_responses_finish: bool,
     protocol_closed: bool,
     close_after_response: HashSet<u64>,
+    /// Response heads Hyper has not seen yet. Node picks a framing from what the script does
+    /// after the head is built, so the runtime holds the head until `write` streams it or `end`
+    /// completes it. See `flush_response_head`.
+    pending_heads: BTreeMap<u64, hyper_http::ResponseCommand>,
+    /// Requests whose method is HEAD. Node declares no length for them.
+    head_requests: HashSet<u64>,
+    /// Responses Hyper will never ask for a body from, decided when the head was flushed.
+    bodyless_responses: HashSet<u64>,
     client_requests: Option<mpsc::UnboundedSender<hyper_http::ClientRequestCommand>>,
     client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
     client_bodies: BTreeMap<u64, ResponseBodyDriver>,
     client_body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
     completed_client_requests: HashSet<u64>,
+}
+
+/// Send a parked response head to Hyper, declaring a body length when Node would.
+///
+/// This is the one place the Content-Length rule lives, so the interpreter and the native path
+/// inherit it from the same code. `complete_body` is `Some(len)` only when the caller is `end`
+/// and no chunk was streamed first, which is exactly Node's condition for computing a length
+/// instead of chunking. A head the realm already committed carries its own framing header and is
+/// left alone, and a response that cannot have a body never gets a length: Hyper drops
+/// `Transfer-Encoding` for those itself, but it forwards a `Content-Length` that Node omits.
+///
+/// Returns false only when the connection can no longer accept a response.
+fn flush_response_head(
+    connection: &mut RuntimeHttpConnection,
+    id: u64,
+    complete_body: Option<usize>,
+) -> bool {
+    let Some(mut command) = connection.pending_heads.remove(&id) else {
+        // Already flushed by an earlier `write`; the body driver owns the rest.
+        return true;
+    };
+    let carries_body =
+        response_status_allows_body(command.status) && !connection.head_requests.contains(&id);
+    if !carries_body {
+        connection.bodyless_responses.insert(id);
+    }
+    if let Some(length) = complete_body
+        && carries_body
+        && !declares_framing(&command.headers)
+    {
+        command
+            .headers
+            .push(("content-length".into(), length.to_string()));
+    }
+    connection
+        .responses
+        .as_ref()
+        .is_some_and(|responses| responses.send(command).is_ok())
+}
+
+/// A head the realm already framed. Node leaves a script-supplied `Content-Length` or
+/// `Transfer-Encoding` untouched, and so does Kiln.
+fn declares_framing(headers: &[(String, String)]) -> bool {
+    headers.iter().any(|(name, _)| {
+        name.eq_ignore_ascii_case("content-length")
+            || name.eq_ignore_ascii_case("transfer-encoding")
+    })
+}
+
+/// Statuses that carry no body, and therefore no length. Matches Node's `_hasBody`.
+fn response_status_allows_body(status: u16) -> bool {
+    !matches!(status, 204 | 304) && !(100..200).contains(&status)
 }
 
 fn map_http1_client_event(
@@ -4234,6 +4331,173 @@ mod tests {
         assert_eq!(observer.get(), 2, "Drop must initiate shutdown when needed");
     }
 
+    /// Drive one scripted HTTP/1 request through the runtime and return the bytes the response
+    /// selected for the transport. The head is what these tests are about, so the write is read
+    /// off the action rather than started against the script.
+    fn response_head_for(
+        request: &[u8],
+        status: u16,
+        headers: Vec<(String, String)>,
+        chunks: &[&[u8]],
+        body: &[u8],
+    ) -> String {
+        use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
+
+        let resource = ResourceId::new(77);
+        let read = AsyncHostOp::TcpRead {
+            stream: resource,
+            max_bytes: DEFAULT_HIGH_WATER_MARK,
+        };
+        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([ScriptedHostStep {
+            operation: read.clone(),
+            result: Ok(AsyncHostValue::Bytes(request.to_vec())),
+        }]))
+        .expect("scripted runtime builds");
+        let start = runtime.start_http1_connection(resource);
+        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
+            panic!("HTTP connection starts one read")
+        };
+        let _read_request =
+            start_http_test_operation(&mut runtime, resource, read_operation, false);
+        let completion = next_host_completion(&mut runtime).expect("request read completes");
+        runtime
+            .complete_http_connection(resource, completion)
+            .expect("read belongs to connection");
+        let events = (0..8)
+            .find_map(|_| {
+                runtime.poll_http_connection(resource);
+                let events = runtime.take_http_events(resource);
+                (!events.is_empty()).then_some(events)
+            })
+            .expect("request events");
+        let (id, _, _) = request_events(&events);
+
+        assert!(runtime.start_http1_response(
+            resource,
+            id,
+            status,
+            headers,
+            DEFAULT_HIGH_WATER_MARK,
+        ));
+        for chunk in chunks {
+            assert!(
+                runtime
+                    .write_http1_response(resource, id, chunk.to_vec())
+                    .is_some()
+            );
+        }
+        assert!(
+            runtime
+                .end_http1_response(resource, id, body.to_vec())
+                .is_some()
+        );
+        let actions = (0..8)
+            .find_map(|_| {
+                runtime
+                    .poll_http_connection(resource)
+                    .filter(|actions| !actions.is_empty())
+            })
+            .expect("the response selects a write");
+        let [HttpStreamAction::Start(write)] = actions.as_slice() else {
+            panic!("a response selects one write: {actions:?}")
+        };
+        let AsyncHostOp::TcpWrite { data, .. } = write.clone().into_host_op() else {
+            panic!("a response writes bytes")
+        };
+        String::from_utf8(data).expect("an HTTP head is ASCII")
+    }
+
+    const GET: &[u8] = b"GET /framing HTTP/1.1\r\nHost: kiln\r\n\r\n";
+    const HEAD: &[u8] = b"HEAD /framing HTTP/1.1\r\nHost: kiln\r\n\r\n";
+
+    #[test]
+    fn end_with_the_whole_body_declares_its_length_in_bytes() {
+        // Case 1: nothing flushed, no prior write, no framing header the script chose.
+        assert_eq!(
+            response_head_for(GET, 200, Vec::new(), &[], b"kiln"),
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
+        );
+        // A length is bytes, not characters: five characters, six UTF-8 bytes.
+        assert_eq!(
+            response_head_for(GET, 200, Vec::new(), &[], "h\u{e9}llo".as_bytes()),
+            "HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nh\u{e9}llo"
+        );
+    }
+
+    #[test]
+    fn end_with_no_body_declares_zero() {
+        // Case 2.
+        assert_eq!(
+            response_head_for(GET, 200, Vec::new(), &[], b""),
+            "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_framing_the_script_chose_is_left_alone() {
+        // Case 3, both directions. A declared length is not recomputed, and a script that asked
+        // for chunking still gets it even though the whole body arrived with `end`.
+        assert_eq!(
+            response_head_for(
+                GET,
+                200,
+                vec![("content-length".into(), "4".into())],
+                &[],
+                b"kiln",
+            ),
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
+        );
+        assert_eq!(
+            response_head_for(
+                GET,
+                200,
+                vec![("transfer-encoding".into(), "chunked".into())],
+                &[],
+                b"kiln",
+            ),
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n4\r\nkiln\r\n0\r\n\r\n"
+        );
+        // The header name is matched without regard to case, as HTTP requires.
+        assert_eq!(
+            response_head_for(
+                GET,
+                200,
+                vec![("Content-Length".into(), "4".into())],
+                &[],
+                b"kiln",
+            ),
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
+        );
+    }
+
+    #[test]
+    fn a_chunk_before_end_keeps_the_body_chunked() {
+        // Case 4: the length is not known when the head has to go out.
+        assert_eq!(
+            response_head_for(GET, 200, Vec::new(), &[b"ki"], b"ln"),
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nki\r\n2\r\nln\r\n0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_response_that_cannot_carry_a_body_declares_no_length() {
+        // Case 5. A HEAD response and a bodiless status get neither header, which is what node
+        // sends; hyper forwards a content-length here rather than dropping it, so the rule has to
+        // decline to add one.
+        assert_eq!(
+            response_head_for(HEAD, 200, Vec::new(), &[], b"kiln"),
+            "HTTP/1.1 200 OK\r\n\r\n"
+        );
+        assert_eq!(
+            response_head_for(GET, 204, Vec::new(), &[], b""),
+            "HTTP/1.1 204 No Content\r\n\r\n"
+        );
+        assert_eq!(
+            response_head_for(GET, 304, Vec::new(), &[], b""),
+            "HTTP/1.1 304 Not Modified\r\n\r\n"
+        );
+    }
+
     #[test]
     fn scripted_provider_dispatches_buffered_http1_pipeline_after_first_response() {
         use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
@@ -4247,8 +4511,8 @@ mod tests {
             b"GET /first HTTP/1.1\r\nHost: kiln\r\n\r\nGET /second HTTP/1.1\r\nHost: kiln\r\n\r\n";
         let first_write = AsyncHostOp::TcpWrite {
             stream: resource,
-            data: b"HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n6\r\n/first\r\n0\r\n\r\n"
-                .to_vec(),
+            // `end` carries the whole body, so the head declares a length instead of chunking.
+            data: b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\n/first".to_vec(),
         };
         let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
             ScriptedHostStep {

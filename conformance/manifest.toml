@@ -957,7 +957,7 @@ done undefined
 """
 
 [server]
-tests = 4
+tests = 6
 authored = "2026-08-30"
 target = """
 A Node HTTP server, compiled. design.md §14 places the compatibility graft at step 10 and the \
@@ -1167,6 +1167,43 @@ expected_stdout = """
 </body>
 </html>
 
+"""
+
+[[test]]
+id = "server/s06-response-framing"
+requires_host = "node"
+group = "server"
+source = "server/s06-response-framing.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "promises", "async-await", "collections", "closures", "event-emitter", "for-of", "destructuring"]
+catches = """
+Response framing, which is the first thing a client sees and the last thing a probe usually \
+asserts. Node does not chunk a response whose whole body arrives with `end`: it counts the bytes \
+and declares a `Content-Length`. Kiln chunked every response, so a four-byte body went out as a \
+chunked stream and no client could know the length in advance. The probe reads the framing back \
+off the client rather than the server, because the framing is a property of the bytes on the \
+wire and not of the object that produced them. \
+It also pins the four cases that must not change: a length or an encoding the script chose is \
+left alone, a chunk written before `end` still streams, `writeHead` commits the header block so \
+a later `end` can no longer declare a length, and a response that cannot carry a body - a HEAD \
+request or a 204 - declares no framing at all.\
+"""
+notes = """
+Byte length rather than character length is the assertion behind `/implicit-utf8`: five \
+characters and six bytes, the same distinction ADR 0022 made for strings and s03 makes for \
+Buffer.\
+"""
+expected_stdout = """
+GET /implicit 200 4 undefined "kiln"
+GET /implicit-empty 200 0 undefined ""
+GET /implicit-utf8 200 6 undefined "héllo"
+GET /declared-length 200 4 undefined "kiln"
+GET /declared-chunked 200 undefined chunked "kiln"
+GET /streamed 200 undefined chunked "kiln"
+GET /write-head 200 undefined chunked "kiln"
+GET /no-content 204 undefined undefined ""
+HEAD /implicit 200 undefined undefined ""
+HEAD /streamed 200 undefined undefined ""
 """
 
 [[test]]

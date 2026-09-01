@@ -12035,6 +12035,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                     }
                 }
+                // Node's `writeHead` commits the header block: `_storeHeader` runs here, so a
+                // later `end(body)` can no longer declare a length and Node writes
+                // `Transfer-Encoding: chunked` into the block instead. Recording that header is
+                // what makes the committed head observably identical to Node's; Hyper still owns
+                // the encoding, and drops the header where no body is allowed.
+                let framed = state.headers.iter().any(|(name, _)| {
+                    name.eq_ignore_ascii_case("content-length")
+                        || name.eq_ignore_ascii_case("transfer-encoding")
+                });
+                let status = state.status;
+                if !framed && !matches!(status, 204 | 304) && !(100..200).contains(&status) {
+                    state
+                        .headers
+                        .push(("transfer-encoding".into(), "chunked".into()));
+                }
                 Ok(receiver.clone())
             }
             Native::NodeResponseWrite => {
