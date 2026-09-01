@@ -107,7 +107,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 23;
+pub const PROVIDER_ABI_VERSION: u32 = 24;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -118,8 +118,8 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        assert_eq!(PROVIDER_ABI_VERSION, 23);
-        assert_eq!(PROVIDER_EXPORTS.len(), 76);
+        assert_eq!(PROVIDER_ABI_VERSION, 24);
+        assert_eq!(PROVIDER_EXPORTS.len(), 80);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_temporal_last_error"));
     }
