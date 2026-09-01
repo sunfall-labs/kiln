@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 14;
+pub const C_GENERATOR_VERSION: u32 = 17;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -2139,6 +2139,10 @@ typedef struct kiln_host {
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
+extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
+extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
+extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
+extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
 
 /* A closure is its body plus the boxes it captured.
  *
@@ -2157,6 +2161,11 @@ typedef struct kiln_closure {
     /* An arrow captures `new.target` where it was written, for the same reason it captures
      * `this`: it has none of its own. */
     int arrow;
+    /* Whether this body is strict code, which is a property of the text it was written in and
+     * not of the call. It decides one thing here: `OrdinaryCallBindThis`. A sloppy body called
+     * with no receiver runs with the global object as `this`, which is how `var root = this ||
+     * global` finds the realm; a strict one runs with the `undefined` it was passed. */
+    int strict;
     kiln_value captured_this;
     kiln_value captured_new_target;
     /* ...and its `arguments`, which is the enclosing function's list rather than its own. */
@@ -2557,6 +2566,7 @@ struct kiln_node_server {
     uint64_t timeout_milliseconds;
     int protocol_http;
     int closing;
+    int closed;
     kiln_node_socket *sockets;
 };
 
@@ -2579,6 +2589,7 @@ struct kiln_node_socket {
     int shutdown_after_write;
     int utf8;
     int closing;
+    int closed;
 };
 
 typedef struct kiln_node_client_request {
@@ -2772,6 +2783,8 @@ int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t 
 int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
+int kiln_realm_value_slot(uint32_t key, void **out_slot);
+int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
  * portable 128-bit integer. `Temporal` measures instants in nanoseconds, and rounding the realm's
@@ -3592,6 +3605,13 @@ static kiln_object *kiln_c99_object_of(kiln_value value) {
     return (kiln_object *)(uintptr_t)value.bits;
 }
 
+static void kiln_c99_drop_object(void *pointer) {
+    kiln_object *object = (kiln_object *)pointer;
+    if (object == NULL) return;
+    free(object->properties);
+    free(object);
+}
+
 static kiln_array *kiln_c99_array_of(kiln_value value) {
     return (kiln_array *)(uintptr_t)value.bits;
 }
@@ -3615,6 +3635,13 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->prototype = kiln_c99_undefined();
     object->frozen = 0;
     object->module_namespace = 0;
+    {
+        int owned = kiln_realm_own_object(object, kiln_c99_drop_object);
+        if (owned != KILN_C99_OK) {
+            kiln_c99_drop_object(object);
+            return owned;
+        }
+    }
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -5195,7 +5222,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     }
 }
 
-/* The state `Math.random` advances, and the constants that advance it.
+/* The state `Math.random` advances belongs to the active realm, while generated C retains the
+ * exact SplitMix64 policy seed and the conversion from one word to an ECMAScript number.
  *
  * SplitMix64: a full-period generator with good statistical properties in five lines, which is
  * what a language builtin needs. Seeded from a constant rather than from the environment, so the
@@ -5204,8 +5232,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
 #ifndef KILN_REALM_ENTROPY_SEED
 #define KILN_REALM_ENTROPY_SEED UINT64_C(0x9E3779B97F4A7C15)
 #endif
-static uint64_t kiln_c99_random_state = KILN_REALM_ENTROPY_SEED;
-
 static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
 #if KILN_REALM_HOST_ENTROPY
     kiln_value answer;
@@ -5217,16 +5243,8 @@ static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
     *out = answer.bits;
     return KILN_C99_OK;
 #else
-    uint64_t mixed;
     (void)host;
-    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
-    kiln_c99_random_state += UINT64_C(0x9E3779B97F4A7C15);
-    mixed = kiln_c99_random_state;
-    mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
-    mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94D049BB133111EB);
-    mixed = mixed ^ (mixed >> 31);
-    *out = mixed;
-    return KILN_C99_OK;
+    return kiln_realm_entropy_word(KILN_REALM_ENTROPY_SEED, out);
 #endif
 }
 
@@ -5962,43 +5980,57 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
  * are non-enumerable, which is what node does and what stops `Object.keys(globalThis)` from being
  * a list of the realm's furniture -- a program's own additions are enumerable, which is the
  * distinction that makes the question worth asking. */
-static kiln_value kiln_c99_globals;
-static kiln_value kiln_c99_process;
-static kiln_value kiln_c99_atomics;
+#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
+#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
+#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+
+static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
+    void *slot = NULL;
+    int status;
+    if (out == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_realm_value_slot(key, &slot);
+    if (status != KILN_C99_OK || slot == NULL) return status;
+    *out = (kiln_value *)slot;
+    return KILN_C99_OK;
+}
 
 static int kiln_c99_atomics_object(kiln_value *out) {
     static const char *const names[] = {
         "add", "and", "compareExchange", "exchange", "isLockFree", "load", "notify",
         "or", "pause", "store", "sub", "wait", "waitAsync", "xor",
     };
+    kiln_value *atomics;
     size_t index;
-    int status;
-    if (kiln_c99_atomics.tag == KILN_VALUE_OBJECT) {
-        *out = kiln_c99_atomics;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_ATOMICS, &atomics);
+    if (status != KILN_C99_OK) return status;
+    if (atomics->tag == KILN_VALUE_OBJECT) {
+        *out = *atomics;
         return KILN_C99_OK;
     }
-    status = kiln_c99_new_object(&kiln_c99_atomics);
+    status = kiln_c99_new_object(atomics);
     for (index = 0; status == KILN_C99_OK && index < sizeof names / sizeof *names; ++index)
         status = kiln_c99_define_method(
-            kiln_c99_atomics, names[index], strlen(names[index]),
+            *atomics, names[index], strlen(names[index]),
             kiln_c99_method(KILN_C99_METHOD_ATOMICS_UNAVAILABLE));
     if (status != KILN_C99_OK) return status;
-    *out = kiln_c99_atomics;
+    *out = *atomics;
     return KILN_C99_OK;
 }
 
 static int kiln_c99_process_object(kiln_value *out) {
+    kiln_value *process;
     kiln_value env;
     kiln_value argv;
     kiln_value exec_argv;
     kiln_value versions;
     kiln_value stream;
-    int status;
-    if (kiln_c99_process.tag == KILN_VALUE_OBJECT) {
-        *out = kiln_c99_process;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_PROCESS, &process);
+    if (status != KILN_C99_OK) return status;
+    if (process->tag == KILN_VALUE_OBJECT) {
+        *out = *process;
         return KILN_C99_OK;
     }
-    status = kiln_c99_new_object(&kiln_c99_process);
+    status = kiln_c99_new_object(process);
     if (status == KILN_C99_OK) status = kiln_c99_new_object(&env);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&argv);
     if (status == KILN_C99_OK) status = kiln_c99_new_array(&exec_argv);
@@ -6007,58 +6039,59 @@ static int kiln_c99_process_object(kiln_value *out) {
         status = kiln_c99_put(NULL, versions, "node", 4,
                               kiln_c99_copy_text("22.0.0", 6), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "env", 3, env, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "env", 3, env, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "argv", 4, argv, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "argv", 4, argv, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "execArgv", 8, exec_argv, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "execArgv", 8, exec_argv, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "platform", 8,
+        status = kiln_c99_put(NULL, *process, "platform", 8,
                               kiln_c99_copy_text("kiln", 4), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "version", 7,
+        status = kiln_c99_put(NULL, *process, "version", 7,
                               kiln_c99_copy_text("kiln", 4), 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "versions", 8, versions, 0, NULL);
+        status = kiln_c99_put(NULL, *process, "versions", 8, versions, 0, NULL);
     if (status == KILN_C99_OK)
-        status = kiln_c99_put(NULL, kiln_c99_process, "pid", 3,
+        status = kiln_c99_put(NULL, *process, "pid", 3,
                               kiln_c99_number(1.0), 0, NULL);
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(0.0), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, kiln_c99_process, "stdin", 5, stream, 0, NULL);
+            status = kiln_c99_put(NULL, *process, "stdin", 5, stream, 0, NULL);
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(1.0), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, kiln_c99_process, "stdout", 6, stream, 0, NULL);
+            status = kiln_c99_put(NULL, *process, "stdout", 6, stream, 0, NULL);
     }
     if (status == KILN_C99_OK) {
         status = kiln_c99_new_object(&stream);
         if (status == KILN_C99_OK)
             status = kiln_c99_put(NULL, stream, "fd", 2, kiln_c99_number(2.0), 0, NULL);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, kiln_c99_process, "stderr", 6, stream, 0, NULL);
+            status = kiln_c99_put(NULL, *process, "stderr", 6, stream, 0, NULL);
     }
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(kiln_c99_process, "nextTick", 8,
+        status = kiln_c99_define_method(*process, "nextTick", 8,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_NEXT_TICK));
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(kiln_c99_process, "hrtime", 6,
+        status = kiln_c99_define_method(*process, "hrtime", 6,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_HRTIME));
     if (status == KILN_C99_OK)
-        status = kiln_c99_define_method(kiln_c99_process, "cwd", 3,
+        status = kiln_c99_define_method(*process, "cwd", 3,
                                         kiln_c99_method(KILN_C99_METHOD_PROCESS_CWD));
     if (status != KILN_C99_OK) return status;
-    *out = kiln_c99_process;
+    *out = *process;
     return KILN_C99_OK;
 }
 
 static int kiln_c99_global_object(kiln_value *out) {
+    kiln_value *globals;
     static const struct {
         const char *name;
         uint64_t builtin;
@@ -6108,59 +6141,60 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"clearTimeout", KILN_C99_METHOD_CLEAR_TIMEOUT},
                      {"clearInterval", KILN_C99_METHOD_CLEAR_INTERVAL}};
     size_t index;
-    int status;
-    if (kiln_c99_globals.tag == KILN_VALUE_OBJECT) {
-        *out = kiln_c99_globals;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
+    if (status != KILN_C99_OK) return status;
+    if (globals->tag == KILN_VALUE_OBJECT) {
+        *out = *globals;
         return KILN_C99_OK;
     }
-    status = kiln_c99_new_object(&kiln_c99_globals);
+    status = kiln_c99_new_object(globals);
     if (status != KILN_C99_OK) {
         return status;
     }
     for (index = 0; index < sizeof constructors / sizeof *constructors && status == KILN_C99_OK;
          ++index) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, constructors[index].name,
+        status = kiln_c99_put(NULL, *globals, constructors[index].name,
                               strlen(constructors[index].name),
                               kiln_c99_builtin(constructors[index].builtin), 0, NULL);
     }
     for (index = 0; index < sizeof functions / sizeof *functions && status == KILN_C99_OK;
          ++index) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, functions[index].name,
+        status = kiln_c99_put(NULL, *globals, functions[index].name,
                               strlen(functions[index].name),
                               kiln_c99_method(functions[index].code), 0, NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "NaN", 3, kiln_c99_number(0.0 / 0.0), 0,
+        status = kiln_c99_put(NULL, *globals, "NaN", 3, kiln_c99_number(0.0 / 0.0), 0,
                               NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "Infinity", 8, kiln_c99_number(1.0 / 0.0), 0,
+        status = kiln_c99_put(NULL, *globals, "Infinity", 8, kiln_c99_number(1.0 / 0.0), 0,
                               NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "undefined", 9, kiln_c99_undefined(), 0,
+        status = kiln_c99_put(NULL, *globals, "undefined", 9, kiln_c99_undefined(), 0,
                               NULL);
     }
     /* It holds itself under both of its names, which is how a program reaches it without a
      * keyword: `global.Object === Object` is the standard test for "am I in a realm that has
      * one". */
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "globalThis", 10, kiln_c99_globals, 0, NULL);
+        status = kiln_c99_put(NULL, *globals, "globalThis", 10, *globals, 0, NULL);
     }
     if (status == KILN_C99_OK) {
-        status = kiln_c99_put(NULL, kiln_c99_globals, "global", 6, kiln_c99_globals, 0, NULL);
+        status = kiln_c99_put(NULL, *globals, "global", 6, *globals, 0, NULL);
     }
     if (status != KILN_C99_OK) {
         return status;
     }
     {
-        kiln_object *object = kiln_c99_object_of(kiln_c99_globals);
+        kiln_object *object = kiln_c99_object_of(*globals);
         size_t slot;
         for (slot = 0; slot < object->count; ++slot) {
             object->properties[slot].enumerable = 0;
         }
     }
-    *out = kiln_c99_globals;
+    *out = *globals;
     return KILN_C99_OK;
 }
 
@@ -7126,6 +7160,13 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value) {
     return (kiln_closure *)(uintptr_t)value.bits;
 }
 
+static void kiln_c99_drop_closure(void *pointer) {
+    kiln_closure *closure = (kiln_closure *)pointer;
+    if (closure == NULL) return;
+    free(closure->upvalues);
+    free(closure);
+}
+
 static kiln_value *kiln_c99_cell_of(kiln_value value) {
     return (kiln_value *)(uintptr_t)value.bits;
 }
@@ -7160,7 +7201,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
                                  const char *diagnostic_source,
                                  uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
-                                 int async_generator, int arrow, kiln_value receiver,
+                                 int async_generator, int arrow, int strict, kiln_value receiver,
                                  kiln_value new_target, uint32_t local_count,
                                  uint32_t stack_size,
                                  uint32_t handler_depth, uint32_t prologue_resume,
@@ -7189,6 +7230,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->stack_size = stack_size;
     closure->handler_depth = handler_depth;
     closure->arrow = arrow;
+    closure->strict = strict;
     closure->captured_this = arrow ? receiver : kiln_c99_undefined();
     closure->async_generator = async_generator;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
@@ -7216,6 +7258,13 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->proto = proto;
     closure->upvalue_count = count;
     closure->upvalues = upvalues;
+    {
+        int owned = kiln_realm_own_closure(closure, kiln_c99_drop_closure);
+        if (owned != KILN_C99_OK) {
+            kiln_c99_drop_closure(closure);
+            return owned;
+        }
+    }
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
 }
@@ -7540,6 +7589,23 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     closure = kiln_c99_closure_of(callee);
     if (closure->arrow) {
         receiver = closure->captured_this;
+    } else if (!closure->strict &&
+               (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL)) {
+        /* `OrdinaryCallBindThis`: sloppy code never sees `undefined` or `null` as `this`. The
+         * specification substitutes the global object for both, which is what a UMD header reads
+         * when it writes `var root = this || global`.
+         *
+         * The specification also `ToObject`s a *primitive* receiver, and that half is not here:
+         * this backend has no wrapper objects to make one out of, so `f.call(7)` still sees 7.
+         * That is a gap this rule shares with every other primitive-wrapper site in the C
+         * runtime, not a decision taken here -- and it is unreachable from the substitution
+         * above, which is the case a real program actually depends on. Constructing does not
+         * reach this at all: `new C()` enters the body through `kiln_c99_construct` with the new
+         * instance as its receiver, which is already an object. */
+        int global_status = kiln_c99_global_object(&receiver);
+        if (global_status != KILN_C99_OK) {
+            return global_status;
+        }
     }
     if (closure->generator) {
         /* Calling a generator function does not run it: it builds the object that will. An
@@ -8427,13 +8493,10 @@ static kiln_method_store *kiln_c99_fixture_method_stores;
 
 static void kiln_c99_drop_callable_store(void *pointer) {
     kiln_method_store *entry = (kiln_method_store *)pointer;
-    kiln_object *properties;
     if (entry == NULL) return;
-    properties = kiln_c99_object_of(entry->properties);
-    if (properties != NULL) {
-        free(properties->properties);
-        free(properties);
-    }
+    /* `entry->properties` is independently registered in the realm object arena. The store owns
+     * only this routing record; freeing the object here as well would make teardown order part of
+     * correctness and double-free it when the object arena runs. */
     free(entry);
 }
 
@@ -12157,6 +12220,19 @@ static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *ev
                                has_argument ? 2 : 1, depth, thrown);
 }
 
+static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
+                                                  kiln_value *thrown) {
+    kiln_node_socket *socket;
+    if (server == NULL || !server->closing || server->closed || server->listener != 0)
+        return KILN_C99_OK;
+    for (socket = server->sockets; socket != NULL; socket = socket->next) {
+        if (!socket->closed) return KILN_C99_OK;
+    }
+    server->closed = 1;
+    return kiln_c99_node_emit(server->host, server->object, "close",
+                              kiln_c99_undefined(), 0, 0, thrown);
+}
+
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
 static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 
@@ -12193,6 +12269,8 @@ static void kiln_c99_node_cancel_request(uint64_t *request) {
 
 static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
     kiln_node_completion *work;
+    if (socket->closed) return KILN_C99_OK;
+    if (socket->closing) return KILN_C99_OK;
     if (socket->close_request != 0) return KILN_C99_OK;
     socket->closing = 1;
     kiln_c99_node_cancel_request(&socket->connect_request);
@@ -12540,11 +12618,15 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         return kiln_c99_node_emit(socket->host, object, "error", message, 1, 0, exception);
     }
     if (event->kind == 10) {
+        int status;
         socket->closing = 1;
+        socket->closed = 1;
         if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
             return KILN_C99_CONTROL_ERROR;
-        return kiln_c99_node_emit(socket->host, socket->object, "close",
-                                  kiln_c99_undefined(), 0, 0, exception);
+        status = kiln_c99_node_emit(socket->host, socket->object, "close",
+                                    kiln_c99_undefined(), 0, 0, exception);
+        if (status != KILN_C99_OK) return status;
+        return kiln_c99_node_server_maybe_emit_close(socket->server, exception);
     }
     return KILN_C99_OK;
 }
@@ -12672,8 +12754,7 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
         }
         if (work->kind == KILN_REALM_OP_CLOSE_RESOURCE) {
             server->listener = 0;
-            return kiln_c99_node_emit(server->host, server->object, "close",
-                                      kiln_c99_undefined(), 0, 0, exception);
+            return kiln_c99_node_server_maybe_emit_close(server, exception);
         }
     }
     if (work->socket != NULL) {
@@ -12733,11 +12814,15 @@ static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *com
                                       kiln_c99_undefined(), 0, 0, exception);
         }
         if (work->kind == KILN_REALM_OP_CLOSE_RESOURCE) {
+            int status;
             socket->close_request = 0;
+            socket->closed = 1;
             if (kiln_c99_node_socket_ready_state(socket, "closed", 6) != KILN_C99_OK)
                 return KILN_C99_CONTROL_ERROR;
-            return kiln_c99_node_emit(socket->host, socket->object, "close",
-                                      kiln_c99_undefined(), 0, 0, exception);
+            status = kiln_c99_node_emit(socket->host, socket->object, "close",
+                                        kiln_c99_undefined(), 0, 0, exception);
+            if (status != KILN_C99_OK) return status;
+            return kiln_c99_node_server_maybe_emit_close(socket->server, exception);
         }
     }
     return KILN_C99_CONTROL_ERROR;
@@ -23610,6 +23695,45 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
 "#,
 );
 
+/// Mutable static state embedded in the generated-C prelude, classified by its required owner.
+///
+/// This is the migration manifest for ADR 0036. Adding a new mutable `kiln_c99_*` static without
+/// naming its owner fails the architecture test below. Realm entries move into the shared value
+/// kernel; frame entries remain save/restore state local to one synchronous generated-body call.
+#[cfg(test)]
+const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
+    ("kiln_c99_diagnostic_site", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_operation", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_instruction", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_depth", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_method", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_receiver_tag", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_has_method", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_detail", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_function", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_function_len", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
+    ("kiln_c99_new_target", C99StateOwner::Frame),
+    ("kiln_c99_inheriting_new_target", C99StateOwner::Frame),
+    ("kiln_c99_adopted_this", C99StateOwner::Frame),
+    ("kiln_c99_frame_args", C99StateOwner::Frame),
+    ("kiln_c99_frame_argc", C99StateOwner::Frame),
+    ("kiln_c99_captured_arguments", C99StateOwner::Frame),
+    ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
+    ("kiln_c99_symbols", C99StateOwner::Realm),
+    ("kiln_c99_symbol_count", C99StateOwner::Realm),
+    ("kiln_c99_symbol_capacity", C99StateOwner::Realm),
+    ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(test)]
+enum C99StateOwner {
+    Realm,
+    Frame,
+    TestFixture,
+}
+
 /// The stack each emitted C function needs: the module body, then one entry per compiled
 /// function body in [`Program::functions`], in the same order.
 struct StackPlan {
@@ -23965,6 +24089,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::PopHandler
         | Instruction::Throw
         | Instruction::ThrowReference(_)
+        | Instruction::StoreGlobalBinding(_)
         | Instruction::GetPrivate(_)
         | Instruction::SetPrivate(_)
         | Instruction::Dup2
@@ -24323,6 +24448,16 @@ fn stack_effect(
         // expecting that value. Modelling it as terminal would leave those instructions verified
         // at a height one short of the one the machine actually runs them at.
         Instruction::ThrowReference(_) => Ok((height + 1, false)),
+        // A sloppy assignment to an unbound name. The value is consumed and the property lands on
+        // the global object, so nothing is left behind: the compound and expression-valued forms
+        // duplicate the value themselves before the store.
+        Instruction::StoreGlobalBinding(_) => {
+            if height < 1 {
+                Err(underflow(1))
+            } else {
+                Ok((height - 1, false))
+            }
+        }
         // A literal produces a fresh object, so it only ever grows the stack.
         Instruction::NewRegExp { .. } => Ok((height + 1, false)),
         Instruction::LoadNewTarget => Ok((height + 1, false)),
@@ -24619,6 +24754,7 @@ fn render_functions(
     plan: &StackPlan,
     symbol: &str,
     diagnostic_site: &str,
+    strict_functions: &[bool],
 ) {
     for index in 0..program.functions.len() {
         writeln!(
@@ -24658,6 +24794,7 @@ fn render_functions(
             index,
             symbol,
             diagnostic_site,
+            strict_functions,
         );
     }
 }
@@ -24734,6 +24871,7 @@ fn render_function(
     index: usize,
     symbol: &str,
     diagnostic_site: &str,
+    strict_functions: &[bool],
 ) {
     let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
@@ -24845,6 +24983,7 @@ fn render_function(
         constants: &program.constants,
         frame_stacks,
         functions: &program.functions,
+        strict_functions,
         source: &program.source,
         symbol,
         diagnostic_site,
@@ -25179,6 +25318,10 @@ fn render_emission_policy(output: &mut String, policy: &EmissionPolicy) {
 
 fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionPolicy) -> String {
     let plan = validate_program(program).expect("render called after validation");
+    // A bare `Program` arrives with no goal and no strictness table: it is a scalar unit, and
+    // every one this backend is handed came from a Module goal. Strict throughout keeps its
+    // emitted bytes exactly what they were.
+    let strict_functions = vec![true; program.functions.len()];
     let callables = produces_references(program);
     let entry_symbol = if callables {
         format!("{symbol}_body")
@@ -25207,7 +25350,14 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol, symbol);
+    render_functions(
+        &mut output,
+        program,
+        &plan,
+        symbol,
+        symbol,
+        &strict_functions,
+    );
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result) {{",
@@ -25253,6 +25403,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         constants: &program.constants,
         frame_stacks: &plan.functions,
         functions: &program.functions,
+        strict_functions: &strict_functions,
         source: &program.source,
         symbol,
         diagnostic_site: symbol,
@@ -25290,6 +25441,19 @@ fn render_module(
     let program = &module.program;
     let plan = validate_program(program).expect("render called after validation");
     let callables = produces_references(program);
+    // What the compiler said, padded with the strict answer. A `ModuleProgram` assembled by hand
+    // -- a builtin's export shape, a fixture -- carries no table, and reading its absence as
+    // strict is what keeps every unit that is really ESM emitting the bytes it emitted before.
+    let strict_functions: Vec<bool> = (0..program.functions.len())
+        .map(|index| {
+            module
+                .strictness
+                .functions
+                .get(index)
+                .copied()
+                .unwrap_or(true)
+        })
+        .collect();
     let entry_symbol = if callables {
         format!("{symbol}_body")
     } else {
@@ -25319,7 +25483,14 @@ fn render_module(
         )
         .unwrap();
     }
-    render_functions(&mut output, program, &plan, symbol, diagnostic_site);
+    render_functions(
+        &mut output,
+        program,
+        &plan,
+        symbol,
+        diagnostic_site,
+        &strict_functions,
+    );
     writeln!(
         output,
         "{}int {entry_symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports, size_t import_count, kiln_value *exports, size_t export_count) {{",
@@ -25393,6 +25564,7 @@ fn render_module(
         constants: &program.constants,
         frame_stacks: &plan.functions,
         functions: &program.functions,
+        strict_functions: &strict_functions,
         source: &program.source,
         symbol,
         diagnostic_site,
@@ -25494,6 +25666,15 @@ struct Emitter<'a> {
     /// catches nothing propagates a throw by returning it, which needs no machinery at all.
     handlers: Vec<u32>,
     functions: &'a [FunctionProto],
+    /// Whether `functions[i]` is strict code, in the same order.
+    ///
+    /// The native backend needs this for exactly one rule: `OrdinaryCallBindThis`, where a
+    /// sloppy body called with no receiver gets the global object and a strict one gets what it
+    /// was passed. The interpreter reads the same answer off its `Strictness` table; a closure
+    /// this backend builds carries the bit instead, because a C function has no table to consult.
+    /// A short table -- a fixture with no strictness of its own -- reads strict, which is the
+    /// answer every ESM unit has and so leaves the emitted bytes of one unchanged.
+    strict_functions: &'a [bool],
     /// The unit's source text, which each proto's span slices to give a function its `toString`.
     source: &'a str,
     symbol: &'a str,
@@ -25525,6 +25706,7 @@ fn emit_instruction(
         constants,
         frame_stacks,
         functions,
+        strict_functions,
         source,
         symbol,
         diagnostic_site,
@@ -25662,6 +25844,22 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::StoreGlobalBinding(name) => {
+            // Sloppy code settles an unresolvable assignment against the global object, which
+            // creates the property. The interpreter does the same thing through its own global
+            // object; both engines have to, or a UMD header installs itself under one and throws
+            // under the other -- a divergence worse than the shared refusal it replaced.
+            let unwind = unwind_or_return(handlers, site);
+            let Constant::String(text) = &constants[*name as usize] else {
+                unreachable!("verification rejects a non-string binding name before emission")
+            };
+            writeln!(
+                output,
+                "    {{ kiln_value member = stack[--sp]; kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {}, member, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                text.len()
+            )
+            .unwrap();
+        }
         Instruction::Const(constant) => match &constants[*constant as usize] {
             Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
             Constant::Null => output.push_str("    stack[sp++] = kiln_c99_null();\n"),
@@ -25760,6 +25958,14 @@ fn emit_instruction(
             let asynchronous = i32::from(target.asynchronous);
             let arrow = i32::from(target.arrow);
             let async_generator = i32::from(target.async_generator);
+            // The one thing this backend does with strictness beyond the flags already baked
+            // into `SetPropertyStrict` and friends: it decides the receiver a bare call gets.
+            let strict = i32::from(
+                strict_functions
+                    .get(*proto as usize)
+                    .copied()
+                    .unwrap_or(true),
+            );
             // `f.length` is how many arguments a caller *must* supply, which is the parameters
             // before the first default and before a rest -- not how many slots the frame has.
             // `(a, b = 1) => a` has two slots and a length of one, and reporting two said the
@@ -25790,7 +25996,7 @@ fn emit_instruction(
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -25810,7 +26016,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -26759,7 +26965,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             }
             Instruction::Apply => byte(&mut hash, 48),
             Instruction::SuperApply => byte(&mut hash, 61),
-            // 62: the next free tag. Never reuse one -- two programs hashing alike would serve
+            // 75: the next free tag. Never reuse one -- two programs hashing alike would serve
             // one's object file for the other.
             Instruction::DirectEval(_) => byte(&mut hash, 62),
             Instruction::DynamicImport => byte(&mut hash, 63),
@@ -26772,6 +26978,10 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
             Instruction::PushHole => byte(&mut hash, 55),
             Instruction::ThrowReference(value) => {
                 byte(&mut hash, 57);
+                word(&mut hash, u64::from(*value));
+            }
+            Instruction::StoreGlobalBinding(value) => {
+                byte(&mut hash, 74);
                 word(&mut hash, u64::from(*value));
             }
             Instruction::NewRegExp { pattern, flags } => {
@@ -27135,6 +27345,27 @@ fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
         text(&mut hash, &binding.exported);
         word(&mut hash, u64::from(binding.local_slot));
     }
+    // Appended last, after every byte that was already a persisted cache key -- the same rule
+    // the source text follows in `hash_program_with_seed`. Strictness changes the emitted C: a
+    // sloppy body's closure carries the bit that gives a bare call the global object as `this`.
+    // Two modules with identical bytecode and different strictness are not interchangeable, and
+    // a key without this would serve one's object file for the other. The padding matches the
+    // emitter's: a table shorter than the function list reads strict.
+    byte(&mut hash, 0x43);
+    word(&mut hash, module.program.functions.len() as u64);
+    for index in 0..module.program.functions.len() {
+        byte(
+            &mut hash,
+            u8::from(
+                module
+                    .strictness
+                    .functions
+                    .get(index)
+                    .copied()
+                    .unwrap_or(true),
+            ),
+        );
+    }
     hash
 }
 
@@ -27262,6 +27493,7 @@ mod tests {
                 exported: "probe".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let emitted = emit_runtime_module_with_logical_path(
             &module,
@@ -27294,6 +27526,7 @@ mod tests {
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated = emit_module_with_logical_path(&module, "src/namespace.js")
             .expect("namespace helper module emits");
@@ -27426,6 +27659,7 @@ int main(void) {{
                 exported: "EventEmitter".to_owned(),
                 local_slot: 0,
             }],
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated = emit_runtime_module_with_logical_path(
             &module,
@@ -27453,6 +27687,7 @@ static int child_constructor(kiln_host *host, kiln_value *result, kiln_value *up
     return KILN_C99_OK;
 }}
 int main(void) {{
+    uint64_t realm;
     kiln_value exports[1];
     kiln_value result;
     kiln_value emitter;
@@ -27464,8 +27699,10 @@ int main(void) {{
     kiln_value inherited;
     kiln_value args[2];
     kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
     if (kiln_c99_construct(NULL, &emitter, exports[0], NULL, 0, 0,
@@ -27476,7 +27713,7 @@ int main(void) {{
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
     if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
     if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_INHERITS, args, 2, 0,
@@ -27507,7 +27744,8 @@ int main(void) {{
     args[1] = kiln_c99_number(9.0);
     if (kiln_c99_invoke_method(NULL, &result, KILN_C99_METHOD_NODE_EVENT_EMIT, emitter, args, 2,
                                0, &thrown) != KILN_C99_OK || kiln_c99_truthy(result)) return 9;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 39;
 }}
 "#,
             symbol = generated.symbol
@@ -27534,6 +27772,7 @@ static int readable_child(kiln_host *host, kiln_value *result, kiln_value *upval
     return KILN_C99_OK;
 }
 int main(void) {
+    uint64_t realm;
     kiln_value readable = kiln_c99_method(KILN_C99_METHOD_NODE_READABLE);
     kiln_value child;
     kiln_value result;
@@ -27543,6 +27782,8 @@ int main(void) {
     kiln_value emitter_prototype;
     kiln_value arguments[2];
     kiln_value thrown = kiln_c99_undefined();
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_callable_prototype(readable, &readable_prototype) != KILN_C99_OK) return 1;
     if (kiln_c99_callable_prototype(kiln_c99_method(KILN_C99_METHOD_NODE_EVENT_EMITTER),
                                     &emitter_prototype) != KILN_C99_OK) return 2;
@@ -27553,7 +27794,7 @@ int main(void) {
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
     if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
     arguments[1] = readable;
@@ -27565,7 +27806,8 @@ int main(void) {
         method.bits != KILN_C99_METHOD_NODE_READABLE_PUSH) return 9;
     if (kiln_c99_get(NULL, instance, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 10;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 11;
 }
 "#;
         let run = run_with_main(&generated, wrapper, "native-readable-prototype-graph");
@@ -27893,6 +28135,7 @@ int main(void) {
             dependencies: Vec::new(),
             imports: Vec::new(),
             exports: Vec::new(),
+            strictness: kiln_ir::Strictness::default(),
         };
         let generated =
             emit_module_with_logical_path(&module, "node_modules/@fastify/error/index.js")
@@ -27998,6 +28241,7 @@ int main(void) {
         for declaration in [
             "static kiln_value kiln_c99_globals;",
             "static kiln_value kiln_c99_process;",
+            "static kiln_value kiln_c99_atomics;",
             "static kiln_value *kiln_c99_symbols;",
             "static kiln_method_store *kiln_c99_fixture_method_stores;",
             "static kiln_native_constructor kiln_c99_native_constructors[]",
@@ -28007,6 +28251,61 @@ int main(void) {
                 "realm state remains private to one generated translation unit: {declaration}"
             );
         }
+    }
+
+    #[test]
+    fn every_mutable_c99_static_has_an_explicit_owner() {
+        let generated =
+            emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+        let mut discovered = generated
+            .source
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let declaration = line.split('=').next().unwrap_or(line);
+                let name_start = line.find("kiln_c99_")?;
+                let before_name = &line[..name_start];
+                let immutable = if before_name.contains('*') {
+                    before_name.trim_end().ends_with("* const")
+                } else {
+                    before_name.starts_with("static const ")
+                };
+                if !line.starts_with("static ")
+                    || immutable
+                    || declaration.contains('(')
+                    || !line.contains("kiln_c99_")
+                    || !line.ends_with(';')
+                {
+                    return None;
+                }
+                let tail = &line[name_start..];
+                let end = tail
+                    .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .unwrap_or(tail.len());
+                Some(tail[..end].to_owned())
+            })
+            .collect::<Vec<_>>();
+        discovered.sort();
+        discovered.dedup();
+        let mut classified = C99_MUTABLE_STATE_OWNERS
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect::<Vec<_>>();
+        classified.sort();
+        assert_eq!(
+            discovered, classified,
+            "mutable generated-C state must say whether the realm, dynamic frame, or test fixture owns it"
+        );
+        assert!(
+            !generated
+                .source
+                .contains("static kiln_value kiln_c99_globals;"),
+            "globalThis identity must live in the active realm slot, not one module"
+        );
+        assert!(
+            generated.source.contains("kiln_realm_value_slot("),
+            "generated value operations must reach realm singleton identity through the typed slot ABI"
+        );
     }
 
     #[test]
@@ -28110,13 +28409,16 @@ static int refuses_before_instruction(kiln_host *host, kiln_value *result,
     return KILN_C99_CONTROL_ERROR;
 }
 int main(void) {
+    uint64_t realm;
     kiln_value function;
     kiln_value result = kiln_c99_undefined();
     kiln_value thrown = kiln_c99_undefined();
     kiln_value diagnostic;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
                               NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if (kiln_c99_call(NULL, &result, function, kiln_c99_undefined(), NULL, 0, 0,
                       &thrown) != KILN_C99_CONTROL_ERROR) return 2;
@@ -28125,7 +28427,8 @@ int main(void) {
     if (strstr(diagnostic.ptr, "module=node_modules/example/index.js") == NULL) return 4;
     if (strstr(diagnostic.ptr, "operation=FunctionBody") == NULL) return 5;
     if (strstr(diagnostic.ptr, "function=initialize") == NULL) return 6;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 7;
 }
 "#;
         let run = run_with_main(&generated, wrapper, "function-refusal-source");
@@ -28191,6 +28494,7 @@ int main(void) {
             dependencies: Vec::new(),
             imports,
             exports,
+            strictness: kiln_ir::Strictness::default(),
         }
     }
 
@@ -28330,6 +28634,22 @@ static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
+static kiln_value kiln_test_value_slots[3];
+static uint64_t kiln_test_entropy_seed = 0;
+static uint64_t kiln_test_entropy_state = 0;
+static int kiln_test_entropy_initialized = 0;
+static void *kiln_test_owned_pointers[4096];
+static kiln_drop_opaque_fn kiln_test_owned_drops[4096];
+static size_t kiln_test_owned_count = 0;
+static int kiln_test_implicit_realm = 0;
+
+static void kiln_test_drop_owned(void) {
+    size_t index;
+    for (index = kiln_test_owned_count; index != 0; --index) {
+        kiln_test_owned_drops[index - 1](kiln_test_owned_pointers[index - 1]);
+    }
+    kiln_test_owned_count = 0;
+}
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -28352,7 +28672,9 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
     return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
 }
 int kiln_realm_destroy(uint64_t realm) {
-    return realm == 1 ? KILN_C99_OK : KILN_C99_INVALID_ARGUMENT;
+    if (realm != 1 || kiln_test_realm_active) return KILN_C99_INVALID_ARGUMENT;
+    kiln_test_drop_owned();
+    return KILN_C99_OK;
 }
 /* Here rather than beside the other provider stubs, because its argument is a struct the runtime
  * prelude declares and this fixture is the first text that follows the prelude. */
@@ -28424,6 +28746,46 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     kiln_test_callable_stores[index] = candidate;
     *out_store = candidate;
     return KILN_C99_OK;
+}
+int kiln_realm_value_slot(uint32_t key, void **out_slot) {
+    if (!kiln_test_realm_active || key == 0 || key > 3 || out_slot == NULL)
+        return KILN_C99_INVALID_ARGUMENT;
+    *out_slot = &kiln_test_value_slots[key - 1];
+    return KILN_C99_OK;
+}
+int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word) {
+    uint64_t mixed;
+    if (!kiln_test_realm_active || out_word == NULL) return KILN_C99_INVALID_ARGUMENT;
+    if (!kiln_test_entropy_initialized) {
+        kiln_test_entropy_seed = seed;
+        kiln_test_entropy_state = seed;
+        kiln_test_entropy_initialized = 1;
+    } else if (kiln_test_entropy_seed != seed) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    kiln_test_entropy_state += UINT64_C(0x9E3779B97F4A7C15);
+    mixed = kiln_test_entropy_state;
+    mixed = (mixed ^ (mixed >> 30)) * UINT64_C(0xBF58476D1CE4E5B9);
+    mixed = (mixed ^ (mixed >> 27)) * UINT64_C(0x94D049BB133111EB);
+    *out_word = mixed ^ (mixed >> 31);
+    return KILN_C99_OK;
+}
+int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer) {
+    if (pointer == NULL || drop_pointer == NULL) {
+        return KILN_C99_INVALID_ARGUMENT;
+    }
+    if (!kiln_test_realm_active && !kiln_test_implicit_realm) {
+        if (atexit(kiln_test_drop_owned) != 0) return KILN_C99_OUT_OF_MEMORY;
+        kiln_test_implicit_realm = 1;
+    }
+    if (kiln_test_owned_count == 4096) return KILN_C99_OUT_OF_MEMORY;
+    kiln_test_owned_pointers[kiln_test_owned_count] = pointer;
+    kiln_test_owned_drops[kiln_test_owned_count] = drop_pointer;
+    ++kiln_test_owned_count;
+    return KILN_C99_OK;
+}
+int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer) {
+    return kiln_realm_own_closure(pointer, drop_pointer);
 }
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {
@@ -30916,12 +31278,15 @@ static int callback(kiln_host *host, kiln_value *result, kiln_value *upvalues,
     return KILN_C99_OK;
 }
 int main(void) {
+    uint64_t realm;
     kiln_value thrown = kiln_c99_undefined();
     kiln_value result;
     kiln_value args[4];
     kiln_value callable;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
+    kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
-                              kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;
     args[0] = kiln_c99_copy_text("%s:%d", 5);
@@ -30945,7 +31310,8 @@ int main(void) {
     args[2] = callable;
     if (kiln_c99_node_dns_lookup(NULL, &result, args, 3, 0, &thrown) != KILN_C99_OK)
         return 5;
-    return 0;
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 6;
 }
 "#;
         let run = run_with_main(&generated, wrapper, "node-support-facades");

@@ -712,7 +712,7 @@ diffing - but committed so that benchmarks need neither a network nor a Node too
 # machine, stdout and stderr merged, recorded verbatim. All four exit 0 and write nothing to
 # stderr.
 [regress]
-tests = 8
+tests = 10
 authored = "2026-08-29"
 expected_output_method = """
 Ran `node <probe>.js` and recorded the bytes it printed. One trap, which r07 fell into and which \
@@ -1167,4 +1167,46 @@ expected_stdout = """
 </body>
 </html>
 
+"""
+
+[[test]]
+id = "regress/r09-sloppy-code-binds-globals-and-this"
+group = "regress"
+source = "regress/r09-sloppy-code-binds-globals-and-this.js"
+status = "runnable"
+features = ["sloppy-mode", "global-object", "this-binding", "reference-error", "functions"]
+catches = """
+CommonJS compiled as strict code. Node wraps a CommonJS file in an ordinary function, so its \
+body is sloppy: an assignment to a name nothing bound creates a property on the global object, \
+and `this` in a bare call is that object. Kiln raised a ReferenceError for the first and \
+answered `undefined` for the second, which is exactly the pair a UMD header uses to install \
+itself -- so a large fraction of real packages could not attach their module at all. The two \
+lines after them pin what the fix must not take with it: reading a name nothing bound is still \
+a ReferenceError, in sloppy code as in strict, and so is the read half of `notThere += 1`.\
+"""
+expected_stdout = """
+object string installed
+installed
+true
+compound: ReferenceError
+read: ReferenceError
+"""
+
+[[test]]
+id = "regress/r10-module-code-stays-strict"
+group = "regress"
+source = "regress/r10-module-code-stays-strict.mjs"
+status = "runnable"
+features = ["module-code", "strict-mode", "this-binding", "reference-error"]
+catches = """
+The failure mode of r09's fix. A module is strict whatever its text says, so the sloppy rules \
+r09 asks for must be chosen by the source *goal* and not by the absence of a `"use strict"` \
+directive. Applied by strictness alone, an undeclared assignment starts creating globals inside \
+ESM too -- a wrong answer no bundle would ever surface, because every one of them is already \
+strict, and one that only Test262's `language/module-code` would report.\
+"""
+expected_stdout = """
+undefined
+ReferenceError
+undefined
 """

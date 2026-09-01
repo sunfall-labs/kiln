@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 481
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -531,6 +532,10 @@ typedef int (*kiln_host_call_fn)(void *context, uint16_t operation, uint16_t arg
 typedef struct kiln_host {
 typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
+extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
+extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
+extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
+extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
 struct kiln_closure;
 struct kiln_generator;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
@@ -617,6 +622,8 @@ int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t 
 int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
+int kiln_realm_value_slot(uint32_t key, void **out_slot);
+int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds);
@@ -924,6 +931,7 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
 done:
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
+static void kiln_c99_drop_object(void *pointer) {
 static kiln_array *kiln_c99_array_of(kiln_value value) {
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
@@ -972,7 +980,6 @@ static const char *kiln_c99_method_name(uint64_t code) {
 #ifndef KILN_REALM_ENTROPY_SEED
 #define KILN_REALM_ENTROPY_SEED UINT64_C(0x9E3779B97F4A7C15)
 #endif
-static uint64_t kiln_c99_random_state = KILN_REALM_ENTROPY_SEED;
 static int kiln_c99_entropy_word(kiln_host *host, uint64_t *out) {
 #if KILN_REALM_HOST_ENTROPY
 #else
@@ -997,9 +1004,10 @@ static size_t kiln_c99_frame_argc;
 static kiln_value kiln_c99_captured_arguments;
 static int kiln_c99_frame_is_arrow;
 static int kiln_c99_visible_arguments(kiln_value *out) {
-static kiln_value kiln_c99_globals;
-static kiln_value kiln_c99_process;
-static kiln_value kiln_c99_atomics;
+#define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
+#define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
+#define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
 static int kiln_c99_atomics_object(kiln_value *out) {
 static int kiln_c99_process_object(kiln_value *out) {
 static int kiln_c99_global_object(kiln_value *out) {
@@ -1054,6 +1062,7 @@ static kiln_value kiln_c99_null(void) {
 static kiln_value kiln_c99_boolean(int value) {
 static kiln_value kiln_c99_function(kiln_closure *closure) {
 static kiln_closure *kiln_c99_closure_of(kiln_value value) {
+static void kiln_c99_drop_closure(void *pointer) {
 static kiln_value *kiln_c99_cell_of(kiln_value value) {
 static int kiln_c99_make_cell(kiln_value *slot) {
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
@@ -1152,6 +1161,7 @@ static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
 static void *kiln_c99_node_hidden_pointer(kiln_value object, const char *key, size_t key_len) {
 static int kiln_c99_node_client_try_start(kiln_node_client_request *request) {
 static int kiln_c99_node_emit(kiln_host *host, kiln_value object, const char *event,
+static int kiln_c99_node_server_maybe_emit_close(kiln_node_server *server,
 static void kiln_c99_node_drop_completion(void *opaque) { free(opaque); }
 static void kiln_c99_node_drop_http_connection(void *opaque) { (void)opaque; }
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
