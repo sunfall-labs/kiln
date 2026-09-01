@@ -67,6 +67,6 @@ idle time goes away, against 9,000 today.
 
 ## Context
 
-Follows ADR 0037, whose steps 2 and 3 landed in `66c9e729` and `7e88131d` and took this bench
+Follows ADR 0040, whose steps 2 and 3 landed in `66c9e729` and `7e88131d` and took this bench
 from 4,692 to 9,056 rps by removing the checkpoint's parks. This issue is the next cost those
 parks were hiding, and it is a different one: not the cost of a park, but the number of them.

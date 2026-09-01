@@ -35,6 +35,7 @@ mod reasons;
 mod source_compiler;
 mod test262;
 mod toml_lite;
+mod worker;
 
 pub use case::{
     CaseResult, Diagnostic, DiagnosticPhase, Outcome, RunMode, RunResult, Timing, Variant,
@@ -52,12 +53,9 @@ pub use test262::{
     run_case, run_case_variants, run_case_variants_with_harness, run_case_with_harness,
     run_variant, run_variant_with_harness,
 };
+pub use worker::InterpreterWorker;
 
-/// Install the frontend service used by runtime `eval` and `Function` compilation.
-///
-/// The interpreter remains downstream of parsing and lowering; executable hosts call this at
-/// their entry boundary so dynamically generated code uses the same Oxc → HIR → IR pipeline as
-/// source files. Keeping this explicit also lets embedders omit code generation deliberately.
-pub fn install_source_compiler() {
-    source_compiler::install();
+/// Explicit frontend capability for runtime `eval` and `Function` compilation.
+pub fn source_compiler_capability() -> kiln_interpreter::ExecutionCapabilities {
+    source_compiler::capabilities()
 }

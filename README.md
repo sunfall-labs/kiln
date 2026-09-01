@@ -185,6 +185,10 @@ is visible next to the reasoning for it.
 - [0029](docs/adr/0029-use-mature-rust-implementations-at-existing-seams.md) — mature Rust Modules
   own general-purpose scheduling, resolution, concurrency testing and standards engines behind
   existing Kiln Seams; heap and query-engine choices remain gated, and Cranelift is not planned.
+- [0038](docs/adr/0038-a-realm-owns-its-intrinsics-and-a-value-says-which-realm-made-it.md) — a
+  realm owns its intrinsics and a value says which realm made it, mostly through the prototype it
+  links to; creating one is a host capability, and `gc-arena` is still not adopted, with the seam
+  it would need written down.
 
 ## License
 

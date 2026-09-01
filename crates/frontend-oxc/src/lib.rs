@@ -65,6 +65,60 @@ pub fn parse_with_goal(path: &str, source: &str, goal: SourceGoal) -> Module {
     parse_source(source, source_type)
 }
 
+/// What the code around a direct `eval` makes legal inside it.
+///
+/// Eval code is parsed as a Script, and a Script alone may not write `super.x`, `new.target` or a
+/// private name -- so the three early errors that say so are exactly wrong for source that was
+/// handed to `eval` from inside a method, a function, or a class body. The specification says as
+/// much: PerformEval applies the eval rules "as outside a constructor, inside a method, and
+/// inside a function" according to where the call was written.
+///
+/// The permission is per-construct and per-name rather than a blanket "this came from eval":
+/// `eval('super.x')` written at the top level of a script is still a `SyntaxError`, and so is
+/// `eval('this.#absent')` for a name no enclosing class declared. Anything not named here is
+/// reported exactly as it was before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EvalSyntax {
+    /// `new.target` is legal: the call is inside a function, or a class field initialiser.
+    pub new_target: bool,
+    /// `super.x` and `super[e]` are legal: the call is inside a method or a field initialiser.
+    pub super_property: bool,
+    /// The private names in scope, spelled without the `#`.
+    pub private_names: Vec<String>,
+}
+
+impl EvalSyntax {
+    /// Whether this context makes one reported early error not an error at all.
+    ///
+    /// Matched on the message because Oxc gives these diagnostics no code to match on instead.
+    /// That is a pin to one Oxc version, and it is checked rather than trusted: the tests below
+    /// assert that each of these three suppressions actually fires, so a reworded upstream
+    /// diagnostic fails the build rather than silently returning to rejecting legal code.
+    fn permits(&self, message: &str) -> bool {
+        if self.new_target && message == "Unexpected new.target expression" {
+            return true;
+        }
+        if self.super_property
+            && message
+                == "'super' can only be referenced in members of derived classes or object literal expressions."
+        {
+            return true;
+        }
+        self.private_names.iter().any(|name| {
+            message == format!("Private identifier '#{name}' is not allowed outside class bodies")
+        })
+    }
+}
+
+/// Parse the source handed to a direct `eval`, in the syntactic context of its call site.
+///
+/// Always the Script goal, like any other eval: `allow` widens which early errors apply, and
+/// nothing else.
+pub fn parse_eval(path: &str, source: &str, allow: &EvalSyntax) -> Module {
+    let inferred = SourceType::from_path(Path::new(path)).unwrap_or_default();
+    parse_source_in_context(source, inferred.with_script(true), Some(allow))
+}
+
 /// Parse a CommonJS file with Oxc's explicit wrapper-aware goal while preserving the owned HIR
 /// boundary. Package-format policy belongs to the Node resolver/graph; the frontend only selects
 /// grammar. Unlike an ordinary Script goal, this admits the wrapper's top-level `return` and
@@ -132,6 +186,14 @@ fn parse_source_with_commonjs_requires(
 }
 
 fn parse_source(source: &str, source_type: SourceType) -> Module {
+    parse_source_in_context(source, source_type, None)
+}
+
+fn parse_source_in_context(
+    source: &str,
+    source_type: SourceType,
+    allow: Option<&EvalSyntax>,
+) -> Module {
     let allocator = Allocator::default();
     // A regular expression literal's *pattern* is a grammar of its own, and Oxc only runs it when
     // asked: without this the tokenizer checks the flags, hands back the pattern as opaque text,
@@ -146,13 +208,22 @@ fn parse_source(source: &str, source_type: SourceType) -> Module {
         })
         .parse();
 
-    lower_parsed(&parsed, source, source_type)
+    lower_parsed_in_context(&parsed, source, source_type, allow)
 }
 
 fn lower_parsed(
     parsed: &oxc_parser::ParserReturn<'_>,
     source: &str,
     source_type: SourceType,
+) -> Module {
+    lower_parsed_in_context(parsed, source, source_type, None)
+}
+
+fn lower_parsed_in_context(
+    parsed: &oxc_parser::ParserReturn<'_>,
+    source: &str,
+    source_type: SourceType,
+    allow: Option<&EvalSyntax>,
 ) -> Module {
     let mut requested_modules = parsed
         .module_record
@@ -220,7 +291,19 @@ fn lower_parsed(
         .iter()
         .map(lower_diagnostic)
         .collect::<Vec<_>>();
-    diagnostics.extend(early_errors(parsed));
+    // A permitted early error is dropped *before* the semantic pass is decided on, not after:
+    // `new.target` is refused by the parser itself, and leaving its diagnostic in place would
+    // suppress every other early error in the same source rather than only this one.
+    if let Some(allow) = allow {
+        diagnostics.retain(|diagnostic| !allow.permits(&diagnostic.message));
+    }
+    if diagnostics.is_empty() {
+        let mut early = early_errors(parsed);
+        if let Some(allow) = allow {
+            early.retain(|diagnostic| !allow.permits(&diagnostic.message));
+        }
+        diagnostics.extend(early);
+    }
     let mut lowerer = Lowerer { text: source };
     let body = lowerer.statements(&parsed.program.body);
 
@@ -295,9 +378,12 @@ fn lower_diagnostic(diagnostic: &OxcDiagnostic) -> Diagnostic {
 ///
 /// Nothing is checked once the parser itself has failed.  Semantic analysis of an error-recovered
 /// AST reports errors about a program the author never wrote, and the source is already rejected,
-/// so the cascade would only bury the diagnostic that matters.
+/// so the cascade would only bury the diagnostic that matters.  The caller decides that: it runs
+/// this only when no parser diagnostic survived, which for ordinary source means Oxc reported
+/// none and for eval code means the only one it reported was the `new.target` the call site
+/// makes legal.
 fn early_errors(parsed: &oxc_parser::ParserReturn<'_>) -> Vec<Diagnostic> {
-    if parsed.panicked || !parsed.diagnostics.is_empty() {
+    if parsed.panicked {
         return Vec::new();
     }
     // `new_compiler` is the cheap configuration: syntax checks on, the random-access node store
@@ -835,30 +921,43 @@ impl Lowerer<'_> {
             Expression::UnaryExpression(expression)
                 if matches!(expression.operator, UnaryOperator::Delete) =>
             {
-                let Expression::StaticMemberExpression(member) = &expression.argument else {
-                    if let Expression::ComputedMemberExpression(member) = &expression.argument {
-                        return HirExpression {
-                            kind: HirExpressionKind::Delete {
-                                object: Box::new(self.expression(&member.object)),
-                                property: Box::new(kiln_hir::ObjectKey::Computed(
-                                    self.expression(&member.expression),
-                                )),
-                            },
-                            span: expression_span,
-                        };
-                    }
-                    // `delete x` on a plain binding is a no-op that returns false in strict mode
-                    // and cannot be spelled at all in a module; refusing beats guessing.
-                    return self.unsupported_expression(
-                        "delete of something other than a property",
-                        expression_span,
-                    );
-                };
-                HirExpressionKind::Delete {
-                    object: Box::new(self.expression(&member.object)),
-                    property: Box::new(kiln_hir::ObjectKey::Static(
-                        member.property.name.to_string(),
-                    )),
+                // Parentheses do not make an operand something else: `delete (o.x)` still deletes
+                // the property and `delete (x)` is still the unqualified delete the parser
+                // reports as an early error in strict code.  Everything below therefore decides
+                // on the operand with its parentheses taken off.
+                let mut argument = &expression.argument;
+                while let Expression::ParenthesizedExpression(inner) = argument {
+                    argument = &inner.expression;
+                }
+                match argument {
+                    Expression::StaticMemberExpression(member) => HirExpressionKind::Delete {
+                        object: Box::new(self.expression(&member.object)),
+                        property: Box::new(kiln_hir::ObjectKey::Static(
+                            member.property.name.to_string(),
+                        )),
+                    },
+                    Expression::ComputedMemberExpression(member) => HirExpressionKind::Delete {
+                        object: Box::new(self.expression(&member.object)),
+                        property: Box::new(kiln_hir::ObjectKey::Computed(
+                            self.expression(&member.expression),
+                        )),
+                    },
+                    Expression::PrivateFieldExpression(member) => HirExpressionKind::Delete {
+                        object: Box::new(self.expression(&member.object)),
+                        property: Box::new(kiln_hir::ObjectKey::Private(
+                            member.field.name.to_string(),
+                        )),
+                    },
+                    // A binding, whose answer depends on which scope declared it -- so the name
+                    // travels to the IR compiler, which is the only thing that knows.
+                    Expression::Identifier(identifier) => HirExpressionKind::DeleteBinding {
+                        name: identifier.name.to_string(),
+                    },
+                    // Not a reference at all. `delete 0`, `delete f()`, `delete this`: the
+                    // operand is evaluated for its effects and the answer is `true`.
+                    other => HirExpressionKind::DeleteValue {
+                        argument: Box::new(self.expression(other)),
+                    },
                 }
             }
             Expression::UnaryExpression(expression) => {
@@ -1675,7 +1774,7 @@ impl Lowerer<'_> {
     ) -> Result<kiln_hir::Class, String> {
         let mut constructor = None;
         let mut methods = Vec::new();
-        let mut fields = Vec::new();
+        let mut initialisers = Vec::new();
 
         for element in &class.body.body {
             let method = match element {
@@ -1699,17 +1798,146 @@ impl Lowerer<'_> {
                             kiln_hir::ObjectKey::Computed(_) => {}
                         }
                     }
-                    fields.push(kiln_hir::ClassField {
+                    initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
                         key,
                         value,
                         is_static: property.r#static,
-                    });
+                    }));
                     continue;
                 }
                 ClassElement::MethodDefinition(method) => method,
-                ClassElement::StaticBlock(_) => return Err("class static block".into()),
-                ClassElement::AccessorProperty(_) => {
-                    return Err("class accessor property".into());
+                ClassElement::StaticBlock(block) => {
+                    initialisers.push(kiln_hir::ClassInitialiser::StaticBlock(HirFunction {
+                        // Anonymous, and it binds no name: nothing can refer to a static block,
+                        // so a name here would only show up in a stack frame that should read
+                        // as the class body it is.
+                        name: None,
+                        binds_own_name: false,
+                        arrow: false,
+                        generator: false,
+                        asynchronous: false,
+                        parameters: Vec::new(),
+                        rest: None,
+                        body: self.statements(&block.body),
+                        // A class body is strict whatever encloses it, and the block is part of
+                        // the body.
+                        strict: true,
+                        span: span(block.span),
+                    }));
+                    continue;
+                }
+                // `accessor x = v` is three members written as one: a backing slot, and the
+                // pair of functions that read and write it. Lowered here rather than in the IR
+                // because that is all it is -- a private field plus `get x` / `set x` -- and
+                // putting the getter and setter among the class's other methods, at the
+                // position the source wrote them, is what makes a getter or setter written
+                // beside it override exactly the half it declares.
+                ClassElement::AccessorProperty(accessor) => {
+                    // A computed key would have to be evaluated *once* and used by all three
+                    // members. Two of them are separate `ClassMethod`s here, so lowering one
+                    // would evaluate the key twice -- an observable wrong answer, where a
+                    // refusal is only a missing feature.
+                    if accessor.computed {
+                        return Err("computed class accessor property".into());
+                    }
+                    // `accessor #x` needs a private getter/setter pair under `#x` beside a
+                    // second private name for the storage, and the duplicate-name rules that
+                    // go with it. Not attempted.
+                    if matches!(
+                        accessor.key,
+                        oxc_ast::ast::PropertyKey::PrivateIdentifier(_)
+                    ) {
+                        return Err("private class accessor property".into());
+                    }
+                    let Some(key) = accessor.key.static_name() else {
+                        return Err("class accessor property name".into());
+                    };
+                    let key = key.to_string();
+                    // The backing slot is a private name the program cannot have written: `%`
+                    // is not an identifier character, so this can never collide with a `#x` the
+                    // class declares, and nothing can reach the storage except the two
+                    // functions below.
+                    let storage = format!("%accessor:{key}");
+                    let member_span = span(accessor.span);
+                    let this = || HirExpression {
+                        kind: HirExpressionKind::This,
+                        span: member_span,
+                    };
+                    let read = HirExpression {
+                        kind: HirExpressionKind::PrivateMember {
+                            object: Box::new(this()),
+                            name: storage.clone(),
+                            optional: false,
+                        },
+                        span: member_span,
+                    };
+                    // The parameter is named where no source can name it, so the body cannot be
+                    // shadowed by anything and reads exactly the value it was handed.
+                    let written = HirExpression {
+                        kind: HirExpressionKind::PrivateAssignment {
+                            operator: kiln_hir::AssignmentOperator::Assign,
+                            object: Box::new(this()),
+                            name: storage.clone(),
+                            value: Box::new(HirExpression {
+                                kind: HirExpressionKind::Identifier("%value".to_owned()),
+                                span: member_span,
+                            }),
+                        },
+                        span: member_span,
+                    };
+                    let accessor_function =
+                        |parameters: Vec<kiln_hir::Parameter>, body: Vec<HirStatement>| {
+                            HirFunction {
+                                name: None,
+                                binds_own_name: false,
+                                arrow: false,
+                                generator: false,
+                                asynchronous: false,
+                                parameters,
+                                rest: None,
+                                body,
+                                // A class body is strict whatever encloses it.
+                                strict: true,
+                                span: member_span,
+                            }
+                        };
+                    let mut value = accessor.value.as_ref().map(|value| self.expression(value));
+                    if let Some(value) = &mut value {
+                        name_anonymous_function(value, &key);
+                    }
+                    initialisers.push(kiln_hir::ClassInitialiser::Field(kiln_hir::ClassField {
+                        key: kiln_hir::ObjectKey::Private(storage),
+                        value,
+                        is_static: accessor.r#static,
+                    }));
+                    methods.push(kiln_hir::ClassMethod {
+                        key: kiln_hir::ObjectKey::Static(key.clone()),
+                        function: accessor_function(
+                            Vec::new(),
+                            vec![HirStatement {
+                                kind: HirStatementKind::Return(Some(read)),
+                                span: member_span,
+                            }],
+                        ),
+                        is_static: accessor.r#static,
+                        kind: kiln_hir::MethodKind::Get,
+                    });
+                    methods.push(kiln_hir::ClassMethod {
+                        key: kiln_hir::ObjectKey::Static(key),
+                        function: accessor_function(
+                            vec![kiln_hir::Parameter {
+                                pattern: kiln_hir::Pattern::Identifier("%value".to_owned()),
+                                span: member_span,
+                            }],
+                            vec![HirStatement {
+                                kind: HirStatementKind::Expression(written),
+                                span: member_span,
+                            }],
+                        ),
+                        is_static: accessor.r#static,
+                        kind: kiln_hir::MethodKind::Set,
+                    });
+                    continue;
                 }
                 ClassElement::TSIndexSignature(_) => {
                     return Err("TypeScript index signature".into());
@@ -1754,7 +1982,7 @@ impl Lowerer<'_> {
                 .map(|heritage| self.expression(&heritage.expression)),
             constructor,
             methods,
-            fields,
+            initialisers,
             span: statement_span,
         })
     }
@@ -2612,12 +2840,13 @@ mod tests {
     #[test]
     fn a_refused_class_names_the_member_that_refused_it() {
         // A class is refused whole, so every cause used to arrive as the wrapper "class
-        // expression" -- one bucket covering a static block, an async method and a computed key
-        // alike, and 2,294 guard-corpus cases behind it with nothing to rank them by. What is
+        // expression" -- one bucket covering an accessor property, an async method and a
+        // computed key alike, and 2,294 guard-corpus cases behind it with nothing to rank them
+        // by. (The static block that used to stand here lowers now.) What is
         // protected here is that the reported name describes the *member*, not the syntactic
         // position the class sat in. If a case here starts failing, the member was lowered:
         // delete the line.
-        let module = parse("module.js", "const value = class { static {} };");
+        let module = parse("module.js", "const value = class { accessor #x = 1; };");
         let HirStatementKind::Variable { declarations, .. } = &module.body[0].kind else {
             panic!("expected a variable declaration");
         };
@@ -2627,15 +2856,17 @@ mod tests {
             .expect("fixture has an initializer");
         assert!(matches!(
             &initializer.kind,
-            HirExpressionKind::Unsupported { feature } if feature == "class static block"
+            HirExpressionKind::Unsupported { feature }
+                if feature == "private class accessor property"
         ));
 
         // The declaration form reports the same name: the two callers differ only in what they
         // wrap it in, which is what made them report two different useless ones.
-        let module = parse("module.js", "class Holder { static {} }");
+        let module = parse("module.js", "class Holder { accessor #x = 1; }");
         assert!(matches!(
             &module.body[0].kind,
-            HirStatementKind::Unsupported { feature } if feature == "class static block"
+            HirStatementKind::Unsupported { feature }
+                if feature == "private class accessor property"
         ));
     }
 
@@ -3055,5 +3286,90 @@ mod tests {
         );
         let (_, none) = parameters_of("function a(first) {}");
         assert_eq!(none, None);
+    }
+
+    /// A direct `eval` is parsed in the syntactic context of its call site.
+    ///
+    /// Each of these three is refused outright in a Script and is legal in eval code written
+    /// inside the right construct.  The pairs matter as much as the permissions: the refusal has
+    /// to survive where the language keeps it, or the suppression has stopped being a context
+    /// and become a blanket exemption.
+    #[test]
+    fn eval_syntax_permits_only_what_the_call_site_allows() {
+        let none = EvalSyntax::default();
+        for source in ["new.target;", "super.x;", "this.#m;"] {
+            assert!(
+                !parse_eval("<eval>", source, &none).diagnostics.is_empty(),
+                "`{source}` is a SyntaxError in eval code written at the top level of a script"
+            );
+        }
+
+        let in_function = EvalSyntax {
+            new_target: true,
+            ..EvalSyntax::default()
+        };
+        assert_eq!(
+            parse_eval("<eval>", "new.target;", &in_function).diagnostics,
+            Vec::new(),
+            "`new.target` is legal in eval code written inside a function"
+        );
+        // Still a Script, and everything else it forbids it still forbids: a permission that
+        // widened past its own construct would be indistinguishable from not parsing at all.
+        assert!(
+            !parse_eval("<eval>", "new.target; super.x;", &in_function)
+                .diagnostics
+                .is_empty()
+        );
+
+        let in_method = EvalSyntax {
+            super_property: true,
+            ..EvalSyntax::default()
+        };
+        assert_eq!(
+            parse_eval("<eval>", "super.x;", &in_method).diagnostics,
+            Vec::new(),
+            "`super.x` is legal in eval code written inside a method"
+        );
+        // `super()` is a different production with a different rule, and being inside a method
+        // does not make it legal -- Test262 asks for exactly this.
+        assert!(
+            !parse_eval("<eval>", "super();", &in_method)
+                .diagnostics
+                .is_empty()
+        );
+
+        let in_class = EvalSyntax {
+            private_names: vec!["m".to_owned()],
+            ..EvalSyntax::default()
+        };
+        assert_eq!(
+            parse_eval("<eval>", "this.#m;", &in_class).diagnostics,
+            Vec::new(),
+            "a private name the enclosing class declared is visible to a direct eval"
+        );
+        // Per name, not per source: a name no enclosing class declared is still a SyntaxError.
+        assert!(
+            !parse_eval("<eval>", "this.#absent;", &in_class)
+                .diagnostics
+                .is_empty()
+        );
+    }
+
+    /// A permitted parser diagnostic must not swallow the early errors that come after it.
+    ///
+    /// Oxc raises `new.target` from the parser and runs its early-error pass only over a source
+    /// the parser accepted.  Dropping the diagnostic after that pass had already been skipped
+    /// would make `eval` inside a function accept `let x; const x = 0;`.
+    #[test]
+    fn a_permitted_parser_diagnostic_still_leaves_the_early_errors_in_place() {
+        let in_function = EvalSyntax {
+            new_target: true,
+            ..EvalSyntax::default()
+        };
+        assert!(
+            !parse_eval("<eval>", "new.target; let x; const x = 0;", &in_function)
+                .diagnostics
+                .is_empty()
+        );
     }
 }

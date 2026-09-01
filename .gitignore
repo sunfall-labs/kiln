@@ -26,3 +26,6 @@
 # of the failing run, never a thing to commit -- `cargo insta accept` turns it into a real `.snap`
 # -- and leaving it untracked is how `git add -A` sweeps one into somebody's commit.
 *.snap.new
+
+# Native test harness scratch: PID-named, written beside the fixture it compiles.
+.kiln-native-*.mjs

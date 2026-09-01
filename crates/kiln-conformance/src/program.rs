@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{ExecutionLimits, execute, execute_node};
+use kiln_interpreter::{ExecutionLimits, execute_node_with_strictness, execute_with_strictness};
 use kiln_module_graph::ModuleGraph;
 use kiln_module_resolver::{
     NodeModuleFormat, NodeRuntimeResolver, ResolutionKind, ResolutionPolicy, ResolvedModule,
@@ -21,6 +21,7 @@ use kiln_runtime::CaptureHost;
 use crate::case::{
     CaseResult, Diagnostic, DiagnosticPhase, Outcome, RunMode, Variant, VariantResult,
 };
+use crate::worker::InterpreterWorker;
 
 /// How much of either side of a stdout diff a one-line report shows before it elides.
 const DIFF_EXCERPT_BYTES: usize = 160;
@@ -30,19 +31,16 @@ const DIFF_EXCERPT_BYTES: usize = 160;
 /// The single reported variant is [`Variant::Sloppy`]: a recorded stdout is an observation of one
 /// ordinary script run, and Test262's strict-directive expansion would be judging a program the
 /// corpus never observed.
-pub(crate) fn run_against_expected_stdout(
+pub(crate) fn run_against_expected_stdout_with_worker(
     path: &Path,
     expected: &str,
     mode: RunMode,
+    worker: Option<&mut InterpreterWorker>,
 ) -> VariantResult {
     VariantResult {
         variant: Variant::Sloppy,
-        result: run(path, expected, mode),
+        result: run_with_executor(path, expected, mode, false, worker),
     }
-}
-
-fn run(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
-    run_with_executor(path, expected, mode, false)
 }
 
 /// Run a source file through the same compiler but with the Tokio-owned Node Adapter installed.
@@ -56,7 +54,7 @@ pub fn run_node_against_expected_stdout(
         result: if is_javascript_source(path) {
             run_node_module(path, expected, mode)
         } else {
-            run_with_executor(path, expected, mode, true)
+            run_with_executor(path, expected, mode, true, None)
         },
     }
 }
@@ -66,8 +64,6 @@ pub fn run_node_against_expected_stdout(
 /// becoming a second, easier-to-pass Node runtime that real programs never use.
 fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     let started = Instant::now();
-    crate::source_compiler::install();
-
     if let Some(reason) = uninstalled_packages_requirement(path) {
         return skipped(&reason, started);
     }
@@ -148,7 +144,11 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     };
 
     let mut host = CaptureHost::new();
-    if let Err(error) = graph.execute_node(&mut host, ExecutionLimits::default()) {
+    if let Err(error) = graph.execute_node(
+        &mut host,
+        ExecutionLimits::default(),
+        crate::source_compiler::capabilities(),
+    ) {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);
         result.stdout = host.into_stdout();
         return result;
@@ -156,10 +156,14 @@ fn run_node_module(path: &Path, expected: &str, mode: RunMode) -> CaseResult {
     judge_stdout(host.into_stdout(), expected, started)
 }
 
-fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> CaseResult {
+fn run_with_executor(
+    path: &Path,
+    expected: &str,
+    mode: RunMode,
+    node: bool,
+    worker: Option<&mut InterpreterWorker>,
+) -> CaseResult {
     let started = Instant::now();
-    crate::source_compiler::install();
-
     if let Some(reason) = out_of_process_build_requirement(path) {
         return skipped(reason, started);
     }
@@ -209,45 +213,67 @@ fn run_with_executor(path: &Path, expected: &str, mode: RunMode, node: bool) -> 
         return CaseResult::new(Outcome::Pass, Vec::new(), String::new(), started);
     }
 
-    let program = match kiln_ir::compile(&module) {
-        Ok(program) => program,
-        Err(diagnostics) if diagnostics.is_empty() => {
-            return failed(
-                DiagnosticPhase::Compile,
-                "lowering refused the program without saying why",
-                started,
-            );
-        }
-        Err(diagnostics) => {
-            return failed_with(
-                diagnostics
-                    .into_iter()
-                    .map(|diagnostic| {
-                        Diagnostic::new(
-                            DiagnosticPhase::Compile,
-                            diagnostic.message,
-                            diagnostic.span,
-                        )
-                    })
-                    .collect(),
-                started,
-            );
-        }
-    };
+    // Compiled *and* asked which bodies came out strict. The two halves have to travel together:
+    // the goal decides strictness, and handing the machine `Strictness::sloppy` for a program the
+    // compiler compiled strict makes `this` in a bare call inside an `.mjs` the global object.
+    let (program, strictness) =
+        match kiln_ir::compile_with_strictness(&module, kiln_ir::CompileOptions::default()) {
+            Ok(compiled) => compiled,
+            Err(diagnostics) if diagnostics.is_empty() => {
+                return failed(
+                    DiagnosticPhase::Compile,
+                    "lowering refused the program without saying why",
+                    started,
+                );
+            }
+            Err(diagnostics) => {
+                return failed_with(
+                    diagnostics
+                        .into_iter()
+                        .map(|diagnostic| {
+                            Diagnostic::new(
+                                DiagnosticPhase::Compile,
+                                diagnostic.message,
+                                diagnostic.span,
+                            )
+                        })
+                        .collect(),
+                    started,
+                );
+            }
+        };
 
     let mut host = CaptureHost::new();
+    let program = std::rc::Rc::new(program);
+    let strictness = std::rc::Rc::new(strictness);
     let result = if node {
-        execute_node(
-            std::rc::Rc::new(program),
+        execute_node_with_strictness(
+            program,
+            strictness,
             &mut host,
             ExecutionLimits::default(),
+            crate::source_compiler::capabilities(),
         )
+        .map(|_| ())
+    } else if let Some(worker) = worker {
+        worker
+            .execute_reclaiming(
+                program,
+                strictness,
+                &mut host,
+                ExecutionLimits::default(),
+                crate::source_compiler::capabilities(),
+            )
+            .map(|_| ())
     } else {
-        execute(
-            std::rc::Rc::new(program),
+        execute_with_strictness(
+            program,
+            strictness,
             &mut host,
             ExecutionLimits::default(),
+            crate::source_compiler::capabilities(),
         )
+        .map(|_| ())
     };
     if let Err(error) = result {
         let mut result = failed(DiagnosticPhase::Runtime, error.to_string(), started);

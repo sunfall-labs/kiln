@@ -244,10 +244,17 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
         Request::Test {
             root,
             mode,
+            changed_root,
             changed_paths,
             previously_failed,
         } => (
-            match crate::testing::run(&root, mode, changed_paths, previously_failed) {
+            match crate::testing::run_with_changed_root(
+                &root,
+                mode,
+                changed_root,
+                changed_paths,
+                previously_failed,
+            ) {
                 Ok(summary) => Response::Tested(summary),
                 Err(message) => Response::Error { message },
             },
@@ -851,14 +858,11 @@ fn execute_graph(
     node: bool,
     limits: kiln_interpreter::ExecutionLimits,
 ) -> Response {
-    // `eval` and `Function` are runtime compilation, but still use the exact frontend pipeline
-    // linked into this executable. The interpreter receives it as an explicit host service and
-    // therefore keeps no parser dependency or ambient compiler discovery of its own.
-    kiln_conformance::install_source_compiler();
+    let capabilities = kiln_conformance::source_compiler_capability();
     let mut host = kiln_runtime::CaptureHost::new();
     let result = match graph {
-        Ok(graph) if node => graph.execute_node(&mut host, limits),
-        Ok(graph) => graph.execute(&mut host, limits),
+        Ok(graph) if node => graph.execute_node(&mut host, limits, capabilities),
+        Ok(graph) => graph.execute(&mut host, limits, capabilities),
         Err(error) => Err(error),
     };
     match result {
@@ -1142,7 +1146,6 @@ fn module_graph_diagnostics(error: kiln_module_graph::ModuleGraphError) -> Vec<D
                 | ModuleGraphError::UnresolvedImport { importer, .. }
                 | ModuleGraphError::MissingExport { importer, .. }
                 | ModuleGraphError::AmbiguousExport { importer, .. } => Some(importer),
-                ModuleGraphError::Cycle { paths } => paths.first(),
                 ModuleGraphError::DuplicateExport { module, .. }
                 | ModuleGraphError::Execution { module, .. } => Some(module),
                 ModuleGraphError::Compile { .. } | ModuleGraphError::StepOverflow => None,
@@ -1198,7 +1201,7 @@ fn execute_program(
     node: bool,
     limits: kiln_interpreter::ExecutionLimits,
 ) -> Response {
-    kiln_conformance::install_source_compiler();
+    let capabilities = kiln_conformance::source_compiler_capability();
     let program = match program {
         Ok(program) => program,
         Err(diagnostics) => {
@@ -1226,9 +1229,9 @@ fn execute_program(
 
     let mut host = kiln_runtime::CaptureHost::new();
     let result = if node {
-        kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, limits)
+        kiln_interpreter::execute_node(std::rc::Rc::new(program), &mut host, limits, capabilities)
     } else {
-        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, limits)
+        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, limits, capabilities)
     };
     match result {
         Ok(execution) => {

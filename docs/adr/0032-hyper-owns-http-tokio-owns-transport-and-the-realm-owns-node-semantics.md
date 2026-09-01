@@ -72,6 +72,13 @@ tests pin both the missing raw-close operation and the opaque close capability. 
 state-machine tests still prove the temporal property that queued and in-flight writes complete
 before a graceful close.
 
+The complete cross-crate contract is available as one developer command:
+
+    bash scripts/check-http-close-contract.sh
+
+It checks the compile-time authority, deterministic transport ordering, provider escape-hatch
+denial, emitted-C routing, and the real native graceful and abort regressions in that order.
+
 ### Migration is event-shaped, not API-shaped
 
 The Node adapters consume Kiln-owned request/response events rather than Hyper types. During

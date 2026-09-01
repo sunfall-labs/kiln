@@ -19,7 +19,9 @@ use std::rc::Rc;
 use kiln_host_abi::HostOps;
 use kiln_intl as engine;
 
-use crate::{ArrayData, ErrorKind, ExecutionError, Native, ObjectData, Value, Vm, WellKnown};
+use crate::{
+    ArrayData, ErrorKind, ExecutionError, Native, ObjectData, RealmId, Value, Vm, WellKnown,
+};
 
 /// Which `Intl` service a constructor, prototype or instance belongs to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -308,30 +310,40 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
         Service::Segmenter,
     ];
     match (op, name) {
-        (Op::Namespace, "getCanonicalLocales") => {
-            Some(Value::Native(Native::Intl(Op::GetCanonicalLocales)))
+        (Op::Namespace, "getCanonicalLocales") => Some(Value::Native(
+            Native::Intl(Op::GetCanonicalLocales),
+            RealmId::PRIMARY,
+        )),
+        (Op::Namespace, "supportedValuesOf") => Some(Value::Native(
+            Native::Intl(Op::SupportedValuesOf),
+            RealmId::PRIMARY,
+        )),
+        (Op::Namespace, _) => {
+            SERVICES
+                .iter()
+                .find(|service| service.name() == name)
+                .map(|service| {
+                    Value::Native(Native::Intl(Op::Constructor(*service)), RealmId::PRIMARY)
+                })
         }
-        (Op::Namespace, "supportedValuesOf") => {
-            Some(Value::Native(Native::Intl(Op::SupportedValuesOf)))
-        }
-        (Op::Namespace, _) => SERVICES
-            .iter()
-            .find(|service| service.name() == name)
-            .map(|service| Value::Native(Native::Intl(Op::Constructor(*service)))),
-        (Op::Constructor(service), "prototype") => {
-            Some(Value::Native(Native::Intl(Op::Prototype(service))))
-        }
+        (Op::Constructor(service), "prototype") => Some(Value::Native(
+            Native::Intl(Op::Prototype(service)),
+            RealmId::PRIMARY,
+        )),
         // `Intl.Locale` has no locale negotiation to do, so it has no `supportedLocalesOf`.
         (Op::Constructor(service), "supportedLocalesOf")
             if !matches!(service, Service::Locale | Service::Segments) =>
         {
-            Some(Value::Native(Native::Intl(Op::SupportedLocalesOf(service))))
+            Some(Value::Native(
+                Native::Intl(Op::SupportedLocalesOf(service)),
+                RealmId::PRIMARY,
+            ))
         }
         // `%Segments.prototype%` is not a constructor's prototype -- no `Intl.Segments` exists --
         // so it is the one prototype here with no `constructor` on it.
-        (Op::Prototype(service), "constructor") if service != Service::Segments => {
-            Some(Value::Native(Native::Intl(Op::Constructor(service))))
-        }
+        (Op::Prototype(service), "constructor") if service != Service::Segments => Some(
+            Value::Native(Native::Intl(Op::Constructor(service)), RealmId::PRIMARY),
+        ),
         (Op::Prototype(service), _) => prototype_method(service, name),
         _ => None,
     }
@@ -378,7 +390,10 @@ pub fn prototype_method(service: Service, name: &str) -> Option<Value> {
         (Service::Locale, "toString") => Method::LocaleToString,
         _ => return None,
     };
-    Some(Value::Native(Native::Intl(Op::Method(service, method))))
+    Some(Value::Native(
+        Native::Intl(Op::Method(service, method)),
+        RealmId::PRIMARY,
+    ))
 }
 
 /// What an instance answers to: its prototype's methods, plus `Intl.Locale`'s data accessors.
