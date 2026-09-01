@@ -1167,6 +1167,16 @@ mod realm {
                 }
                 HttpStreamAction::Event(kiln_runtime::node_stream::StreamEvent::Close) => {
                     realm.http_connections.borrow_mut().remove(&resource);
+                    // The transport has said its last word; the runtime's entry goes with the
+                    // realm's, or a server retains every connection it ever accepted.
+                    if in_context {
+                        let Some(runtime) = active_runtime() else {
+                            return INVALID_ARGUMENT;
+                        };
+                        unsafe { &mut *runtime }.retire_http_connection(resource);
+                    } else {
+                        realm.runtime.borrow_mut().retire_http_connection(resource);
+                    }
                 }
                 HttpStreamAction::Event(_) => {}
                 HttpStreamAction::Error(error) => {

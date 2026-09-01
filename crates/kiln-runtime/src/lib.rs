@@ -1286,19 +1286,19 @@ impl<H: RealmHostProvider> RealmState<H> {
             // transition but not the transport error. Busy connections still surface every error.
             actions.retain(|action| !matches!(action, HttpStreamAction::Error(_)));
         }
-        // The Close event is the transport's last word for this resource: Hyper's task is done,
-        // every body driver has finished or been abandoned, and nothing will poll the entry
-        // again. Retiring it here keeps the table proportional to open connections rather than
-        // to connections ever accepted, which is what a server measures over a long run.
-        if actions.iter().any(|action| {
-            matches!(
-                action,
-                HttpStreamAction::Event(node_stream::StreamEvent::Close)
-            )
-        }) {
-            self.http_connections.remove(&resource);
-        }
         Some(actions)
+    }
+
+    /// Forget a connection whose transport has reported Close.
+    ///
+    /// The Close event is the transport's last word for the resource: Hyper's task is done and
+    /// every body driver has finished or been abandoned. A caller that has consumed that event
+    /// retires the entry so the table stays proportional to open connections rather than to
+    /// connections ever accepted, which is the difference a server measures over a long run.
+    /// Retiring is the caller's call because its own checkpoint may still want to observe the
+    /// closed connection once more before it lets go.
+    pub fn retire_http_connection(&mut self, resource: ResourceId) -> bool {
+        self.http_connections.remove(&resource).is_some()
     }
 
     /// Retire an HTTP transport after Hyper has completed its connection future.
@@ -4186,10 +4186,12 @@ mod tests {
             action,
             HttpStreamAction::Event(node_stream::StreamEvent::Close)
         )));
+        assert!(runtime.retire_http_connection(resource));
         assert!(
             runtime.poll_http_connection(resource).is_none(),
-            "a connection that reported Close is retired from the table"
+            "a retired connection is gone from the table"
         );
+        assert!(!runtime.retire_http_connection(resource));
         assert!(runtime.host_mut().is_exhausted());
     }
 
