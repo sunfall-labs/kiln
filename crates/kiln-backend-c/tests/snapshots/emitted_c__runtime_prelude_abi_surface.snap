@@ -855,6 +855,10 @@ static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value);
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target);
 static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len);
+static int kiln_c99_throw_module_namespace_write(kiln_value *thrown, const char *key,
+static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char *key,
+static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char *key,
+static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown);
 static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len);
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
 static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
@@ -1226,6 +1230,11 @@ static int kiln_c99_throw_not_a(kiln_value *thrown, kiln_value value, const char
 static int kiln_c99_throw_not_iterable(kiln_value *thrown, kiln_value value) {
 static int kiln_c99_throw_cannot_set(kiln_value *thrown, kiln_value target) {
 static int kiln_c99_throw_read_only(kiln_value *thrown, const char *key, size_t key_len) {
+static int kiln_c99_throw_module_namespace(kiln_value *thrown, const char *prefix,
+static int kiln_c99_throw_module_namespace_write(kiln_value *thrown, const char *key,
+static int kiln_c99_throw_module_namespace_delete(kiln_value *thrown, const char *key,
+static int kiln_c99_throw_module_namespace_define(kiln_value *thrown, const char *key,
+static int kiln_c99_throw_module_namespace_freeze(kiln_value *thrown) {
 static int kiln_c99_throw_cannot_delete(kiln_value *thrown, const char *key, size_t key_len) {
 static int kiln_c99_throw_error(kiln_value *thrown, uint64_t kind, const char *message) {
 static int kiln_c99_throw_node_invalid_arg_type(kiln_value *thrown, const char *message) {
