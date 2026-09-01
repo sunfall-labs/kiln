@@ -16316,6 +16316,25 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_FINALLY: {
             kiln_value on_fulfilled = kiln_c99_undefined();
             kiln_value on_rejected = kiln_c99_undefined();
+            /* `catch(r)` is `Invoke(this, "then", [undefined, r])` -- literally, including the
+             * read -- so a thenable that is not a promise is handled by its *own* `then`, and a
+             * subclass that overrides `then` has that one run. Only `catch` delegates: `then`
+             * itself needs a promise to attach a reaction to, and `finally` needs a pair of
+             * closures over the receiver that this backend has no way to make for a thenable. */
+            if (code == KILN_C99_METHOD_CATCH && receiver.tag != KILN_VALUE_PROMISE) {
+                kiln_value method;
+                kiln_value forwarded[2];
+                status = kiln_c99_get(host, receiver, "then", 4, &method, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (!kiln_c99_is_callable(method)) {
+                    return kiln_c99_throw_not_a(thrown, method, "function");
+                }
+                forwarded[0] = kiln_c99_undefined();
+                forwarded[1] = argc > 0 ? args[0] : kiln_c99_undefined();
+                return kiln_c99_call(host, result, method, receiver, forwarded, 2, depth, thrown);
+            }
             /* `Promise.prototype.then.call({})` has no promise to attach a reaction to. The
              * interpreter reports this against the receiver, and the two are compared byte for
              * byte, so the same sentence is built here. */

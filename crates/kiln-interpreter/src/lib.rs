@@ -2987,7 +2987,7 @@ fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
         Value::Function(closure) => closure.properties.borrow().is_extensible(),
         Value::Array(items) => items.properties.borrow().is_extensible(),
         Value::Bound(bound) => bound.properties.borrow().is_extensible(),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => intrinsics.extensible(target),
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => intrinsics.extensible(target),
         // An exotic object carries an ordinary store for its named properties, and closing it is
         // what `Object.preventExtensions(sample)` has to mean: the elements are not properties
         // of that store and are unaffected, which is what the specification says too.
@@ -3055,7 +3055,7 @@ fn own_property_state(
             .get_own_property(key)
             .cloned()
             .or_else(|| tabulated_property(target, key)),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
             match intrinsics.overridden(target, key) {
                 Overridden::Held(property, _) => Some(property),
                 // Unreachable: `own_attributes` answered `None` for a removed property, so the
@@ -5518,6 +5518,14 @@ pub enum Value {
     /// A function bound to one promise, which no other value kind here can express: a `Native`
     /// carries no state and a `Closure` carries bytecode. The flag says which of the two it is.
     Settler(Rc<PromiseData>, bool),
+    /// The `GetCapabilitiesExecutor` a `NewPromiseCapability(C)` hands to `C`.
+    ///
+    /// `Promise.resolve.call(C, v)` is defined as constructing a `C` and *catching the two
+    /// functions its executor is given*, which is the only way a subclass with its own
+    /// constructor can take part. That needs a callable holding state -- the pair, once they
+    /// arrive -- and `Settler` was the only one the machine had, so every static that owes a
+    /// capability ignored `this` and built an intrinsic promise instead.
+    Capability(Rc<CapabilityRecord>),
     /// An array. Separate from `Object` rather than an object with numeric keys: `Array.isArray`
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
@@ -5796,7 +5804,7 @@ impl Value {
             | Self::Temporal(_) => "object",
             Self::BigInt(_) => "bigint",
             // A settler is a function the program can call, hold and pass on, so it says so.
-            Self::Settler(..) => "function",
+            Self::Settler(..) | Self::Capability(_) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
@@ -5865,7 +5873,7 @@ impl Value {
             Self::Date(_) => "date",
             Self::Temporal(value) => value.kind().tag(),
             Self::BigInt(_) => "bigint",
-            Self::Settler(..) => "function",
+            Self::Settler(..) | Self::Capability(_) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
         }
@@ -5898,7 +5906,7 @@ impl Value {
             | Self::Generator(_)
             | Self::Promise(_)
             | Self::RegExp(_)
-            | Self::Settler(..)
+            | Self::Settler(..) | Self::Capability(_)
             | Self::Bound(_)
             | Self::CommonJsRequire(_)
             | Self::CommonJsResolve(_) => f64::NAN,
@@ -5954,7 +5962,7 @@ impl Value {
             | Self::Promise(_)
             | Self::RegExp(_)
             | Self::Date(_)
-            | Self::Settler(..)
+            | Self::Settler(..) | Self::Capability(_)
             | Self::Bound(_)
             | Self::CommonJsRequire(_)
             | Self::CommonJsResolve(_)
@@ -6026,7 +6034,7 @@ impl Value {
             },
             // No `n` suffix: that is the literal's spelling, not the value's.
             Self::BigInt(value) => value.to_string(),
-            Self::Settler(..) | Self::Bound(_) => "function () { [native code] }".to_owned(),
+            Self::Settler(..) | Self::Capability(_) | Self::Bound(_) => "function () { [native code] }".to_owned(),
             Self::CommonJsRequire(_) => "function require() { [native code] }".to_owned(),
             Self::CommonJsResolve(_) => "function resolve() { [native code] }".to_owned(),
             Self::Proxy(proxy) => proxy.target.to_display_string(),
@@ -13852,7 +13860,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                         // A promise executor's `resolve`/`reject`: an ordinary callable value,
                         // which reaches the program as one and so has to be callable here.
-                        Value::Settler(..) => {
+                        Value::Settler(..) | Value::Capability(..) => {
                             let callee = callee.clone();
                             let arguments = self.take_arguments(argc, current)?;
                             let called =
@@ -16259,42 +16267,67 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // add a tick for nothing and break `Promise.resolve(p) === p`. A promise of a
                 // different constructor is wrapped, which is what makes `P.resolve(plain)` a `P`.
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let derived = self.promise_subclass_prototype(receiver);
-                if matches!(value, Value::Promise(_))
-                    && derived
-                        .as_ref()
-                        .is_none_or(|wanted| same_value(&prototype_of(&value), wanted))
-                {
-                    return Ok(value);
+                if !is_an_object(receiver) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Promise.resolve called on a non-object".to_owned(),
+                    });
+                }
+                if matches!(value, Value::Promise(_)) {
+                    let constructor = self.read_property(&value, "constructor", instruction)?;
+                    if same_value(&constructor, receiver) {
+                        return Ok(value);
+                    }
+                }
+                if !Self::reached_through_intrinsic_promise(receiver) {
+                    let (promise, resolve, _) =
+                        self.new_promise_capability(receiver, instruction)?;
+                    self.call_value(&resolve, Value::Undefined, vec![value], instruction)?;
+                    return Ok(promise);
                 }
                 let promise = PromiseState::pending();
                 self.resolve_promise(&promise, value);
-                Ok(Self::as_promise_of(Value::Promise(promise), derived))
+                Ok(Value::Promise(promise))
             }
             Native::PromiseReject => {
-                let promise = PromiseState::pending();
                 let reason = arguments.first().cloned().unwrap_or(Value::Undefined);
+                if !is_an_object(receiver) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Promise.reject called on a non-object".to_owned(),
+                    });
+                }
+                if !Self::reached_through_intrinsic_promise(receiver) {
+                    let (promise, _, reject) =
+                        self.new_promise_capability(receiver, instruction)?;
+                    self.call_value(&reject, Value::Undefined, vec![reason], instruction)?;
+                    return Ok(promise);
+                }
+                let promise = PromiseState::pending();
                 self.settle(&promise, &Settled::Rejected(reason));
-                let derived = self.promise_subclass_prototype(receiver);
-                Ok(Self::as_promise_of(Value::Promise(promise), derived))
+                Ok(Value::Promise(promise))
             }
             // The pure spelling builds the pair; the constructor it was reached through decides
             // what kind of promise is in it, and only the machine can see the receiver's chain.
             Native::PromiseWithResolvers => {
-                let derived = self.promise_subclass_prototype(receiver);
-                let pair = call_native(
+                if !is_an_object(receiver) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Promise.withResolvers called on a non-object".to_owned(),
+                    });
+                }
+                if !Self::reached_through_intrinsic_promise(receiver) {
+                    let (promise, resolve, reject) =
+                        self.new_promise_capability(receiver, instruction)?;
+                    let mut result = ObjectData::default();
+                    result.set("promise", promise);
+                    result.set("resolve", resolve);
+                    result.set("reject", reject);
+                    return Ok(Value::Object(Rc::new(RefCell::new(result))));
+                }
+                call_native(
                     &self.intrinsics,
                     Native::PromiseWithResolvers,
                     receiver,
                     arguments,
-                )?;
-                if let Some(prototype) = derived
-                    && let Value::Object(object) = &pair
-                    && let Some(promise) = object.borrow().get_own("promise")
-                {
-                    record_prototype(promise, prototype);
-                }
-                Ok(pair)
+                )
             }
             Native::PromiseThen => {
                 let Value::Promise(promise) = receiver else {
@@ -16315,16 +16348,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 );
                 Ok(Self::as_promise_of(Value::Promise(derived), species))
             }
-            // `catch(r)` is `then(undefined, r)`, and saying so keeps one implementation.
-            Native::PromiseCatch => self.dispatch_native(
-                Native::PromiseThen,
-                receiver,
-                &[
-                    Value::Undefined,
-                    arguments.first().cloned().unwrap_or(Value::Undefined),
-                ],
-                instruction,
-            ),
+            // `catch(r)` is `Invoke(this, "then", [undefined, r])` -- literally, including the
+            // read. Calling the intrinsic `then` directly meant a subclass that overrides `then`,
+            // and every thenable a library hands round in place of a promise, had its own `then`
+            // skipped: `Promise.prototype.catch.call(thenable, f)` refused the receiver outright.
+            Native::PromiseCatch => {
+                let method = self.read_property(receiver, "then", instruction)?;
+                if !is_callable(&method) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: format!(
+                            "{} is not a function",
+                            method.to_display_string()
+                        ),
+                    });
+                }
+                let on_rejected = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.call_value(
+                    &method,
+                    receiver.clone(),
+                    vec![Value::Undefined, on_rejected],
+                    instruction,
+                )
+            }
             // `finally(f)` runs `f` either way and passes the outcome through untouched, which
             // is what separates it from `then(f, f)`.
             Native::PromiseFinally => {
@@ -17194,7 +17239,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Value::Native(_)
                     | Value::Callback(_)
                     | Value::Bound(_)
-                    | Value::Settler(..) => {
+                    | Value::Settler(..) | Value::Capability(..) => {
                         self.intrinsics.close(&target, false);
                         true
                     }
@@ -21161,6 +21206,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Ok(Value::Undefined)
             }
+            // The executor a `NewPromiseCapability` hands to a constructor: it keeps the pair it
+            // is called with. A constructor that calls it twice is a `TypeError` -- the pair it
+            // already recorded is the one the caller is about to use, and replacing it would
+            // leave the promise settled by functions nobody holds.
+            Value::Capability(record) => {
+                let mut resolve = record.resolve.borrow_mut();
+                let mut reject = record.reject.borrow_mut();
+                if !matches!(*resolve, Value::Undefined) || !matches!(*reject, Value::Undefined) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Promise capability executor has already been invoked"
+                            .to_owned(),
+                    });
+                }
+                *resolve = arguments.first().cloned().unwrap_or(Value::Undefined);
+                *reject = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                Ok(Value::Undefined)
+            }
             // A callback method reaches here when a built-in drives another built-in -- a spread
             // over a generator, for instance. `invoke` is the one place that knows how to run
             // each kind, so this defers to it rather than repeating the dispatch.
@@ -22415,6 +22477,59 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         (inherited_builtin(closure) == Some(Native::PromiseConstructor))
             .then(|| prototype_object(closure))
+    }
+
+    /// `NewPromiseCapability(C)`: build a promise *through* `C` and keep the pair that settles it.
+    ///
+    /// The specification does not build the promise and then relabel it -- it calls `C` with an
+    /// executor and takes whatever `C` hands that executor. That is the difference between a
+    /// subclass whose constructor runs and one whose prototype was stamped on afterwards, and it
+    /// is observable three ways: the constructor's own side effects happen, `resolve` and
+    /// `reject` are the functions *it* produced, and a `C` that never calls its executor is a
+    /// `TypeError` rather than a promise nothing can settle.
+    ///
+    /// Used by the statics for which this is the whole algorithm. `then` and the four
+    /// combinators still build an intrinsic promise: they need per-element resolve functions and
+    /// a `GetPromiseResolve` besides this, and honouring `this` here alone would leave them
+    /// waiting on a promise no reaction ever reaches.
+    fn new_promise_capability(
+        &mut self,
+        constructor: &Value,
+        instruction: usize,
+    ) -> Result<(Value, Value, Value), ExecutionError> {
+        if !is_constructor(constructor) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!(
+                    "{} is not a constructor",
+                    constructor.to_display_string()
+                ),
+            });
+        }
+        let record = Rc::new(CapabilityRecord::default());
+        let executor = Value::Capability(Rc::clone(&record));
+        let promise = self.construct_value(
+            constructor.clone(),
+            vec![executor],
+            constructor.clone(),
+            instruction,
+        )?;
+        let resolve = record.resolve.borrow().clone();
+        let reject = record.reject.borrow().clone();
+        if !is_callable(&resolve) || !is_callable(&reject) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Promise resolve or reject function is not callable".to_owned(),
+            });
+        }
+        Ok((promise, resolve, reject))
+    }
+
+    /// Whether a promise-producing static was reached through the intrinsic `Promise` itself.
+    ///
+    /// The capability walk above is observable -- it runs a constructor -- so it is taken only
+    /// when there is something to observe. For `%Promise%` the executor it would call is this
+    /// machine's own, and the promise it would produce is the one built directly here.
+    fn reached_through_intrinsic_promise(receiver: &Value) -> bool {
+        matches!(receiver, Value::Native(Native::PromiseConstructor))
     }
 
     /// `SpeciesConstructor(promise, %Promise%)`, reduced to the prototype the promise `then`
@@ -28150,7 +28265,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             // Every other callable answers to the same three, and to nothing else: none of them
             // has a property store to shadow them with.
-            Value::Callback(_) | Value::Settler(..) => {
+            Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
                 match self.intrinsics.overridden(target, name) {
                     Overridden::Held(Property::Value(value), _) => value,
                     Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
@@ -28687,7 +28802,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             // A bound function ignores the receiver the call site offers, whichever way it is
             // reached, so both go through one path.
-            Value::Settler(..) | Value::Bound(_) => self
+            Value::Settler(..) | Value::Capability(..) | Value::Bound(_) => self
                 .call_value(&method, receiver, arguments, instruction)
                 .map(Some),
             Value::Function(closure) => {
@@ -32781,7 +32896,7 @@ fn json_stringify(
             None => "null".to_owned(),
         }),
         // A function has no JSON spelling, and a settler is one.
-        Value::Settler(..) | Value::Bound(_) => None,
+        Value::Settler(..) | Value::Capability(..) | Value::Bound(_) => None,
         // Serialising a proxy means reading its properties, which means running its traps, which
         // this pure walk cannot do. Refused rather than silently serialising the target.
         Value::Proxy(_) => return Err(ExecutionError::ProxyNotSerialisable),
@@ -33075,7 +33190,7 @@ fn call_native(
                 Value::Function(_)
                 | Value::Native(_)
                 | Value::Callback(_)
-                | Value::Settler(..)
+                | Value::Settler(..) | Value::Capability(..)
                 | Value::Bound(_) => "Function",
                 _ => "Object",
             }
@@ -33339,7 +33454,7 @@ fn call_native(
                 }
                 // A built-in has no store of its own; the realm keeps one for it, and that is
                 // where the closure has to be recorded or the next `isExtensible` undoes it.
-                Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
+                Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
                     intrinsics.close(&target, sealing);
                 }
                 // An exotic object closes its named store. Its elements are not slots of that
@@ -35875,10 +35990,15 @@ fn prototype_of(value: &Value) -> Value {
             Value::Native(Native::PrototypeOf(PrototypeTable::Object))
         }
         // Every callable inherits `Function.prototype`, and every ordinary object
-        // `Object.prototype`. A primitive has no chain of its own to walk.
-        Value::Native(_) | Value::Bound(_) | Value::Callback(_) | Value::Function(_) => {
-            Value::Native(Native::PrototypeOf(PrototypeTable::Function))
-        }
+        // `Object.prototype`. A primitive has no chain of its own to walk. The two the promise
+        // machinery makes are callables too -- a program is handed `resolve` and `reject` and can
+        // ask what they inherit from, and answering null said they were not functions at all.
+        Value::Native(_)
+        | Value::Bound(_)
+        | Value::Callback(_)
+        | Value::Function(_)
+        | Value::Settler(..)
+        | Value::Capability(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Function)),
         Value::Array(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Array)),
         // A date is a value kind rather than an object here, and without this link
         // `Date.prototype.isPrototypeOf(new Date())` is false -- a chain a program can see is
@@ -38112,7 +38232,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         }
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
         Value::Intl(value) => format!("{} {{}}", value.service().tag()),
-        Value::Settler(..) => "[Function (anonymous)]".to_owned(),
+        Value::Settler(..) | Value::Capability(..) => "[Function (anonymous)]".to_owned(),
         // Node prints the target's name with a "bound " prefix; without a name to prefix, the
         // fact that it is bound is the whole of what there is to say.
         Value::Bound(_) => "[Function: bound]".to_owned(),
@@ -39233,7 +39353,7 @@ fn is_callable(value: &Value) -> bool {
         Value::Function(_)
             | Value::Native(_)
             | Value::Callback(_)
-            | Value::Settler(..)
+            | Value::Settler(..) | Value::Capability(..)
             | Value::Bound(_)
             | Value::CommonJsRequire(_)
             | Value::CommonJsResolve(_)
@@ -40589,6 +40709,34 @@ fn array_own_property(items: &ArrayData, key: &str) -> Option<Property> {
 /// `Boolean.prototype` a `[[BooleanData]]` of false. That is not a curiosity -- it is what makes
 /// `Number.prototype.valueOf()` answer 0 instead of throwing, which a program reaches by calling
 /// any of these methods without a receiver of its own.
+/// The two functions a `NewPromiseCapability(C)` is waiting for.
+///
+/// Shared between the executor `C` is called with and the caller that will use them, because the
+/// executor is *how* they arrive: the specification's own way of saying "whatever `C` does with
+/// its argument, these are the functions that settle the promise it returns".
+pub struct CapabilityRecord {
+    resolve: RefCell<Value>,
+    reject: RefCell<Value>,
+}
+
+impl std::fmt::Debug for CapabilityRecord {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CapabilityRecord")
+    }
+}
+
+impl Default for CapabilityRecord {
+    fn default() -> Self {
+        // Undefined until the executor is called, which is exactly the test the specification
+        // makes: a constructor that never calls it leaves both undefined, and that is the
+        // `TypeError` rather than a promise nothing holds the settlers for.
+        Self {
+            resolve: RefCell::new(Value::Undefined),
+            reject: RefCell::new(Value::Undefined),
+        }
+    }
+}
+
 fn wrapped_primitive(value: &Value) -> Option<Value> {
     match value {
         Value::Object(object) => object.borrow().primitive().cloned(),
@@ -40844,6 +40992,9 @@ fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
         // A promise's `resolve`/`reject` pair: anonymous, one argument, exactly as the
         // specification builds them.
         Value::Settler(..) => Some((String::new(), 1.0)),
+        // The `GetCapabilitiesExecutor` takes the pair, so its `length` is 2. Anonymous like the
+        // settlers, and for the same reason: the specification gives it no name.
+        Value::Capability(_) => Some((String::new(), 2.0)),
         _ => None,
     }
 }
@@ -41786,7 +41937,7 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
             intrinsics.reshape(target, &mut keys);
             keys
         }
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
             let mut keys = Vec::new();
             if intrinsic_identity(target).is_some() {
                 keys.push("length".to_owned());
@@ -42129,7 +42280,7 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         other if exotic_properties(other).is_some() => exotic_properties(target)
             .map(|store| store.borrow().keys().map(str::to_owned).collect())
             .unwrap_or_default(),
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => intrinsic_key(target)
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics
                     .entries
@@ -42251,7 +42402,7 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
         // per value -- two reads of `Array.prototype.push` produce the same `Copy` marker, so
         // there is no per-value store to put it in -- so the realm's store answers first, and
         // the tables answer for everything it has nothing to say about.
-        Value::Native(_) | Value::Callback(_) | Value::Settler(..) => {
+        Value::Native(_) | Value::Callback(_) | Value::Settler(..) | Value::Capability(..) => {
             match intrinsics.overridden(target, key) {
                 Overridden::Held(_, attributes) => Some(attributes),
                 Overridden::Removed => None,
@@ -42760,6 +42911,12 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
         // A BigInt is a primitive: two of them are equal when the numbers are, however they were
         // built. This is deliberately value equality rather than `Rc` identity.
         Value::BigInt(a) => matches!(right, Value::BigInt(b) if a == b),
+        // Two capability executors are the same function only when they hold the same record:
+        // each `NewPromiseCapability` makes its own, and a program can compare the one it was
+        // handed with the one it kept.
+        Value::Capability(a) => {
+            matches!(right, Value::Capability(b) if Rc::ptr_eq(a, b))
+        }
         Value::Settler(a, one) => matches!(
             right,
             Value::Settler(b, other) if Rc::ptr_eq(a, b) && one == other
