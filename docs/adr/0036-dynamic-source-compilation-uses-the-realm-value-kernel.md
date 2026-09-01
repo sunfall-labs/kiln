@@ -49,6 +49,19 @@ method registries, diagnostic fallbacks and other state that can only approximat
 duplicated. The application object cache remains independent of the shipped runtime identity, as
 ADR 0009 and ADR 0028 require.
 
+The generated-C prelude is split by ownership, not by textual convenience:
+
+1. immutable value layouts and constants form the private kernel contract;
+2. realm state and value operations are compiled once into the shared kernel object;
+3. dynamic call-frame state and generated instruction bodies remain in application units.
+
+This distinction is load-bearing. `globalThis`, registered symbols, entropy and diagnostics are
+realm state. `new.target`, the active arguments view and derived-constructor handoff are dynamic
+frame state and must not become process-global merely because both were formerly C `static`
+variables. The backend maintains an exhaustive owner manifest for mutable prelude state; adding an
+unclassified static fails its architecture tests. Hot generated bodies call the shared C kernel
+directly. They do not bounce every property access through Rust or a generic opcode dispatcher.
+
 ### `SourceCompiler` is an explicit realm capability
 
 A native realm has one of two source-code policies:

@@ -23661,6 +23661,47 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
 "#,
 );
 
+/// Mutable static state embedded in the generated-C prelude, classified by its required owner.
+///
+/// This is the migration manifest for ADR 0036. Adding a new mutable `kiln_c99_*` static without
+/// naming its owner fails the architecture test below. Realm entries move into the shared value
+/// kernel; frame entries remain save/restore state local to one synchronous generated-body call.
+const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
+    ("kiln_c99_diagnostic_site", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_operation", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_instruction", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_depth", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_method", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_receiver_tag", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_has_method", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_detail", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_function", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_function_len", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
+    ("kiln_c99_random_state", C99StateOwner::Realm),
+    ("kiln_c99_new_target", C99StateOwner::Frame),
+    ("kiln_c99_inheriting_new_target", C99StateOwner::Frame),
+    ("kiln_c99_adopted_this", C99StateOwner::Frame),
+    ("kiln_c99_frame_args", C99StateOwner::Frame),
+    ("kiln_c99_frame_argc", C99StateOwner::Frame),
+    ("kiln_c99_captured_arguments", C99StateOwner::Frame),
+    ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
+    ("kiln_c99_globals", C99StateOwner::Realm),
+    ("kiln_c99_process", C99StateOwner::Realm),
+    ("kiln_c99_atomics", C99StateOwner::Realm),
+    ("kiln_c99_symbols", C99StateOwner::Realm),
+    ("kiln_c99_symbol_count", C99StateOwner::Realm),
+    ("kiln_c99_symbol_capacity", C99StateOwner::Realm),
+    ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
+];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum C99StateOwner {
+    Realm,
+    Frame,
+    TestFixture,
+}
+
 /// The stack each emitted C function needs: the module body, then one entry per compiled
 /// function body in [`Program::functions`], in the same order.
 struct StackPlan {
@@ -28066,6 +28107,56 @@ int main(void) {
                 "realm state remains private to one generated translation unit: {declaration}"
             );
         }
+    }
+
+    #[test]
+    fn every_mutable_c99_static_has_an_explicit_owner() {
+        let generated =
+            emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+        let mut discovered = generated
+            .source
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let declaration = line.split('=').next().unwrap_or(line);
+                let name_start = line.find("kiln_c99_")?;
+                let before_name = &line[..name_start];
+                let immutable = if before_name.contains('*') {
+                    before_name.trim_end().ends_with("* const")
+                } else {
+                    before_name.starts_with("static const ")
+                };
+                if !line.starts_with("static ")
+                    || immutable
+                    || declaration.contains('(')
+                    || !line.contains("kiln_c99_")
+                    || !line.ends_with(';')
+                {
+                    return None;
+                }
+                let tail = &line[name_start..];
+                let end = tail
+                    .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .unwrap_or(tail.len());
+                Some(tail[..end].to_owned())
+            })
+            .collect::<Vec<_>>();
+        discovered.sort();
+        discovered.dedup();
+        let mut classified = C99_MUTABLE_STATE_OWNERS
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect::<Vec<_>>();
+        classified.sort();
+        assert_eq!(
+            discovered, classified,
+            "mutable generated-C state must say whether the realm, dynamic frame, or test fixture owns it"
+        );
+        assert!(
+            C99_MUTABLE_STATE_OWNERS
+                .iter()
+                .any(|(name, owner)| *name == "kiln_c99_globals" && *owner == C99StateOwner::Realm)
+        );
     }
 
     #[test]
