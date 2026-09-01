@@ -437,6 +437,12 @@ fn bounded_u16(value: f64) -> Result<u16> {
     Ok(value as u16)
 }
 
+/// A calendar identifier as a *constructor* takes it: the bare name and nothing else.
+///
+/// `new Temporal.PlainDate(2000, 5, 2, calendar)` runs `CanonicalizeCalendar`, which is a lookup
+/// rather than a parse: `"iso8601"`, `"gregory"`, `"hebrew"` are calendars and
+/// `"1997-12-04[u-ca=iso8601]"` is a RangeError. The language draws the line here on purpose --
+/// a constructor takes the identifier, and the conversion below is what everything *else* takes.
 fn calendar_from(id: Option<&str>) -> Result<Calendar> {
     match id {
         None => Ok(Calendar::ISO),
@@ -444,8 +450,54 @@ fn calendar_from(id: Option<&str>) -> Result<Calendar> {
     }
 }
 
+/// A calendar identifier as everything but a constructor takes it, which is two spellings.
+///
+/// `ToTemporalCalendarIdentifier` tries the bare name first and, when that is not one, falls back
+/// to `ParseTemporalCalendarString`: an ISO 8601 string *carries* a calendar in its `[u-ca=...]`
+/// annotation, and one without an annotation names the ISO calendar. So
+/// `Temporal.PlainDate.from({ ..., calendar: "2020-01-01" })` is the ISO calendar and
+/// `"2020-01-01[u-ca=gregory]"` is Gregorian, and neither is a typo to reject. This is the form
+/// `from`, a property bag's `calendar` field, and `withCalendar` all take.
+///
+/// The second half was missing and the failure it produced pointed the wrong way: the string went
+/// to the engine as a bare identifier, the engine said `unknown calendar`, and the reading was
+/// that the linked engine lacked calendar data. It does not -- `gregory`, `hebrew` and `japanese`
+/// all resolve -- the *first* of the two steps was simply the only one ever taken.
+fn calendar_reference_from(id: Option<&str>) -> Result<Calendar> {
+    let Some(id) = id else {
+        return Ok(Calendar::ISO);
+    };
+    let direct = match Calendar::try_from_utf8(id.as_bytes()) {
+        Ok(calendar) => return Ok(calendar),
+        Err(error) => error,
+    };
+    // An annotation-free ISO string is the ISO calendar, which is what the empty slice means
+    // here; a string that is no ISO date at all is not a calendar either way, so the identifier
+    // error -- which names what the program actually wrote -- is the one that is reported.
+    match temporal_rs::parsers::parse_allowed_calendar_formats(id.as_bytes()) {
+        None => Err(Error::from(direct)),
+        Some(annotation) if annotation.is_empty() => Ok(Calendar::ISO),
+        Some(annotation) => Ok(Calendar::try_from_utf8(annotation)?),
+    }
+}
+
+/// A time-zone identifier as a *constructor* takes it: a named zone or an offset, not a string
+/// that merely mentions one. `new Temporal.ZonedDateTime(0n, "1997-12-04T12:34[+01:00]")` is a
+/// RangeError for the same reason the calendar case above is.
 fn time_zone_from(id: &str) -> Result<TimeZone> {
     Ok(TimeZone::try_from_identifier_str(id)?)
+}
+
+/// A time-zone identifier as everything but a constructor takes it, which is the same two
+/// spellings.
+///
+/// `ToTemporalTimeZoneIdentifier` is `ParseTemporalTimeZoneString`, not `ParseTimeZoneIdentifier`:
+/// a named zone and an offset are the short forms, and a whole ISO string is the long one --
+/// `"2021-08-19T17:30[America/Vancouver]"` names Vancouver and `"2021-08-19T17:30Z"` names UTC.
+/// `try_from_str` is the engine's own spelling of the pair; `try_from_identifier_str` is only its
+/// first half, and was what every one of these call sites used.
+fn time_zone_reference_from(id: &str) -> Result<TimeZone> {
+    Ok(TimeZone::try_from_str(id)?)
 }
 
 /// The engine's representation, private so that no `temporal_rs` type is reachable from outside.
@@ -746,7 +798,7 @@ pub fn from_fields(kind: Kind, fields: &Fields, options: &Options) -> Result<Tem
         ));
     }
     let overflow = options.overflow()?;
-    let calendar = calendar_from(fields.calendar.as_deref())?;
+    let calendar = calendar_reference_from(fields.calendar.as_deref())?;
     Ok(TemporalValue(match kind {
         Kind::PlainDate => {
             let partial = PartialDate {
@@ -797,7 +849,7 @@ pub fn from_fields(kind: Kind, fields: &Fields, options: &Options) -> Result<Tem
                         None => None,
                     },
                 },
-                timezone: Some(time_zone_from(time_zone)?),
+                timezone: Some(time_zone_reference_from(time_zone)?),
                 calendar,
             };
             Repr::ZonedDateTime(ZonedDateTime::from_partial(
@@ -1461,7 +1513,7 @@ impl TemporalValue {
         time: Option<&Self>,
         options: &Options,
     ) -> Result<Self> {
-        let zone = time_zone_from(time_zone)?;
+        let zone = time_zone_reference_from(time_zone)?;
         let disambiguation =
             parse_option::<Disambiguation>(options.disambiguation.as_deref(), "disambiguation")?
                 .unwrap_or(Disambiguation::Compatible);
@@ -1505,12 +1557,12 @@ impl TemporalValue {
             return Err(Error::type_error("this is not a Temporal.ZonedDateTime"));
         };
         Ok(TemporalValue(Repr::ZonedDateTime(
-            zoned.with_timezone(time_zone_from(time_zone)?)?,
+            zoned.with_timezone(time_zone_reference_from(time_zone)?)?,
         )))
     }
 
     pub fn with_calendar(&self, calendar: &str) -> Result<Self> {
-        let calendar = calendar_from(Some(calendar))?;
+        let calendar = calendar_reference_from(Some(calendar))?;
         Ok(TemporalValue(match &self.0 {
             Repr::PlainDate(date) => Repr::PlainDate(date.with_calendar(calendar)),
             Repr::PlainDateTime(datetime) => Repr::PlainDateTime(datetime.with_calendar(calendar)),
@@ -1562,7 +1614,7 @@ impl TemporalValue {
 /// zone is UTC (ADR 0015). So the instant arrives here as an argument and the default zone is
 /// fixed, and there is no path from this crate to `SystemTime::now` to forget to close.
 pub mod now {
-    use super::{Error, Kind, Repr, Result, TemporalValue, TimeZone, time_zone_from};
+    use super::{Error, Kind, Repr, Result, TemporalValue, TimeZone, time_zone_reference_from};
     use temporal_rs::TemporalResult;
     use temporal_rs::host::{HostClock, HostTimeZone};
     use temporal_rs::provider::TimeZoneProvider;
@@ -1612,7 +1664,7 @@ pub mod now {
         time_zone: Option<&str>,
     ) -> Result<TemporalValue> {
         let zone = match time_zone {
-            Some(identifier) => Some(time_zone_from(identifier)?),
+            Some(identifier) => Some(time_zone_reference_from(identifier)?),
             None => None,
         };
         let clock = || temporal_rs::now::Now::new(RealmClock { epoch_nanoseconds });
