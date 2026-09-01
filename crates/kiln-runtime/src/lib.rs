@@ -1024,6 +1024,18 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// response head for one HTTP/1 request lets Hyper dispatch the next request already buffered
     /// in that connection. This checkpoint keeps that work under Tokio's scheduler while making
     /// it visible to the synchronous language adapter before it waits on an otherwise-idle read.
+    /// One cooperative turn, for a caller that repeats until the checkpoint stops progressing.
+    ///
+    /// [`Self::poll_http_tasks`] drains a fixed four turns because its caller had no way to ask
+    /// whether another was needed. A caller that loops on its own progress does, and one turn per
+    /// round is both cheaper and strictly more thorough: it stops at quiescence rather than at
+    /// four, and it keeps going past four when a connection still has work.
+    pub fn poll_http_tasks_once(&mut self) {
+        self.local.block_on(&self.runtime, async {
+            tokio::task::yield_now().await;
+        });
+    }
+
     pub fn poll_http_tasks(&mut self) {
         self.local.block_on(&self.runtime, async {
             // Hyper commonly needs more than one cooperative turn: a body wake schedules the
