@@ -8,8 +8,12 @@ static const char kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_constant_1[] = "l
 static const char kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_constant_2[] = "toUpperCase";
 static const char kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_constant_3[] = " & more";
 static const char kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_constant_4[] = "concat";
+static void kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_gc_roots(void *heap, void *context, int phase) {
+    kiln_c99_gc_unit_roots(heap, context, phase);
+}
 static int kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_body(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
+    (void)kiln_realm_gc_register_roots(kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_gc_roots, NULL, 0);
     int depth = 0;
     kiln_value thrown_value = kiln_c99_undefined();
     kiln_value *thrown = &thrown_value;
@@ -69,6 +73,11 @@ typedef struct kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_realm_context {
     kiln_value *result;
 } kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_realm_context;
 
+static int kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_gc_result_entry(void *result) {
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}
+
 static int kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_realm_entry(void *opaque) {
     kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_realm_context *context = (kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_realm_context *)opaque;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -85,6 +94,8 @@ int kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d(kiln_host *host, kiln_value *re
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, kiln_module_a6ea7ee8abde4ef0a434dd715b469a9d_realm_entry, &context);
     if (status == KILN_C99_OK)

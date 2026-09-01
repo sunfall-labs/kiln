@@ -2696,6 +2696,19 @@ impl<M, T> Realm<M, T> {
         self.now
     }
 
+    /// Visits every queued next-tick and microtask, in queue order, without running or
+    /// removing it. The native collector enumerates the roots queued work holds this way.
+    pub fn for_each_queued(&self, mut visit: impl FnMut(&M)) {
+        self.next_ticks.iter().for_each(&mut visit);
+        self.microtasks.iter().for_each(&mut visit);
+    }
+
+    /// Visits every armed timer's work, including cancelled entries that have not been
+    /// discarded yet, without running or removing it.
+    pub fn for_each_timer(&self, mut visit: impl FnMut(&T)) {
+        self.timers.iter().for_each(|entry| visit(&entry.work));
+    }
+
     /// Adds one FIFO microtask. The caller retains ownership of the work represented by `work`.
     pub fn queue_microtask(&mut self, work: M) {
         self.microtasks.push_back(work);

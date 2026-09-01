@@ -2193,8 +2193,21 @@ extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidat
                                      kiln_drop_opaque_fn drop_candidate, void **out_store);
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
-extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
-extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
+/* The collector's seam with the runtime archive (ADR 0041). The prelude owns the heap and the
+ * tracer; the archive owns the turn boundary and the roots it holds. */
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+typedef struct kiln_gc_hooks {
+    uint32_t version;
+    uint32_t size;
+    void (*collect)(void *heap, int force);
+    void (*teardown_begin)(void *heap);
+    void (*teardown_end)(void *heap);
+    void (*mark_value)(void *heap, const void *value);
+    void (*mark_block)(void *heap, void *pointer);
+} kiln_gc_hooks;
+extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_mark_roots(void *heap);
 
 /* A closure is its body plus the boxes it captured.
  *
@@ -3665,13 +3678,6 @@ static kiln_object *kiln_c99_object_of(kiln_value value) {
     return (kiln_object *)(uintptr_t)value.bits;
 }
 
-static void kiln_c99_drop_object(void *pointer) {
-    kiln_object *object = (kiln_object *)pointer;
-    if (object == NULL) return;
-    free(object->properties);
-    free(object);
-}
-
 static kiln_array *kiln_c99_array_of(kiln_value value) {
     return (kiln_array *)(uintptr_t)value.bits;
 }
@@ -3684,8 +3690,724 @@ static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
     return (kiln_typed_array *)(uintptr_t)value.bits;
 }
 
+/* ---------------------------------------------------------------------------------------------
+ * The collector (ADR 0041).
+ *
+ * Every allocation a JavaScript value can point at, or that holds one, comes from
+ * `kiln_c99_gc_alloc`. It carries a header naming its kind, its mark epoch and its size, is
+ * linked into one heap shared by every translation unit of the program, and is entered in a hash
+ * set of block addresses. Marking is precise about edges and paranoid about targets: a candidate
+ * pointer is marked only when the set knows it, so a string that points at a constant table, a
+ * symbol that points at the well-known table, or an allocation site still on plain `malloc` is
+ * ignored rather than freed.
+ *
+ * Collection runs only at the top of the realm's drive loop, where no generated frame is on the
+ * stack (ADR 0041 says why that is enough for a server and not yet enough for a CPU-bound body).
+ * The runtime archive calls `collect` through the hooks below; it never reads a C layout. It
+ * enumerates the roots it owns by handing pointers and value slots back to `mark_block` and
+ * `mark_value`, and each translation unit marks its own statics through a registered root
+ * function.
+ *
+ * The heap struct's first member is the hooks pointer. The runtime reads exactly that one word
+ * through the otherwise opaque heap pointer, so a root function outside the prelude (the graph
+ * launcher) can mark through `kiln_realm_gc_mark_value`.
+ * ------------------------------------------------------------------------------------------- */
+
+typedef enum kiln_gc_kind {
+    KILN_GC_NONE = 0,
+    KILN_GC_STRING,
+    KILN_GC_BYTES,
+    KILN_GC_OBJECT,
+    KILN_GC_CLOSURE,
+    KILN_GC_CELL,
+    KILN_GC_ARRAY,
+    KILN_GC_GENERATOR,
+    KILN_GC_PROMISE,
+    KILN_GC_SETTLER,
+    KILN_GC_BOUND,
+    KILN_GC_COLLECTION,
+    KILN_GC_PROXY,
+    KILN_GC_DATE,
+    KILN_GC_REGEXP,
+    KILN_GC_SYMBOL,
+    KILN_GC_TYPED_BUFFER,
+    KILN_GC_TYPED_ARRAY,
+    KILN_GC_COMMONJS_REQUIRE,
+    KILN_GC_METHOD_STORE,
+    KILN_GC_NODE_SERVER,
+    KILN_GC_NODE_SOCKET,
+    KILN_GC_NODE_CLIENT_REQUEST,
+    KILN_GC_NODE_RESPONSE,
+    KILN_GC_NODE_COMPLETION,
+    KILN_GC_NODE_FS_COMPLETION,
+    KILN_GC_MICROTASK,
+    KILN_GC_NEXT_TICK,
+    KILN_GC_TIMER,
+    KILN_GC_KIND_COUNT
+} kiln_gc_kind;
+
+#define KILN_GC_PHASE_MARK 0
+#define KILN_GC_PHASE_TEARDOWN 1
+#define KILN_GC_PHASE_RESET 2
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_HOOKS_VERSION 1u
+#define KILN_GC_DEFAULT_FLOOR ((size_t)8 * 1024 * 1024)
+
+typedef struct kiln_gc_block {
+    struct kiln_gc_block *prev;
+    struct kiln_gc_block *next;
+    size_t size;
+    uint32_t kind;
+    uint32_t mark;
+} kiln_gc_block;
+
+typedef struct kiln_gc_heap {
+    const kiln_gc_hooks *hooks;
+    kiln_gc_block *head;
+    size_t count;
+    size_t bytes;
+    size_t since_collection;
+    size_t survived;
+    size_t floor;
+    uint32_t epoch;
+    int enabled;
+    int stress;
+    int trace;
+    int collecting;
+    int mark_failed;
+    int fallback;
+    kiln_gc_block **table;
+    size_t table_capacity;
+    size_t table_count;
+    kiln_gc_block **stack;
+    size_t stack_len;
+    size_t stack_capacity;
+    uint64_t collections;
+    uint64_t freed_blocks;
+    uint64_t freed_bytes;
+} kiln_gc_heap;
+
+static const kiln_gc_hooks kiln_c99_gc_hooks;
+/* The heap a unit uses when no realm is active: the prelude's own tests. It never collects. */
+static kiln_gc_heap kiln_c99_gc_fallback;
+
+static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
+    const char *setting;
+    memset(heap, 0, sizeof *heap);
+    heap->hooks = &kiln_c99_gc_hooks;
+    heap->floor = KILN_GC_DEFAULT_FLOOR;
+    heap->enabled = 1;
+    setting = getenv("KILN_GC");
+    if (setting != NULL && setting[0] == '0' && setting[1] == '\0') heap->enabled = 0;
+    setting = getenv("KILN_GC_STRESS");
+    heap->stress = setting != NULL && setting[0] != '\0' && setting[0] != '0';
+    setting = getenv("KILN_GC_TRACE");
+    heap->trace = setting != NULL && setting[0] != '\0' && setting[0] != '0';
+    setting = getenv("KILN_GC_FLOOR_KIB");
+    if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
+        size_t kib = 0;
+        while (*setting >= '0' && *setting <= '9' && kib < ((size_t)-1) / 10240) {
+            kib = kib * 10 + (size_t)(*setting - '0');
+            ++setting;
+        }
+        heap->floor = kib * 1024;
+    }
+}
+
+/* Diagnostics stay off the locale-sensitive printf family (decision recorded beside
+ * kiln_number_to_js_string): a count is spelled here by hand. */
+static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
+
+static void kiln_c99_gc_trace_count(uint64_t count) {
+    char digits[24];
+    size_t at = sizeof digits;
+    digits[--at] = '\0';
+    do {
+        digits[--at] = (char)('0' + (int)(count % 10));
+        count /= 10;
+    } while (count != 0 && at != 0);
+    fputs(&digits[at], stderr);
+}
+
+static kiln_gc_heap *kiln_c99_gc_heap(void) {
+    void *attached = NULL;
+    kiln_gc_heap *candidate;
+    int status = kiln_realm_gc_attach(&kiln_c99_gc_hooks, NULL, &attached);
+    if (status == KILN_C99_OK && attached != NULL) return (kiln_gc_heap *)attached;
+    if (status != KILN_C99_OK) {
+        if (kiln_c99_gc_fallback.hooks == NULL) {
+            kiln_c99_gc_heap_init(&kiln_c99_gc_fallback);
+            kiln_c99_gc_fallback.enabled = 0;
+            kiln_c99_gc_fallback.fallback = 1;
+        }
+        return &kiln_c99_gc_fallback;
+    }
+    candidate = (kiln_gc_heap *)malloc(sizeof *candidate);
+    if (candidate == NULL) return NULL;
+    kiln_c99_gc_heap_init(candidate);
+    status = kiln_realm_gc_attach(&kiln_c99_gc_hooks, candidate, &attached);
+    if (status != KILN_C99_OK || attached == NULL) {
+        free(candidate);
+        return NULL;
+    }
+    if (attached != candidate) free(candidate);
+    return (kiln_gc_heap *)attached;
+}
+
+static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
+    uint64_t bits = (uint64_t)(uintptr_t)pointer;
+    bits ^= bits >> 29;
+    bits *= UINT64_C(0xBF58476D1CE4E5B9);
+    bits ^= bits >> 32;
+    return (size_t)bits & mask;
+}
+
+static int kiln_c99_gc_table_grow(kiln_gc_heap *heap, size_t wanted) {
+    kiln_gc_block **grown;
+    kiln_gc_block **old = heap->table;
+    size_t old_capacity = heap->table_capacity;
+    size_t index;
+    size_t capacity = 64;
+    while (capacity < wanted * 2) {
+        if (capacity > ((size_t)-1) / 4) return KILN_C99_OUT_OF_MEMORY;
+        capacity *= 2;
+    }
+    grown = (kiln_gc_block **)calloc(capacity, sizeof *grown);
+    if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+    heap->table = grown;
+    heap->table_capacity = capacity;
+    heap->table_count = 0;
+    for (index = 0; index < old_capacity; ++index) {
+        kiln_gc_block *block = old[index];
+        if (block != NULL) {
+            size_t slot = kiln_c99_gc_hash(block, capacity - 1);
+            while (grown[slot] != NULL) slot = (slot + 1) & (capacity - 1);
+            grown[slot] = block;
+            ++heap->table_count;
+        }
+    }
+    free(old);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_gc_table_insert(kiln_gc_heap *heap, kiln_gc_block *block) {
+    size_t slot;
+    size_t mask;
+    if ((heap->table_count + 1) * 2 > heap->table_capacity) {
+        int status = kiln_c99_gc_table_grow(heap, heap->table_count + 1);
+        if (status != KILN_C99_OK) return status;
+    }
+    mask = heap->table_capacity - 1;
+    slot = kiln_c99_gc_hash(block, mask);
+    while (heap->table[slot] != NULL) slot = (slot + 1) & mask;
+    heap->table[slot] = block;
+    ++heap->table_count;
+    return KILN_C99_OK;
+}
+
+/* Linear probing with backward-shift deletion, so a release leaves no tombstone behind. */
+static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *block) {
+    size_t mask;
+    size_t slot;
+    size_t hole;
+    if (heap->table_capacity == 0) return;
+    mask = heap->table_capacity - 1;
+    slot = kiln_c99_gc_hash(block, mask);
+    while (heap->table[slot] != block) {
+        if (heap->table[slot] == NULL) return;
+        slot = (slot + 1) & mask;
+    }
+    hole = slot;
+    for (;;) {
+        size_t home;
+        slot = (slot + 1) & mask;
+        if (heap->table[slot] == NULL) break;
+        home = kiln_c99_gc_hash(heap->table[slot], mask);
+        /* Move the entry back into the hole when its home sits at or before the hole in probe
+         * order, otherwise a lookup that started at its home would stop at the hole. */
+        if ((slot > hole && (home <= hole || home > slot)) ||
+            (slot < hole && home <= hole && home > slot)) {
+            heap->table[hole] = heap->table[slot];
+            hole = slot;
+        }
+    }
+    heap->table[hole] = NULL;
+    --heap->table_count;
+}
+
+static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+    kiln_gc_block *block;
+    size_t mask;
+    size_t slot;
+    if (payload == NULL || heap->table_capacity == 0) return NULL;
+    block = (kiln_gc_block *)((char *)payload - sizeof(kiln_gc_block));
+    mask = heap->table_capacity - 1;
+    slot = kiln_c99_gc_hash(block, mask);
+    while (heap->table[slot] != NULL) {
+        if (heap->table[slot] == block) return block;
+        slot = (slot + 1) & mask;
+    }
+    return NULL;
+}
+
+static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    kiln_gc_block *block;
+    if (heap == NULL || size > ((size_t)-1) - sizeof *block) return NULL;
+    block = (kiln_gc_block *)malloc(sizeof *block + (size == 0 ? 1 : size));
+    if (block == NULL) return NULL;
+    if (kiln_c99_gc_table_insert(heap, block) != KILN_C99_OK) {
+        free(block);
+        return NULL;
+    }
+    block->kind = kind;
+    block->mark = 0;
+    block->size = size;
+    block->prev = NULL;
+    block->next = heap->head;
+    if (heap->head != NULL) heap->head->prev = block;
+    heap->head = block;
+    ++heap->count;
+    heap->bytes += size;
+    heap->since_collection += size;
+    return block + 1;
+}
+
+static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
+    void *payload = kiln_c99_gc_alloc(kind, size);
+    if (payload != NULL && size != 0) memset(payload, 0, size);
+    return payload;
+}
+
+static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
+    if (block->prev != NULL) block->prev->next = block->next;
+    else heap->head = block->next;
+    if (block->next != NULL) block->next->prev = block->prev;
+    block->prev = NULL;
+    block->next = NULL;
+    --heap->count;
+    heap->bytes -= block->size;
+}
+
+static void kiln_c99_gc_finalize(kiln_gc_block *block);
+
+/* Explicit release for a block whose lifetime is already known: queued work after it ran, a
+ * host-operation completion after its callback. The collector remains the backstop. */
+static void kiln_c99_gc_release(void *payload) {
+    kiln_gc_heap *heap;
+    kiln_gc_block *block;
+    if (payload == NULL) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    block = kiln_c99_gc_lookup(heap, payload);
+    if (block == NULL) return;
+    kiln_c99_gc_unlink(heap, block);
+    kiln_c99_gc_table_remove(heap, block);
+    kiln_c99_gc_finalize(block);
+    heap->freed_blocks += 1;
+    heap->freed_bytes += block->size;
+    free(block);
+}
+
+static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
+    kiln_gc_block *block = kiln_c99_gc_lookup(heap, payload);
+    if (block == NULL || block->mark == heap->epoch) return;
+    block->mark = heap->epoch;
+    if (heap->stack_len == heap->stack_capacity) {
+        size_t wanted = heap->stack_capacity == 0 ? 256 : heap->stack_capacity * 2;
+        kiln_gc_block **grown =
+            (kiln_gc_block **)realloc(heap->stack, wanted * sizeof *heap->stack);
+        if (grown == NULL) {
+            /* A collection that cannot record what it saw must not free anything. */
+            heap->mark_failed = 1;
+            return;
+        }
+        heap->stack = grown;
+        heap->stack_capacity = wanted;
+    }
+    heap->stack[heap->stack_len++] = block;
+}
+
+static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
+    /* Every payload-carrying tag keeps its pointer in the shared word, and a pointer the heap
+     * does not know (a constant, a well-known symbol, a provider handle) is simply not marked. */
+    if (value == NULL || value->tag < KILN_VALUE_STRING) return;
+    kiln_c99_gc_mark_block(heap, (const void *)(uintptr_t)value->bits);
+}
+
+static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
+                                    size_t count) {
+    size_t index;
+    if (values == NULL) return;
+    for (index = 0; index < count; ++index) kiln_c99_gc_mark_value(heap, &values[index]);
+}
+
+static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
+    void *payload = block + 1;
+    switch (block->kind) {
+    case KILN_GC_OBJECT: {
+        kiln_object *object = (kiln_object *)payload;
+        size_t index;
+        for (index = 0; index < object->count; ++index) {
+            const kiln_property *property = &object->properties[index];
+            kiln_c99_gc_mark_block(heap, property->key);
+            kiln_c99_gc_mark_value(heap, &property->value);
+            kiln_c99_gc_mark_value(heap, &property->getter);
+            kiln_c99_gc_mark_value(heap, &property->setter);
+        }
+        kiln_c99_gc_mark_value(heap, &object->prototype);
+        break;
+    }
+    case KILN_GC_CLOSURE: {
+        kiln_closure *closure = (kiln_closure *)payload;
+        kiln_c99_gc_mark_values(heap, closure->upvalues, closure->upvalue_count);
+        kiln_c99_gc_mark_value(heap, &closure->captured_this);
+        kiln_c99_gc_mark_value(heap, &closure->captured_new_target);
+        kiln_c99_gc_mark_value(heap, &closure->captured_arguments);
+        kiln_c99_gc_mark_value(heap, &closure->prototype);
+        kiln_c99_gc_mark_value(heap, &closure->properties);
+        break;
+    }
+    case KILN_GC_CELL:
+        kiln_c99_gc_mark_value(heap, (const kiln_value *)payload);
+        break;
+    case KILN_GC_ARRAY: {
+        kiln_array *array = (kiln_array *)payload;
+        kiln_c99_gc_mark_values(heap, array->elements, array->count);
+        kiln_c99_gc_mark_value(heap, &array->properties);
+        break;
+    }
+    case KILN_GC_GENERATOR: {
+        kiln_generator *frame = (kiln_generator *)payload;
+        kiln_c99_gc_mark_value(heap, &frame->function);
+        kiln_c99_gc_mark_value(heap, &frame->receiver);
+        kiln_c99_gc_mark_value(heap, &frame->promise);
+        kiln_c99_gc_mark_value(heap, &frame->sent);
+        if (frame->function.tag == KILN_VALUE_FUNCTION) {
+            const kiln_closure *closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
+            kiln_c99_gc_mark_values(heap, frame->locals, closure->local_count);
+            kiln_c99_gc_mark_values(heap, frame->stack, closure->stack_size);
+        }
+        break;
+    }
+    case KILN_GC_PROMISE: {
+        kiln_promise *promise = (kiln_promise *)payload;
+        size_t index;
+        kiln_c99_gc_mark_value(heap, &promise->value);
+        for (index = 0; index < promise->count; ++index) {
+            kiln_c99_gc_mark_value(heap, &promise->reactions[index].on_fulfilled);
+            kiln_c99_gc_mark_value(heap, &promise->reactions[index].on_rejected);
+            kiln_c99_gc_mark_value(heap, &promise->reactions[index].derived);
+        }
+        break;
+    }
+    case KILN_GC_SETTLER:
+        kiln_c99_gc_mark_value(heap, &((kiln_settler *)payload)->promise);
+        break;
+    case KILN_GC_BOUND: {
+        kiln_bound *bound = (kiln_bound *)payload;
+        kiln_c99_gc_mark_value(heap, &bound->target);
+        kiln_c99_gc_mark_value(heap, &bound->receiver);
+        kiln_c99_gc_mark_values(heap, bound->arguments, bound->count);
+        kiln_c99_gc_mark_value(heap, &bound->properties);
+        break;
+    }
+    case KILN_GC_COLLECTION: {
+        kiln_collection *collection = (kiln_collection *)payload;
+        size_t index;
+        for (index = 0; index < collection->count; ++index) {
+            if (collection->entries[index].dead) continue;
+            kiln_c99_gc_mark_value(heap, &collection->entries[index].key);
+            kiln_c99_gc_mark_value(heap, &collection->entries[index].value);
+        }
+        kiln_c99_gc_mark_value(heap, &collection->properties);
+        break;
+    }
+    case KILN_GC_PROXY:
+        kiln_c99_gc_mark_value(heap, &((kiln_proxy *)payload)->target);
+        kiln_c99_gc_mark_value(heap, &((kiln_proxy *)payload)->handler);
+        break;
+    case KILN_GC_TYPED_ARRAY:
+        kiln_c99_gc_mark_block(heap, ((kiln_typed_array *)payload)->buffer);
+        break;
+    case KILN_GC_METHOD_STORE:
+        kiln_c99_gc_mark_value(heap, &((kiln_method_store *)payload)->properties);
+        kiln_c99_gc_mark_block(heap, ((kiln_method_store *)payload)->next);
+        break;
+    case KILN_GC_NODE_SERVER: {
+        kiln_node_server *server = (kiln_node_server *)payload;
+        kiln_c99_gc_mark_value(heap, &server->object);
+        kiln_c99_gc_mark_value(heap, &server->connection_listener);
+        kiln_c99_gc_mark_block(heap, server->sockets);
+        break;
+    }
+    case KILN_GC_NODE_SOCKET: {
+        kiln_node_socket *socket = (kiln_node_socket *)payload;
+        kiln_c99_gc_mark_value(heap, &socket->object);
+        kiln_c99_gc_mark_block(heap, socket->next);
+        kiln_c99_gc_mark_block(heap, socket->server);
+        kiln_c99_gc_mark_block(heap, socket->client_requests);
+        kiln_c99_gc_mark_block(heap, socket->responses);
+        break;
+    }
+    case KILN_GC_NODE_CLIENT_REQUEST: {
+        kiln_node_client_request *request = (kiln_node_client_request *)payload;
+        kiln_c99_gc_mark_value(heap, &request->object);
+        kiln_c99_gc_mark_value(heap, &request->callback);
+        kiln_c99_gc_mark_value(heap, &request->response);
+        kiln_c99_gc_mark_block(heap, request->socket);
+        kiln_c99_gc_mark_block(heap, request->next);
+        break;
+    }
+    case KILN_GC_NODE_RESPONSE: {
+        kiln_node_response *response = (kiln_node_response *)payload;
+        kiln_c99_gc_mark_value(heap, &response->request);
+        kiln_c99_gc_mark_value(heap, &response->object);
+        kiln_c99_gc_mark_value(heap, &response->headers);
+        kiln_c99_gc_mark_block(heap, response->socket);
+        kiln_c99_gc_mark_block(heap, response->next);
+        break;
+    }
+    case KILN_GC_NODE_COMPLETION: {
+        kiln_node_completion *completion = (kiln_node_completion *)payload;
+        kiln_c99_gc_mark_block(heap, completion->server);
+        kiln_c99_gc_mark_block(heap, completion->socket);
+        kiln_c99_gc_mark_block(heap, completion->client_request);
+        break;
+    }
+    case KILN_GC_NODE_FS_COMPLETION:
+        kiln_c99_gc_mark_value(heap, &((kiln_node_fs_completion *)payload)->promise);
+        break;
+    case KILN_GC_MICROTASK: {
+        kiln_microtask *task = (kiln_microtask *)payload;
+        kiln_c99_gc_mark_value(heap, &task->handler);
+        kiln_c99_gc_mark_value(heap, &task->argument);
+        kiln_c99_gc_mark_value(heap, &task->derived);
+        break;
+    }
+    case KILN_GC_NEXT_TICK: {
+        kiln_next_tick *tick = (kiln_next_tick *)payload;
+        kiln_c99_gc_mark_value(heap, &tick->callback);
+        kiln_c99_gc_mark_values(heap, tick->args, tick->argc);
+        break;
+    }
+    case KILN_GC_TIMER: {
+        kiln_timer *timer = (kiln_timer *)payload;
+        kiln_c99_gc_mark_value(heap, &timer->callback);
+        kiln_c99_gc_mark_values(heap, timer->args, timer->argc);
+        break;
+    }
+    case KILN_GC_STRING:
+    case KILN_GC_BYTES:
+    case KILN_GC_DATE:
+    case KILN_GC_REGEXP:
+    case KILN_GC_SYMBOL:
+    case KILN_GC_TYPED_BUFFER:
+    case KILN_GC_COMMONJS_REQUIRE:
+    default:
+        break;
+    }
+}
+
+/* Inner growth buffers are the owner's, never a value's, so they are released here and only
+ * here. A kind whose payload owns a provider handle releases it here too. */
+static void kiln_c99_gc_finalize(kiln_gc_block *block) {
+    void *payload = block + 1;
+    switch (block->kind) {
+    case KILN_GC_OBJECT:
+        free(((kiln_object *)payload)->properties);
+        break;
+    case KILN_GC_CLOSURE:
+        free(((kiln_closure *)payload)->upvalues);
+        break;
+    case KILN_GC_ARRAY:
+        free(((kiln_array *)payload)->elements);
+        break;
+    case KILN_GC_GENERATOR: {
+        kiln_generator *frame = (kiln_generator *)payload;
+        free(frame->locals);
+        free(frame->stack);
+        free(frame->handlers);
+        free(frame->handler_stack);
+        break;
+    }
+    case KILN_GC_PROMISE:
+        free(((kiln_promise *)payload)->reactions);
+        break;
+    case KILN_GC_BOUND:
+        free(((kiln_bound *)payload)->arguments);
+        break;
+    case KILN_GC_COLLECTION:
+        free(((kiln_collection *)payload)->entries);
+        break;
+    case KILN_GC_TYPED_BUFFER:
+        free(((kiln_typed_buffer *)payload)->bytes);
+        break;
+    case KILN_GC_NODE_SERVER:
+        free(((kiln_node_server *)payload)->address);
+        break;
+    case KILN_GC_NODE_CLIENT_REQUEST: {
+        kiln_node_client_request *request = (kiln_node_client_request *)payload;
+        free(request->host_name);
+        free(request->path);
+        free(request->method);
+        free(request->headers);
+        free(request->pending_body);
+        break;
+    }
+    case KILN_GC_NEXT_TICK:
+        free(((kiln_next_tick *)payload)->args);
+        break;
+    case KILN_GC_TIMER:
+        free(((kiln_timer *)payload)->args);
+        break;
+    default:
+        break;
+    }
+}
+
+static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
+    while (heap->stack_len != 0 && !heap->mark_failed) {
+        kiln_gc_block *block = heap->stack[--heap->stack_len];
+        kiln_c99_gc_trace(heap, block);
+    }
+}
+
+static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
+    ++heap->epoch;
+    if (heap->epoch == 0) ++heap->epoch;
+    heap->stack_len = 0;
+    heap->mark_failed = 0;
+}
+
+/* Free every unmarked block. Marked blocks either stay (an ordinary collection) or are orphaned
+ * (teardown, where a result a caller still borrows must outlive the heap). */
+static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
+    kiln_gc_block *block = heap->head;
+    size_t survived = 0;
+    while (block != NULL) {
+        kiln_gc_block *next = block->next;
+        if (block->mark != heap->epoch) {
+            kiln_c99_gc_unlink(heap, block);
+            kiln_c99_gc_table_remove(heap, block);
+            kiln_c99_gc_finalize(block);
+            heap->freed_blocks += 1;
+            heap->freed_bytes += block->size;
+            free(block);
+        } else if (orphan_marked) {
+            kiln_c99_gc_unlink(heap, block);
+            kiln_c99_gc_table_remove(heap, block);
+        } else {
+            survived += block->size;
+        }
+        block = next;
+    }
+    heap->survived = survived;
+    heap->since_collection = 0;
+}
+
+static void kiln_c99_gc_collect(void *opaque, int force) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    size_t threshold;
+    uint64_t before_blocks;
+    uint64_t before_bytes;
+    if (heap == NULL || heap->collecting || heap->fallback) return;
+    if (!heap->enabled && !heap->stress) return;
+    threshold = heap->floor > heap->survived ? heap->floor : heap->survived;
+    if (!force && !heap->stress && heap->since_collection < threshold) return;
+    heap->collecting = 1;
+    before_blocks = heap->freed_blocks;
+    before_bytes = heap->freed_bytes;
+    kiln_c99_gc_begin(heap);
+    (void)kiln_realm_gc_mark_roots(heap);
+    kiln_c99_gc_drain(heap);
+    if (!heap->mark_failed) {
+        kiln_c99_gc_sweep(heap, 0);
+        heap->collections += 1;
+    }
+    if (heap->trace) {
+        kiln_c99_gc_trace_text("kiln gc: collection ");
+        kiln_c99_gc_trace_count(heap->collections);
+        kiln_c99_gc_trace_text(" freed ");
+        kiln_c99_gc_trace_count(heap->freed_blocks - before_blocks);
+        kiln_c99_gc_trace_text(" blocks (");
+        kiln_c99_gc_trace_count(heap->freed_bytes - before_bytes);
+        kiln_c99_gc_trace_text(" bytes), ");
+        kiln_c99_gc_trace_count((uint64_t)heap->count);
+        kiln_c99_gc_trace_text(" blocks (");
+        kiln_c99_gc_trace_count((uint64_t)heap->bytes);
+        kiln_c99_gc_trace_text(heap->mark_failed
+                                   ? " bytes) live (marking ran out of memory; nothing freed)\n"
+                                   : " bytes) live\n");
+    }
+    heap->collecting = 0;
+}
+
+static void kiln_c99_gc_teardown_begin(void *opaque) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    if (heap == NULL || heap->fallback) return;
+    heap->collecting = 1;
+    kiln_c99_gc_begin(heap);
+}
+
+static void kiln_c99_gc_teardown_end(void *opaque) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    if (heap == NULL || heap->fallback) return;
+    kiln_c99_gc_drain(heap);
+    if (heap->mark_failed) {
+        /* Orphan everything rather than free a block a survivor root still names. */
+        ++heap->epoch;
+        if (heap->epoch == 0) ++heap->epoch;
+        for (kiln_gc_block *block = heap->head; block != NULL; block = block->next)
+            block->mark = heap->epoch;
+    }
+    kiln_c99_gc_sweep(heap, 1);
+    if (heap->trace) {
+        kiln_c99_gc_trace_text("kiln gc: teardown after ");
+        kiln_c99_gc_trace_count(heap->collections);
+        kiln_c99_gc_trace_text(" collections, ");
+        kiln_c99_gc_trace_count(heap->freed_blocks);
+        kiln_c99_gc_trace_text(" blocks (");
+        kiln_c99_gc_trace_count(heap->freed_bytes);
+        kiln_c99_gc_trace_text(" bytes) freed in total\n");
+    }
+    free(heap->table);
+    free(heap->stack);
+    free(heap);
+}
+
+static void kiln_c99_gc_hook_mark_value(void *opaque, const void *value) {
+    kiln_c99_gc_mark_value((kiln_gc_heap *)opaque, (const kiln_value *)value);
+}
+
+static void kiln_c99_gc_hook_mark_block(void *opaque, void *payload) {
+    kiln_c99_gc_mark_block((kiln_gc_heap *)opaque, payload);
+}
+
+static const kiln_gc_hooks kiln_c99_gc_hooks = {
+    KILN_GC_HOOKS_VERSION,
+    (uint32_t)sizeof(kiln_gc_hooks),
+    kiln_c99_gc_collect,
+    kiln_c99_gc_teardown_begin,
+    kiln_c99_gc_teardown_end,
+    kiln_c99_gc_hook_mark_value,
+    kiln_c99_gc_hook_mark_block,
+};
+
+/* A borrowed result slot: marked during collection and again at teardown, so the value a caller
+ * reads after `kiln_realm_destroy` is never freed by it (ADR 0034's borrowed-result contract). */
+static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
+    if (phase == KILN_GC_PHASE_RESET || context == NULL) return;
+    kiln_c99_gc_mark_value((kiln_gc_heap *)opaque, (const kiln_value *)context);
+}
+
+/* Allocation helpers for the kinds whose bytes are the value: strings and raw byte payloads. */
+static char *kiln_c99_gc_alloc_text(size_t len) {
+    return (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len == 0 ? 1 : len);
+}
+
 static int kiln_c99_new_object(kiln_value *out) {
-    kiln_object *object = (kiln_object *)malloc(sizeof *object);
+    kiln_object *object = (kiln_object *)kiln_c99_gc_alloc(KILN_GC_OBJECT, sizeof *object);
     if (object == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -3696,13 +4418,6 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->frozen = 0;
     object->module_namespace = 0;
     object->arguments_brand = 0;
-    {
-        int owned = kiln_realm_own_object(object, kiln_c99_drop_object);
-        if (owned != KILN_C99_OK) {
-            kiln_c99_drop_object(object);
-            return owned;
-        }
-    }
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -7380,12 +8095,6 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value) {
     return (kiln_closure *)(uintptr_t)value.bits;
 }
 
-static void kiln_c99_drop_closure(void *pointer) {
-    kiln_closure *closure = (kiln_closure *)pointer;
-    if (closure == NULL) return;
-    free(closure->upvalues);
-    free(closure);
-}
 
 static kiln_value *kiln_c99_cell_of(kiln_value value) {
     return (kiln_value *)(uintptr_t)value.bits;
@@ -7394,7 +8103,7 @@ static kiln_value *kiln_c99_cell_of(kiln_value value) {
 /* Turn a slot into a box in place.  Whatever the slot already held becomes the box's first
  * contents, which is what makes `let x = 1;` followed by a closure over `x` see the 1. */
 static int kiln_c99_make_cell(kiln_value *slot) {
-    kiln_value *box = (kiln_value *)malloc(sizeof *box);
+    kiln_value *box = (kiln_value *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *box);
     if (box == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
@@ -7427,7 +8136,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
                                  uint32_t handler_depth, uint32_t prologue_resume,
                                  const kiln_value *captured,
                                  uint32_t count) {
-    kiln_closure *closure = (kiln_closure *)malloc(sizeof *closure);
+    kiln_closure *closure = (kiln_closure *)kiln_c99_gc_alloc(KILN_GC_CLOSURE, sizeof *closure);
     kiln_value *upvalues = NULL;
     uint32_t index;
     if (closure == NULL) {
@@ -7436,7 +8145,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     if (count != 0) {
         upvalues = (kiln_value *)malloc((size_t)count * sizeof *upvalues);
         if (upvalues == NULL) {
-            free(closure);
+            kiln_c99_gc_release(closure);
             return KILN_C99_OUT_OF_MEMORY;
         }
         for (index = 0; index < count; ++index) {
@@ -7479,13 +8188,6 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->proto = proto;
     closure->upvalue_count = count;
     closure->upvalues = upvalues;
-    {
-        int owned = kiln_realm_own_closure(closure, kiln_c99_drop_closure);
-        if (owned != KILN_C99_OK) {
-            kiln_c99_drop_closure(closure);
-            return owned;
-        }
-    }
     *out = kiln_c99_function(closure);
     return KILN_C99_OK;
 }
@@ -8061,7 +8763,7 @@ static int kiln_c99_truthy(kiln_value value) {
 }
 
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
-    char *copy = (char *)malloc(len == 0 ? 1 : len);
+    char *copy = kiln_c99_gc_alloc_text(len);
     if (copy == NULL) {
         return kiln_c99_undefined();
     }
@@ -8454,7 +9156,7 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
         l.len > (size_t)-1 - r.len) {
         return kiln_c99_undefined();
     }
-    copy = (char *)malloc((l.len + r.len) == 0 ? 1 : l.len + r.len);
+    copy = kiln_c99_gc_alloc_text(l.len + r.len);
     if (copy == NULL) {
         return kiln_c99_undefined();
     }
@@ -24160,6 +24862,40 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
     return KILN_C99_OK;
 }
 
+/* This unit's own roots (ADR 0041): the symbols it made, the intrinsic prototypes it filled in
+ * lazily, and the call-transient statics, which are marked rather than cleared so a stale read
+ * after a collection still names live memory. Module-scope slots are marked by the emitted root
+ * function that calls this. At teardown the statics are reset, because a later realm in the same
+ * process must not find the previous realm's freed objects in them. */
+static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    size_t index;
+    size_t constructors = sizeof kiln_c99_native_constructors / sizeof *kiln_c99_native_constructors;
+    (void)context;
+    if (phase == KILN_GC_PHASE_RESET) {
+        free(kiln_c99_symbols);
+        kiln_c99_symbols = NULL;
+        kiln_c99_symbol_count = 0;
+        kiln_c99_symbol_capacity = 0;
+        for (index = 0; index < constructors; ++index)
+            kiln_c99_native_constructors[index].prototype = kiln_c99_undefined();
+        kiln_c99_new_target = kiln_c99_undefined();
+        kiln_c99_adopted_this = kiln_c99_undefined();
+        kiln_c99_captured_arguments = kiln_c99_undefined();
+        kiln_c99_frame_arguments_object = kiln_c99_undefined();
+        kiln_c99_frame_callee = kiln_c99_undefined();
+        return;
+    }
+    if (phase != KILN_GC_PHASE_MARK) return;
+    kiln_c99_gc_mark_values(heap, kiln_c99_symbols, kiln_c99_symbol_count);
+    for (index = 0; index < constructors; ++index)
+        kiln_c99_gc_mark_value(heap, &kiln_c99_native_constructors[index].prototype);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_new_target);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_adopted_this);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_captured_arguments);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_frame_arguments_object);
+    kiln_c99_gc_mark_value(heap, &kiln_c99_frame_callee);
+}
 
 "#,
 );
@@ -24196,6 +24932,7 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_symbol_count", C99StateOwner::Realm),
     ("kiln_c99_symbol_capacity", C99StateOwner::Realm),
     ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
+    ("kiln_c99_gc_fallback", C99StateOwner::TestFixture),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25577,6 +26314,25 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
     }
 }
 
+/// The root function this unit registers with the realm (ADR 0041): its module-scope slots,
+/// when it has them, and the prelude statics every unit owns a copy of.
+fn render_unit_roots(output: &mut String, symbol: &str, module_scope: bool, local_count: u32) {
+    writeln!(
+        output,
+        "static void {symbol}_gc_roots(void *heap, void *context, int phase) {{"
+    )
+    .unwrap();
+    if module_scope {
+        writeln!(
+            output,
+            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((kiln_gc_heap *)heap, {symbol}_globals, {});",
+            usize::try_from(local_count).unwrap().max(1)
+        )
+        .unwrap();
+    }
+    output.push_str("    kiln_c99_gc_unit_roots(heap, context, phase);\n}\n");
+}
+
 fn render_scalar_realm_wrapper(output: &mut String, symbol: &str) {
     writeln!(
         output,
@@ -25585,6 +26341,11 @@ typedef struct {symbol}_realm_context {{
     kiln_host *host;
     kiln_value *result;
 }} {symbol}_realm_context;
+
+static int {symbol}_gc_result_entry(void *result) {{
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}}
 
 static int {symbol}_realm_entry(void *opaque) {{
     {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
@@ -25602,6 +26363,8 @@ int {symbol}(kiln_host *host, kiln_value *result) {{
     context.host = host;
     context.result = result;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, {symbol}_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, {symbol}_realm_entry, &context);
     if (status == KILN_C99_OK)
@@ -25631,6 +26394,11 @@ typedef struct {symbol}_realm_context {{
     kiln_value *exports;
     size_t export_count;
 }} {symbol}_realm_context;
+
+static int {symbol}_gc_result_entry(void *result) {{
+    return kiln_realm_gc_register_roots(kiln_c99_gc_result_roots, result,
+                                        KILN_GC_ROOT_SURVIVES_TEARDOWN);
+}}
 
 static int {symbol}_realm_entry(void *opaque) {{
     {symbol}_realm_context *context = ({symbol}_realm_context *)opaque;
@@ -25678,6 +26446,8 @@ int {symbol}(kiln_host *host, kiln_value *result, const kiln_value *imports,
     context.exports = exports;
     context.export_count = export_count;
     status = kiln_realm_create(&realm);
+    if (status == KILN_C99_OK)
+        status = kiln_realm_enter(realm, {symbol}_gc_result_entry, result);
     if (status == KILN_C99_OK)
         status = kiln_realm_enter(realm, {symbol}_realm_entry, &context);
     if (status == KILN_C99_OK)
@@ -25888,6 +26658,12 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         )
         .unwrap();
     }
+    render_unit_roots(
+        &mut output,
+        symbol,
+        uses_module_scope(program),
+        program.local_count,
+    );
     render_functions(
         &mut output,
         program,
@@ -25903,6 +26679,11 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    writeln!(
+        output,
+        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
+    )
+    .unwrap();
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -26021,6 +26802,12 @@ fn render_module(
         )
         .unwrap();
     }
+    render_unit_roots(
+        &mut output,
+        symbol,
+        uses_module_scope(program),
+        program.local_count,
+    );
     render_functions(
         &mut output,
         program,
@@ -26036,6 +26823,11 @@ fn render_module(
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n");
+    writeln!(
+        output,
+        "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
+    )
+    .unwrap();
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -29390,18 +30182,6 @@ static kiln_value kiln_test_value_slots[3];
 static uint64_t kiln_test_entropy_seed = 0;
 static uint64_t kiln_test_entropy_state = 0;
 static int kiln_test_entropy_initialized = 0;
-static void *kiln_test_owned_pointers[4096];
-static kiln_drop_opaque_fn kiln_test_owned_drops[4096];
-static size_t kiln_test_owned_count = 0;
-static int kiln_test_implicit_realm = 0;
-
-static void kiln_test_drop_owned(void) {
-    size_t index;
-    for (index = kiln_test_owned_count; index != 0; --index) {
-        kiln_test_owned_drops[index - 1](kiln_test_owned_pointers[index - 1]);
-    }
-    kiln_test_owned_count = 0;
-}
 
 int kiln_realm_create(uint64_t *out_realm) {
     if (out_realm == NULL) return KILN_C99_INVALID_ARGUMENT;
@@ -29425,7 +30205,6 @@ int kiln_realm_drive(uint64_t realm, void *host, void *thrown) {
 }
 int kiln_realm_destroy(uint64_t realm) {
     if (realm != 1 || kiln_test_realm_active) return KILN_C99_INVALID_ARGUMENT;
-    kiln_test_drop_owned();
     return KILN_C99_OK;
 }
 /* Here rather than beside the other provider stubs, because its argument is a struct the runtime
@@ -29522,22 +30301,22 @@ int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word) {
     *out_word = mixed ^ (mixed >> 31);
     return KILN_C99_OK;
 }
-int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer) {
-    if (pointer == NULL || drop_pointer == NULL) {
-        return KILN_C99_INVALID_ARGUMENT;
-    }
-    if (!kiln_test_realm_active && !kiln_test_implicit_realm) {
-        if (atexit(kiln_test_drop_owned) != 0) return KILN_C99_OUT_OF_MEMORY;
-        kiln_test_implicit_realm = 1;
-    }
-    if (kiln_test_owned_count == 4096) return KILN_C99_OUT_OF_MEMORY;
-    kiln_test_owned_pointers[kiln_test_owned_count] = pointer;
-    kiln_test_owned_drops[kiln_test_owned_count] = drop_pointer;
-    ++kiln_test_owned_count;
+int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
+    /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
+    (void)hooks;
+    (void)candidate;
+    if (out_heap != NULL) *out_heap = NULL;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags) {
+    (void)roots;
+    (void)context;
+    (void)flags;
     return KILN_C99_OK;
 }
-int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer) {
-    return kiln_realm_own_closure(pointer, drop_pointer);
+int kiln_realm_gc_mark_roots(void *heap) {
+    (void)heap;
+    return KILN_C99_OK;
 }
 int kiln_realm_now(double *out_milliseconds) {
     if (!kiln_test_realm_active || out_milliseconds == NULL) {

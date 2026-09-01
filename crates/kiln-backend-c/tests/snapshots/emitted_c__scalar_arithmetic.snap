@@ -3,8 +3,12 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
 /* Program hash: b0b5c9783ec30bc3; bytecode version: 2. */
+static void kiln_module_b0b5c9783ec30bc31af37e91c7fc00d6_gc_roots(void *heap, void *context, int phase) {
+    kiln_c99_gc_unit_roots(heap, context, phase);
+}
 int kiln_module_b0b5c9783ec30bc31af37e91c7fc00d6(kiln_host *host, kiln_value *result) {
     size_t sp = 0;
+    (void)kiln_realm_gc_register_roots(kiln_module_b0b5c9783ec30bc31af37e91c7fc00d6_gc_roots, NULL, 0);
     kiln_value stack[2];
     kiln_value locals[2];
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;

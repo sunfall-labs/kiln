@@ -535,8 +535,11 @@ typedef void (*kiln_drop_opaque_fn)(void *pointer);
 extern int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
 extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
-extern int kiln_realm_own_closure(void *pointer, kiln_drop_opaque_fn drop_pointer);
-extern int kiln_realm_own_object(void *pointer, kiln_drop_opaque_fn drop_pointer);
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+typedef struct kiln_gc_hooks {
+extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_mark_roots(void *heap);
 struct kiln_closure;
 struct kiln_generator;
 typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
@@ -932,10 +935,50 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
 done:
 static kiln_value kiln_c99_undefined(void) {
 static kiln_object *kiln_c99_object_of(kiln_value value) {
-static void kiln_c99_drop_object(void *pointer) {
 static kiln_array *kiln_c99_array_of(kiln_value value) {
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
+typedef enum kiln_gc_kind {
+#define KILN_GC_PHASE_MARK 0
+#define KILN_GC_PHASE_TEARDOWN 1
+#define KILN_GC_PHASE_RESET 2
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_HOOKS_VERSION 1u
+#define KILN_GC_DEFAULT_FLOOR ((size_t)8 * 1024 * 1024)
+typedef struct kiln_gc_block {
+typedef struct kiln_gc_heap {
+static const kiln_gc_hooks kiln_c99_gc_hooks;
+static kiln_gc_heap kiln_c99_gc_fallback;
+static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
+static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
+static void kiln_c99_gc_trace_count(uint64_t count) {
+static kiln_gc_heap *kiln_c99_gc_heap(void) {
+static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
+static int kiln_c99_gc_table_grow(kiln_gc_heap *heap, size_t wanted) {
+static int kiln_c99_gc_table_insert(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *block) {
+static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
+static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
+static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_gc_finalize(kiln_gc_block *block);
+static void kiln_c99_gc_release(void *payload) {
+static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
+static void kiln_c99_gc_mark_value(kiln_gc_heap *heap, const kiln_value *value) {
+static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values,
+static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
+static void kiln_c99_gc_finalize(kiln_gc_block *block) {
+static void kiln_c99_gc_drain(kiln_gc_heap *heap) {
+static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
+static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
+static void kiln_c99_gc_collect(void *opaque, int force) {
+static void kiln_c99_gc_teardown_begin(void *opaque) {
+static void kiln_c99_gc_teardown_end(void *opaque) {
+static void kiln_c99_gc_hook_mark_value(void *opaque, const void *value) {
+static void kiln_c99_gc_hook_mark_block(void *opaque, void *payload) {
+static const kiln_gc_hooks kiln_c99_gc_hooks = {
+static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
+static char *kiln_c99_gc_alloc_text(size_t len) {
 static int kiln_c99_new_object(kiln_value *out) {
 static int kiln_c99_new_abort_signal(kiln_value *out) {
 static int kiln_c99_new_abort_controller(kiln_value *out) {
@@ -1068,7 +1111,6 @@ static kiln_value kiln_c99_null(void) {
 static kiln_value kiln_c99_boolean(int value) {
 static kiln_value kiln_c99_function(kiln_closure *closure) {
 static kiln_closure *kiln_c99_closure_of(kiln_value value) {
-static void kiln_c99_drop_closure(void *pointer) {
 static kiln_value *kiln_c99_cell_of(kiln_value value) {
 static int kiln_c99_make_cell(kiln_value *slot) {
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
@@ -1327,3 +1369,4 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {

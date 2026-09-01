@@ -51,7 +51,7 @@ static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const PRIVATE_ASYNC_ABI_VERSION: u32 = 4;
+const PRIVATE_ASYNC_ABI_VERSION: u32 = 5;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
@@ -3346,6 +3346,44 @@ fn write_graph_namespace_build(
     .unwrap();
 }
 
+/// The graph launcher's root function (ADR 0041): the export, import and namespace arrays it
+/// links with, and the two result slots `main` reads after the realm is destroyed.
+fn render_graph_roots(
+    output: &mut String,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+) {
+    output.push_str(
+        "static void kiln_graph_gc_roots(void *heap, void *context, int phase) {\n    kiln_graph_context *graph = (kiln_graph_context *)context;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET) return;\n",
+    );
+    for (index, (node, _)) in modules.iter().enumerate() {
+        let export_count = native_graph_export_count(node);
+        if export_count != 0 {
+            writeln!(
+                output,
+                "    for (index = 0; index < (size_t){export_count}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_exports_{index}[index]);"
+            )
+            .unwrap();
+        }
+        if !node.program.imports.is_empty() {
+            writeln!(
+                output,
+                "    for (index = 0; index < (size_t){}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_imports_{index}[index]);",
+                node.program.imports.len()
+            )
+            .unwrap();
+        }
+    }
+    writeln!(
+        output,
+        "    for (index = 0; index < (size_t){}; ++index) (void)kiln_realm_gc_mark_value(heap, &kiln_namespaces[index]);",
+        modules.len()
+    )
+    .unwrap();
+    output.push_str(
+        "    if (graph != NULL) {\n        (void)kiln_realm_gc_mark_value(heap, &graph->result);\n        (void)kiln_realm_gc_mark_value(heap, &graph->entry_result);\n    }\n}\n",
+    );
+}
+
 fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -3443,6 +3481,12 @@ extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
+extern int kiln_realm_gc_mark_value(void *heap, const void *value);
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_PHASE_RESET 2
 "#,
     );
     for (_, module) in modules {
@@ -3607,7 +3651,11 @@ typedef struct kiln_graph_context {
     kiln_value result;
     kiln_value entry_result;
 } kiln_graph_context;
-
+"#,
+    );
+    render_graph_roots(&mut output, modules);
+    output.push_str(
+        r#"
 static int kiln_graph_enter(void *opaque) {
     kiln_graph_context *graph = (kiln_graph_context *)opaque;
     kiln_graph_entry_context context;
@@ -3615,6 +3663,8 @@ static int kiln_graph_enter(void *opaque) {
     kiln_value *result;
     int status = 0;
     if (graph == NULL) return -1;
+    status = kiln_realm_gc_register_roots(kiln_graph_gc_roots, graph, KILN_GC_ROOT_SURVIVES_TEARDOWN);
+    if (status != 0) return status;
     host = &graph->host;
     result = &graph->result;
 "#,
@@ -3966,6 +4016,48 @@ const kiln_module_api_v2 *{api_symbol}(void) {{
     )
 }
 
+/// The embedding wrapper's root function (ADR 0041): the link arrays its body allocates, for as
+/// long as they exist, and the module result slot the body writes into.
+fn render_shared_wrapper_roots(
+    output: &mut String,
+    modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    wrapper_symbol: &str,
+) {
+    writeln!(
+        output,
+        "\ntypedef struct {wrapper_symbol}_gc_context {{\n    kiln_value **imports;\n    kiln_value **exports;\n    kiln_value *namespaces;\n    kiln_value *result;\n}} {wrapper_symbol}_gc_context;"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static const size_t {wrapper_symbol}_gc_import_counts[{}] = {{{}}};",
+        modules.len().max(1),
+        modules
+            .iter()
+            .map(|(node, _)| node.program.imports.len().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static const size_t {wrapper_symbol}_gc_export_counts[{}] = {{{}}};",
+        modules.len().max(1),
+        modules
+            .iter()
+            .map(|(node, _)| native_graph_export_count(node).to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "static void {wrapper_symbol}_gc_roots(void *heap, void *context, int phase) {{\n    {wrapper_symbol}_gc_context *roots = ({wrapper_symbol}_gc_context *)context;\n    size_t module;\n    size_t index;\n    if (phase == KILN_GC_PHASE_RESET || roots == NULL) return;\n    for (module = 0; module < (size_t){count}; ++module) {{\n        if (roots->imports != NULL && roots->imports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_import_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->imports[module][index]);\n        if (roots->exports != NULL && roots->exports[module] != NULL)\n            for (index = 0; index < {wrapper_symbol}_gc_export_counts[module]; ++index)\n                (void)kiln_realm_gc_mark_value(heap, &roots->exports[module][index]);\n        if (roots->namespaces != NULL) (void)kiln_realm_gc_mark_value(heap, &roots->namespaces[module]);\n    }}\n    if (roots->result != NULL) (void)kiln_realm_gc_mark_value(heap, roots->result);\n}}",
+        count = modules.len()
+    )
+    .unwrap();
+}
+
 fn graph_shared_wrapper_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
@@ -4005,6 +4097,12 @@ extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
+typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
+extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
+extern int kiln_realm_gc_unregister_roots(kiln_gc_roots_fn roots, void *context);
+extern int kiln_realm_gc_mark_value(void *heap, const void *value);
+#define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
+#define KILN_GC_PHASE_RESET 2
 extern int kiln_realm_is_active(void);
 
 typedef int (*kiln_graph_module_fn)(kiln_host *host, kiln_value *result,
@@ -4201,9 +4299,10 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             "    if (thrown != NULL) *thrown = specifier;\n    return KILN_C99_HOST_ERROR;\n}\n",
         );
     }
+    render_shared_wrapper_roots(&mut output, modules, wrapper_symbol);
     writeln!(
         output,
-        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;",
+        "\nstatic int {wrapper_symbol}_body(kiln_host *proxy_host, kiln_value *result) {{\n    kiln_value **import_arrays = NULL;\n    kiln_value **export_arrays = NULL;\n    kiln_value *namespaces = NULL;\n    kiln_commonjs_context *commonjs_modules = NULL;\n    kiln_commonjs_graph_context commonjs_graph;\n    {wrapper_symbol}_gc_context gc_context;\n    kiln_value module_result;\n    int status = KILN_C99_OK;\n    size_t index;\n    if (result == NULL || proxy_host == NULL) return KILN_C99_INVALID_ARGUMENT;\n    commonjs_graph = (kiln_commonjs_graph_context){{ NULL, NULL, (size_t){count} }};\n    *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    if ((size_t){count} > (size_t)-1 / sizeof(*import_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*export_arrays) ||\n        (size_t){count} > (size_t)-1 / sizeof(*namespaces) ||\n        (size_t){count} > (size_t)-1 / sizeof(*commonjs_modules)) {{\n        status = KILN_C99_HOST_ERROR;\n        goto cleanup;\n    }}\n    import_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*import_arrays));\n    export_arrays = (kiln_value **)calloc((size_t){count}, sizeof(*export_arrays));\n    namespaces = (kiln_value *)calloc((size_t){count}, sizeof(*namespaces));\n    commonjs_modules = (kiln_commonjs_context *)calloc((size_t){count}, sizeof(*commonjs_modules));\n    if (import_arrays == NULL || export_arrays == NULL || namespaces == NULL || commonjs_modules == NULL) {{ status = KILN_C99_HOST_ERROR; goto cleanup; }}\n    commonjs_graph.modules = commonjs_modules;\n    commonjs_graph.exports = export_arrays;\n    gc_context.imports = import_arrays;\n    gc_context.exports = export_arrays;\n    gc_context.namespaces = namespaces;\n    gc_context.result = &module_result;\n    module_result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};\n    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_roots, &gc_context, 0);\n    if (status != KILN_C99_OK) goto cleanup;",
         wrapper_symbol = wrapper_symbol,
         count = modules.len(),
     )
@@ -4300,7 +4399,13 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
             output.push_str("    if (status != KILN_C99_OK) goto cleanup;\n");
         }
     }
-    output.push_str("cleanup:\n    for (index = 0; index < (size_t)");
+    output.push_str("cleanup:\n");
+    writeln!(
+        output,
+        "    (void)kiln_realm_gc_unregister_roots({wrapper_symbol}_gc_roots, &gc_context);"
+    )
+    .unwrap();
+    output.push_str("    for (index = 0; index < (size_t)");
     write!(output, "{}; ++index) {{\n        free(import_arrays == NULL ? NULL : import_arrays[index]);\n        free(export_arrays == NULL ? NULL : export_arrays[index]);\n    }}\n    free(import_arrays);\n    free(export_arrays);\n    free(namespaces);\n    free(commonjs_modules);\n    return status;\n}}\n", modules.len()).unwrap();
     writeln!(
         output,
@@ -4312,9 +4417,18 @@ typedef struct {wrapper_symbol}_realm_context {{
     kiln_host proxy_host;
 }} {wrapper_symbol}_realm_context;
 
+static void {wrapper_symbol}_gc_result_roots(void *heap, void *context, int phase) {{
+    if (phase == KILN_GC_PHASE_RESET || context == NULL) return;
+    (void)kiln_realm_gc_mark_value(heap, context);
+}}
+
 static int {wrapper_symbol}_realm_entry(void *opaque) {{
     {wrapper_symbol}_realm_context *context = ({wrapper_symbol}_realm_context *)opaque;
+    int status;
     if (context == NULL) return KILN_C99_INVALID_ARGUMENT;
+    status = kiln_realm_gc_register_roots({wrapper_symbol}_gc_result_roots, context->result,
+                                          KILN_GC_ROOT_SURVIVES_TEARDOWN);
+    if (status != KILN_C99_OK) return status;
     return {wrapper_symbol}_body(&context->proxy_host, context->result);
 }}
 
@@ -5317,7 +5431,7 @@ mod tests {
                  makes two different ABIs hash alike and every cached artifact is then suspect"
             );
         }
-        assert!(runtime_abi_identity().contains("async-4"));
+        assert!(runtime_abi_identity().contains("async-5"));
         // Same reasoning as above, and the same history: this pin was 14, then 15, then 18, and
         // is 22 as this is written -- all on one day, all intended, none caught by being pinned.
         // What matters is that the provider's version reaches the identity at all: if it did not,
