@@ -850,6 +850,24 @@ fn run<E: QueryEngine>(
     }
 }
 
+/// What `process.argv` reports for an interpreted run, in node's spelling: the executable that
+/// is running, then the entry it was pointed at.
+///
+/// A natively compiled program answers the same question with the same two slots, but both hold
+/// its own path -- there is no separate interpreter and no script file, which is the single
+/// executable convention. Either way `process.argv[2..]` is where the program's own arguments
+/// begin, and `kiln run` takes none, so here it is always empty.
+///
+/// `current_exe` can fail on an exotic host. The entry path is still worth reporting when it
+/// does, so the executable slot falls back to the name every launcher of this program has:
+/// leaving both slots off would move the entry to index 0 and shift what a program reads.
+pub(crate) fn interpreted_argv(path: &str) -> Vec<String> {
+    let executable = std::env::current_exe()
+        .map(|exe| exe.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "kiln".to_owned());
+    vec![executable, path.to_owned()]
+}
+
 fn execute_graph(
     graph: Result<Arc<ModuleGraph>, kiln_module_graph::ModuleGraphError>,
     path: String,
@@ -858,10 +876,11 @@ fn execute_graph(
     node: bool,
     limits: kiln_interpreter::ExecutionLimits,
 ) -> Response {
-    let capabilities = kiln_conformance::source_compiler_capability();
+    let capabilities =
+        kiln_conformance::source_compiler_capability().with_argv(interpreted_argv(&path));
     let mut host = kiln_runtime::CaptureHost::new();
     let result = match graph {
-        Ok(graph) if node => graph.execute_node(&mut host, limits, capabilities),
+        Ok(graph) if node => graph.execute_node(&mut host, limits, capabilities.clone()),
         Ok(graph) => graph.execute(&mut host, limits, capabilities),
         Err(error) => Err(error),
     };

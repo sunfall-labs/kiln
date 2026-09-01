@@ -1187,7 +1187,7 @@ impl ModuleGraph {
             runtime: &mut runtime as *mut _,
             node_session: &mut node_session as *mut _,
             limits,
-            capabilities,
+            capabilities: capabilities.clone(),
             node,
         };
 
@@ -1354,7 +1354,7 @@ impl ModuleGraph {
                     remaining_limits,
                     &mut runtime,
                     node_session.as_mut().expect("Node mode owns a session"),
-                    capabilities,
+                    capabilities.clone(),
                     path == &self.entry,
                     &mut commonjs_loader,
                     true,
@@ -1367,7 +1367,7 @@ impl ModuleGraph {
                     host,
                     remaining_limits,
                     &mut runtime,
-                    capabilities,
+                    capabilities.clone(),
                     &mut commonjs_loader,
                     true,
                 )
@@ -1581,7 +1581,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     (&mut *self.node_session)
                         .as_mut()
                         .expect("Node mode owns a session"),
-                    self.capabilities,
+                    self.capabilities.clone(),
                     is_entry,
                     self,
                     enter_runtime,
@@ -1594,7 +1594,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     &mut *self.host,
                     remaining_limits,
                     &mut *self.runtime,
-                    self.capabilities,
+                    self.capabilities.clone(),
                     self,
                     enter_runtime,
                 )

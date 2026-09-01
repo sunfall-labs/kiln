@@ -51,7 +51,7 @@ static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const PRIVATE_ASYNC_ABI_VERSION: u32 = 4;
+const PRIVATE_ASYNC_ABI_VERSION: u32 = 5;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
@@ -3441,6 +3441,7 @@ extern int kiln_cli_write_result(kiln_value value);
 extern void kiln_cli_report_failure(int status, kiln_value value);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
+extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
 "#,
@@ -3750,7 +3751,7 @@ static int kiln_graph_enter(void *opaque) {
     }
     output.push_str(&evaluation);
     output.push_str(
-        "    return 0;\n}\n\nint main(void) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
+        "    return 0;\n}\n\n/* argc/argv reach the realm before it is entered, so the first `process` a module builds\n * already has the command line. The strings are copied on the other side of this call. */\nint main(int argc, char **argv) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0 && argc > 0)\n        status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);\n    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
     );
     Ok(output)
 }
@@ -5317,9 +5318,9 @@ mod tests {
                  makes two different ABIs hash alike and every cached artifact is then suspect"
             );
         }
-        assert!(runtime_abi_identity().contains("async-4"));
+        assert!(runtime_abi_identity().contains("async-5"));
         // Same reasoning as above, and the same history: this pin was 14, then 15, then 18, and
-        // is 22 as this is written -- all on one day, all intended, none caught by being pinned.
+        // is 23 as this is written -- all intended, none caught by being pinned.
         // What matters is that the provider's version reaches the identity at all: if it did not,
         // an archive built before an ABI change would keep being linked against emitted C that
         // expects the change, which is exactly the "undefined symbols from a stale archive"
@@ -7412,6 +7413,78 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         assert_eq!(
             run.stdout,
             b"entry body\ndependency microtask\ndependency timer\n"
+        );
+    }
+
+    /// A compiled binary is a single-executable application in node's sense, so it reports the
+    /// command line the way node does for one: `argv[0]` and `argv[1]` both name the executable,
+    /// and the program's own arguments start at index 2. That is not a cosmetic choice -- every
+    /// argument-reading program, and `const [, , first] = process.argv`, counts from there, and a
+    /// one-element argv would silently hand each of them the wrong argument.
+    ///
+    /// Run through `Command` rather than `run_graph`, because the whole question is what the OS
+    /// put in `main`'s `argv` and there is no other way to put anything there.
+    #[test]
+    fn native_process_argv_reports_the_single_executable_command_line() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native process.argv integration: no C compiler found");
+            return;
+        };
+        let project = TestDirectory::new("kiln-native-process-argv");
+        let entry = project.path.join("main.mjs");
+        fs::write(
+            &entry,
+            r#"console.log(JSON.stringify([
+  process.argv.length,
+  process.argv[0] === process.argv[1],
+  process.execPath === process.argv[0],
+  process.argv.slice(2),
+]));
+"#,
+        )
+        .expect("write process.argv fixture");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&project.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("process.argv source compiles");
+        let output = project.path.join("program");
+        NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+            .build_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: output.clone(),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("process.argv graph builds natively");
+
+        let bare = std::process::Command::new(&output)
+            .output()
+            .expect("run the compiled program");
+        assert_eq!(bare.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&bare.stdout),
+            "[2,true,true,[]]\n",
+            "stderr: {}",
+            String::from_utf8_lossy(&bare.stderr)
+        );
+
+        let passed = std::process::Command::new(&output)
+            .args(["a", "b", "c"])
+            .output()
+            .expect("run the compiled program with arguments");
+        assert_eq!(passed.status.code(), Some(0));
+        assert_eq!(
+            String::from_utf8_lossy(&passed.stdout),
+            "[5,true,true,[\"a\",\"b\",\"c\"]]\n",
+            "stderr: {}",
+            String::from_utf8_lossy(&passed.stderr)
         );
     }
 
@@ -9579,7 +9652,9 @@ int main(void) {{
             })
             .collect::<Vec<_>>();
         let launcher = graph_launcher_source(&first_graph, &first_modules).expect("launcher emits");
-        let main = launcher.find("int main(void)").expect("launcher has main");
+        let main = launcher
+            .find("int main(int argc, char **argv)")
+            .expect("launcher has main");
         assert!(launcher[..main].contains("static kiln_value kiln_exports_"));
         assert!(launcher[..main].contains("static kiln_value kiln_imports_"));
         assert!(!launcher[main..].contains("kiln_value kiln_exports_"));
