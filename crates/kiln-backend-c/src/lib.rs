@@ -1050,6 +1050,7 @@ method_ids! {
     (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR, 158, Generic),
     (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS, 159, Generic),
     (KILN_C99_METHOD_OBJECT_IS, 185, Generic),
+    (KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING, 196, Generic),
     (KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE, 186, Generic),
     (KILN_C99_METHOD_REFLECT_OWN_KEYS, 187, Generic),
     (KILN_C99_METHOD_REFLECT_GET, 188, Generic),
@@ -1662,6 +1663,7 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_HAS_OWN_PROPERTY),
     emit_method_define!(KILN_C99_METHOD_OBJECT_TO_STRING),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING),
     emit_method_define!(KILN_C99_METHOD_OBJECT_VALUE_OF),
     r#"
 /* Map and Set. `size` is a property rather than a method, so it is answered by the read. */
@@ -5123,6 +5125,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_DATE_PARSE: return "parse";
     case KILN_C99_METHOD_HAS_OWN_PROPERTY: return "hasOwnProperty";
     case KILN_C99_METHOD_OBJECT_TO_STRING: return "toString";
+    case KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING: return "toLocaleString";
     case KILN_C99_METHOD_OBJECT_VALUE_OF: return "valueOf";
     case KILN_C99_METHOD_COLLECTION_GET: return "get";
     case KILN_C99_METHOD_COLLECTION_SET: return "set";
@@ -5951,13 +5954,25 @@ static const kiln_value *kiln_c99_frame_args;
 static size_t kiln_c99_frame_argc;
 static kiln_value kiln_c99_captured_arguments;
 static int kiln_c99_frame_is_arrow;
+/* The one `arguments` object this call has handed out, built on first mention and undefined
+ * until then.
+ *
+ * `arguments` names a single object per call, not a snapshot: `arguments[0] = 1` has to be
+ * visible to the next read of `arguments`, and `arguments === arguments` is true. Materialising
+ * a fresh array per mention made both false, and every definition made on one was discarded by
+ * the statement after it. Still built lazily, so a call nothing asks it of pays nothing. */
+static kiln_value kiln_c99_frame_arguments_object;
 
-/* The `arguments` this frame can see: an arrow's captured list, or this call's own. */
+/* The `arguments` this frame can see: an arrow's captured object, or this call's own. */
 static int kiln_c99_visible_arguments(kiln_value *out) {
     size_t at;
     int status;
     if (kiln_c99_frame_is_arrow) {
         *out = kiln_c99_captured_arguments;
+        return KILN_C99_OK;
+    }
+    if (kiln_c99_frame_arguments_object.tag == KILN_VALUE_ARRAY) {
+        *out = kiln_c99_frame_arguments_object;
         return KILN_C99_OK;
     }
     status = kiln_c99_new_array(out);
@@ -5970,6 +5985,7 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
             return status;
         }
     }
+    kiln_c99_frame_arguments_object = *out;
     return KILN_C99_OK;
 }
 
@@ -7025,6 +7041,9 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             return 0;
         }
+        if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
+            return KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING;
+        }
         if (kiln_c99_same_name(key, key_len, "isPrototypeOf")) {
             return KILN_C99_METHOD_IS_PROTOTYPE_OF;
         }
@@ -7297,6 +7316,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     const kiln_value *saved_args = kiln_c99_frame_args;
     size_t saved_argc = kiln_c99_frame_argc;
     kiln_value saved_captured = kiln_c99_captured_arguments;
+    kiln_value saved_arguments_object = kiln_c99_frame_arguments_object;
     int saved_is_arrow = kiln_c99_frame_is_arrow;
     int saved_diagnostic_depth = kiln_c99_diagnostic_active_depth;
     int status;
@@ -7305,6 +7325,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
             closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
     }
     kiln_c99_frame_is_arrow = closure->arrow;
+    kiln_c99_frame_arguments_object = kiln_c99_undefined();
     if (closure->arrow) {
         kiln_c99_captured_arguments = closure->captured_arguments;
     } else {
@@ -7335,6 +7356,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     kiln_c99_frame_args = saved_args;
     kiln_c99_frame_argc = saved_argc;
     kiln_c99_captured_arguments = saved_captured;
+    kiln_c99_frame_arguments_object = saved_arguments_object;
     kiln_c99_frame_is_arrow = saved_is_arrow;
     kiln_c99_diagnostic_active_depth = saved_diagnostic_depth;
     return status;
@@ -9230,6 +9252,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                      ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                                  : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
                                      ? KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE
+                                 : kiln_c99_same_name(key, key_len, "toLocaleString")
+                                     ? KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING
                                      : kiln_c99_lookup_method(key, key_len,
                                                               KILN_C99_METHOD_HAS_OWN_PROPERTY,
                                                               KILN_C99_METHOD_OBJECT_VALUE_OF);
@@ -16292,6 +16316,25 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
         case KILN_C99_METHOD_FINALLY: {
             kiln_value on_fulfilled = kiln_c99_undefined();
             kiln_value on_rejected = kiln_c99_undefined();
+            /* `catch(r)` is `Invoke(this, "then", [undefined, r])` -- literally, including the
+             * read -- so a thenable that is not a promise is handled by its *own* `then`, and a
+             * subclass that overrides `then` has that one run. Only `catch` delegates: `then`
+             * itself needs a promise to attach a reaction to, and `finally` needs a pair of
+             * closures over the receiver that this backend has no way to make for a thenable. */
+            if (code == KILN_C99_METHOD_CATCH && receiver.tag != KILN_VALUE_PROMISE) {
+                kiln_value method;
+                kiln_value forwarded[2];
+                status = kiln_c99_get(host, receiver, "then", 4, &method, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (!kiln_c99_is_callable(method)) {
+                    return kiln_c99_throw_not_a(thrown, method, "function");
+                }
+                forwarded[0] = kiln_c99_undefined();
+                forwarded[1] = argc > 0 ? args[0] : kiln_c99_undefined();
+                return kiln_c99_call(host, result, method, receiver, forwarded, 2, depth, thrown);
+            }
             /* `Promise.prototype.then.call({})` has no promise to attach a reaction to. The
              * interpreter reports this against the receiver, and the two are compared byte for
              * byte, so the same sentence is built here. */
@@ -16948,10 +16991,36 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
             *result = kiln_c99_value(KILN_VALUE_STRING, 0, built.bytes, built.len);
             return KILN_C99_OK;
         }
+        case KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING: {
+            /* `Invoke(ToObject(this), "toString")`, not the tag itself: a class that overrides
+             * `toString` for display is the whole reason the method exists. It was not in this
+             * table at all, so `({}).toLocaleString()` was a TypeError about `undefined` -- a
+             * missing name reported as a missing function. */
+            kiln_value method;
+            if (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert undefined or null to object");
+            }
+            status = kiln_c99_get(host, receiver, "toString", 8, &method, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            return kiln_c99_call(host, result, method, receiver, NULL, 0, depth, thrown);
+        }
         case KILN_C99_METHOD_OBJECT_VALUE_OF:
-            /* Returns the receiver unchanged, which is the identity that makes ToPrimitive fall
-             * through to `toString` for a plain object -- and the right answer for a primitive,
-             * which is already what it converts to. */
+            /* The receiver unchanged, which is the identity that makes ToPrimitive fall through
+             * to `toString` for a plain object.
+             *
+             * `ToObject(this)` says a primitive receiver answers with its *box*, and there is no
+             * wrapper object in this backend to hand back. It cannot be refused here either: a
+             * primitive's own `valueOf` -- `"abc".valueOf()` -- is routed to this code rather
+             * than to the string one, so refusing would refuse that too. The only way to reach
+             * `Object.prototype.valueOf` with a primitive is through `.call`, which this backend
+             * refuses on a method receiver already, so the difference is not reachable here. */
+            if (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Cannot convert undefined or null to object");
+            }
             *result = receiver;
             return KILN_C99_OK;
         case KILN_C99_METHOD_PRIMITIVE_TO_STRING:
@@ -17910,8 +17979,20 @@ static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t 
                 flag = &kiln_c99_object_of(closure->properties)->frozen;
             }
             if (flag == NULL) {
+                /* A built-in -- `Object`, `Math`, `JSON`, `Array.prototype.push` -- is an object
+                 * whose properties are writable and configurable, so it is not frozen and there
+                 * is nowhere to record that it became so. It shares this arm with the primitives
+                 * only because neither keeps a store; answering `true` for it said the realm's
+                 * own namespaces could not be changed, which every one of them can. */
+                int is_object = subject.tag == KILN_VALUE_BUILTIN ||
+                                subject.tag == KILN_VALUE_METHOD ||
+                                subject.tag == KILN_VALUE_GENERATOR ||
+                                subject.tag == KILN_VALUE_SETTLER ||
+                                subject.tag == KILN_VALUE_TEMPORAL ||
+                                subject.tag == KILN_VALUE_COMMONJS_REQUIRE;
                 /* A primitive has nothing to freeze and is already as frozen as it gets. */
-                *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject : kiln_c99_boolean(1);
+                *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject
+                                                                : kiln_c99_boolean(!is_object);
                 return KILN_C99_OK;
             }
             if (code == KILN_C99_METHOD_OBJECT_FREEZE) {
@@ -19912,6 +19993,44 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     }
     if (status != KILN_C99_OK) {
         return status;
+    }
+    if (target.tag == KILN_VALUE_ARRAY) {
+        /* An array index is an element, not a name. The store below holds `a.total = 1`; putting
+         * a definition of `"0"` there recorded a property nothing reads, so
+         * `Object.defineProperty(a, "0", { value: 10 })` returned the array unchanged and
+         * `a[0]` still answered what it had -- a silent wrong answer, and the shape
+         * `arguments` reaches through every ES5 test that redefines a parameter slot.
+         *
+         * Only the definition an element can actually carry is accepted. There is no per-element
+         * attribute table here, so a definition that would make one non-writable, hidden or
+         * non-configurable, or turn it into an accessor, is refused by name rather than written
+         * as an ordinary element that lies about its own flags. */
+        double at = kiln_c99_key_index(key, key_len);
+        if (at >= 0.0) {
+            kiln_array *array = kiln_c99_array_of(target);
+            size_t slot = (size_t)at;
+            size_t fill;
+            if (has_getter || has_setter || !has_value || array->frozen ||
+                (has_writable && !kiln_c99_truthy(writable)) ||
+                (has_enumerable && !kiln_c99_truthy(enumerable)) ||
+                (has_configurable && !kiln_c99_truthy(configurable))) {
+                return KILN_C99_CONTROL_ERROR;
+            }
+            status = kiln_c99_reserve((void **)&array->elements, &array->capacity, slot + 1,
+                                      sizeof *array->elements);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            /* Growing leaves holes, which read as undefined and are not the same thing. */
+            for (fill = array->count; fill < slot; ++fill) {
+                array->elements[fill] = kiln_c99_hole();
+            }
+            array->elements[slot] = value;
+            if (slot + 1 > array->count) {
+                array->count = slot + 1;
+            }
+            return KILN_C99_OK;
+        }
     }
     status = kiln_c99_definition_store(target, &store);
     if (status != KILN_C99_OK) {
@@ -23719,6 +23838,7 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_frame_args", C99StateOwner::Frame),
     ("kiln_c99_frame_argc", C99StateOwner::Frame),
     ("kiln_c99_captured_arguments", C99StateOwner::Frame),
+    ("kiln_c99_frame_arguments_object", C99StateOwner::Frame),
     ("kiln_c99_frame_is_arrow", C99StateOwner::Frame),
     ("kiln_c99_symbols", C99StateOwner::Realm),
     ("kiln_c99_symbol_count", C99StateOwner::Realm),
