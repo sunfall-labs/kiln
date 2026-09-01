@@ -6174,21 +6174,35 @@ pub enum EvalCompileError {
 /// function pointer over owned data -- and a host that installs none simply has no `eval`.
 pub type SourceCompiler = fn(&EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError>;
 
-thread_local! {
-    /// Per thread rather than per VM, because it is a property of the *build* -- which frontend
-    /// this process was linked with -- and not of any one execution. A `Cell` of a function
-    /// pointer costs nothing to read, which matters because every `eval` reads it.
-    static SOURCE_COMPILER: std::cell::Cell<Option<SourceCompiler>> =
-        const { std::cell::Cell::new(None) };
+/// Language-engine capabilities selected explicitly for one execution realm.
+///
+/// Environmental values remain [`RealmCapabilities`] owned by `kiln-runtime`. This companion
+/// keeps compiler/linker implementation types out of that scheduler crate while making their
+/// authority just as explicit. The default realm cannot compile source at run time.
+#[derive(Clone, Copy, Default)]
+pub struct ExecutionCapabilities {
+    source_compiler: Option<SourceCompiler>,
+    module_loader: Option<ModuleLoader>,
 }
 
-/// Give this thread's VMs a compiler, so `eval` and `Function` can build programs at run time.
-pub fn install_source_compiler(compiler: SourceCompiler) {
-    SOURCE_COMPILER.with(|slot| slot.set(Some(compiler)));
-}
+impl ExecutionCapabilities {
+    pub const fn with_source_compiler(mut self, compiler: SourceCompiler) -> Self {
+        self.source_compiler = Some(compiler);
+        self
+    }
 
-fn source_compiler() -> Option<SourceCompiler> {
-    SOURCE_COMPILER.with(std::cell::Cell::get)
+    pub const fn source_compiler(self) -> Option<SourceCompiler> {
+        self.source_compiler
+    }
+
+    pub const fn with_module_loader(mut self, loader: ModuleLoader) -> Self {
+        self.module_loader = Some(loader);
+        self
+    }
+
+    pub const fn module_loader(self) -> Option<ModuleLoader> {
+        self.module_loader
+    }
 }
 
 /// One module a dynamic import has to evaluate, compiled and linked by the host.
@@ -6257,26 +6271,11 @@ pub enum ModuleLoadError {
 /// interpreter is downstream of the bytecode and has no filesystem, no parser and no linker.
 /// A host that installs none simply has no `import()`, and says so rather than answering.
 ///
-/// The specifier arrives already coerced to a string. The referrer does not arrive at all: a
-/// compiled program does not carry the path it came from, so a host that needs one has to know
-/// where it put the program.
+/// The specifier arrives already coerced to a string. This temporary function-pointer contract
+/// carries no referrer; a filesystem-backed loader must not emulate one with ambient state. The
+/// referrer-aware service object that replaces this is part of the remaining module-realm kernel
+/// migration.
 pub type ModuleLoader = fn(&str) -> Result<ModulePlan, ModuleLoadError>;
-
-thread_local! {
-    /// Per thread for the same reason [`SOURCE_COMPILER`] is: which linker this process was
-    /// built with is a property of the build, not of any one execution.
-    static MODULE_LOADER: std::cell::Cell<Option<ModuleLoader>> =
-        const { std::cell::Cell::new(None) };
-}
-
-/// Give this thread's VMs a module loader, so `import()` can reach a module at run time.
-pub fn install_module_loader(loader: ModuleLoader) {
-    MODULE_LOADER.with(|slot| slot.set(Some(loader)));
-}
-
-fn module_loader() -> Option<ModuleLoader> {
-    MODULE_LOADER.with(std::cell::Cell::get)
-}
 
 /// Whether a program reads or writes module scope through the frame stack.
 ///
@@ -6944,7 +6943,7 @@ impl fmt::Display for ExecutionError {
             Self::FrozenArray => write!(formatter, "cannot change the length of a frozen array"),
             Self::NoSourceCompiler => write!(
                 formatter,
-                "no source compiler is installed, so `eval` and `Function` cannot compile at run time"
+                "this realm has no source compiler capability, so `eval` and `Function` cannot compile at run time"
             ),
             Self::NoModuleLoader => write!(
                 formatter,
@@ -7273,9 +7272,10 @@ pub fn execute<H: HostOps + ?Sized>(
     program: Rc<Program>,
     host: &mut H,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
     let strictness = Rc::new(Strictness::sloppy(&program));
-    execute_with_strictness(program, strictness, host, limits)
+    execute_with_strictness(program, strictness, host, limits, capabilities)
 }
 
 /// [`execute`], told which of the program's bodies the compiler compiled as strict code.
@@ -7288,9 +7288,17 @@ pub fn execute_with_strictness<H: HostOps + ?Sized>(
     strictness: Rc<Strictness>,
     host: &mut H,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = realm_runtime()?;
-    execute_in_runtime_with_strictness(program, strictness, host, limits, &mut runtime)
+    execute_in_runtime_with_strictness(
+        program,
+        strictness,
+        host,
+        limits,
+        &mut runtime,
+        capabilities,
+    )
 }
 
 /// Execute one script under a caller-owned realm runtime.
@@ -7304,6 +7312,7 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
@@ -7313,6 +7322,7 @@ pub fn execute_in_runtime_with_strictness<H: HostOps + ?Sized>(
         locals,
         limits,
         runtime.capabilities(),
+        capabilities,
     )?;
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
@@ -7340,9 +7350,10 @@ pub fn execute_node<H: HostOps + ?Sized>(
     program: Rc<Program>,
     host: &mut H,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
     let strictness = Rc::new(Strictness::sloppy(&program));
-    execute_node_with_strictness(program, strictness, host, limits)
+    execute_node_with_strictness(program, strictness, host, limits, capabilities)
 }
 
 /// [`execute_node`], told which of the program's bodies are strict code.
@@ -7351,9 +7362,17 @@ pub fn execute_node_with_strictness<H: HostOps + ?Sized>(
     strictness: Rc<Strictness>,
     host: &mut H,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
     let mut runtime = realm_runtime()?;
-    execute_node_in_runtime_with_strictness(program, strictness, host, limits, &mut runtime)
+    execute_node_in_runtime_with_strictness(
+        program,
+        strictness,
+        host,
+        limits,
+        &mut runtime,
+        capabilities,
+    )
 }
 
 /// Execute one Node script under a caller-owned realm runtime and capability policy.
@@ -7363,6 +7382,7 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
@@ -7372,6 +7392,7 @@ pub fn execute_node_in_runtime_with_strictness<H: HostOps + ?Sized>(
         locals,
         limits,
         runtime.capabilities(),
+        capabilities,
     )?;
     vm.async_host = Some(runtime as *mut RealmRuntime as *mut dyn ActiveAsyncHostOps);
     vm.http_runtime = Some(runtime as *mut RealmRuntime as *mut dyn ActiveHttpRuntime);
@@ -7396,9 +7417,10 @@ pub fn execute_reclaiming<H: HostOps + ?Sized>(
     program: Rc<Program>,
     host: &mut H,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
 ) -> Result<u64, ExecutionError> {
     let strictness = Rc::new(Strictness::sloppy(&program));
-    execute_reclaiming_with_strictness(program, strictness, host, limits)
+    execute_reclaiming_with_strictness(program, strictness, host, limits, capabilities)
 }
 
 /// [`execute_reclaiming`], told which of the program's bodies are strict code.
@@ -7407,9 +7429,17 @@ pub fn execute_reclaiming_with_strictness<H: HostOps + ?Sized>(
     strictness: Rc<Strictness>,
     host: &mut H,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
 ) -> Result<u64, ExecutionError> {
     let mut runtime = realm_runtime()?;
-    execute_reclaiming_in_runtime_with_strictness(program, strictness, host, limits, &mut runtime)
+    execute_reclaiming_in_runtime_with_strictness(
+        program,
+        strictness,
+        host,
+        limits,
+        &mut runtime,
+        capabilities,
+    )
 }
 
 /// Execute and reclaim one independent script on a caller-owned runtime.
@@ -7429,6 +7459,7 @@ pub fn execute_reclaiming_in_runtime_with_strictness<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
 ) -> Result<u64, ExecutionError> {
     let locals = vec![Value::Undefined; program.local_count as usize];
     let mut vm = Vm::with_entropy_seed(
@@ -7438,6 +7469,7 @@ pub fn execute_reclaiming_in_runtime_with_strictness<H: HostOps + ?Sized>(
         locals,
         limits,
         runtime.capabilities(),
+        capabilities,
     )?;
     // A Script's `this` is the global object, and in strict code too: strictness governs what a
     // *function* receives when called without a receiver, not what a script body's `this` is.
@@ -7727,9 +7759,17 @@ pub fn execute_module<H: HostOps + ?Sized>(
     import_values: &[Value],
     host: &mut H,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     let mut runtime = realm_runtime()?;
-    execute_module_in_runtime(module, import_values, host, limits, &mut runtime)
+    execute_module_in_runtime(
+        module,
+        import_values,
+        host,
+        limits,
+        &mut runtime,
+        capabilities,
+    )
 }
 
 /// Execute one linked module under a caller-owned Realm Runtime.
@@ -7743,8 +7783,17 @@ pub fn execute_module_in_runtime<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
-    execute_module_in_runtime_mode(module, import_values, host, limits, runtime, false)
+    execute_module_in_runtime_mode(
+        module,
+        import_values,
+        host,
+        limits,
+        runtime,
+        capabilities,
+        false,
+    )
 }
 
 /// Execute one module while allowing graph-owned CommonJS targets to load on demand.
@@ -7756,6 +7805,7 @@ pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
     loader: &mut dyn CommonJsModuleLoader,
     enter_runtime: bool,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
@@ -7766,6 +7816,7 @@ pub fn execute_module_in_runtime_with_loader<H: HostOps + ?Sized>(
         host,
         limits,
         runtime,
+        capabilities,
         None,
         Some(loader),
         enter_runtime,
@@ -7783,6 +7834,7 @@ pub fn execute_node_module_in_runtime<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     let mut session = ModuleRealmSession::default();
     execute_node_module_in_session(
@@ -7792,6 +7844,7 @@ pub fn execute_node_module_in_runtime<H: HostOps + ?Sized>(
         limits,
         runtime,
         &mut session,
+        capabilities,
         true,
     )
 }
@@ -7804,6 +7857,7 @@ pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
     session: &mut ModuleRealmSession,
+    capabilities: ExecutionCapabilities,
     drain: bool,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     execute_module_in_runtime_mode_with_session(
@@ -7813,6 +7867,7 @@ pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
         host,
         limits,
         runtime,
+        capabilities,
         Some((session, drain)),
         None,
         true,
@@ -7829,6 +7884,7 @@ pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
     session: &mut ModuleRealmSession,
+    capabilities: ExecutionCapabilities,
     drain: bool,
     loader: &mut dyn CommonJsModuleLoader,
     enter_runtime: bool,
@@ -7840,6 +7896,7 @@ pub fn execute_node_module_in_session_with_loader<H: HostOps + ?Sized>(
         host,
         limits,
         runtime,
+        capabilities,
         Some((session, drain)),
         Some(loader),
         enter_runtime,
@@ -7852,6 +7909,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
     host: &mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
     node: bool,
 ) -> Result<ModuleExecutionResult, ExecutionError> {
     if node {
@@ -7863,6 +7921,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             host,
             limits,
             runtime,
+            capabilities,
             Some((&mut session, true)),
             None,
             true,
@@ -7875,6 +7934,7 @@ fn execute_module_in_runtime_mode<H: HostOps + ?Sized>(
             host,
             limits,
             runtime,
+            capabilities,
             None,
             None,
             true,
@@ -7890,6 +7950,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
     host: &'host mut H,
     limits: ExecutionLimits,
     runtime: &mut RealmRuntime,
+    capabilities: ExecutionCapabilities,
     session: Option<(&mut ModuleRealmSession, bool)>,
     commonjs_loader: Option<&'host mut dyn CommonJsModuleLoader>,
     enter_runtime: bool,
@@ -8012,6 +8073,7 @@ fn execute_module_in_runtime_mode_with_session<'host, H: HostOps + ?Sized>(
         locals,
         limits,
         runtime.capabilities(),
+        capabilities,
     )?;
     vm.self_bindings = self_bindings;
     vm.self_namespaces = self_namespaces;
@@ -8556,6 +8618,10 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// versioned boundary.
     timezone: String,
     default_locale: String,
+    /// Runtime source compilation is explicit realm authority, absent unless the caller selects
+    /// a compiler. It is copied into each short-lived module VM from the graph session policy.
+    source_compiler: Option<SourceCompiler>,
+    module_loader: Option<ModuleLoader>,
     /// Promise state waiting for a Tokio-owned host request, keyed by opaque request identity.
     pending_host: Vec<PendingHostRequest>,
     /// Persistent Node resource requests routed to provider-neutral server/stream drivers.
@@ -8699,6 +8765,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         locals: Vec<Value>,
         limits: ExecutionLimits,
         capabilities: &RealmCapabilities,
+        execution: ExecutionCapabilities,
     ) -> Result<Self, ExecutionError> {
         let timezone = resolve_timezone(host, &capabilities.timezone)?;
         let default_locale = resolve_locale(host, &capabilities.locale)?;
@@ -8732,6 +8799,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             clock_capability: capabilities.clock,
             timezone,
             default_locale,
+            source_compiler: execution.source_compiler(),
+            module_loader: execution.module_loader(),
             pending_host: Vec::new(),
             pending_node: Vec::new(),
             node_servers: Vec::new(),
@@ -30369,7 +30438,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// which is the whole of what "evaluates in the caller's scope" means. Without one, this is
     /// an indirect eval: global scope, the global object as `this`, and no arguments.
     fn enter_eval(&mut self, source: &str, site: Option<&EvalSite>) -> Result<(), ExecutionError> {
-        let Some(compile) = source_compiler() else {
+        let Some(compile) = self.source_compiler else {
             return Err(ExecutionError::NoSourceCompiler);
         };
         // Strict either because the caller is -- which only the compiler knew, so the site
@@ -30536,7 +30605,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// it cannot host the request at all, which is not something to tell the program -- a
     /// rejection would look to it exactly like a module that failed.
     fn import_module(&mut self, specifier: &str) -> Result<Result<Value, Value>, ExecutionError> {
-        let Some(load) = module_loader() else {
+        let Some(load) = self.module_loader else {
             return Err(ExecutionError::NoModuleLoader);
         };
         let plan = match load(specifier) {
@@ -42752,6 +42821,7 @@ mod tests {
             Vec::new(),
             ExecutionLimits::default(),
             &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
         )
         .expect("realm capabilities resolve");
         assert_eq!(
@@ -42864,6 +42934,7 @@ mod tests {
             Vec::new(),
             ExecutionLimits::default(),
             &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
         )
         .expect("realm capabilities resolve");
         assert_eq!(
@@ -42983,6 +43054,7 @@ mod tests {
             Rc::new(program.clone()),
             &mut host,
             ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
         )
         .map(|result| result.value)
     }
@@ -42995,6 +43067,7 @@ mod tests {
             vec![Value::Undefined; program.local_count as usize],
             ExecutionLimits::default(),
             &RealmCapabilities::default(),
+            ExecutionCapabilities::default(),
         )
         .expect("realm capabilities resolve")
     }
@@ -43026,6 +43099,7 @@ mod tests {
                 clock: ClockCapability::Host,
                 ..RealmCapabilities::default()
             },
+            ExecutionCapabilities::default(),
         )
         .expect("realm capabilities resolve");
 
@@ -43111,6 +43185,7 @@ mod tests {
                 locale: LocaleCapability::Host,
                 ..RealmCapabilities::default()
             },
+            ExecutionCapabilities::default(),
         )
         .expect("host capabilities resolve");
 
@@ -43151,6 +43226,7 @@ mod tests {
                 locale: LocaleCapability::Named("fr-fr".into()),
                 ..RealmCapabilities::default()
             },
+            ExecutionCapabilities::default(),
         )
         .expect("named capabilities resolve");
 
@@ -43192,6 +43268,7 @@ mod tests {
                 entropy: EntropyCapability::Host,
                 ..RealmCapabilities::default()
             },
+            ExecutionCapabilities::default(),
         )
         .expect("realm capabilities resolve");
 
@@ -43237,6 +43314,7 @@ mod tests {
                     entropy: EntropyCapability::Seeded(7),
                     ..RealmCapabilities::default()
                 },
+                ExecutionCapabilities::default(),
             )
             .expect("realm capabilities resolve");
             vm.dispatch_native(Native::MathRandom, &Value::Undefined, &[], 0)
@@ -43691,7 +43769,6 @@ mod tests {
     /// caller afterwards. A copy would leave the caller reading 1 and look entirely plausible.
     #[test]
     fn a_direct_eval_writes_through_to_the_callers_binding() {
-        install_source_compiler(stub_eval_compiler);
         let mut program = program(
             vec![
                 Constant::Number(1.0f64.to_bits()),
@@ -43718,7 +43795,74 @@ mod tests {
             ],
         );
         program.local_count = 1;
-        assert_eq!(run(&program), Ok(Value::Number(2.0)));
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
+        };
+        let mut runtime = realm_runtime().expect("realm runtime");
+        let result = execute_in_runtime_with_strictness(
+            Rc::new(program.clone()),
+            Rc::new(Strictness::sloppy(&program)),
+            &mut host,
+            ExecutionLimits::default(),
+            &mut runtime,
+            ExecutionCapabilities::default().with_source_compiler(stub_eval_compiler),
+        )
+        .map(|execution| execution.value);
+        assert_eq!(result, Ok(Value::Number(2.0)));
+    }
+
+    #[test]
+    fn source_compiler_authority_is_scoped_to_one_execution() {
+        fn constant_compiler(
+            _request: &EvalSource<'_>,
+        ) -> Result<(Program, Strictness), EvalCompileError> {
+            Ok((
+                program(
+                    vec![Constant::Number(42.0f64.to_bits())],
+                    vec![Instruction::Const(0), Instruction::Return],
+                ),
+                Strictness::default(),
+            ))
+        }
+
+        let invoking_eval = program(
+            vec![Constant::String("ignored".to_owned())],
+            vec![
+                Instruction::LoadBuiltin(kiln_ir::Builtin::Eval),
+                Instruction::Const(0),
+                Instruction::Call { argc: 1 },
+                Instruction::Return,
+            ],
+        );
+        let run_with = |capabilities| {
+            let mut host = TestHost {
+                calls: Vec::new(),
+                clock_now: None,
+                entropy: std::collections::VecDeque::new(),
+                timezone: None,
+                locale: None,
+            };
+            execute(
+                Rc::new(invoking_eval.clone()),
+                &mut host,
+                ExecutionLimits::default(),
+                capabilities,
+            )
+            .map(|result| result.value)
+        };
+
+        assert_eq!(
+            run_with(ExecutionCapabilities::default().with_source_compiler(constant_compiler)),
+            Ok(Value::Number(42.0))
+        );
+        assert!(matches!(
+            run_with(ExecutionCapabilities::default()),
+            Err(ExecutionError::NoSourceCompiler)
+        ));
     }
 
     /// A directive prologue decides an eval's strictness, and an escaped spelling is not one.
@@ -44675,7 +44819,12 @@ mod tests {
         // Reported as a thrown `RangeError`, which nothing here catches, rather than as a
         // fatal status: the bound is still enforced, and a program that wants to survive its own
         // recursion can now write the `try` that does it.
-        let outcome = execute(Rc::new(program.clone()), &mut host, limits);
+        let outcome = execute(
+            Rc::new(program.clone()),
+            &mut host,
+            limits,
+            ExecutionCapabilities::default(),
+        );
         assert!(
             matches!(&outcome, Err(ExecutionError::Uncaught { message, .. })
                 if message.contains("Maximum call stack size exceeded")),
@@ -44925,6 +45074,7 @@ mod tests {
             Rc::new(program.clone()),
             &mut host,
             ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
         )
         .unwrap();
         assert_eq!(result.value, Value::Number(5.0));
@@ -44979,6 +45129,7 @@ mod tests {
             Rc::new(program.clone()),
             &mut host,
             ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
         )
         .unwrap();
         assert_eq!(result.value, Value::Number(2.0));
@@ -45014,6 +45165,7 @@ mod tests {
             Rc::new(program.clone()),
             &mut host,
             ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
         )
         .unwrap();
         assert_eq!(result.value, Value::String("left".into()));
@@ -45044,6 +45196,7 @@ mod tests {
             Rc::new(program.clone()),
             &mut host,
             ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
         )
         .unwrap();
         assert_eq!(host.calls.len(), 1);
@@ -45069,6 +45222,7 @@ mod tests {
                 max_steps: 3,
                 ..ExecutionLimits::default()
             },
+            ExecutionCapabilities::default(),
         )
         .unwrap_err();
         assert_eq!(
@@ -45124,6 +45278,7 @@ mod tests {
             &[Value::Number(21.0)],
             &mut host,
             ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
         )
         .expect("module executes");
 
@@ -45705,6 +45860,7 @@ mod tests {
             Rc::new(program.clone()),
             &mut host,
             ExecutionLimits::default(),
+            ExecutionCapabilities::default(),
         )
         .expect("runs");
         host.lines.join(",")

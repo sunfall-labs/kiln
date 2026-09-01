@@ -8,7 +8,8 @@
 use std::rc::Rc;
 
 use kiln_interpreter::{
-    ExecutionError, ExecutionLimits, execute_reclaiming_in_runtime_with_strictness,
+    ExecutionCapabilities, ExecutionError, ExecutionLimits,
+    execute_reclaiming_in_runtime_with_strictness,
 };
 use kiln_ir::{Program, Strictness};
 use kiln_runtime::{CaptureHost, RealmRuntime, RuntimeBuildError};
@@ -63,6 +64,7 @@ impl InterpreterWorker {
         strictness: Rc<Strictness>,
         host: &mut CaptureHost,
         limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
     ) -> Result<u64, ExecutionError> {
         assert!(
             self.is_reusable(),
@@ -75,6 +77,7 @@ impl InterpreterWorker {
             host,
             limits,
             &mut self.runtime,
+            capabilities,
         );
         self.reusable = true;
         self.completed_executions = self.completed_executions.saturating_add(1);

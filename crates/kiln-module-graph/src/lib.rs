@@ -14,12 +14,12 @@ use std::sync::Arc;
 use kiln_hir::Module;
 use kiln_host_abi::HostOps;
 use kiln_interpreter::{
-    Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionError, ExecutionLimits, ExecutionResult,
-    ModuleBinding, ModulePlan, ModuleRealmSession, ModuleSelfExport, ModuleSelfImport,
-    ModuleValueRef, PlannedModule, Value, execute_module_in_runtime_with_loader,
-    execute_node_module_in_session_with_loader, node_builtin_commonjs_value,
-    node_builtin_export_names, node_builtin_exports, ordinary_object, own_data_property,
-    parse_json_module, read_through_cell,
+    Cell, CommonJsModuleLoader, CommonJsRequire, ExecutionCapabilities, ExecutionError,
+    ExecutionLimits, ExecutionResult, ModuleBinding, ModulePlan, ModuleRealmSession,
+    ModuleSelfExport, ModuleSelfImport, ModuleValueRef, PlannedModule, Value,
+    execute_module_in_runtime_with_loader, execute_node_module_in_session_with_loader,
+    node_builtin_commonjs_value, node_builtin_export_names, node_builtin_exports, ordinary_object,
+    own_data_property, parse_json_module, read_through_cell,
 };
 use kiln_ir::{
     BYTECODE_VERSION, CompileDiagnostic, ExportBinding, Instruction, ModuleProgram, Program,
@@ -850,8 +850,9 @@ impl ModuleGraph {
         &self,
         host: &mut H,
         limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
     ) -> Result<ExecutionResult, ModuleGraphError> {
-        self.execute_mode(host, limits, false)
+        self.execute_mode(host, limits, capabilities, false)
     }
 
     /// Turn this graph into the plan one `import()` needs, with the entry as the module asked for.
@@ -1013,14 +1014,16 @@ impl ModuleGraph {
         &self,
         host: &mut H,
         limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
     ) -> Result<ExecutionResult, ModuleGraphError> {
-        self.execute_mode(host, limits, true)
+        self.execute_mode(host, limits, capabilities, true)
     }
 
     fn execute_mode<H: HostOps + ?Sized>(
         &self,
         host: &mut H,
         limits: ExecutionLimits,
+        capabilities: ExecutionCapabilities,
         node: bool,
     ) -> Result<ExecutionResult, ModuleGraphError> {
         let mut values: HashMap<PathBuf, HashMap<String, Value>> = HashMap::new();
@@ -1081,6 +1084,7 @@ impl ModuleGraph {
             runtime: &mut runtime as *mut _,
             node_session: &mut node_session as *mut _,
             limits,
+            capabilities,
             node,
         };
 
@@ -1217,6 +1221,7 @@ impl ModuleGraph {
                     remaining_limits,
                     &mut runtime,
                     node_session.as_mut().expect("Node mode owns a session"),
+                    capabilities,
                     path == &self.entry,
                     &mut commonjs_loader,
                     true,
@@ -1229,6 +1234,7 @@ impl ModuleGraph {
                     host,
                     remaining_limits,
                     &mut runtime,
+                    capabilities,
                     &mut commonjs_loader,
                     true,
                 )
@@ -1320,6 +1326,7 @@ struct CommonJsLoader<'graph, H: HostOps + ?Sized> {
     runtime: *mut RealmRuntime,
     node_session: *mut Option<ModuleRealmSession>,
     limits: ExecutionLimits,
+    capabilities: ExecutionCapabilities,
     node: bool,
 }
 
@@ -1433,6 +1440,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     (&mut *self.node_session)
                         .as_mut()
                         .expect("Node mode owns a session"),
+                    self.capabilities,
                     is_entry,
                     self,
                     enter_runtime,
@@ -1445,6 +1453,7 @@ impl<H: HostOps + ?Sized> CommonJsLoader<'_, H> {
                     &mut *self.host,
                     remaining_limits,
                     &mut *self.runtime,
+                    self.capabilities,
                     self,
                     enter_runtime,
                 )
@@ -2274,7 +2283,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute dual package graph");
         assert_eq!(host.output, ["import require"]);
     }
@@ -2311,7 +2324,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute shared-realm graph");
         assert_eq!(
             host.output,
@@ -2400,7 +2417,11 @@ mod tests {
         .expect("build mixed graph");
         let mut host = kiln_runtime::CaptureHost::new();
         let execution = graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute mixed graph");
         assert_eq!(host.into_stdout(), "42\n");
         assert_eq!(execution.value, Value::Undefined);
@@ -2424,7 +2445,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute top-level await graph");
         assert_eq!(host.into_stdout(), "module-ready\n");
     }
@@ -2451,7 +2476,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute dependency top-level await graph");
         assert_eq!(host.into_stdout(), "dep-before\ndep-after\n42\n");
     }
@@ -2478,7 +2507,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         let error = graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect_err("rejected dependency top-level await must stop the importer");
         assert!(matches!(
             error,
@@ -2505,7 +2538,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         let error = graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect_err("rejected top-level await must fail module evaluation");
         assert!(matches!(
             error,
@@ -2534,7 +2571,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute top-level for-await graph");
         assert_eq!(host.into_stdout(), "7\n");
     }
@@ -2565,7 +2606,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute builtin CommonJS graph");
         assert_eq!(host.into_stdout(), "true\n");
     }
@@ -2605,7 +2650,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute legacy URL/querystring graph");
         assert_eq!(
             host.into_stdout(),
@@ -2640,7 +2689,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute accessor-backed CommonJS graph");
         assert_eq!(host.into_stdout(), "42\n");
     }
@@ -2677,7 +2730,11 @@ mod tests {
 
         let mut host = TestHost::default();
         let execution = graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute relative CommonJS graph");
         assert_eq!(host.output, ["42"]);
         assert_eq!(execution.value, Value::Undefined);
@@ -2712,7 +2769,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute nested CommonJS graph");
         assert_eq!(host.output, ["42"]);
     }
@@ -2746,7 +2807,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute lazy CommonJS graph");
         assert_eq!(host.output, ["1"]);
     }
@@ -2780,7 +2845,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("JavaScript catches the missing require");
         assert_eq!(host.output, ["42"]);
     }
@@ -2808,7 +2877,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute cached CommonJS graph");
         assert_eq!(host.into_stdout(), "1\n");
     }
@@ -2833,7 +2906,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute captured CommonJS loader graph");
         assert_eq!(host.into_stdout(), "executed\n42\n");
     }
@@ -2861,7 +2938,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute mixed ESM/CommonJS graph");
         assert_eq!(host.output, ["42"]);
     }
@@ -2903,7 +2984,11 @@ mod tests {
 
         let mut host = kiln_runtime::CaptureHost::new();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute CommonJS cycle");
         assert_eq!(host.into_stdout(), "1 1 1 1\n");
     }
@@ -3074,7 +3159,11 @@ mod tests {
 
         let mut host = TestHost::default();
         let result = graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["42"]);
         assert!(result.steps > 0);
@@ -3109,7 +3198,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute package graph");
         assert_eq!(host.output, ["42"]);
     }
@@ -3155,7 +3248,11 @@ mod tests {
 
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute builtin imports");
         assert_eq!(host.output, ["function function readFile,stat,writeFile"]);
     }
@@ -3182,7 +3279,11 @@ mod tests {
         .expect("implemented builtin export links");
         let mut host = TestHost::default();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute typed node:net module");
         assert_eq!(host.output, ["[Function: nodeNetConnect]"]);
     }
@@ -3218,7 +3319,11 @@ mod tests {
 
         let mut deterministic_host = TestHost::default();
         let error = graph
-            .execute(&mut deterministic_host, ExecutionLimits::default())
+            .execute(
+                &mut deterministic_host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect_err("deterministic execution must not gain host I/O from an import");
         assert!(matches!(
             error,
@@ -3230,7 +3335,11 @@ mod tests {
 
         let mut node_host = TestHost::default();
         graph
-            .execute_node(&mut node_host, ExecutionLimits::default())
+            .execute_node(
+                &mut node_host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("explicit Node graph execution");
         assert_eq!(node_host.output, ["from tokio"]);
     }
@@ -3314,7 +3423,11 @@ mod tests {
             port_sender: Some(port_sender),
         };
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("serve live request");
         let response = client.join().expect("client thread");
         assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
@@ -3400,7 +3513,11 @@ mod tests {
             port_sender: Some(port_sender),
         };
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("serve options-form request");
         let response = client.join().expect("client thread");
         assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
@@ -3463,7 +3580,11 @@ mod tests {
             output: Vec::new(),
         };
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("serve identity request");
         let response = client.join().expect("client completes");
         assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
@@ -3553,7 +3674,11 @@ mod tests {
             port_sender: Some(port_sender),
         };
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("serve request body");
         let response = client.join().expect("client completes");
         assert_eq!(http_status(&response), "HTTP/1.1 201 Created");
@@ -3619,7 +3744,11 @@ mod tests {
             output: Vec::new(),
         };
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("serve paused request");
         let response = client.join().expect("client completes");
         assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
@@ -3681,7 +3810,11 @@ mod tests {
             output: Vec::new(),
         };
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("serve streaming response");
         let response = client.join().expect("client completes");
         assert_eq!(http_status(&response), "HTTP/1.1 200 OK");
@@ -3759,7 +3892,11 @@ mod tests {
         });
         let mut host = ServerHost(Some(port_sender));
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("run net server");
         assert_eq!(client.join().expect("client completes"), b"tokio net");
     }
@@ -3815,7 +3952,11 @@ mod tests {
         .expect("build net client graph");
         let mut host = TestHost::default();
         graph
-            .execute_node(&mut host, ExecutionLimits::default())
+            .execute_node(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("run net client");
         assert_eq!(peer.join().expect("peer completes"), *b"ping");
         assert_eq!(host.output, ["5"]);
@@ -3848,7 +3989,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["hi x", "7", "42", "default"]);
     }
@@ -3875,7 +4020,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["lib/constant main"]);
     }
@@ -3902,7 +4051,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["default,one,two", "1 2 zero"]);
     }
@@ -3931,7 +4084,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["a b delta alpha,beta,default"]);
     }
@@ -3972,7 +4129,11 @@ mod tests {
         );
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["a wide", "alpha,shared"]);
     }
@@ -4032,7 +4193,11 @@ mod tests {
         );
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute namespace import");
         assert_eq!(host.output, ["onlyA,onlyB", "1 2 undefined"]);
     }
@@ -4057,7 +4222,11 @@ mod tests {
             .expect("converging paths resolve to one binding");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute converging star graph");
         assert_eq!(host.output, ["42"]);
     }
@@ -4086,7 +4255,11 @@ mod tests {
         let graph = project.graph(&entry).expect("deep star chain links");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("deep star chain executes");
         assert_eq!(host.output, ["42"]);
     }
@@ -4117,7 +4290,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["0 10", "2 10"]);
     }
@@ -4143,7 +4320,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["0"]);
     }
@@ -4167,7 +4348,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["23 45 444", "24"]);
     }
@@ -4185,7 +4370,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         // `undefined` here would be the one answer worse than the refusal this replaced.
         assert_eq!(host.output, ["ReferenceError", "1"]);
@@ -4205,7 +4394,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         // A snapshot would print `1` twice. node prints this.
         assert_eq!(host.output, ["1", "2"]);
@@ -4222,7 +4415,11 @@ mod tests {
         let graph = project.graph(&entry).expect("build graph");
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["42"]);
     }
@@ -4242,7 +4439,11 @@ mod tests {
         );
         let mut host = TestHost::default();
         graph
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute graph");
         assert_eq!(host.output, ["dependency", "entry"]);
     }
@@ -4298,7 +4499,11 @@ mod tests {
         );
         let mut host = TestHost::default();
         patched
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute patched graph");
         assert_eq!(host.output, ["new", "7"]);
 
@@ -4354,13 +4559,21 @@ mod tests {
             .expect("second body edit can be patched");
         let mut host = TestHost::default();
         patched_both
-            .execute(&mut host, ExecutionLimits::default())
+            .execute(
+                &mut host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute both patched modules");
         assert_eq!(host.output, ["first new", "second new", "30"]);
 
         let mut original_host = TestHost::default();
         graph
-            .execute(&mut original_host, ExecutionLimits::default())
+            .execute(
+                &mut original_host,
+                ExecutionLimits::default(),
+                ExecutionCapabilities::default(),
+            )
             .expect("execute original graph");
         assert_eq!(original_host.output, ["first old", "second old", "3"]);
     }
@@ -4488,7 +4701,8 @@ mod tests {
                 ExecutionLimits {
                     max_steps: 1,
                     ..ExecutionLimits::default()
-                }
+                },
+                ExecutionCapabilities::default(),
             ),
             Err(ModuleGraphError::Execution {
                 error: ExecutionError::StepLimitExceeded { steps: 1, limit: 1 },

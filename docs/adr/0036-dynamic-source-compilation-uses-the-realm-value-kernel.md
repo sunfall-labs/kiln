@@ -56,7 +56,9 @@ A native realm has one of two source-code policies:
     source_compiler  unavailable (default) | injected(versioned compiler service)
 
 The default is inert and deterministic. Reaching `eval` or `Function` without the capability is an
-engine refusal, not a JavaScript `SyntaxError` and not an approximation. A Node-compatible realm
+engine refusal, not a JavaScript `SyntaxError` and not an approximation. Interpreter execution now
+enforces this with an `ExecutionCapabilities` value required by every public script, module and
+graph entry point; no ambient or thread-local compiler installer remains. A Node-compatible realm
 explicitly injects the service. The service uses the same Oxc frontend and Kiln IR compiler as the
 ordinary build, but neither dependency enters the value kernel or generated module ABI.
 

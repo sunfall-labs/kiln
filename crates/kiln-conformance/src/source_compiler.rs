@@ -8,15 +8,15 @@
 
 use frontend_oxc::parse_with_goal;
 use kiln_hir::SourceGoal;
-use kiln_interpreter::{EvalCompileError, EvalSource, install_source_compiler};
+use kiln_interpreter::{EvalCompileError, EvalSource, ExecutionCapabilities};
 use kiln_ir::{EvalOptions, Program, Strictness};
 
 /// Give this thread's VMs a compiler, so `eval` and `Function` can build a program at run time.
 ///
 /// Idempotent, and called at the top of every run rather than once at startup: a conformance run
 /// creates a VM per case and this crate has no other moment that happens exactly once.
-pub(crate) fn install() {
-    install_source_compiler(compile_source);
+pub(crate) fn capabilities() -> ExecutionCapabilities {
+    ExecutionCapabilities::default().with_source_compiler(compile_source)
 }
 
 fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), EvalCompileError> {

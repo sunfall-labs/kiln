@@ -1113,7 +1113,11 @@ fn native_equivalence(
     let started = Instant::now();
     let mut host = kiln_runtime::CaptureHost::new();
     graph
-        .execute(&mut host, Default::default())
+        .execute(
+            &mut host,
+            Default::default(),
+            kiln_interpreter::ExecutionCapabilities::default(),
+        )
         .map_err(|error| format!("interpreter graph equivalence run: {error}"))?;
     let native = Command::new(&report.output)
         .output()
@@ -1277,8 +1281,13 @@ fn warm_execution(w: &Workload, budget: Budget) -> Result<Measurement, String> {
             format!("compiling interpreter scenario failed: {diagnostics:?}")
         })?;
         let mut host = kiln_runtime::CaptureHost::new();
-        kiln_interpreter::execute(std::rc::Rc::new(program), &mut host, Default::default())
-            .map_err(|error| format!("executing interpreter scenario failed: {error}"))?;
+        kiln_interpreter::execute(
+            std::rc::Rc::new(program),
+            &mut host,
+            Default::default(),
+            kiln_interpreter::ExecutionCapabilities::default(),
+        )
+        .map_err(|error| format!("executing interpreter scenario failed: {error}"))?;
         let elapsed = started.elapsed();
         let expected = format!("warm {}\n", 100 + seed);
         if host.stdout() != expected {
@@ -1451,7 +1460,11 @@ fn build_linked_graph(
 fn execute_linked(graph: &ModuleGraph) -> Result<String, String> {
     let mut host = kiln_runtime::CaptureHost::new();
     graph
-        .execute(&mut host, Default::default())
+        .execute(
+            &mut host,
+            Default::default(),
+            kiln_interpreter::ExecutionCapabilities::default(),
+        )
         .map_err(|error| format!("executing linked graph: {error}"))?;
     Ok(host.into_stdout())
 }
