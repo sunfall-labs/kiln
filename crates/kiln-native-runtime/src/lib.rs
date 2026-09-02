@@ -534,9 +534,15 @@ int kiln_cli_write_result_file(const char *path, kiln_value value) {
         if (value.len != 0 && value.ptr == NULL) {
             return KILN_C99_INVALID_ARGUMENT;
         }
+#if SIZE_MAX > UINT64_MAX
+        /* `length` is a uint64_t on the wire. Where `size_t` cannot exceed it -- which is every
+         * target this ships to -- the check is a tautology, and gcc says so under `-Wtype-limits`,
+         * which `-Werror` here turns into a build failure. Kept behind the condition that makes it
+         * meaningful rather than deleted, so a 128-bit `size_t` still gets the refusal. */
         if ((uintmax_t)value.len > UINT64_MAX) {
             return KILN_C99_INVALID_ARGUMENT;
         }
+#endif
         tag = (uint8_t)value.tag;
         length = (uint64_t)value.len;
         break;
