@@ -4203,10 +4203,10 @@ question it answered now asked once, in `Executor::run`. Numbers are in
 - **The archive's error message never reached C.** `NativeServerDispatch` put an error's
   message in the event view's `reason` slot; the generated kind-9 handler reads `data`. Every
   direct-engine error had been emitted with an empty message. It fills both now.
-- **`deterministic_entropy_is_one_realm_stream_and_rejects_policy_drift` aborts at baseline.**
-  A misaligned-pointer dereference (`context.cast::<[u64; 2]>()` on a 4-aligned address) in
-  the test helper, under debug alignment checks, on this Linux host at `8aec5b8` before any
-  change here. Skipped with `--skip deterministic_entropy`; not mine, and not fixed here.
+- **`deterministic_entropy_is_one_realm_stream_and_rejects_policy_drift` misaligned pointer fixed.**
+  The test declared `let mut first = [0; 2];` (inferred as `[i32; 2]`, 4-aligned and 8 bytes),
+  and passed it to `draws_realm_entropy` which cast to `&mut [u64; 2]` (8-aligned, 16 bytes).
+  Fixed by explicitly typing the arrays as `[u64; 2]`; the test now passes cleanly.
 - `mbx` was not installed on this host. `mise use -g cargo:mbx` installs 1.4.1 into the shims
   directory, which is not on `PATH`; `/home/coder/.local/share/mise/shims/mbx` works, and the
   scripts' `kiln_cargo` falls back to bare `cargo` unless the shims are on `PATH`.
