@@ -27,6 +27,7 @@ use kiln_host_abi::ResourceId;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 
+use crate::HttpCloseMode;
 use crate::http_body::{BodyEvent, BodySink, ResponseBody, ResponseBodyDriver};
 use crate::node_stream::WriteDisposition;
 
@@ -40,11 +41,13 @@ pub fn trace_enabled() -> bool {
 
 macro_rules! trace {
     ($($arg:tt)*) => {
-        if trace_enabled() {
+        if $crate::http_engine::trace_enabled() {
             eprintln!("[kiln-http] {}", format_args!($($arg)*));
         }
     };
 }
+
+pub(crate) use trace;
 
 /// An owned byte transport a host handed to the HTTP engine: the live socket, or a scripted
 /// duplex that replays recorded bytes and captures what is written.
@@ -61,15 +64,23 @@ impl std::fmt::Debug for HostTransport {
     }
 }
 
-/// One protocol event delivered to the language adapter. Every span is borrowed for the call.
+/// One protocol event delivered to the language adapter, for either role of a connection.
+/// Every span is borrowed for the call.
 #[derive(Debug, Clone, Copy)]
-pub struct ServerEvent<'a> {
-    pub kind: ServerEventKind,
+pub struct HttpEvent<'a> {
+    pub kind: HttpEventKind,
+    /// The request the event belongs to; zero for a connection-level event.
     pub id: u64,
+    /// `RequestHead`: the peer asked to keep the connection open. `ResponseEnd`: the connection
+    /// can carry another request, which is the Agent's reuse decision.
     pub keep_alive: bool,
     pub version_minor: u8,
+    /// `ResponseHead` only.
+    pub status: u16,
     pub method: &'a [u8],
     pub target: &'a [u8],
+    /// `ResponseHead` only: the status text.
+    pub reason: &'a [u8],
     /// `name NUL value NUL` per header, the shape the private C ABI already consumes.
     pub headers: &'a [u8],
     pub data: &'a [u8],
@@ -77,25 +88,32 @@ pub struct ServerEvent<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServerEventKind {
+pub enum HttpEventKind {
     RequestHead,
     RequestData,
     RequestEnd,
+    /// The body the language is writing (a response, or a client request) took a queued chunk.
     Drain,
+    /// Every byte of that body is in Hyper's hands.
     Finish,
+    ResponseHead,
+    ResponseData,
+    ResponseEnd,
     Error,
     Closed,
 }
 
-impl ServerEvent<'static> {
-    fn bare(kind: ServerEventKind, id: u64) -> Self {
+impl HttpEvent<'static> {
+    pub(crate) fn bare(kind: HttpEventKind, id: u64) -> Self {
         Self {
             kind,
             id,
             keep_alive: false,
             version_minor: 0,
+            status: 0,
             method: &[],
             target: &[],
+            reason: &[],
             headers: &[],
             data: &[],
             message: &[],
@@ -106,74 +124,43 @@ impl ServerEvent<'static> {
 /// The realm's side of a connection. `event` runs the language; `checkpoint` drains what the
 /// language queued (next-ticks, microtasks, the rejection check) before the engine continues.
 /// A non-zero return is a realm failure and ends the connection.
-pub trait ServerDispatch {
-    fn event(&self, event: &ServerEvent<'_>) -> i32;
+pub trait HttpDispatch {
+    fn event(&self, event: &HttpEvent<'_>) -> i32;
     fn checkpoint(&self) -> i32;
 }
 
-/// How a connection should stop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ServerCloseMode {
-    /// Finish the response in flight, then close.
-    Graceful,
-    /// Drop the transport now.
-    Abort,
-}
-
-/// The engine's maps are keyed by small integers (resource and request ids), so they hash by
-/// one multiplication rather than SipHash, which showed up in the request profile.
-#[derive(Default)]
-struct IntHasher(u64);
-
-impl Hasher for IntHasher {
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.write_u64(u64::from(*byte));
-        }
-    }
-
-    fn write_u64(&mut self, value: u64) {
-        self.0 = (self.0 ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    }
-}
-
-type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<IntHasher>>;
-
-/// The table of live server connections. Lives in the realm state; tasks reach it through
-/// `Rc` so a finished connection can retire itself.
-#[derive(Default)]
-pub struct HttpServerEngine {
-    connections: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
-}
-
-struct ServerConnection {
-    shared: Rc<ConnectionShared>,
-    task: tokio::task::JoinHandle<()>,
-}
-
-struct ConnectionShared {
-    resource: ResourceId,
-    dispatch: Rc<dyn ServerDispatch>,
-    requests: RefCell<HashMap<u64, Rc<ResponseSlot>>>,
-    /// The flattened request headers of the request being dispatched, reused per request.
-    header_scratch: RefCell<Vec<u8>>,
+/// What both engines keep per connection: the realm's dispatch, and the body events produced
+/// inside a language call that must reach the language only after it returns.
+pub(crate) struct Dispatcher {
+    pub(crate) resource: ResourceId,
+    dispatch: Rc<dyn HttpDispatch>,
     /// Body events (`drain`, `finish`) produced inside a language call, delivered after it.
     deferred: RefCell<Vec<(u64, BodyEvent)>>,
-    deferred_wake: Notify,
-    shutdown: Notify,
-    closing: Cell<bool>,
-    /// An abort has been requested and its `Closed` has not been published yet. Counted as
-    /// work in flight so a drive does not return before the language hears it.
-    abort_pending: Cell<bool>,
+    pub(crate) deferred_wake: Notify,
     failed: Cell<bool>,
 }
 
-impl ConnectionShared {
-    fn dispatch(&self, event: &ServerEvent<'_>) -> bool {
+impl Dispatcher {
+    pub(crate) fn new(resource: ResourceId, dispatch: Rc<dyn HttpDispatch>) -> Self {
+        Self {
+            resource,
+            dispatch,
+            deferred: RefCell::new(Vec::new()),
+            deferred_wake: Notify::new(),
+            failed: Cell::new(false),
+        }
+    }
+
+    pub(crate) fn failed(&self) -> bool {
+        self.failed.get()
+    }
+
+    pub(crate) fn set_failed(&self, failed: bool) {
+        self.failed.set(failed);
+    }
+
+    /// Run the language for one event and then its checkpoint. False once the realm failed.
+    pub(crate) fn dispatch(&self, event: &HttpEvent<'_>) -> bool {
         if self.failed.get() {
             return false;
         }
@@ -194,12 +181,12 @@ impl ConnectionShared {
         true
     }
 
-    fn defer(&self, id: u64, event: BodyEvent) {
+    pub(crate) fn defer(&self, id: u64, event: BodyEvent) {
         self.deferred.borrow_mut().push((id, event));
         self.deferred_wake.notify_one();
     }
 
-    fn flush_deferred(&self) -> bool {
+    pub(crate) fn flush_deferred(&self) -> bool {
         loop {
             let pending = std::mem::take(&mut *self.deferred.borrow_mut());
             if pending.is_empty() {
@@ -207,14 +194,103 @@ impl ConnectionShared {
             }
             for (id, event) in pending {
                 let kind = match event {
-                    BodyEvent::Drain => ServerEventKind::Drain,
-                    BodyEvent::Finish => ServerEventKind::Finish,
+                    BodyEvent::Drain => HttpEventKind::Drain,
+                    BodyEvent::Finish => HttpEventKind::Finish,
                 };
-                if !self.dispatch(&ServerEvent::bare(kind, id)) {
+                if !self.dispatch(&HttpEvent::bare(kind, id)) {
                     return false;
                 }
             }
         }
+    }
+
+    /// Deliver deferred body events as they are produced, for as long as the realm is healthy.
+    /// Resolves only once a dispatch fails, so a `select!` arm on it runs the pump for the life
+    /// of the connection.
+    pub(crate) async fn pump(&self) {
+        loop {
+            self.deferred_wake.notified().await;
+            if !self.flush_deferred() {
+                return;
+            }
+        }
+    }
+
+    /// A body driver whose `drain` and `finish` are deferred to this dispatcher's next safe
+    /// point.
+    pub(crate) fn body_driver(
+        self: &Rc<Self>,
+        id: u64,
+        high_water_mark: usize,
+    ) -> ResponseBodyDriver {
+        let driver = ResponseBodyDriver::new(high_water_mark);
+        let sink = Rc::clone(self);
+        driver.set_sink(BodySink::Direct(Rc::new(move |event| {
+            sink.defer(id, event)
+        })));
+        driver
+    }
+}
+
+/// The engine's maps are keyed by small integers (resource and request ids), so they hash by
+/// one multiplication rather than SipHash, which showed up in the request profile.
+#[derive(Default)]
+pub(crate) struct IntHasher(u64);
+
+impl Hasher for IntHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u64(u64::from(*byte));
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+pub(crate) type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<IntHasher>>;
+
+/// The table of live server connections. Lives in the realm state; tasks reach it through
+/// `Rc` so a finished connection can retire itself.
+#[derive(Default)]
+pub struct HttpServerEngine {
+    connections: Rc<RefCell<HashMap<ResourceId, ServerConnection>>>,
+}
+
+struct ServerConnection {
+    shared: Rc<ConnectionShared>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct ConnectionShared {
+    resource: ResourceId,
+    dispatcher: Rc<Dispatcher>,
+    requests: RefCell<HashMap<u64, Rc<ResponseSlot>>>,
+    /// The flattened request headers of the request being dispatched, reused per request.
+    header_scratch: RefCell<Vec<u8>>,
+    shutdown: Notify,
+    closing: Cell<bool>,
+    /// An abort has been requested and its `Closed` has not been published yet. Counted as
+    /// work in flight so a drive does not return before the language hears it.
+    abort_pending: Cell<bool>,
+}
+
+impl ConnectionShared {
+    fn dispatch(&self, event: &HttpEvent<'_>) -> bool {
+        self.dispatcher.dispatch(event)
+    }
+
+    fn defer(&self, id: u64, event: BodyEvent) {
+        self.dispatcher.defer(id, event);
+    }
+
+    fn flush_deferred(&self) -> bool {
+        self.dispatcher.flush_deferred()
     }
 }
 
@@ -402,20 +478,15 @@ fn body_driver(
     id: u64,
     high_water_mark: usize,
 ) -> ResponseBodyDriver {
-    let driver = ResponseBodyDriver::new(high_water_mark);
-    let sink = Rc::clone(shared);
-    driver.set_sink(BodySink::Direct(Rc::new(move |event| {
-        sink.defer(id, event)
-    })));
-    driver
+    shared.dispatcher.body_driver(id, high_water_mark)
 }
 
-fn status_allows_body(status: u16) -> bool {
+pub(crate) fn status_allows_body(status: u16) -> bool {
     !matches!(status, 204 | 304) && !(100..200).contains(&status)
 }
 
 /// Parse `name NUL value NUL` pairs into a header map, refusing anything Hyper would refuse.
-fn parse_flattened_headers(bytes: &[u8]) -> Option<HeaderMap> {
+pub(crate) fn parse_flattened_headers(bytes: &[u8]) -> Option<HeaderMap> {
     let mut headers = HeaderMap::new();
     let mut fields = bytes.split(|byte| *byte == 0);
     while let Some(name) = fields.next() {
@@ -466,22 +537,19 @@ impl HttpServerEngine {
         resource: ResourceId,
         transport: HostTransport,
         allow_half_close: bool,
-        dispatch: Rc<dyn ServerDispatch>,
+        dispatch: Rc<dyn HttpDispatch>,
     ) -> bool {
         if self.connections.borrow().contains_key(&resource) {
             return false;
         }
         let shared = Rc::new(ConnectionShared {
             resource,
-            dispatch,
+            dispatcher: Rc::new(Dispatcher::new(resource, dispatch)),
             requests: RefCell::new(HashMap::default()),
             header_scratch: RefCell::new(Vec::with_capacity(512)),
-            deferred: RefCell::new(Vec::new()),
-            deferred_wake: Notify::new(),
             shutdown: Notify::new(),
             closing: Cell::new(false),
             abort_pending: Cell::new(false),
-            failed: Cell::new(false),
         });
         trace!("{resource:?} attach half_close={allow_half_close}");
         let table = Rc::clone(&self.connections);
@@ -542,32 +610,32 @@ impl HttpServerEngine {
 
     /// Stop a connection. Graceful lets the response in flight finish; abort drops the
     /// transport and reports `Closed` on the next task turn, never inside the caller.
-    pub fn close(&mut self, resource: ResourceId, mode: ServerCloseMode) -> bool {
+    pub fn close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
         let shared = {
             let table = self.connections.borrow();
             let Some(connection) = table.get(&resource) else {
                 return false;
             };
-            if mode == ServerCloseMode::Abort {
+            if mode == HttpCloseMode::Abort {
                 connection.task.abort();
             }
             Rc::clone(&connection.shared)
         };
         trace!("{resource:?} close {mode:?}");
         match mode {
-            ServerCloseMode::Graceful => {
+            HttpCloseMode::Graceful => {
                 shared.closing.set(true);
                 shared.shutdown.notify_one();
             }
-            ServerCloseMode::Abort => {
+            HttpCloseMode::Abort => {
                 // The abort takes effect at the task's next poll; until `Closed` has been
                 // published the connection counts as in flight, and it is published from a
                 // task, never from inside the caller's own call.
                 shared.abort_pending.set(true);
-                shared.failed.set(false);
+                shared.dispatcher.set_failed(false);
                 let table = Rc::clone(&self.connections);
                 tokio::task::spawn_local(async move {
-                    let _ = shared.dispatch(&ServerEvent::bare(ServerEventKind::Closed, 0));
+                    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
                     shared.abort_pending.set(false);
                     table.borrow_mut().remove(&shared.resource);
                 });
@@ -578,6 +646,14 @@ impl HttpServerEngine {
 
     pub fn open_connections(&self) -> usize {
         self.connections.borrow().len()
+    }
+
+    /// Abort every connection task and forget the table. Realm teardown; nothing is
+    /// dispatched.
+    pub fn shutdown(&mut self) {
+        for (_, connection) in self.connections.borrow_mut().drain() {
+            connection.task.abort();
+        }
     }
 
     /// Requests whose response the language has not finished: what keeps a drive waiting
@@ -636,16 +712,10 @@ async fn serve(
     let _ = allow_half_close;
     builder.half_close(true);
     let mut connection = Box::pin(builder.serve_connection(TokioIo::new(transport.0), service));
-    let pump = Rc::clone(&shared);
     let result = tokio::select! {
         biased;
         result = &mut connection => result,
-        _ = async {
-            loop {
-                pump.deferred_wake.notified().await;
-                if !pump.flush_deferred() { break; }
-            }
-        } => connection.await,
+        _ = shared.dispatcher.pump() => connection.await,
         _ = shared.shutdown.notified() => {
             connection.as_mut().graceful_shutdown();
             connection.await
@@ -658,14 +728,14 @@ async fn serve(
     );
     if let Err(error) = result {
         let message = error.to_string();
-        let event = ServerEvent {
+        let event = HttpEvent {
             message: message.as_bytes(),
-            ..ServerEvent::bare(ServerEventKind::Error, 0)
+            ..HttpEvent::bare(HttpEventKind::Error, 0)
         };
         let _ = shared.dispatch(&event);
     }
     let _ = shared.flush_deferred();
-    let _ = shared.dispatch(&ServerEvent::bare(ServerEventKind::Closed, 0));
+    let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::Closed, 0));
     table.borrow_mut().remove(&shared.resource);
 }
 
@@ -718,13 +788,13 @@ async fn handle(
     }
     let dispatched = {
         let scratch = shared.header_scratch.borrow();
-        let head = ServerEvent {
+        let head = HttpEvent {
             keep_alive,
             version_minor: u8::from(!http_10),
             method: parts.method.as_str().as_bytes(),
             target,
             headers: &scratch,
-            ..ServerEvent::bare(ServerEventKind::RequestHead, id)
+            ..HttpEvent::bare(HttpEventKind::RequestHead, id)
         };
         shared.dispatch(&head)
     };
@@ -736,9 +806,9 @@ async fn handle(
                     if let Ok(data) = frame.into_data()
                         && !data.is_empty()
                     {
-                        let event = ServerEvent {
+                        let event = HttpEvent {
                             data: &data,
-                            ..ServerEvent::bare(ServerEventKind::RequestData, id)
+                            ..HttpEvent::bare(HttpEventKind::RequestData, id)
                         };
                         if !shared.dispatch(&event) {
                             failed = true;
@@ -748,9 +818,9 @@ async fn handle(
                 }
                 Err(error) => {
                     let message = error.to_string();
-                    let event = ServerEvent {
+                    let event = HttpEvent {
                         message: message.as_bytes(),
-                        ..ServerEvent::bare(ServerEventKind::Error, id)
+                        ..HttpEvent::bare(HttpEventKind::Error, id)
                     };
                     let _ = shared.dispatch(&event);
                     failed = true;
@@ -759,12 +829,12 @@ async fn handle(
             }
         }
         if !failed {
-            let _ = shared.dispatch(&ServerEvent::bare(ServerEventKind::RequestEnd, id));
+            let _ = shared.dispatch(&HttpEvent::bare(HttpEventKind::RequestEnd, id));
         }
     }
     let _ = shared.flush_deferred();
 
-    let response = if shared.failed.get() {
+    let response = if shared.dispatcher.failed() {
         unavailable()
     } else {
         SlotReady {
@@ -811,7 +881,7 @@ fn unavailable() -> EngineResponse {
     }
 }
 
-fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
+pub(crate) fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
     into.clear();
     for (name, value) in headers {
         into.extend_from_slice(name.as_str().as_bytes());
@@ -827,15 +897,15 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct Recording {
-        events: RefCell<Vec<(ServerEventKind, u64, Vec<u8>)>>,
+        events: RefCell<Vec<(HttpEventKind, u64, Vec<u8>)>>,
         checkpoints: Cell<usize>,
         answer: RefCell<Option<Box<dyn Fn(u64)>>>,
     }
 
-    impl ServerDispatch for Recording {
-        fn event(&self, event: &ServerEvent<'_>) -> i32 {
+    impl HttpDispatch for Recording {
+        fn event(&self, event: &HttpEvent<'_>) -> i32 {
             let payload = match event.kind {
-                ServerEventKind::RequestHead => {
+                HttpEventKind::RequestHead => {
                     let mut bytes = event.method.to_vec();
                     bytes.push(b' ');
                     bytes.extend_from_slice(event.target);
@@ -843,14 +913,14 @@ mod tests {
                     bytes.extend_from_slice(event.headers);
                     bytes
                 }
-                ServerEventKind::RequestData => event.data.to_vec(),
-                ServerEventKind::Error => event.message.to_vec(),
+                HttpEventKind::RequestData => event.data.to_vec(),
+                HttpEventKind::Error => event.message.to_vec(),
                 _ => Vec::new(),
             };
             self.events
                 .borrow_mut()
                 .push((event.kind, event.id, payload));
-            if event.kind == ServerEventKind::RequestEnd
+            if event.kind == HttpEventKind::RequestEnd
                 && let Some(answer) = self.answer.borrow().as_ref()
             {
                 answer(event.id);
@@ -954,13 +1024,13 @@ mod tests {
             assert_eq!(
                 kinds,
                 vec![
-                    ServerEventKind::RequestHead,
-                    ServerEventKind::RequestEnd,
-                    ServerEventKind::Finish,
-                    ServerEventKind::RequestHead,
-                    ServerEventKind::RequestEnd,
-                    ServerEventKind::Finish,
-                    ServerEventKind::Closed,
+                    HttpEventKind::RequestHead,
+                    HttpEventKind::RequestEnd,
+                    HttpEventKind::Finish,
+                    HttpEventKind::RequestHead,
+                    HttpEventKind::RequestEnd,
+                    HttpEventKind::Finish,
+                    HttpEventKind::Closed,
                 ],
                 "{events:?}"
             );

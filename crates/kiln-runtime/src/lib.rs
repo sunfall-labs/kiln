@@ -6,16 +6,18 @@
 //! runs. Tokio types are deliberately private to this crate.
 
 mod http_body;
+pub mod http_client;
 pub mod http_engine;
-pub use http_engine::{
-    HostTransport, HttpServerEngine, ServerCloseMode, ServerDispatch, ServerEvent, ServerEventKind,
-};
+pub use http_client::HttpClientEngine;
+pub use http_engine::{HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine};
 mod http_transport;
 mod hyper_http;
 pub mod node_http;
 pub mod node_http_agent;
 pub mod node_net;
 pub mod node_stream;
+pub mod scripted_transport;
+pub use scripted_transport::{ScriptedTransport, ScriptedTransportLog};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashSet, VecDeque};
@@ -360,6 +362,9 @@ pub enum WorkItem<M = WorkId, T = WorkId> {
 /// `(deadline, sequence)` ordering.
 #[derive(Debug)]
 pub enum RuntimeTurn<M, T> {
+    /// The HTTP engines queued protocol events for a loop that drains them at its checkpoint
+    /// (ADR 0046's queued adapter). Nothing else happened; run the checkpoint.
+    Protocol,
     Completion(Completion),
     Timer(WorkItem<M, T>),
     /// The realm's asynchronous supervisor failed and the runtime can no longer make progress.
@@ -389,6 +394,10 @@ pub struct ScriptedHost {
     next_request: u64,
     next_sequence: u64,
     shutdown: bool,
+    /// Scripted connections the HTTP engine may take over (ADR 0046), and what it did with
+    /// each one after taking it.
+    transports: BTreeMap<ResourceId, ScriptedTransport>,
+    transport_logs: BTreeMap<ResourceId, ScriptedTransportLog>,
     #[cfg(test)]
     shutdown_observer: Option<Rc<std::cell::Cell<usize>>>,
 }
@@ -471,9 +480,24 @@ impl ScriptedHost {
             next_request: 1,
             next_sequence: 0,
             shutdown: false,
+            transports: BTreeMap::new(),
+            transport_logs: BTreeMap::new(),
             #[cfg(test)]
             shutdown_observer: None,
         }
+    }
+
+    /// Script the bytes of one connection: the HTTP engine takes `transport` when the realm
+    /// attaches `resource`, and [`Self::transport_log`] shows what it wrote.
+    pub fn with_transport(mut self, resource: ResourceId, transport: ScriptedTransport) -> Self {
+        self.transport_logs.insert(resource, transport.log());
+        self.transports.insert(resource, transport);
+        self
+    }
+
+    /// What the engine has done with a scripted connection so far.
+    pub fn transport_log(&self, resource: ResourceId) -> Option<&ScriptedTransportLog> {
+        self.transport_logs.get(&resource)
     }
 
     /// Returns whether every expected operation was submitted and every completion consumed.
@@ -554,6 +578,18 @@ impl RealmHostProvider for ScriptedHost {
 
     fn set_resource_referenced_now(&mut self, _resource: ResourceId, _referenced: bool) -> bool {
         true
+    }
+
+    fn take_transport(&mut self, resource: ResourceId) -> Option<HostTransport> {
+        self.transports
+            .remove(&resource)
+            .map(|transport| HostTransport(Box::new(transport)))
+    }
+
+    fn release_transport(&mut self, resource: ResourceId) -> bool {
+        // The log outlives the connection on purpose: a test reads what was written after
+        // the engine has let the transport go.
+        self.transport_logs.contains_key(&resource)
     }
 
     fn next_completion_async<'a>(
@@ -641,6 +677,24 @@ struct Executor {
     local: tokio::task::LocalSet,
 }
 
+impl Executor {
+    /// Run `operation` inside this executor: directly when the caller is already there (a
+    /// language callback made from a task, or from `enter`), since Tokio panics on a nested
+    /// `block_on`; through one `block_on` otherwise.
+    ///
+    /// This is the one place the runtime asks "am I in context". ADR 0040 deleted the
+    /// `_in_context` twins that put that question on every caller; a runtime that is only
+    /// ever entered through its own executor can answer it itself.
+    fn run<R>(&self, operation: impl FnOnce() -> R) -> R {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            operation()
+        } else {
+            self.local
+                .block_on(&self.runtime, async move { operation() })
+        }
+    }
+}
+
 /// What ended a drive's wait.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DriveWake {
@@ -695,6 +749,11 @@ pub struct RealmState<H> {
     http_agent: HttpAgent,
     /// Server connections that are Hyper tasks over host transports (ADR 0046).
     http_server: HttpServerEngine,
+    /// Client connections, likewise.
+    http_client: HttpClientEngine,
+    /// Protocol events parked by the queued adapter for a loop that drains them at its
+    /// checkpoint, and the signal that wakes that loop.
+    queued_http: Rc<QueuedHttp>,
     lifecycle: RealmRuntimeLifecycle,
 }
 
@@ -769,6 +828,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 http_connections: BTreeMap::new(),
                 http_agent: HttpAgent::default(),
                 http_server: HttpServerEngine::default(),
+                http_client: HttpClientEngine::default(),
+                queued_http: Rc::new(QueuedHttp::default()),
                 lifecycle: RealmRuntimeLifecycle::Open,
             },
             _not_send: PhantomData,
@@ -805,9 +866,11 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if self.is_shutdown() {
             return None;
         }
-        Some(self.executor.local.block_on(&self.executor.runtime, async {
-            RealmHostProvider::start_on_realm(&mut self.state.host, operation, referenced)
-        }))
+        let host = &mut self.state.host;
+        Some(
+            self.executor
+                .run(|| RealmHostProvider::start_on_realm(host, operation, referenced)),
+        )
     }
 
     /// Starts one asynchronous host operation on this realm's Tokio runtime.
@@ -875,39 +938,49 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return Some(RuntimeTurn::Failure(failure.clone()));
         }
         let deadline = realm.next_timer_deadline();
-        if !self.state.host.has_pending_work() {
+        let host_pending = self.state.host.has_pending_work();
+        if !host_pending && !self.state.has_live_http_work() {
             return self.next_timer(realm).map(RuntimeTurn::Timer);
         }
+        if self.state.queued_http.take_signalled() {
+            return Some(RuntimeTurn::Protocol);
+        }
+        // Three things can end the wait: a host completion (only while one is pending, since
+        // a provider with nothing in flight answers `None` at once), the HTTP engines queueing
+        // an event for the caller's checkpoint, and the next timer coming due.
+        let signal = Rc::clone(&self.state.queued_http.signal);
+        let host = &mut self.state.host;
         self.executor.local.block_on(&self.executor.runtime, async {
-            match deadline {
-                Some(deadline) => {
-                    let delay = deadline.saturating_sub(realm.now);
-                    tokio::select! {
-                        biased;
-                        completion = self.state.host.next_completion_async() => {
-                            match completion {
-                                Ok(Some(completion)) => Some(RuntimeTurn::Completion(completion)),
-                                Ok(None) => None,
-                                Err(failure) => Some(RuntimeTurn::Failure(failure)),
-                            }
-                        }
-                        _ = tokio::time::sleep(delay) => {
-                            realm.run_next_timer().map(RuntimeTurn::Timer)
-                        }
-                    }
+            let completion = async {
+                if host_pending {
+                    host.next_completion_async().await
+                } else {
+                    std::future::pending().await
                 }
-                None => match self.state.host.next_completion_async().await {
+            };
+            let timer = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep(deadline.saturating_sub(realm.now)).await,
+                    None => std::future::pending().await,
+                }
+            };
+            tokio::select! {
+                biased;
+                completion = completion => match completion {
                     Ok(Some(completion)) => Some(RuntimeTurn::Completion(completion)),
                     Ok(None) => None,
                     Err(failure) => Some(RuntimeTurn::Failure(failure)),
                 },
+                _ = signal.notified() => Some(RuntimeTurn::Protocol),
+                _ = timer => realm.run_next_timer().map(RuntimeTurn::Timer),
             }
         })
     }
 
-    /// Select a turn only while referenced host work or a realm timer can keep execution alive.
-    /// Unreferenced I/O remains registered and may still complete at later checkpoints, but does
-    /// not make a Node realm wait indefinitely on an idle keep-alive socket.
+    /// Select a turn only while referenced host work, an HTTP request in flight, or a realm
+    /// timer can keep execution alive. Unreferenced I/O remains registered and may still
+    /// complete at later checkpoints, but does not make a Node realm wait indefinitely on an
+    /// idle keep-alive socket.
     pub fn next_referenced_turn<M, T>(
         &mut self,
         realm: &mut Realm<M, T>,
@@ -921,7 +994,10 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if let Some(failure) = self.state.host.runtime_failure() {
             return Some(RuntimeTurn::Failure(failure.clone()));
         }
-        if !self.state.host.has_referenced_work() && realm.next_timer_deadline().is_none() {
+        if !self.state.host.has_referenced_work()
+            && realm.next_timer_deadline().is_none()
+            && !self.state.has_live_http_work()
+        {
             return None;
         }
         self.next_turn(realm)
@@ -933,22 +1009,73 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         &mut self,
         resource: ResourceId,
         allow_half_close: bool,
-        dispatch: Rc<dyn ServerDispatch>,
+        dispatch: Rc<dyn HttpDispatch>,
     ) -> bool {
-        if self.is_shutdown() || self.state.http_server.is_attached(resource) {
+        if self.is_shutdown() || self.state.http_owns(resource) {
             return false;
         }
         let Some(transport) = self.state.host.take_transport(resource) else {
             return false;
         };
-        self.state
-            .http_server
-            .attach(resource, transport, allow_half_close, dispatch)
+        let engine = &mut self.state.http_server;
+        self.executor
+            .run(|| engine.attach(resource, transport, allow_half_close, dispatch))
+    }
+
+    /// Attach the HTTP client engine to a connected stream (ADR 0046): the host hands over its
+    /// transport and Hyper drives it, calling `dispatch` directly for every response event.
+    pub fn client_attach(&mut self, resource: ResourceId, dispatch: Rc<dyn HttpDispatch>) -> bool {
+        if self.is_shutdown() || self.state.http_owns(resource) {
+            return false;
+        }
+        let Some(transport) = self.state.host.take_transport(resource) else {
+            return false;
+        };
+        let engine = &mut self.state.http_client;
+        self.executor
+            .run(|| engine.attach(resource, transport, dispatch))
+    }
+
+    /// Attach a server connection whose events are queued for [`Self::take_http_events`]
+    /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
+    pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
+        let dispatch = Rc::new(QueuedDispatch {
+            resource,
+            role: QueuedRole::Server,
+            queue: Rc::clone(&self.state.queued_http),
+        });
+        self.server_attach(resource, allow_half_close, dispatch)
+    }
+
+    /// Attach a client connection whose events are queued for
+    /// [`Self::take_http_client_events`].
+    pub fn client_attach_queued(&mut self, resource: ResourceId) -> bool {
+        let dispatch = Rc::new(QueuedDispatch {
+            resource,
+            role: QueuedRole::Client,
+            queue: Rc::clone(&self.state.queued_http),
+        });
+        self.client_attach(resource, dispatch)
     }
 
     /// The direct HTTP server engine.
     pub fn http_server(&mut self) -> &mut HttpServerEngine {
         &mut self.state.http_server
+    }
+
+    /// The direct HTTP client engine.
+    pub fn http_client(&mut self) -> &mut HttpClientEngine {
+        &mut self.state.http_client
+    }
+
+    /// Stop the connection on `resource`, whichever engine owns it. The transport is released
+    /// once the engine has published `Closed`; a caller closing from outside an engine
+    /// callback sees that on its next turn.
+    pub fn http_close(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
+        let engine = &mut self.state;
+        self.executor.run(|| {
+            engine.http_server.close(resource, mode) || engine.http_client.close(resource, mode)
+        })
     }
 
     /// Whether any direct server connection is still open.
@@ -1010,9 +1137,10 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.state.host.has_pending_work()
     }
 
-    /// Requests in flight on direct server connections.
+    /// Requests in flight on direct connections: server responses the language has not
+    /// finished, and client requests whose response has not ended.
     pub fn requests_in_flight(&self) -> usize {
-        self.state.http_server.requests_in_flight()
+        self.state.http_server.requests_in_flight() + self.state.http_client.requests_in_flight()
     }
 
     /// A one-line description of the host's pending work, for `KILN_HTTP_TRACE`.
@@ -1367,6 +1495,9 @@ impl<H: RealmHostProvider> RealmState<H> {
             }
         }
         drop(connections);
+        self.http_server.shutdown();
+        self.http_client.shutdown();
+        self.queued_http.clear();
         self.http_agent = HttpAgent::default();
         RealmHostProvider::shutdown_on_realm(&mut self.host);
         self.lifecycle = RealmRuntimeLifecycle::Closed;
@@ -1422,6 +1553,42 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// Cancels one asynchronous host request owned by this realm.
     pub fn cancel_host_op(&mut self, request: RequestId) -> bool {
         RealmHostProvider::cancel_on_realm(&mut self.host, request)
+    }
+
+    /// Whether an HTTP engine owns the transport of `resource`.
+    pub fn http_owns(&self, resource: ResourceId) -> bool {
+        self.http_server.is_attached(resource) || self.http_client.is_attached(resource)
+    }
+
+    /// Whether the HTTP engines can still produce something the language must hear: a
+    /// request in flight on either side, or a queued event nobody has drained. A taken
+    /// transport is unreferenced by design, so this is what keeps a loop waiting on HTTP.
+    pub fn has_live_http_work(&self) -> bool {
+        self.http_server.requests_in_flight() != 0
+            || self.http_client.requests_in_flight() != 0
+            || self.queued_http.has_events()
+    }
+
+    /// Drain the server events the queued adapter parked for `resource`. A `Closed` here is
+    /// the connection's last word; the transport goes back to the host with it.
+    pub fn take_queued_server_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
+        let events = self.queued_http.take_server(resource);
+        if events.contains(&RuntimeHttpEvent::Closed) {
+            let _ = self.host.release_transport(resource);
+        }
+        events
+    }
+
+    /// Drain the client events the queued adapter parked for `resource`.
+    pub fn take_queued_client_events(
+        &mut self,
+        resource: ResourceId,
+    ) -> Vec<RuntimeHttpClientEvent> {
+        let events = self.queued_http.take_client(resource);
+        if events.contains(&RuntimeHttpClientEvent::Closed) {
+            let _ = self.host.release_transport(resource);
+        }
+        events
     }
 
     #[cfg(test)]
@@ -1944,6 +2111,182 @@ fn map_http1_client_event(
         completed.insert(id);
     }
     Some(mapped)
+}
+
+/// Protocol events parked for a loop that drains them at its own checkpoint: ADR 0046's
+/// queued adapter, which the interpreter uses until its loop can take the direct one.
+#[derive(Default)]
+pub struct QueuedHttp {
+    server: std::cell::RefCell<BTreeMap<ResourceId, VecDeque<RuntimeHttpEvent>>>,
+    client: std::cell::RefCell<BTreeMap<ResourceId, VecDeque<RuntimeHttpClientEvent>>>,
+    /// Fires when an event is queued, so a parked [`RealmRuntime::next_turn`] returns
+    /// [`RuntimeTurn::Protocol`].
+    signal: Rc<tokio::sync::Notify>,
+    /// A permit the signal would otherwise hand to a wait that has not started yet.
+    signalled: std::cell::Cell<bool>,
+}
+
+impl QueuedHttp {
+    fn push_server(&self, resource: ResourceId, event: RuntimeHttpEvent) {
+        self.server
+            .borrow_mut()
+            .entry(resource)
+            .or_default()
+            .push_back(event);
+        self.signalled.set(true);
+        self.signal.notify_one();
+    }
+
+    fn push_client(&self, resource: ResourceId, event: RuntimeHttpClientEvent) {
+        self.client
+            .borrow_mut()
+            .entry(resource)
+            .or_default()
+            .push_back(event);
+        self.signalled.set(true);
+        self.signal.notify_one();
+    }
+
+    fn take_server(&self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
+        self.server
+            .borrow_mut()
+            .remove(&resource)
+            .map(Vec::from)
+            .unwrap_or_default()
+    }
+
+    fn take_client(&self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent> {
+        self.client
+            .borrow_mut()
+            .remove(&resource)
+            .map(Vec::from)
+            .unwrap_or_default()
+    }
+
+    fn has_events(&self) -> bool {
+        !self.server.borrow().is_empty() || !self.client.borrow().is_empty()
+    }
+
+    /// Whether an event was queued since the last wait, consuming the flag. The `Notify`
+    /// keeps its own permit, which the next wait drains at once; this only saves that wait.
+    fn take_signalled(&self) -> bool {
+        self.signalled.replace(false)
+    }
+
+    fn clear(&self) {
+        self.server.borrow_mut().clear();
+        self.client.borrow_mut().clear();
+    }
+}
+
+#[derive(Clone, Copy)]
+enum QueuedRole {
+    Server,
+    Client,
+}
+
+/// The queued adapter: one per connection, converting each engine event into the owned event
+/// the interpreter already consumes and parking it for `take_queued_*_events`.
+struct QueuedDispatch {
+    resource: ResourceId,
+    role: QueuedRole,
+    queue: Rc<QueuedHttp>,
+}
+
+/// `name NUL value NUL` pairs back into owned strings; a value that is not UTF-8 is dropped,
+/// as the bridged decoder dropped it.
+fn unflatten_headers(bytes: &[u8]) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    let mut fields = bytes.split(|byte| *byte == 0);
+    while let Some(name) = fields.next() {
+        if name.is_empty() {
+            break;
+        }
+        let Some(value) = fields.next() else {
+            break;
+        };
+        if let (Ok(name), Ok(value)) = (std::str::from_utf8(name), std::str::from_utf8(value)) {
+            headers.push((name.to_owned(), value.to_owned()));
+        }
+    }
+    headers
+}
+
+impl HttpDispatch for QueuedDispatch {
+    fn event(&self, event: &HttpEvent<'_>) -> i32 {
+        match self.role {
+            QueuedRole::Server => {
+                let queued = match event.kind {
+                    HttpEventKind::RequestHead => RuntimeHttpEvent::RequestHead {
+                        id: event.id,
+                        request: node_http::HttpRequest {
+                            method: String::from_utf8_lossy(event.method).into_owned(),
+                            target: String::from_utf8_lossy(event.target).into_owned(),
+                            version: if event.version_minor == 0 {
+                                node_http::HttpVersion::Http10
+                            } else {
+                                node_http::HttpVersion::Http11
+                            },
+                            headers: unflatten_headers(event.headers),
+                            body: Vec::new(),
+                            keep_alive: event.keep_alive,
+                        },
+                    },
+                    HttpEventKind::RequestData => RuntimeHttpEvent::RequestData {
+                        id: event.id,
+                        data: event.data.to_vec(),
+                    },
+                    HttpEventKind::RequestEnd => RuntimeHttpEvent::RequestEnd { id: event.id },
+                    HttpEventKind::Drain => RuntimeHttpEvent::Drain { id: event.id },
+                    HttpEventKind::Finish => RuntimeHttpEvent::Finish { id: event.id },
+                    HttpEventKind::Error => RuntimeHttpEvent::Error {
+                        id: event.id,
+                        message: String::from_utf8_lossy(event.message).into_owned(),
+                    },
+                    HttpEventKind::Closed => RuntimeHttpEvent::Closed,
+                    HttpEventKind::ResponseHead
+                    | HttpEventKind::ResponseData
+                    | HttpEventKind::ResponseEnd => return 0,
+                };
+                self.queue.push_server(self.resource, queued);
+            }
+            QueuedRole::Client => {
+                let queued = match event.kind {
+                    HttpEventKind::ResponseHead => RuntimeHttpClientEvent::ResponseHead {
+                        id: event.id,
+                        status: event.status,
+                        reason: String::from_utf8_lossy(event.reason).into_owned(),
+                        headers: unflatten_headers(event.headers),
+                    },
+                    HttpEventKind::ResponseData => RuntimeHttpClientEvent::ResponseData {
+                        id: event.id,
+                        data: event.data.to_vec(),
+                    },
+                    HttpEventKind::ResponseEnd => RuntimeHttpClientEvent::ResponseEnd {
+                        id: event.id,
+                        reusable: event.keep_alive,
+                    },
+                    HttpEventKind::Drain => RuntimeHttpClientEvent::Drain { id: event.id },
+                    HttpEventKind::Finish => RuntimeHttpClientEvent::Finish { id: event.id },
+                    HttpEventKind::Error => RuntimeHttpClientEvent::Error {
+                        id: event.id,
+                        message: String::from_utf8_lossy(event.message).into_owned(),
+                    },
+                    HttpEventKind::Closed => RuntimeHttpClientEvent::Closed,
+                    HttpEventKind::RequestHead
+                    | HttpEventKind::RequestData
+                    | HttpEventKind::RequestEnd => return 0,
+                };
+                self.queue.push_client(self.resource, queued);
+            }
+        }
+        0
+    }
+
+    fn checkpoint(&self) -> i32 {
+        // The loop that drains the queue runs its own checkpoint after each event.
+        0
+    }
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
@@ -3850,6 +4193,7 @@ mod tests {
             }
             RuntimeTurn::Completion(_) => panic!("accept must remain pending without a client"),
             RuntimeTurn::Failure(failure) => panic!("realm failed unexpectedly: {failure}"),
+            RuntimeTurn::Protocol => panic!("no HTTP engine queued anything here"),
         }
         runtime.start_host_op(
             AsyncHostOp::CloseResource {
@@ -4214,11 +4558,13 @@ mod tests {
             RuntimeTurn::Completion(completion) => completion,
             RuntimeTurn::Timer(_) => panic!("a ready completion must beat a due timer"),
             RuntimeTurn::Failure(failure) => panic!("realm failed unexpectedly: {failure}"),
+            RuntimeTurn::Protocol => panic!("no HTTP engine queued anything here"),
         };
         let second_completion = match runtime.next_turn(&mut realm).expect("second completion") {
             RuntimeTurn::Completion(completion) => completion,
             RuntimeTurn::Timer(_) => panic!("a ready completion must beat a due timer"),
             RuntimeTurn::Failure(failure) => panic!("realm failed unexpectedly: {failure}"),
+            RuntimeTurn::Protocol => panic!("no HTTP engine queued anything here"),
         };
         assert_eq!(first_completion.request, first);
         assert_eq!(second_completion.request, second);
@@ -6324,6 +6670,7 @@ mod tests {
             }
             RuntimeTurn::Timer(_) => panic!("a due timer ran before a ready completion"),
             RuntimeTurn::Failure(failure) => panic!("realm failed unexpectedly: {failure}"),
+            RuntimeTurn::Protocol => panic!("no HTTP engine queued anything here"),
         }
         assert!(realm.has_pending_work());
     }
