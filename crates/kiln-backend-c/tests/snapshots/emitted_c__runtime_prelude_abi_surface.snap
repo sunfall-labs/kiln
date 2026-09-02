@@ -771,6 +771,7 @@ static double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value);
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -1028,6 +1029,7 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
 static double kiln_c99_instant_from_parts(const double parts[7]) {

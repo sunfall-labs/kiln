@@ -3233,6 +3233,8 @@ static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double valu
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out);
+static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
+                             kiln_value value);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -5707,6 +5709,30 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
         *out = &object->properties[position];
     }
     object->count += 1;
+    return KILN_C99_OK;
+}
+
+/* Write an own data property the way an assignment would have left it, without asking the
+ * prototype chain for permission first.
+ *
+ * `kiln_c99_put` walks the chain for a setter before every write, because for *program* code a
+ * setter above has first claim.  The runtime's own initialisers are not program code: they fill
+ * a freshly created object whose prototype is one the runtime just linked, so no setter can
+ * exist to claim the write and the walk can only ever fail.  Building a `node:http` request ran
+ * that walk twelve times per request over a three-deep prototype chain, for nothing.
+ *
+ * This is *not* a faster `put`.  It skips the hidden-key guard, the exotic-target dispatch, the
+ * frozen and module-namespace refusals and `__proto__`'s relinking, so it is correct only for a
+ * plain object the caller just made and a key the caller wrote as a literal.  Program-visible
+ * assignment keeps going through `kiln_c99_put`. */
+static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
+                             kiln_value value) {
+    kiln_property *slot;
+    int status = kiln_c99_own_slot(target, key, key_len, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->value = value;
     return KILN_C99_OK;
 }
 
@@ -13893,37 +13919,37 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         }
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(request, "@@node:response", 15, response);
+        /* Every property below is a first write to an object created three statements ago, onto a
+         * prototype chain the runtime linked itself.  `kiln_c99_own_data` is what `kiln_c99_put`
+         * would have produced -- writable, enumerable, configurable data -- without the walk up
+         * that chain looking for a setter that cannot be there. */
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "method", 6,
-                                  kiln_c99_copy_text((const char *)event->method,
-                                                     (size_t)event->method_len), 0, NULL);
+            status = kiln_c99_own_data(request, "method", 6,
+                                       kiln_c99_copy_text((const char *)event->method,
+                                                          (size_t)event->method_len));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "url", 3,
-                                  kiln_c99_copy_text((const char *)event->target,
-                                                     (size_t)event->target_len), 0, NULL);
+            status = kiln_c99_own_data(request, "url", 3,
+                                       kiln_c99_copy_text((const char *)event->target,
+                                                          (size_t)event->target_len));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "httpVersion", 11,
-                                  event->version_minor ? kiln_c99_copy_text("1.1", 3)
-                                                       : kiln_c99_copy_text("1.0", 3), 0, NULL);
+            status = kiln_c99_own_data(request, "httpVersion", 11,
+                                       event->version_minor ? kiln_c99_copy_text("1.1", 3)
+                                                            : kiln_c99_copy_text("1.0", 3));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "httpVersionMajor", 16,
-                                  kiln_c99_number(1.0), 0, NULL);
+            status = kiln_c99_own_data(request, "httpVersionMajor", 16, kiln_c99_number(1.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "httpVersionMinor", 16,
-                                  kiln_c99_number(event->version_minor ? 1.0 : 0.0), 0, NULL);
+            status = kiln_c99_own_data(request, "httpVersionMinor", 16,
+                                       kiln_c99_number(event->version_minor ? 1.0 : 0.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "aborted", 7,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(request, "aborted", 7, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "complete", 8,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(request, "complete", 8, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "destroyed", 9,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(request, "destroyed", 9, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "socket", 6, socket->object, 0, NULL);
+            status = kiln_c99_own_data(request, "socket", 6, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "connection", 10, socket->object, 0, NULL);
+            status = kiln_c99_own_data(request, "connection", 10, socket->object);
         /* `headers` is an accessor until it is read.  Building the table eagerly cost one
          * object and two heap strings per header on every request, and the common server reads
          * one header or none.  The flattened bytes are copied instead -- one malloc and one
@@ -13961,24 +13987,21 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
                                                       response);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "req", 3, request, 0, NULL);
+            status = kiln_c99_own_data(response->object, "req", 3, request);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "socket", 6, socket->object, 0, NULL);
+            status = kiln_c99_own_data(response->object, "socket", 6, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "connection", 10,
-                                  socket->object, 0, NULL);
+            status = kiln_c99_own_data(response->object, "connection", 10, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "statusCode", 10,
-                                  kiln_c99_number(200.0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "statusCode", 10,
+                                       kiln_c99_number(200.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "headersSent", 11,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "writableEnded", 13,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "writableEnded", 13,
+                                       kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "destroyed", 9,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "destroyed", 9, kiln_c99_boolean(0));
         if (status != KILN_C99_OK) return status;
         response->request = request;
         response->next = socket->responses;
