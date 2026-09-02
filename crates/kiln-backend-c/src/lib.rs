@@ -7207,6 +7207,10 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
 #define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
 #define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
 #define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+/* The prototype every `node:http` request object links to. A realm slot rather than a static,
+ * because a realm owns it and the runtime archive already enumerates these slots as GC roots
+ * (ADR 0041) -- and because one identity across translation units is what a prototype is for. */
+#define KILN_C99_REALM_SLOT_INCOMING_MESSAGE UINT32_C(4)
 
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     void *slot = NULL;
@@ -13400,6 +13404,46 @@ static int kiln_c99_install_server_response_methods(kiln_value target) {
     return status;
 }
 
+/* The prototype a `node:http` request links to.
+ *
+ * `req` and `res` are built from nothing on every request, and installing their methods on each
+ * *instance* was the largest single cost in the object model on a keep-alive server: seventeen
+ * or more `kiln_c99_define_method` calls, each a chain walk, a linear scan and an insert, all
+ * producing the same method values every time. One shared prototype per realm replaces them, and
+ * the lookup that finds them was already a chain walk.
+ *
+ * Nothing about listeners moves: `kiln_c99_node_event` keeps its state in an *own*
+ * `@@node:events` property of whichever receiver the method was called on, so buckets land on
+ * the instance and two requests never share listeners. Nor does shadowing: a method on a
+ * prototype is writable, so `req.on = f` still creates an own property that wins.
+ *
+ * There is no registered `IncomingMessage` constructor to hang this on, so it is a realm value
+ * slot. The response has one -- see `kiln_c99_callable_prototype` -- and uses it. */
+static int kiln_c99_node_incoming_message_prototype(kiln_value *out) {
+    kiln_value *slot = NULL;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_INCOMING_MESSAGE, &slot);
+    if (status != KILN_C99_OK) return status;
+    if (slot == NULL) return KILN_C99_CONTROL_ERROR;
+    if (slot->tag == KILN_VALUE_OBJECT) {
+        *out = *slot;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_object(slot);
+    if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(*slot);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(
+            *slot, "setEncoding", 11,
+            kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+    if (status != KILN_C99_OK) {
+        /* A half-built prototype must not be handed out or cached: leave the slot empty so the
+         * next request builds it again rather than inheriting a surface with holes in it. */
+        *slot = kiln_c99_undefined();
+        return status;
+    }
+    *out = *slot;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
                                kiln_value receiver, const kiln_value *args, size_t argc,
                                int depth, kiln_value *thrown) {
@@ -13822,14 +13866,11 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         response->request_id = event->id;
         response->status = 200;
         status = kiln_c99_new_object(&request);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_event(socket->host, &ignored,
-                                         KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                         request, NULL, 0, 0, exception);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(
-                request, "setEncoding", 11,
-                kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+        if (status == KILN_C99_OK) {
+            kiln_value prototype;
+            status = kiln_c99_node_incoming_message_prototype(&prototype);
+            if (status == KILN_C99_OK) status = kiln_c99_set_prototype(request, prototype);
+        }
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(request, "@@node:response", 15, response);
         if (status == KILN_C99_OK)
@@ -13893,34 +13934,17 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         }
         if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->object);
         if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_event(socket->host, &ignored,
-                                         KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                         response->object, NULL, 0, 0, exception);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "setHeader", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "getHeader", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "getHeaders", 10,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "hasHeader", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "removeHeader", 12,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "writeHead", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "write", 5,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "end", 3,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_END));
+        /* The registered native constructor graph already builds exactly this surface --
+         * EventEmitter, Writable, then the eight response methods -- once per realm.  Linking
+         * the live response to it costs one pointer instead of seventeen inserts, and makes a
+         * served `res` and a `new http.ServerResponse()` the same shape for the first time. */
+        if (status == KILN_C99_OK) {
+            kiln_value prototype;
+            status = kiln_c99_callable_prototype(
+                kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE), &prototype);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_set_prototype(response->object, prototype);
+        }
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
                                                       response);
@@ -13988,10 +14012,12 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     }
     if (client != NULL && event->kind == 6) {
         status = kiln_c99_new_object(&client->response);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_node_event(client->host, &ignored,
-                                             KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                             client->response, NULL, 0, 0, exception);
+            if (status == KILN_C99_OK) {
+                kiln_value prototype;
+                status = kiln_c99_node_incoming_message_prototype(&prototype);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_set_prototype(client->response, prototype);
+            }
             if (status == KILN_C99_OK)
                 status = kiln_c99_put(NULL, client->response, "statusCode", 10,
                                       kiln_c99_number((double)event->status), 0, NULL);
@@ -13999,10 +14025,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 status = kiln_c99_put(NULL, client->response, "statusMessage", 13,
                                       kiln_c99_copy_text((const char *)event->reason,
                                                          (size_t)event->reason_len), 0, NULL);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_define_method(
-                    client->response, "setEncoding", 11,
-                    kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
             if (status == KILN_C99_OK) {
                 kiln_value headers;
                 size_t at = 0;
