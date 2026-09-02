@@ -3366,6 +3366,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
                                 int depth, kiln_value *thrown);
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
+static kiln_value kiln_c99_static_text(const char *text, size_t len);
 static kiln_value kiln_c99_control_diagnostic(void);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -9229,6 +9230,18 @@ static int kiln_c99_truthy(kiln_value value) {
     }
 }
 
+/* A string value that borrows bytes the program cannot outlive: a literal in this translation
+ * unit's own read-only data.
+ *
+ * The collector is precise about edges and paranoid about targets (ADR 0041): every candidate
+ * pointer is looked up in the block table and marked only on a hit, so a string pointing at a
+ * literal is ignored by the tracer, never swept, and never released -- `kiln_c99_gc_release`
+ * returns on a table miss for the same reason. That is what makes a constant answer free where
+ * `kiln_c99_copy_text` would allocate a block per request. */
+static kiln_value kiln_c99_static_text(const char *text, size_t len) {
+    return kiln_c99_value(KILN_VALUE_STRING, 0, text, len);
+}
+
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
     char *copy = kiln_c99_gc_alloc_text(len);
     if (copy == NULL) {
@@ -13914,6 +13927,28 @@ static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
                         kiln_c99_copy_text(state, state_len), 0, NULL);
 }
 
+static const char kiln_c99_http_version_11[] = "1.1";
+static const char kiln_c99_http_version_10[] = "1.0";
+static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
+
+/* A request method as a value, without copying bytes that are always one of nine spellings.
+ *
+ * Every method a server sees is a token from a fixed registry, so the string a program reads
+ * back can be this unit's own literal rather than a fresh block per request. An extension method
+ * -- the registry is open -- still copies, so nothing depends on the list being complete. */
+static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) {
+    static const char *const known[] = {"GET",     "POST",    "PUT",  "DELETE", "HEAD",
+                                        "OPTIONS", "PATCH",   "CONNECT", "TRACE"};
+    size_t index;
+    for (index = 0; index < sizeof known / sizeof known[0]; ++index) {
+        const char *name = known[index];
+        if (name[0] == bytes[0] && strlen(name) == len && memcmp(name, bytes, len) == 0) {
+            return kiln_c99_static_text(name, len);
+        }
+    }
+    return kiln_c99_copy_text(bytes, len);
+}
+
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown) {
     kiln_node_socket *socket = (kiln_node_socket *)opaque;
@@ -13950,16 +13985,20 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
          * that chain looking for a setter that cannot be there. */
         if (status == KILN_C99_OK)
             status = kiln_c99_own_data(request, "method", 6,
-                                       kiln_c99_copy_text((const char *)event->method,
-                                                          (size_t)event->method_len));
+                                       kiln_c99_node_http_method_text(
+                                           (const char *)event->method,
+                                           (size_t)event->method_len));
         if (status == KILN_C99_OK)
             status = kiln_c99_own_data(request, "url", 3,
                                        kiln_c99_copy_text((const char *)event->target,
                                                           (size_t)event->target_len));
+        /* Two spellings, both constants: a copy per request bought nothing a literal does not
+         * already give, and the string a program reads is indistinguishable either way. */
         if (status == KILN_C99_OK)
             status = kiln_c99_own_data(request, "httpVersion", 11,
-                                       event->version_minor ? kiln_c99_copy_text("1.1", 3)
-                                                            : kiln_c99_copy_text("1.0", 3));
+                                       event->version_minor
+                                           ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
+                                           : kiln_c99_static_text(kiln_c99_http_version_10, 3));
         if (status == KILN_C99_OK)
             status = kiln_c99_own_data(request, "httpVersionMajor", 16, kiln_c99_number(1.0));
         if (status == KILN_C99_OK)
@@ -15299,7 +15338,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             !(response->status >= 100 && response->status < 200) &&
             !kiln_c99_node_response_is_framed(kiln_c99_object_of(response->headers))) {
             status = kiln_c99_put(NULL, response->headers, "transfer-encoding", 17,
-                                  kiln_c99_copy_text("chunked", 7), 0, NULL);
+                                  kiln_c99_static_text(kiln_c99_transfer_encoding_chunked, 7),
+                                  0, NULL);
             if (status != KILN_C99_OK) return status;
         }
         *result = receiver;

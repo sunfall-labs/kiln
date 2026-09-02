@@ -851,6 +851,7 @@ static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
 static int kiln_c99_node_path(kiln_value *out, uint64_t code,
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
+static kiln_value kiln_c99_static_text(const char *text, size_t len);
 static kiln_value kiln_c99_control_diagnostic(void);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -1161,6 +1162,7 @@ static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high,
 static kiln_value kiln_c99_number_bits(uint64_t bits) {
 static double kiln_c99_as_number(kiln_value value) {
 static int kiln_c99_truthy(kiln_value value) {
+static kiln_value kiln_c99_static_text(const char *text, size_t len) {
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
 static kiln_value kiln_c99_control_diagnostic(void) {
 #define KILN_DIAGNOSTIC_DECIMAL(subject) do { \
@@ -1251,6 +1253,10 @@ static void kiln_c99_node_cancel_request(uint64_t *request) {
 static int kiln_c99_node_close_socket(kiln_node_socket *socket, int force) {
 static int kiln_c99_node_socket_object(kiln_node_socket *socket, kiln_value *thrown) {
 static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
+static const char kiln_c99_http_version_11[] = "1.1";
+static const char kiln_c99_http_version_10[] = "1.0";
+static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
+static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) {
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
 static int kiln_c99_node_complete(void *opaque, const kiln_async_completion *completion,
 static void kiln_c99_node_drop_fs_completion(void *opaque) { kiln_c99_gc_release(opaque); }
