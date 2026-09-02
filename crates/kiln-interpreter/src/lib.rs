@@ -22100,7 +22100,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let promise = Rc::clone(promise);
                 if *rejects {
-                    self.settle(&promise, &Settled::Rejected(value));
+                    if matches!(value, Value::Native(Native::ReturnSignal, _)) {
+                        self.resolve_promise(&promise, Value::Undefined);
+                    } else {
+                        self.settle(&promise, &Settled::Rejected(value));
+                    }
                 } else {
                     self.resolve_promise(&promise, value);
                 }
@@ -23005,9 +23009,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         };
         // Recorded now and cleared if anything attaches later in the same drain, because a
         // handler added on a later tick is still a handler -- `p.catch(...)` on the next line is
-        // ordinary code.
+        // ordinary code. The `.return()` marker is an internal unwinding sentinel and never a
+        // JavaScript rejection.
         if unobserved && let Settled::Rejected(reason) = &outcome {
-            self.unhandled = Some(reason.clone());
+            if !matches!(reason, Value::Native(Native::ReturnSignal, _)) {
+                self.unhandled = Some(reason.clone());
+            }
         }
         for reaction in reactions {
             // The reaction's own context, not this one: whatever settled the promise may be an
@@ -49245,5 +49252,37 @@ mod tests {
             own_attributes(&intrinsics, &buffer, "isBuffer"),
             Some(Attributes::DEFAULT)
         );
+    }
+
+    #[test]
+    fn return_signal_rejected_promise_does_not_surface_as_unhandled_rejection() {
+        let program = Program {
+            source: "".into(),
+            version: kiln_ir::BYTECODE_VERSION,
+            constants: Vec::new(),
+            code: Vec::new(),
+            local_count: 0,
+            functions: Vec::new(),
+        };
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
+        };
+        let mut vm = test_vm(&program, &mut host);
+        let promise = PromiseState::pending();
+        let settler = Value::Settler(Rc::clone(&promise), true);
+        assert!(
+            vm.call_value(
+                &settler,
+                Value::Undefined,
+                vec![Value::Native(Native::ReturnSignal, RealmId::PRIMARY)],
+                0
+            )
+            .is_ok()
+        );
+        assert!(vm.check_unhandled_rejection().is_ok());
     }
 }
