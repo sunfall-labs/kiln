@@ -31348,6 +31348,14 @@ int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_co
     (void)fields; (void)field_count; (void)out_handle;
     return -1;
 }
+int32_t kiln_temporal_construct(uint32_t kind, const double *fields, size_t field_count,
+                                const unsigned char *text, const int64_t *text_lengths,
+                                size_t text_count, int64_t epoch_high, uint64_t epoch_low,
+                                void **out_handle) {
+    (void)kind; (void)fields; (void)field_count; (void)text; (void)text_lengths;
+    (void)text_count; (void)epoch_high; (void)epoch_low; (void)out_handle;
+    return -1;
+}
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
                             const unsigned char *option_text,
                             const int64_t *option_text_lengths, size_t option_text_count,
