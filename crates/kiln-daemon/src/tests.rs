@@ -76,7 +76,7 @@ impl Client {
         })
     }
 
-    fn handshake(&mut self) -> std::io::Result<u32> {
+    fn handshake(&mut self) -> std::io::Result<(u32, u64)> {
         self.raw.handshake()
     }
 
@@ -661,7 +661,7 @@ fn request_and_response_round_trip_over_a_socket() {
     let fixture = Fixture::started();
     let mut client = fixture.client();
 
-    let pid = client.handshake().expect("handshake");
+    let (pid, _) = client.handshake().expect("handshake");
     assert_eq!(pid, std::process::id(), "the daemon reports its own pid");
 
     let set = client
@@ -1708,6 +1708,7 @@ fn protocol_mismatch_is_rejected_and_the_connection_dropped() {
     let response = client
         .request(&Request::Ping {
             protocol: PROTOCOL_VERSION - 1,
+            build: crate::build_identity(),
         })
         .expect("the daemon answers before hanging up");
     let Response::Error { message } = response else {
@@ -1831,7 +1832,7 @@ fn a_silent_client_does_not_block_another() {
     let socket = fixture.socket.clone();
     let pid = within(Duration::from_secs(5), move || {
         let mut client = Client::connect(&socket).expect("connect");
-        client.handshake().expect("handshake")
+        client.handshake().expect("handshake").0
     });
     assert_eq!(pid, std::process::id());
 
@@ -1859,6 +1860,7 @@ fn a_malformed_frame_costs_one_response_not_the_connection() {
     // Line framing resynchronises on its own, so the connection is still usable.
     let request = serde_json::to_string(&Request::Ping {
         protocol: PROTOCOL_VERSION,
+        build: crate::build_identity(),
     })
     .expect("encode");
     crate::framing::write_frame(&mut raw, &request).expect("write");

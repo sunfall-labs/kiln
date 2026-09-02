@@ -236,6 +236,9 @@ impl<E: QueryEngine + Send + 'static> Daemon<E> {
     ///
     /// Consumes the daemon so the socket file is unlinked on return.
     pub fn serve(self) {
+        // Before the first connection, and before any rebuild can replace the file underneath us:
+        // this daemon's answers belong to the build it started from, whatever is at that path now.
+        let _ = crate::build_identity();
         let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
         for incoming in self.listener.incoming() {

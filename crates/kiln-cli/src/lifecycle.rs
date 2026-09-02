@@ -18,7 +18,7 @@ use crate::error::{Error, Result};
 pub fn start(socket: &Path) -> Result<Output> {
     match DaemonClient::connect(socket) {
         Ok(mut client) => {
-            let pid = client.handshake()?;
+            let (pid, _) = client.handshake()?;
             Ok(Output::new(format!(
                 "already running  pid {pid}  {}\n",
                 socket.display()
@@ -26,7 +26,7 @@ pub fn start(socket: &Path) -> Result<Output> {
         }
         Err(Error::NotRunning) => {
             let mut client = DaemonClient::connect_or_start(socket)?;
-            let pid = client.handshake()?;
+            let (pid, _) = client.handshake()?;
             Ok(Output::new(format!(
                 "started  pid {pid}  {}\n",
                 socket.display()
@@ -39,7 +39,7 @@ pub fn start(socket: &Path) -> Result<Output> {
 pub fn stop(socket: &Path) -> Result<Output> {
     match DaemonClient::connect(socket) {
         Ok(mut client) => match client.handshake() {
-            Ok(pid) => {
+            Ok((pid, _)) => {
                 client.shutdown()?;
                 Ok(Output::new(format!("stopped  pid {pid}\n")))
             }
@@ -74,7 +74,7 @@ pub fn stop(socket: &Path) -> Result<Output> {
 pub fn status(socket: &Path) -> Result<(Output, i32)> {
     match DaemonClient::connect(socket) {
         Ok(mut client) => {
-            let pid = client.handshake()?;
+            let (pid, _) = client.handshake()?;
             let text = format!(
                 "running  pid {pid}  protocol {PROTOCOL_VERSION}  {}\n",
                 socket.display()

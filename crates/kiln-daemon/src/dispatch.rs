@@ -120,7 +120,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
     request: Request,
 ) -> (Response, Next) {
     match request {
-        Request::Ping { protocol } if protocol != PROTOCOL_VERSION => (
+        Request::Ping { protocol, .. } if protocol != PROTOCOL_VERSION => (
             Response::Error {
                 message: format!(
                     "protocol mismatch: client speaks version {protocol}, this daemon speaks \
@@ -135,6 +135,7 @@ pub(crate) fn dispatch_source<E: QueryEngine>(
             Response::Pong {
                 protocol: PROTOCOL_VERSION,
                 pid: std::process::id(),
+                build: crate::build_identity(),
             },
             Next::Continue,
         ),

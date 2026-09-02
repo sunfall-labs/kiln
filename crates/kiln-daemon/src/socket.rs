@@ -26,6 +26,43 @@ use kiln_digest::Digest;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// What distinguishes *this build* of the executable from the one before it.
+///
+/// Deliberately not a version constant. `PROTOCOL_VERSION` is bumped by hand when the wire shape
+/// changes, which is exactly the skew that is easy to notice; the skew that costs an afternoon is
+/// a rebuild that changes an *answer* while every message stays well formed. The executable's
+/// length and modification time move on every link and cost a `stat`, where hashing the binary
+/// itself would cost milliseconds on every invocation of a CLI that is supposed to feel instant.
+///
+/// Zero means "unknown" -- no current executable, or no metadata for it -- and compares equal to
+/// itself, so a platform that cannot answer degrades to the old behaviour instead of refusing to
+/// run.
+#[must_use]
+pub fn build_identity() -> u64 {
+    // Captured once, and that is the whole point rather than an optimisation. A build system that
+    // replaces the executable *in place* -- which the one this repository uses does -- leaves a
+    // running daemon's `current_exe()` pointing at the new file, so a daemon that recomputed this
+    // per handshake would read the client's identity and agree with it every time. What has to be
+    // compared is the build each side was *started* from.
+    static IDENTITY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    fn identity() -> Option<u64> {
+        let metadata = std::fs::metadata(std::env::current_exe().ok()?).ok()?;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        let mut bytes = Vec::with_capacity(24);
+        bytes.extend_from_slice(&metadata.len().to_le_bytes());
+        bytes.extend_from_slice(&modified.as_nanos().to_le_bytes());
+        let digest = Digest::hash(&bytes).to_base64_url();
+        let mut identity = [0u8; 8];
+        identity.copy_from_slice(digest.as_bytes().get(..8)?);
+        Some(u64::from_le_bytes(identity))
+    }
+    *IDENTITY.get_or_init(|| identity().unwrap_or(0))
+}
+
 /// Conservative bound on a `sockaddr_un` path: 104 bytes on macOS including the NUL, 108 on
 /// Linux. Exceeding it makes `bind` fail with a much less obvious error than this one.
 const MAX_SOCKET_PATH: usize = 100;
@@ -60,6 +97,20 @@ fn socket_path_in(canonical_root: &Path, temp_dir: &Path) -> io::Result<PathBuf>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_identity_is_one_answer_for_the_life_of_the_process() {
+        // The daemon compares the build it started from against the client's. If this moved while
+        // a daemon was running -- which it would if it were read from the executable on every
+        // call, on a build system that replaces that file in place -- a stale daemon would agree
+        // with every client and the comparison would be decorative.
+        assert_eq!(build_identity(), build_identity());
+        assert_ne!(
+            build_identity(),
+            0,
+            "a test binary has an executable with metadata, so this is a real identity"
+        );
+    }
 
     #[test]
     fn same_root_always_yields_the_same_socket() {
