@@ -989,6 +989,13 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_HOOKS_VERSION 1u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)2 * 1024 * 1024)
 typedef struct kiln_gc_block {
+#define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
+#define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
+#define KILN_GC_SLAB_CLASS_MAX ((size_t)256)
+#define KILN_GC_SLAB_CLASS_STEP ((size_t)16)
+#define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
+typedef struct kiln_gc_slab {
+typedef struct kiln_gc_ptrset {
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
@@ -997,9 +1004,20 @@ static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
 static void kiln_c99_gc_trace_count(uint64_t count) {
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
 static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
-static int kiln_c99_gc_table_grow(kiln_gc_heap *heap, size_t wanted) {
-static int kiln_c99_gc_table_insert(kiln_gc_heap *heap, kiln_gc_block *block) {
-static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *block) {
+static int kiln_c99_gc_ptrset_grow(kiln_gc_ptrset *set, size_t wanted) {
+static int kiln_c99_gc_ptrset_insert(kiln_gc_ptrset *set, void *pointer) {
+static void kiln_c99_gc_ptrset_remove(kiln_gc_ptrset *set, const void *pointer) {
+static int kiln_c99_gc_ptrset_contains(const kiln_gc_ptrset *set, const void *pointer) {
+static void *kiln_c99_gc_aligned_alloc(size_t alignment, size_t size) {
+static void kiln_c99_gc_aligned_free(void *aligned) {
+static int kiln_c99_gc_slab_class(size_t total) {
+static kiln_gc_block *kiln_c99_gc_slab_slot(const kiln_gc_slab *slab, uint32_t index) {
+static void kiln_c99_gc_slab_unlink_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+static void kiln_c99_gc_slab_link_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+static void kiln_c99_gc_slab_unlink_all(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
+static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const void *payload,
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
