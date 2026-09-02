@@ -872,7 +872,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if self.is_shutdown() {
             return None;
         }
-        if !self.state.time_paused {
+        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
             self.executor.local.block_on(&self.executor.runtime, async {
                 tokio::time::pause();
             });
@@ -1049,7 +1049,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 
     /// Pause Tokio time for the deterministic clock, once.
     pub fn pause_time(&mut self) {
-        if !self.state.time_paused {
+        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
             let _entered = self.executor.runtime.enter();
             tokio::time::pause();
             self.state.time_paused = true;
@@ -1164,7 +1164,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         C: FnMut(&mut Realm<M, T>) -> Result<(), E>,
     {
         assert!(!self.is_shutdown(), "a shut down realm cannot be driven");
-        if !self.state.time_paused {
+        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
             self.executor.local.block_on(&self.executor.runtime, async {
                 tokio::time::pause();
             });
@@ -1189,7 +1189,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         if self.is_shutdown() {
             return None;
         }
-        if !self.state.time_paused {
+        if self.state.capabilities.clock == ClockCapability::Virtual && !self.state.time_paused {
             self.executor.local.block_on(&self.executor.runtime, async {
                 tokio::time::pause();
             });

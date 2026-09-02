@@ -1511,6 +1511,9 @@ builtin_surface! {
     (KILN_C99_BUILTIN_ARRAY_BUFFER, "ArrayBuffer", "isView",
      code(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW)),
 
+    (KILN_C99_BUILTIN_PERFORMANCE, "performance", "now",
+     code(KILN_C99_METHOD_NODE_PERFORMANCE_NOW)),
+
     // Every error constructor carries `captureStackTrace`, which `kiln_c99_namespace_method`
     // answers ahead of the table rather than repeating in a row per kind. The row is here so that
     // `Object.getOwnPropertyNames(Error)` and the drift test can both see it.
@@ -22257,6 +22260,40 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             if (code == KILN_C99_METHOD_OBJECT_FREEZE) {
                 *flag = 1;
+                if (subject.tag == KILN_VALUE_OBJECT) {
+                    kiln_object *obj = kiln_c99_object_of(subject);
+                    size_t i;
+                    for (i = 0; i < obj->count; ++i) {
+                        if (!obj->properties[i].accessor) {
+                            obj->properties[i].writable = 0;
+                        }
+                        obj->properties[i].configurable = 0;
+                    }
+                } else if (subject.tag == KILN_VALUE_FUNCTION) {
+                    kiln_closure *closure = kiln_c99_closure_of(subject);
+                    if (closure->properties.tag == KILN_VALUE_OBJECT) {
+                        kiln_object *obj = kiln_c99_object_of(closure->properties);
+                        size_t i;
+                        for (i = 0; i < obj->count; ++i) {
+                            if (!obj->properties[i].accessor) {
+                                obj->properties[i].writable = 0;
+                            }
+                            obj->properties[i].configurable = 0;
+                        }
+                    }
+                } else if (subject.tag == KILN_VALUE_ARRAY) {
+                    kiln_array *arr = kiln_c99_array_of(subject);
+                    if (arr->properties.tag == KILN_VALUE_OBJECT) {
+                        kiln_object *obj = kiln_c99_object_of(arr->properties);
+                        size_t i;
+                        for (i = 0; i < obj->count; ++i) {
+                            if (!obj->properties[i].accessor) {
+                                obj->properties[i].writable = 0;
+                            }
+                            obj->properties[i].configurable = 0;
+                        }
+                    }
+                }
                 /* The object itself, so `Object.freeze(o) === o` and a freeze can be inlined into
                  * the expression that built it. */
                 *result = subject;
@@ -28636,7 +28673,8 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::ClearImmediate
             | kiln_ir::Builtin::AbortController
             | kiln_ir::Builtin::AbortSignal
-            | kiln_ir::Builtin::TextEncoder,
+            | kiln_ir::Builtin::TextEncoder
+            | kiln_ir::Builtin::Performance,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
             feature: format!("the `{builtin:?}` builtin in the native backend"),
@@ -31462,6 +31500,9 @@ fn emit_instruction(
                 }
                 kiln_ir::Builtin::TextEncoder => {
                     "kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER)"
+                }
+                kiln_ir::Builtin::Performance => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE)"
                 }
                 _ => unreachable!("verification rejects every other builtin before emission"),
             };

@@ -8021,7 +8021,14 @@ pub fn execute_node_with_strictness<H: HostOps + ?Sized>(
     limits: ExecutionLimits,
     capabilities: ExecutionCapabilities,
 ) -> Result<ExecutionResult, ExecutionError> {
-    let mut runtime = realm_runtime()?;
+    let mut runtime = RealmRuntime::with_capabilities(RealmCapabilities {
+        clock: ClockCapability::Host,
+        ..RealmCapabilities::default()
+    })
+    .map_err(|error| ExecutionError::Host {
+        instruction: 0,
+        message: error.to_string(),
+    })?;
     execute_node_in_runtime_with_strictness(
         program,
         strictness,
