@@ -628,7 +628,13 @@ async fn serve(
     });
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder.auto_date_header(false);
-    builder.half_close(allow_half_close);
+    // Node's http.Server always allows a half-open socket: a client may shut its write side
+    // after the request and still receive the response. With the socket in Hyper's hands the
+    // EOF is seen at once, so refusing half-close would drop every such response before it is
+    // written (the bridged engine only surfaced the EOF a round trip later). The option a
+    // program passes still selects raw-socket behaviour elsewhere; HTTP keeps Node's rule.
+    let _ = allow_half_close;
+    builder.half_close(true);
     let mut connection = Box::pin(builder.serve_connection(TokioIo::new(transport.0), service));
     let pump = Rc::clone(&shared);
     let result = tokio::select! {
