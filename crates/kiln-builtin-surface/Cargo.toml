@@ -1,0 +1,11 @@
+[package]
+name = "kiln-builtin-surface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately empty, and meant to stay that way. This crate holds one table of `&'static str` and
+# the const functions that read it, so it can sit beneath both engines without putting anything on
+# either one's rebuild path but itself (ADR 0004).
+[dependencies]
