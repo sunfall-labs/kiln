@@ -11966,7 +11966,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 *out = kiln_c99_number(-1.0 / 0.0);
             } else if (kiln_c99_same_name(key, key_len, "NaN")) {
                 *out = kiln_c99_number(0.0 / 0.0);
-             else {
+            } else if (kiln_c99_same_name(key, key_len, "MAX_VALUE")) {
+                /* The two the interpreter had and this list did not. `Number.MAX_VALUE` is the
+                 * first thing a bundled `zod` reads, and its absence refused the whole module. */
+                *out = kiln_c99_number(1.7976931348623157e308);
+            } else if (kiln_c99_same_name(key, key_len, "MIN_VALUE")) {
+                *out = kiln_c99_number(5e-324);
+            } else {
                 return KILN_C99_CONTROL_ERROR;
             }
             return KILN_C99_OK;
