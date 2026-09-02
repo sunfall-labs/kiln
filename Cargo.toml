@@ -15,6 +15,7 @@ repository = "https://github.com/sunfall-labs/kiln"
 [workspace.dependencies]
 kiln-artifact-cache = { path = "crates/kiln-artifact-cache" }
 kiln-backend-c = { path = "crates/kiln-backend-c" }
+kiln-builtin-surface = { path = "crates/kiln-builtin-surface" }
 kiln-db = { path = "crates/kiln-db" }
 kiln-digest = { path = "crates/kiln-digest" }
 kiln-hir = { path = "crates/kiln-hir" }

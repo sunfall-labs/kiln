@@ -44760,190 +44760,112 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
     &[]
 }
 
+/// The static members a built-in carries, out of the table both engines read.
+///
+/// ONE TABLE, TWO EMITTERS (ADR 0043). The member names used to be written out here and again as
+/// `kiln_c99_same_name` chains in `kiln-backend-c`'s emitted C, and nothing compared the two. They
+/// drifted, silently, until an npm bundle read a member one of them lacked: `Number` had fifteen
+/// statics here and five there, and `Number.MAX_VALUE` is the first property a bundled `zod`
+/// reads, so its absence refused the whole module.
+///
+/// Every arm below binds a `const`, so [`kiln_builtin_surface::members`] runs at compile time and
+/// a global this interpreter names but the shared table does not declare fails to build. What the
+/// arm still chooses is which built-in it *is* -- that is this interpreter's own knowledge of its
+/// `Native` values, and the shared table has no business holding it.
 fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str] {
     match target {
         Value::Native(Native::ArrayConstructor, _) => {
-            &["isArray", "from", "fromAsync", "of", "@@species"]
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Array");
+            MEMBERS
         }
-        Value::Native(Native::ObjectConstructor, _) => &[
-            "keys",
-            "getOwnPropertyNames",
-            "assign",
-            "entries",
-            "values",
-            "freeze",
-            "isFrozen",
-            "create",
-            "defineProperty",
-            "fromEntries",
-            "hasOwn",
-            "groupBy",
-            "is",
-            "getOwnPropertySymbols",
-            "defineProperties",
-            "getOwnPropertyDescriptor",
-            "getOwnPropertyDescriptors",
-            "setPrototypeOf",
-            "getPrototypeOf",
-            "preventExtensions",
-            "isExtensible",
-            "seal",
-            "isSealed",
-        ],
-        Value::Native(Native::StringConstructor, _) => &["raw", "fromCharCode", "fromCodePoint"],
-        Value::Native(Native::NumberConstructor, _) => &[
-            "isInteger",
-            "isSafeInteger",
-            "isNaN",
-            "isFinite",
-            "parseInt",
-            "parseFloat",
-            "MAX_SAFE_INTEGER",
-            "MIN_SAFE_INTEGER",
-            "MAX_VALUE",
-            "MIN_VALUE",
-            "EPSILON",
-            "POSITIVE_INFINITY",
-            "NEGATIVE_INFINITY",
-            "NaN",
-        ],
-        Value::Native(Native::DateConstructor, _) => &["now", "UTC", "parse"],
-        Value::Native(Native::PromiseConstructor, _) => &[
-            "resolve",
-            "reject",
-            "all",
-            "allSettled",
-            "race",
-            "any",
-            "withResolvers",
-            "try",
-        ],
-        Value::Native(Native::Json, _) => &[
-            "parse",
-            "rawJSON",
-            "isRawJSON",
-            "stringify",
-            "@@toStringTag",
-        ],
-        Value::Native(Native::Reflect, _) => &[
-            "defineProperty",
-            "deleteProperty",
-            "apply",
-            "construct",
-            "get",
-            "getOwnPropertyDescriptor",
-            "getPrototypeOf",
-            "has",
-            "isExtensible",
-            "ownKeys",
-            "preventExtensions",
-            "set",
-            "setPrototypeOf",
-            "@@toStringTag",
-        ],
-        Value::Native(Native::ProxyConstructor, _) => &["revocable"],
-        Value::Native(Native::ArrayBufferConstructor, _) => &["isView"],
-        Value::Native(Native::RegExpConstructor, _) => &["escape"],
-        Value::Native(Native::Error(ErrorKind::Error), _) => &["isError", "captureStackTrace"],
-        Value::Native(Native::BigIntConstructor, _) => &["asIntN", "asUintN"],
-        Value::Native(Native::MapConstructor, _) => &["groupBy"],
-        Value::Native(Native::TypedArrayIntrinsic, _) => &["@@species"],
+        Value::Native(Native::ObjectConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Object");
+            MEMBERS
+        }
+        Value::Native(Native::StringConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("String");
+            MEMBERS
+        }
+        Value::Native(Native::NumberConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Number");
+            MEMBERS
+        }
+        Value::Native(Native::DateConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Date");
+            MEMBERS
+        }
+        Value::Native(Native::PromiseConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Promise");
+            MEMBERS
+        }
+        Value::Native(Native::Json, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("JSON");
+            MEMBERS
+        }
+        Value::Native(Native::Reflect, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Reflect");
+            MEMBERS
+        }
+        Value::Native(Native::ProxyConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Proxy");
+            MEMBERS
+        }
+        Value::Native(Native::ArrayBufferConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("ArrayBuffer");
+            MEMBERS
+        }
+        Value::Native(Native::RegExpConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("RegExp");
+            MEMBERS
+        }
+        Value::Native(Native::Error(ErrorKind::Error), _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Error");
+            MEMBERS
+        }
+        Value::Native(Native::BigIntConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("BigInt");
+            MEMBERS
+        }
+        Value::Native(Native::MapConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Map");
+            MEMBERS
+        }
+        Value::Native(Native::SymbolConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Symbol");
+            MEMBERS
+        }
+        Value::Native(Native::IteratorConstructor, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Iterator");
+            MEMBERS
+        }
+        Value::Native(Native::NodeBuffer | Native::NodeBufferGlobal, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Buffer");
+            MEMBERS
+        }
+        Value::Native(Native::Atomics, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Atomics");
+            MEMBERS
+        }
+        Value::Native(Native::Math, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("Math");
+            MEMBERS
+        }
+        Value::Native(Native::TypedArrayIntrinsic, _) => {
+            const MEMBERS: &[&str] = kiln_builtin_surface::members("%TypedArray%");
+            MEMBERS
+        }
         Value::Native(Native::TypedArrayConstructor(kind), _) => match kind {
-            TypedKind::Uint8 => &["of", "from", "BYTES_PER_ELEMENT", "fromBase64", "fromHex"],
-            _ => &["of", "from", "BYTES_PER_ELEMENT"],
+            // A view's elements are bytes only here, which is why these two are `Uint8Array`'s
+            // alone and not `%TypedArray%`'s.
+            TypedKind::Uint8 => {
+                const MEMBERS: &[&str] = kiln_builtin_surface::members("Uint8Array");
+                MEMBERS
+            }
+            _ => {
+                const MEMBERS: &[&str] = kiln_builtin_surface::members("%TypedArrayConstructor%");
+                MEMBERS
+            }
         },
-        Value::Native(Native::SymbolConstructor, _) => &[
-            "for",
-            "keyFor",
-            "asyncIterator",
-            "hasInstance",
-            "isConcatSpreadable",
-            "iterator",
-            "match",
-            "matchAll",
-            "replace",
-            "search",
-            "species",
-            "split",
-            "toPrimitive",
-            "toStringTag",
-            "unscopables",
-        ],
-        Value::Native(Native::IteratorConstructor, _) => &["from", "concat", "zip", "zipKeyed"],
-        Value::Native(Native::NodeBuffer | Native::NodeBufferGlobal, _) => &[
-            "from",
-            "alloc",
-            "allocUnsafe",
-            "allocUnsafeSlow",
-            "isBuffer",
-            "byteLength",
-            "concat",
-            "constants",
-        ],
-        Value::Native(Native::Atomics, _) => &[
-            "add",
-            "and",
-            "compareExchange",
-            "exchange",
-            "isLockFree",
-            "load",
-            "notify",
-            "or",
-            "pause",
-            "store",
-            "sub",
-            "wait",
-            "waitAsync",
-            "xor",
-            "@@toStringTag",
-        ],
-        Value::Native(Native::Math, _) => &[
-            "abs",
-            "floor",
-            "ceil",
-            "round",
-            "trunc",
-            "sign",
-            "sqrt",
-            "cbrt",
-            "random",
-            "sinh",
-            "cosh",
-            "tanh",
-            "asinh",
-            "acosh",
-            "atanh",
-            "log1p",
-            "expm1",
-            "fround",
-            "f16round",
-            "clz32",
-            "imul",
-            "hypot",
-            "atan2",
-            "sin",
-            "cos",
-            "tan",
-            "asin",
-            "acos",
-            "atan",
-            "pow",
-            "min",
-            "max",
-            "log",
-            "log2",
-            "log10",
-            "exp",
-            "PI",
-            "E",
-            "LN2",
-            "LN10",
-            "SQRT2",
-            "SQRT1_2",
-            "LOG2E",
-            "LOG10E",
-            "@@toStringTag",
-        ],
         _ => &[],
     }
 }
