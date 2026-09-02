@@ -1712,6 +1712,23 @@ mod realm {
                     realm.runtime.borrow().describe_host_work(),
                 );
             }
+            // A timer that is already due runs now. It is not a wait case: under load the
+            // completion signal always has a permit, and a select that prefers it would let a
+            // due timer wait forever (measured: setTimeout(0) at 13 ms median on a saturated
+            // server while every other route took 0.13 ms).
+            if let Some(due) = deadline
+                && due <= now
+            {
+                let timer = realm.work.borrow_mut().run_next_timer();
+                if let Some(WorkItem::Timer { work, .. }) = timer {
+                    let (host, thrown) = realm.drive_context.get();
+                    let status = work.run(host, thrown);
+                    if status != 0 {
+                        return status;
+                    }
+                }
+                continue;
+            }
             // A completion can arrive only while an operation is pending, and it matters only
             // while something referenced keeps the realm alive; a direct connection with a
             // response outstanding is alive on its own. Otherwise only virtual timers remain.

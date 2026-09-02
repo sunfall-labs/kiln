@@ -989,6 +989,9 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 1u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
+#define KILN_GC_KIND_MASK ((uint32_t)0x3FFFFFFFu)
+#define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
+#define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
 typedef struct kiln_gc_block {
 #define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
 #define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
@@ -1020,6 +1023,8 @@ static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *sla
 static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
 static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const void *payload,
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
+static int kiln_c99_string_is_ascii(kiln_value value) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
@@ -1282,6 +1287,7 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
 static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
 static kiln_value kiln_c99_inspect(kiln_value value) {
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
+static int kiln_c99_units_ascii(const uint16_t *units, size_t count) {
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
 static double kiln_c99_units_find(const uint16_t *haystack, size_t haystack_len,
 static int kiln_c99_is_trimmed(uint16_t unit) {
@@ -1383,6 +1389,7 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key, const char *prefix) {
 static int kiln_c99_define_private(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
 #define KILN_JSON_OPEN(bracket)                                                                   \
