@@ -4281,3 +4281,33 @@ question it answered now asked once, in `Executor::run`. Numbers are in
   without `poll_http_tasks` passes all 35 node conformance tests (12 ms) and 4 server tests (23 ms);
   `poll_tasks` was removed from `ActiveHttpRuntime`.
 
+
+## `node:path` had two implementations and they had both drifted (2026-09-02, Claude `gemini/node-path`)
+
+Inherited a work-in-progress that taught the native backend `dirname`, `basename`, `extname` and
+`relative` in hand-written C. The interpreter already had all four in Rust over `std::path`. Before
+touching anything, both were measured against node over a thirty-path matrix: **the interpreter
+disagreed with node in seven places, the native backend in five, and not the same five.**
+`basename("/foo/bar.js", "bar.js")` was `""` interpreted and `"bar.js"` natively. Whichever engine
+you believed, the other one was lying to you. ADR 0048 folds them into one crate both engines link;
+both now answer node exactly.
+
+Worth keeping: `std::path` was the *cause* of three of the interpreter's seven. It normalises, and
+node's decompositions are lexical -- `dirname("a//b")` is `"a/"`, not `"a"`. Reaching for the
+standard library was right; assuming its dialect was node's was not.
+
+**A fresh binary is not enough: `kiln run` answers from a daemon.** Rebuilt the CLI, confirmed the
+binary's mtime was newer than the source it was built from, ran the matrix, and got the *old*
+answers seven times over. `kiln run` connects to the project's daemon, which was still serving a
+build from before the change, and the handshake did not catch it because every crate in the
+workspace is version `0.0.0`, so there is no skew to detect. `--one-shot` runs in-process and gave
+the new answers immediately. CLAUDE.md's rule is to check the binary against `git log -1`; the
+layer under it is to check who is actually answering.
+
+**The undefined-symbol trap fired exactly as documented, for a reason the file warns about.**
+Workspace green, every native link dead with `undefined reference to kiln_node_path_part`. The
+archive is keyed by a digest over an explicit list of source files, and a crate that compiles into
+the archive but is missing from that list cannot invalidate it. The comment directly above the list
+says this, about the calendar adapter. The list lives in **three** places -- `number_provider.rs`
+and both provider scripts -- and `kiln-cli`'s `script_hygiene` test holds them equal; it caught the
+two I had not updated.

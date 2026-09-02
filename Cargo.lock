@@ -1104,6 +1104,7 @@ dependencies = [
  "kiln-intl",
  "kiln-ir",
  "kiln-node-abi",
+ "kiln-node-path",
  "kiln-runtime",
  "kiln-temporal",
  "md-5",
@@ -1204,6 +1205,7 @@ version = "0.0.0"
 dependencies = [
  "kiln-host-abi",
  "kiln-native-number-abi",
+ "kiln-node-path",
  "kiln-number-core",
  "kiln-runtime",
  "kiln-temporal",
@@ -1227,6 +1229,10 @@ version = "0.0.0"
 
 [[package]]
 name = "kiln-node-abi"
+version = "0.0.0"
+
+[[package]]
+name = "kiln-node-path"
 version = "0.0.0"
 
 [[package]]

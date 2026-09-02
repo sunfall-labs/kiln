@@ -27,6 +27,7 @@ temporal = ["dep:kiln-temporal"]
 kiln-native-number-abi = { workspace = true }
 kiln-number-core = { workspace = true }
 kiln-host-abi = { workspace = true }
+kiln-node-path = { workspace = true }
 kiln-runtime = { workspace = true, optional = true }
 # The calendar engine, wrapped by the adapter that already keeps `temporal_rs` out of every public
 # signature -- which is what lets it cross a C ABI as scalars and an opaque handle.

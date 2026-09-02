@@ -625,6 +625,12 @@ fn runtime_prelude_size() {
     // Widened once on 2026-09-01, when the collector (ADR 0041) added its core, a tracer and a
     // finaliser per heap kind, and the string-builder seam: about 700 lines, to 24,704. The band
     // is again roughly +/-9% of that.
+    //
+    // Widened again on 2026-09-02 for `node:path` and `String.fromCharCode`. The prelude is 27,116
+    // lines at that point -- and would have been ~120 more, except that `dirname`, `basename`,
+    // `extname` and `relative` call the Rust provider rather than carrying a second hand-written
+    // copy of node's algorithms. A ceiling of 27,000 is the one this change would have needed
+    // without that; it is worth knowing which of the two numbers is the honest one.
     const FLOOR_LINES: usize = 22_500;
     const CEILING_LINES: usize = 28_000;
 

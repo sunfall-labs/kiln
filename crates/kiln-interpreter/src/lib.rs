@@ -14,6 +14,7 @@ use kiln_ir::{
     BinaryOp, Constant, EvalAccess, EvalSite, Instruction, ModuleProgram, PrivateKind, Program,
     Strictness, UnaryOp, Upvalue,
 };
+use kiln_node_path::{PathPart, normalize_posix_path, posix_path_part, posix_path_relative};
 use kiln_runtime::{
     ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, HttpCloseMode,
     LocaleCapability, Realm, RealmCapabilities, RealmRuntime, RuntimeHttpClientEvent,
@@ -376,19 +377,6 @@ impl ErrorKind {
 /// that silently does nothing -- which is how it first went in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct BrandOnly(bool);
-
-/// Which slice of a path one of `node:path`'s pure decompositions answers with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PathPart {
-    /// `dirname`: everything before the last separator.
-    Dir,
-    /// `basename`: everything after it, optionally with a suffix removed.
-    Base,
-    /// `extname`: the last dot and what follows, or "".
-    Ext,
-    /// `normalize`: the same path with `.`, `..` and repeated separators resolved.
-    Normalize,
-}
 
 /// One fact `node:os` reports about the machine.
 ///
@@ -16360,11 +16348,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .first()
                     .map_or_else(String::new, Value::to_display_string);
                 let suffix = arguments.get(1).map(Value::to_display_string);
-                return Ok(Value::String(posix_path_part(
-                    part,
-                    &path,
-                    suffix.as_deref(),
-                )));
+                return Ok(Value::String(
+                    posix_path_part(part, &path, suffix.as_deref()).into_owned(),
+                ));
             }
             Native::NodePathRelative => {
                 let from = arguments
@@ -16379,10 +16365,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let path = arguments
                     .first()
                     .map_or_else(String::new, Value::to_display_string);
-                let base = posix_path_part(PathPart::Base, &path, None);
-                let ext = posix_path_part(PathPart::Ext, &path, None);
+                let base = posix_path_part(PathPart::Base, &path, None).into_owned();
+                let ext = posix_path_part(PathPart::Ext, &path, None).into_owned();
                 let name = base
-                    .strip_suffix(&ext)
+                    .strip_suffix(ext.as_str())
                     .filter(|_| !ext.is_empty())
                     .unwrap_or(&base)
                     .to_owned();
@@ -16393,7 +16379,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     ),
                     (
                         "dir".to_owned(),
-                        Value::String(posix_path_part(PathPart::Dir, &path, None)),
+                        Value::String(posix_path_part(PathPart::Dir, &path, None).into_owned()),
                     ),
                     ("base".to_owned(), Value::String(base)),
                     ("ext".to_owned(), Value::String(ext)),
@@ -34228,86 +34214,6 @@ fn split_mix_64(state: &mut u64) -> u64 {
     mixed ^ (mixed >> 31)
 }
 
-/// The four pure decompositions of a POSIX path.
-///
-/// The scanning is `std::path::Path`'s -- `parent`, `file_name`, `extension` -- rather than a
-/// hand-rolled search for the last separator: it already knows that a trailing separator is not
-/// a component, that `.` is not one either, and that a leading dot is a hidden file rather than
-/// an extension. What is left here is the handful of places node's answer differs from Rust's,
-/// and those are worth being explicit about:
-///
-///   * node keeps the dot -- `extname("a.js")` is `".js"` where Rust's `extension` is `"js"`;
-///   * node answers `"."` for a path with no directory, where Rust answers `Some("")`;
-///   * node answers `"/"` for the root's own directory, where Rust answers `None`.
-fn posix_path_part(part: PathPart, path: &str, suffix: Option<&str>) -> String {
-    use std::path::Path;
-    if matches!(part, PathPart::Normalize) {
-        return normalize_posix_path(path);
-    }
-    let scanned = Path::new(path);
-    match part {
-        PathPart::Dir => match scanned.parent().and_then(std::path::Path::to_str) {
-            // The root, and anything that normalizes to it: its own parent.
-            None => path.chars().next().map_or(".", |_| "/").to_owned(),
-            Some("") => ".".to_owned(),
-            Some(parent) => parent.to_owned(),
-        },
-        PathPart::Base => {
-            // `Path::file_name` is `None` for `.` and `..`, which are `CurDir`/`ParentDir`
-            // components rather than names. node answers with the text.
-            let base = scanned
-                .file_name()
-                .and_then(std::ffi::OsStr::to_str)
-                .unwrap_or(match path.trim_end_matches('/') {
-                    dots @ ("." | "..") => dots,
-                    _ => "",
-                });
-            match suffix {
-                Some(suffix) if !suffix.is_empty() => {
-                    base.strip_suffix(suffix).unwrap_or(base).to_owned()
-                }
-                _ => base.to_owned(),
-            }
-        }
-        PathPart::Ext => scanned
-            .extension()
-            .and_then(std::ffi::OsStr::to_str)
-            .map_or_else(String::new, |extension| format!(".{extension}")),
-        PathPart::Normalize => unreachable!("handled above"),
-    }
-}
-
-/// `path.relative(from, to)`: the path that reaches `to` when walked from `from`.
-///
-/// Over `Path::components`, which drops the empty and `.` components a split would leave behind.
-/// `..` is folded first by `normalize_posix_path`, because it has to be resolved lexically --
-/// there is no filesystem here to ask whether a component is a symlink.
-fn posix_path_relative(from: &str, to: &str) -> String {
-    use std::path::{Component, Path};
-    // `..` is folded first, lexically: there is no filesystem here to ask whether a component is
-    // a symlink, so `Path::components` -- which deliberately keeps `ParentDir` for that very
-    // reason -- is given a path that no longer has any. What it does do is drop the empty and
-    // `.` components, which is the part worth not writing twice.
-    let named = |path: &str| -> Vec<String> {
-        Path::new(&normalize_posix_path(path))
-            .components()
-            .filter_map(|part| match part {
-                Component::Normal(name) => name.to_str().map(str::to_owned),
-                _ => None,
-            })
-            .collect()
-    };
-    let (from, to) = (named(from), named(to));
-    let shared = from
-        .iter()
-        .zip(&to)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut parts: Vec<&str> = vec![".."; from.len() - shared];
-    parts.extend(to[shared..].iter().map(String::as_str));
-    parts.join("/")
-}
-
 /// What `node:os` answers for one fact about the machine.
 ///
 /// The compile-time ones are read from `std::env::consts`, which is a property of *this build*
@@ -34378,35 +34284,6 @@ fn os_fact(fact: OsFact) -> Value {
             ("shell".to_owned(), Value::Null),
         ]),
     }
-}
-
-/// POSIX `path.normalize` semantics used by `path.join` on the Unix Node target.
-fn normalize_posix_path(path: &str) -> String {
-    let absolute = path.starts_with('/');
-    let trailing = path.ends_with('/');
-    let mut parts = Vec::new();
-    for part in path.split('/') {
-        match part {
-            "" | "." => {}
-            ".." if parts.last().is_some_and(|part| *part != "..") => {
-                parts.pop();
-            }
-            ".." if !absolute => parts.push(".."),
-            ".." => {}
-            part => parts.push(part),
-        }
-    }
-    let mut normalized = parts.join("/");
-    if absolute {
-        normalized.insert(0, '/');
-    }
-    if normalized.is_empty() {
-        normalized.push('.');
-    }
-    if trailing && normalized != "/" && normalized != "." {
-        normalized.push('/');
-    }
-    normalized
 }
 
 fn to_int32(value: f64) -> i32 {

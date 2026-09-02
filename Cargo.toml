@@ -35,6 +35,7 @@ kiln-temporal = { path = "crates/kiln-temporal" }
 kiln-intl = { path = "crates/kiln-intl" }
 kiln-native-toolchain = { path = "crates/kiln-native-toolchain" }
 kiln-node-abi = { path = "crates/kiln-node-abi" }
+kiln-node-path = { path = "crates/kiln-node-path" }
 kiln-conformance = { path = "crates/kiln-conformance" }
 kiln-proto = { path = "crates/kiln-proto" }
 kiln-daemon = { path = "crates/kiln-daemon" }

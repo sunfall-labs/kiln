@@ -1433,6 +1433,106 @@ mod realm {
         })
     }
 
+    /// `node:path`'s decompositions, answered by the one implementation both engines link.
+    ///
+    /// `part` selects it: 0 `dirname`, 1 `basename`, 2 `extname`, 3 `normalize`. The answer is a
+    /// slice of the caller's own path for everything but `normalize`, so the shared crate
+    /// allocates nothing and this copies once, straight into the caller's buffer.
+    ///
+    /// The caller sizes that buffer from its input -- no decomposition is longer than the path it
+    /// came from -- so the two-call "ask the length, then ask again" dance is not needed. The
+    /// length is still reported through `out_len` whether or not it fitted, so a caller that gets
+    /// the bound wrong can recover instead of truncating.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_path_part(
+        part: u32,
+        path: *const u8,
+        path_len: u64,
+        suffix: *const u8,
+        suffix_len: u64,
+        out: *mut u8,
+        capacity: u64,
+        out_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            let Some(part) = (match part {
+                0 => Some(kiln_node_path::PathPart::Dir),
+                1 => Some(kiln_node_path::PathPart::Base),
+                2 => Some(kiln_node_path::PathPart::Ext),
+                3 => Some(kiln_node_path::PathPart::Normalize),
+                _ => None,
+            }) else {
+                return INVALID_ARGUMENT;
+            };
+            let Some(path) = (unsafe { borrowed_str(path, path_len) }) else {
+                return INVALID_ARGUMENT;
+            };
+            let suffix = if suffix.is_null() {
+                None
+            } else {
+                match unsafe { borrowed_str(suffix, suffix_len) } {
+                    Some(suffix) => Some(suffix),
+                    None => return INVALID_ARGUMENT,
+                }
+            };
+            let answer = kiln_node_path::posix_path_part(part, path, suffix);
+            unsafe { spill(answer.as_bytes(), out, capacity, out_len) }
+        })
+    }
+
+    /// `path.relative(from, to)`, from the same shared implementation.
+    ///
+    /// Unlike the decompositions this one can be longer than either input -- every component of
+    /// `from` that `to` does not share becomes `"../"` -- so the caller's bound has to account for
+    /// that, and `out_len` reports the true length either way.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_node_path_relative(
+        from: *const u8,
+        from_len: u64,
+        to: *const u8,
+        to_len: u64,
+        out: *mut u8,
+        capacity: u64,
+        out_len: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            let (Some(from), Some(to)) = (unsafe { borrowed_str(from, from_len) }, unsafe {
+                borrowed_str(to, to_len)
+            }) else {
+                return INVALID_ARGUMENT;
+            };
+            let answer = kiln_node_path::posix_path_relative(from, to);
+            unsafe { spill(answer.as_bytes(), out, capacity, out_len) }
+        })
+    }
+
+    /// A borrowed `&str` over a caller's bytes, or `None` if they are not a string.
+    unsafe fn borrowed_str<'a>(bytes: *const u8, len: u64) -> Option<&'a str> {
+        if bytes.is_null() {
+            return (len == 0).then_some("");
+        }
+        let len = usize::try_from(len).ok()?;
+        std::str::from_utf8(unsafe { std::slice::from_raw_parts(bytes, len) }).ok()
+    }
+
+    /// Report `answer`'s length through `out_len` and copy it out when it fits.
+    unsafe fn spill(answer: &[u8], out: *mut u8, capacity: u64, out_len: *mut u64) -> i32 {
+        if out_len.is_null() {
+            return INVALID_ARGUMENT;
+        }
+        unsafe { out_len.write(answer.len() as u64) };
+        if capacity < answer.len() as u64 {
+            return INVALID_ARGUMENT;
+        }
+        if !answer.is_empty() {
+            if out.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            unsafe { std::ptr::copy_nonoverlapping(answer.as_ptr(), out, answer.len()) };
+        }
+        0
+    }
+
     /// Interns a registered-symbol key in the active Realm. The returned identity is stable for
     /// that Realm and deliberately meaningless outside it; generated modules never own registry
     /// state independently.
@@ -5120,6 +5220,12 @@ mod realm {
         };
         (realm, kiln_realm_diagnostic_render, realm_diagnostic_render) => {
             const _: unsafe extern "C" fn(*mut u8, u64, *mut u64) -> i32 = kiln_realm_diagnostic_render;
+        };
+        (realm, kiln_node_path_part, node_path_part) => {
+            const _: unsafe extern "C" fn(u32, *const u8, u64, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_node_path_part;
+        };
+        (realm, kiln_node_path_relative, node_path_relative) => {
+            const _: unsafe extern "C" fn(*const u8, u64, *const u8, u64, *mut u8, u64, *mut u64) -> i32 = kiln_node_path_relative;
         };
         (realm, kiln_realm_symbol_for, realm_symbol_for) => {
             const _: unsafe extern "C" fn(*const u8, u64, *mut u64) -> i32 = kiln_realm_symbol_for;

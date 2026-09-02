@@ -8614,6 +8614,27 @@ int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_
     *out_len = 0;
     return KILN_C99_INVALID_ARGUMENT;
 }
+/* `node:path`'s decompositions come from the Rust provider, which this test host does not link:
+ * the backend's own tests compile generated C against a shim, not against the shipped archive.
+ * Refusing here is the honest answer -- a second implementation living in the test host is exactly
+ * the drift the provider exists to end. `kiln test conformance/*` and `scripts/native.sh` run
+ * against the real archive and are where these are exercised. */
+int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len,
+                        const uint8_t *suffix, uint64_t suffix_len, uint8_t *out,
+                        uint64_t capacity, uint64_t *out_len) {
+    (void)part; (void)path; (void)path_len; (void)suffix; (void)suffix_len; (void)out;
+    (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
+int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to,
+                            uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len) {
+    (void)from; (void)from_len; (void)to; (void)to_len; (void)out; (void)capacity;
+    if (out_len == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_len = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id) {
     if (!kiln_test_realm_active || out_id == NULL || key_len > sizeof kiln_test_symbol_key) {
         return KILN_C99_INVALID_ARGUMENT;
