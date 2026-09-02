@@ -4608,9 +4608,48 @@ typedef struct kiln_gc_block {
     uint32_t mark;
 } kiln_gc_block;
 
+/* Small-object slabs (perf/gc-slab-allocator). Most turns allocate a dozen blocks under 128
+ * bytes; routing those through `malloc`/`free` plus a hash-table entry each was the allocator's
+ * whole cost. A slab is one size-aligned allocation holding many same-size slots, so `kiln_c99_gc_lookup`
+ * can answer membership by masking to the slab's base and reading its header instead of probing a
+ * hash table sized by the live set. The block header above is unchanged and is what every slot
+ * holds, so the tracer and finaliser never know which path a block came from. Alignment makes
+ * "is this address in one of my slabs" a value comparison (`kiln_gc_ptrset_contains` on the slab
+ * base) before anything derived from an untrusted candidate pointer is dereferenced -- marking
+ * still never trusts a pointer (ADR 0041); the value check is the fail-safe the hash table gave
+ * per block, done once per slab instead. */
+#define KILN_GC_SLAB_SIZE ((size_t)64 * 1024)
+#define KILN_GC_SLAB_CLASS_MIN ((size_t)48) /* smallest total slot (header + 1 byte payload) */
+#define KILN_GC_SLAB_CLASS_MAX ((size_t)256)
+#define KILN_GC_SLAB_CLASS_STEP ((size_t)16)
+#define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
+
+typedef struct kiln_gc_slab {
+    struct kiln_gc_slab *all_prev;  /* heap-wide list of every slab, for sweep and teardown */
+    struct kiln_gc_slab *all_next;
+    struct kiln_gc_slab *free_prev; /* per-class list of slabs with >=1 free slot */
+    struct kiln_gc_slab *free_next;
+    kiln_gc_block *free_head;       /* free list threaded through freed slots' `next` field */
+    uint32_t class_index;
+    uint32_t slot_size;             /* bytes per slot: header + this class's payload, rounded */
+    uint32_t slot_count;
+    uint32_t free_count;
+    uint32_t first_slot_offset;     /* bytes from the slab base to slot 0 */
+} kiln_gc_slab;
+
+/* A tiny open-addressed set of pointer values, shared by the large-block table (keys are block
+ * headers) and the slab table (keys are slab base addresses). Lookup on a hit only ever compares
+ * pointer values already in the set; nothing derived from an untrusted candidate is read until a
+ * match confirms the memory is ours. */
+typedef struct kiln_gc_ptrset {
+    void **table;
+    size_t capacity;
+    size_t count;
+} kiln_gc_ptrset;
+
 typedef struct kiln_gc_heap {
     const kiln_gc_hooks *hooks;
-    kiln_gc_block *head;
+    kiln_gc_block *head; /* large blocks only; slab blocks are found by walking slabs */
     size_t count;
     size_t bytes;
     size_t since_collection;
@@ -4623,9 +4662,12 @@ typedef struct kiln_gc_heap {
     int collecting;
     int mark_failed;
     int fallback;
-    kiln_gc_block **table;
-    size_t table_capacity;
-    size_t table_count;
+    kiln_gc_ptrset large_table;
+    kiln_gc_ptrset slab_table;
+    kiln_gc_slab *all_slabs;
+    kiln_gc_slab *class_free_head[(KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) /
+                                       KILN_GC_SLAB_CLASS_STEP +
+                                   1];
     kiln_gc_block **stack;
     size_t stack_len;
     size_t stack_capacity;
@@ -4709,108 +4751,288 @@ static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
     return (size_t)bits & mask;
 }
 
-static int kiln_c99_gc_table_grow(kiln_gc_heap *heap, size_t wanted) {
-    kiln_gc_block **grown;
-    kiln_gc_block **old = heap->table;
-    size_t old_capacity = heap->table_capacity;
+static int kiln_c99_gc_ptrset_grow(kiln_gc_ptrset *set, size_t wanted) {
+    void **grown;
+    void **old = set->table;
+    size_t old_capacity = set->capacity;
     size_t index;
     size_t capacity = 64;
     while (capacity < wanted * 2) {
         if (capacity > ((size_t)-1) / 4) return KILN_C99_OUT_OF_MEMORY;
         capacity *= 2;
     }
-    grown = (kiln_gc_block **)calloc(capacity, sizeof *grown);
+    grown = (void **)calloc(capacity, sizeof *grown);
     if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
-    heap->table = grown;
-    heap->table_capacity = capacity;
-    heap->table_count = 0;
+    set->table = grown;
+    set->capacity = capacity;
+    set->count = 0;
     for (index = 0; index < old_capacity; ++index) {
-        kiln_gc_block *block = old[index];
-        if (block != NULL) {
-            size_t slot = kiln_c99_gc_hash(block, capacity - 1);
+        void *entry = old[index];
+        if (entry != NULL) {
+            size_t slot = kiln_c99_gc_hash(entry, capacity - 1);
             while (grown[slot] != NULL) slot = (slot + 1) & (capacity - 1);
-            grown[slot] = block;
-            ++heap->table_count;
+            grown[slot] = entry;
+            ++set->count;
         }
     }
     free(old);
     return KILN_C99_OK;
 }
 
-static int kiln_c99_gc_table_insert(kiln_gc_heap *heap, kiln_gc_block *block) {
+static int kiln_c99_gc_ptrset_insert(kiln_gc_ptrset *set, void *pointer) {
     size_t slot;
     size_t mask;
-    if ((heap->table_count + 1) * 2 > heap->table_capacity) {
-        int status = kiln_c99_gc_table_grow(heap, heap->table_count + 1);
+    if ((set->count + 1) * 2 > set->capacity) {
+        int status = kiln_c99_gc_ptrset_grow(set, set->count + 1);
         if (status != KILN_C99_OK) return status;
     }
-    mask = heap->table_capacity - 1;
-    slot = kiln_c99_gc_hash(block, mask);
-    while (heap->table[slot] != NULL) slot = (slot + 1) & mask;
-    heap->table[slot] = block;
-    ++heap->table_count;
+    mask = set->capacity - 1;
+    slot = kiln_c99_gc_hash(pointer, mask);
+    while (set->table[slot] != NULL) slot = (slot + 1) & mask;
+    set->table[slot] = pointer;
+    ++set->count;
     return KILN_C99_OK;
 }
 
 /* Linear probing with backward-shift deletion, so a release leaves no tombstone behind. */
-static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *block) {
+static void kiln_c99_gc_ptrset_remove(kiln_gc_ptrset *set, const void *pointer) {
     size_t mask;
     size_t slot;
     size_t hole;
-    if (heap->table_capacity == 0) return;
-    mask = heap->table_capacity - 1;
-    slot = kiln_c99_gc_hash(block, mask);
-    while (heap->table[slot] != block) {
-        if (heap->table[slot] == NULL) return;
+    if (set->capacity == 0) return;
+    mask = set->capacity - 1;
+    slot = kiln_c99_gc_hash(pointer, mask);
+    while (set->table[slot] != pointer) {
+        if (set->table[slot] == NULL) return;
         slot = (slot + 1) & mask;
     }
     hole = slot;
     for (;;) {
         size_t home;
         slot = (slot + 1) & mask;
-        if (heap->table[slot] == NULL) break;
-        home = kiln_c99_gc_hash(heap->table[slot], mask);
+        if (set->table[slot] == NULL) break;
+        home = kiln_c99_gc_hash(set->table[slot], mask);
         /* Move the entry back into the hole when its home sits at or before the hole in probe
          * order, otherwise a lookup that started at its home would stop at the hole. */
         if ((slot > hole && (home <= hole || home > slot)) ||
             (slot < hole && home <= hole && home > slot)) {
-            heap->table[hole] = heap->table[slot];
+            set->table[hole] = set->table[slot];
             hole = slot;
         }
     }
-    heap->table[hole] = NULL;
-    --heap->table_count;
+    set->table[hole] = NULL;
+    --set->count;
 }
 
-static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
-    kiln_gc_block *block;
-    uintptr_t address = (uintptr_t)payload;
+/* Value-only membership: never dereferences `pointer`, only compares it against addresses this
+ * heap itself inserted. This is what makes masking an untrusted candidate down to a slab base
+ * safe to then dereference -- the slab header is read only after this returns true. */
+static int kiln_c99_gc_ptrset_contains(const kiln_gc_ptrset *set, const void *pointer) {
     size_t mask;
     size_t slot;
-    if (payload == NULL || heap->table_capacity == 0) return NULL;
+    if (pointer == NULL || set->capacity == 0) return 0;
+    mask = set->capacity - 1;
+    slot = kiln_c99_gc_hash(pointer, mask);
+    while (set->table[slot] != NULL) {
+        if (set->table[slot] == pointer) return 1;
+        slot = (slot + 1) & mask;
+    }
+    return 0;
+}
+
+/* Portable aligned allocation for slabs: only <stdlib.h> `malloc`/`free` are assumed (the
+ * prelude is compiled `-std=c11`, and `posix_memalign` is not reliably declared there on every
+ * target), so the raw pointer is stashed just before the aligned region it returns. */
+static void *kiln_c99_gc_aligned_alloc(size_t alignment, size_t size) {
+    unsigned char *raw = (unsigned char *)malloc(size + alignment - 1 + sizeof(void *));
+    uintptr_t base;
+    unsigned char *aligned;
+    if (raw == NULL) return NULL;
+    base = (uintptr_t)(raw + sizeof(void *));
+    aligned = (unsigned char *)((base + alignment - 1) & ~(uintptr_t)(alignment - 1));
+    ((void **)aligned)[-1] = raw;
+    return aligned;
+}
+
+static void kiln_c99_gc_aligned_free(void *aligned) {
+    if (aligned == NULL) return;
+    free(((void **)aligned)[-1]);
+}
+
+/* Which size class (if any) holds a block whose header plus payload totals `total` bytes; -1
+ * means the block is large and keeps the `malloc` path. */
+static int kiln_c99_gc_slab_class(size_t total) {
+    size_t rounded;
+    if (total > KILN_GC_SLAB_CLASS_MAX) return -1;
+    rounded = total <= KILN_GC_SLAB_CLASS_MIN
+                  ? KILN_GC_SLAB_CLASS_MIN
+                  : (total + (KILN_GC_SLAB_CLASS_STEP - 1)) &
+                        ~(KILN_GC_SLAB_CLASS_STEP - 1);
+    if (rounded > KILN_GC_SLAB_CLASS_MAX) return -1;
+    return (int)((rounded - KILN_GC_SLAB_CLASS_MIN) / KILN_GC_SLAB_CLASS_STEP);
+}
+
+static kiln_gc_block *kiln_c99_gc_slab_slot(const kiln_gc_slab *slab, uint32_t index) {
+    return (kiln_gc_block *)((char *)slab + slab->first_slot_offset +
+                              (size_t)index * slab->slot_size);
+}
+
+static void kiln_c99_gc_slab_unlink_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+    if (slab->free_prev != NULL) slab->free_prev->free_next = slab->free_next;
+    else heap->class_free_head[slab->class_index] = slab->free_next;
+    if (slab->free_next != NULL) slab->free_next->free_prev = slab->free_prev;
+    slab->free_prev = NULL;
+    slab->free_next = NULL;
+}
+
+static void kiln_c99_gc_slab_link_free(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+    slab->free_prev = NULL;
+    slab->free_next = heap->class_free_head[slab->class_index];
+    if (heap->class_free_head[slab->class_index] != NULL)
+        heap->class_free_head[slab->class_index]->free_prev = slab;
+    heap->class_free_head[slab->class_index] = slab;
+}
+
+static void kiln_c99_gc_slab_unlink_all(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+    if (slab->all_prev != NULL) slab->all_prev->all_next = slab->all_next;
+    else heap->all_slabs = slab->all_next;
+    if (slab->all_next != NULL) slab->all_next->all_prev = slab->all_prev;
+    slab->all_prev = NULL;
+    slab->all_next = NULL;
+}
+
+/* A slab that is entirely free is destroyed immediately unless it is the only supply left for
+ * its class (`free_prev`/`free_next` both NULL): that bounds retention to about one empty slab
+ * per class without forcing a fresh slab on the very next allocation of that class. */
+static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *slab) {
+    if (slab->free_prev == NULL && slab->free_next == NULL) return;
+    kiln_c99_gc_slab_unlink_free(heap, slab);
+    kiln_c99_gc_slab_unlink_all(heap, slab);
+    kiln_c99_gc_ptrset_remove(&heap->slab_table, slab);
+    kiln_c99_gc_aligned_free(slab);
+}
+
+static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
+    kiln_gc_slab *slab;
+    size_t slot_size = KILN_GC_SLAB_CLASS_MIN + (size_t)class_index * KILN_GC_SLAB_CLASS_STEP;
+    size_t first_slot_offset = sizeof(kiln_gc_slab);
+    size_t usable;
+    size_t slot_count;
+    uint32_t index;
+    if (first_slot_offset % sizeof(void *) != 0)
+        first_slot_offset += sizeof(void *) - (first_slot_offset % sizeof(void *));
+    if (first_slot_offset >= KILN_GC_SLAB_SIZE) return NULL;
+    usable = KILN_GC_SLAB_SIZE - first_slot_offset;
+    slot_count = usable / slot_size;
+    if (slot_count == 0) return NULL;
+    slab = (kiln_gc_slab *)kiln_c99_gc_aligned_alloc(KILN_GC_SLAB_SIZE, KILN_GC_SLAB_SIZE);
+    if (slab == NULL) return NULL;
+    slab->class_index = (uint32_t)class_index;
+    slab->slot_size = (uint32_t)slot_size;
+    slab->slot_count = (uint32_t)slot_count;
+    slab->free_count = (uint32_t)slot_count;
+    slab->first_slot_offset = (uint32_t)first_slot_offset;
+    slab->free_head = NULL;
+    for (index = 0; index < (uint32_t)slot_count; ++index) {
+        kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
+        slot->size = KILN_GC_SLOT_FREE;
+        slot->kind = KILN_GC_NONE;
+        slot->mark = 0;
+        slot->prev = NULL;
+        slot->next = slab->free_head;
+        slab->free_head = slot;
+    }
+    if (kiln_c99_gc_ptrset_insert(&heap->slab_table, slab) != KILN_C99_OK) {
+        kiln_c99_gc_aligned_free(slab);
+        return NULL;
+    }
+    slab->all_prev = NULL;
+    slab->all_next = heap->all_slabs;
+    if (heap->all_slabs != NULL) heap->all_slabs->all_prev = slab;
+    heap->all_slabs = slab;
+    slab->free_prev = NULL;
+    slab->free_next = heap->class_free_head[class_index];
+    if (heap->class_free_head[class_index] != NULL)
+        heap->class_free_head[class_index]->free_prev = slab;
+    heap->class_free_head[class_index] = slab;
+    return slab;
+}
+
+/* The one membership check every candidate edge pays for (ADR 0041: marking never trusts a
+ * pointer). Masking to a slab base and reading its header is safe only because that read happens
+ * after `kiln_gc_ptrset_contains` confirms the exact address value is one this heap inserted;
+ * nothing derived from the untrusted `payload` is dereferenced before that. A slab hit still
+ * checks the slot is exactly a payload start and not free, so an interior or stale pointer is
+ * rejected the same way a foreign pointer always was. */
+static kiln_gc_block *kiln_c99_gc_lookup_slab(const kiln_gc_heap *heap, const void *payload,
+                                              kiln_gc_slab **out_slab) {
+    uintptr_t address = (uintptr_t)payload;
+    void *slab_base;
+    if (out_slab != NULL) *out_slab = NULL;
     /* A candidate edge is not necessarily a pointer at all: `bits` and `ptr` share one word, so
      * a builtin's code or a method's code arrives here as a small integer. Stepping back from it
      * with pointer arithmetic is undefined behaviour on a pointer that never pointed at an
-     * object, and the sanitizer traps it -- so the header address is computed in integers and
+     * object, and the sanitizer traps it -- so addresses are compared and masked as integers and
      * anything that cannot be a payload is rejected before a pointer exists. */
-    if (address < sizeof(kiln_gc_block)) return NULL;
-    block = (kiln_gc_block *)(address - sizeof(kiln_gc_block));
-    mask = heap->table_capacity - 1;
-    slot = kiln_c99_gc_hash(block, mask);
-    while (heap->table[slot] != NULL) {
-        if (heap->table[slot] == block) return block;
-        slot = (slot + 1) & mask;
+    if (payload == NULL || address < sizeof(kiln_gc_block)) return NULL;
+    slab_base = (void *)(address & ~(uintptr_t)(KILN_GC_SLAB_SIZE - 1));
+    if (kiln_c99_gc_ptrset_contains(&heap->slab_table, slab_base)) {
+        const kiln_gc_slab *slab = (const kiln_gc_slab *)slab_base;
+        size_t offset = address - (uintptr_t)slab_base;
+        size_t relative;
+        size_t slot_index;
+        kiln_gc_block *block;
+        if (offset < slab->first_slot_offset) return NULL;
+        relative = offset - slab->first_slot_offset;
+        if (relative % slab->slot_size != sizeof(kiln_gc_block)) return NULL;
+        slot_index = relative / slab->slot_size;
+        if (slot_index >= slab->slot_count) return NULL;
+        block = kiln_c99_gc_slab_slot(slab, (uint32_t)slot_index);
+        if (block->size == KILN_GC_SLOT_FREE) return NULL;
+        if (out_slab != NULL) *out_slab = (kiln_gc_slab *)slab;
+        return block;
+    }
+    {
+        /* Large block: unchanged from the pre-slab collector, an arithmetic step back to the
+         * header followed by a value-only table check. */
+        kiln_gc_block *block = (kiln_gc_block *)(address - sizeof(kiln_gc_block));
+        if (kiln_c99_gc_ptrset_contains(&heap->large_table, block)) return block;
     }
     return NULL;
 }
 
+static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+    return kiln_c99_gc_lookup_slab(heap, payload, NULL);
+}
+
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
+    size_t payload = size == 0 ? 1 : size;
+    int class_index;
     kiln_gc_block *block;
-    if (heap == NULL || size > ((size_t)-1) - sizeof *block) return NULL;
-    block = (kiln_gc_block *)malloc(sizeof *block + (size == 0 ? 1 : size));
+    if (heap == NULL || size > ((size_t)-1) - sizeof(kiln_gc_block)) return NULL;
+    class_index = kiln_c99_gc_slab_class(sizeof(kiln_gc_block) + payload);
+    if (class_index >= 0) {
+        kiln_gc_slab *slab = heap->class_free_head[class_index];
+        if (slab == NULL) {
+            slab = kiln_c99_gc_slab_new(heap, class_index);
+            if (slab == NULL) return NULL;
+        }
+        block = slab->free_head;
+        slab->free_head = block->next;
+        block->next = NULL;
+        if (--slab->free_count == 0) kiln_c99_gc_slab_unlink_free(heap, slab);
+        block->kind = kind;
+        block->mark = 0;
+        block->size = size;
+        heap->count += 1;
+        heap->bytes += size;
+        heap->since_collection += size;
+        return block + 1;
+    }
+    block = (kiln_gc_block *)malloc(sizeof *block + payload);
     if (block == NULL) return NULL;
-    if (kiln_c99_gc_table_insert(heap, block) != KILN_C99_OK) {
+    if (kiln_c99_gc_ptrset_insert(&heap->large_table, block) != KILN_C99_OK) {
         free(block);
         return NULL;
     }
@@ -4849,18 +5071,30 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block);
  * host-operation completion after its callback. The collector remains the backstop. */
 static void kiln_c99_gc_release(void *payload) {
     kiln_gc_heap *heap;
+    kiln_gc_slab *slab = NULL;
     kiln_gc_block *block;
     if (payload == NULL) return;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return;
-    block = kiln_c99_gc_lookup(heap, payload);
+    block = kiln_c99_gc_lookup_slab(heap, payload, &slab);
     if (block == NULL) return;
-    kiln_c99_gc_unlink(heap, block);
-    kiln_c99_gc_table_remove(heap, block);
     kiln_c99_gc_finalize(block);
     heap->freed_blocks += 1;
     heap->freed_bytes += block->size;
-    free(block);
+    if (slab != NULL) {
+        heap->count -= 1;
+        heap->bytes -= block->size;
+        block->size = KILN_GC_SLOT_FREE;
+        block->kind = KILN_GC_NONE;
+        block->next = slab->free_head;
+        slab->free_head = block;
+        if (++slab->free_count == 1) kiln_c99_gc_slab_link_free(heap, slab);
+        if (slab->free_count == slab->slot_count) kiln_c99_gc_slab_maybe_destroy(heap, slab);
+    } else {
+        kiln_c99_gc_unlink(heap, block);
+        kiln_c99_gc_ptrset_remove(&heap->large_table, block);
+        free(block);
+    }
 }
 
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload) {
@@ -5157,26 +5391,72 @@ static void kiln_c99_gc_begin(kiln_gc_heap *heap) {
 }
 
 /* Free every unmarked block. Marked blocks either stay (an ordinary collection) or are orphaned
- * (teardown, where a result a caller still borrows must outlive the heap). */
+ * (teardown, where a result a caller still borrows must outlive the heap).
+ *
+ * Large blocks are unchanged from the pre-slab collector: each is its own allocation, so an
+ * orphaned survivor is simply left off every list and table, still valid memory the caller
+ * borrows. A slab-resident survivor cannot be orphaned the same way -- its memory is shared with
+ * sibling slots in the same slab -- so at teardown a slab that still has a live slot in it is
+ * leaked whole instead (a bounded, one-time cost paid only for a borrowed result, ADR 0034); a
+ * slab with no survivors is freed like any other. An ordinary collection instead returns each
+ * dead slot to its slab's free list and prunes a slab that lands completely empty. */
 static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
     kiln_gc_block *block = heap->head;
+    kiln_gc_slab *slab = heap->all_slabs;
     size_t survived = 0;
     while (block != NULL) {
         kiln_gc_block *next = block->next;
         if (block->mark != heap->epoch) {
             kiln_c99_gc_unlink(heap, block);
-            kiln_c99_gc_table_remove(heap, block);
+            kiln_c99_gc_ptrset_remove(&heap->large_table, block);
             kiln_c99_gc_finalize(block);
             heap->freed_blocks += 1;
             heap->freed_bytes += block->size;
             free(block);
         } else if (orphan_marked) {
             kiln_c99_gc_unlink(heap, block);
-            kiln_c99_gc_table_remove(heap, block);
+            kiln_c99_gc_ptrset_remove(&heap->large_table, block);
         } else {
             survived += block->size;
         }
         block = next;
+    }
+    while (slab != NULL) {
+        kiln_gc_slab *next_slab = slab->all_next;
+        uint32_t index;
+        int had_survivor = 0;
+        for (index = 0; index < slab->slot_count; ++index) {
+            kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
+            if (slot->size == KILN_GC_SLOT_FREE) continue;
+            if (slot->mark != heap->epoch) {
+                kiln_c99_gc_finalize(slot);
+                heap->freed_blocks += 1;
+                heap->freed_bytes += slot->size;
+                heap->count -= 1;
+                heap->bytes -= slot->size;
+                slot->size = KILN_GC_SLOT_FREE;
+                slot->kind = KILN_GC_NONE;
+                slot->next = slab->free_head;
+                slab->free_head = slot;
+                if (++slab->free_count == 1) kiln_c99_gc_slab_link_free(heap, slab);
+            } else if (orphan_marked) {
+                had_survivor = 1;
+            } else {
+                survived += slot->size;
+            }
+        }
+        if (orphan_marked) {
+            if (!had_survivor) {
+                if (slab->free_count != 0) kiln_c99_gc_slab_unlink_free(heap, slab);
+                kiln_c99_gc_slab_unlink_all(heap, slab);
+                kiln_c99_gc_ptrset_remove(&heap->slab_table, slab);
+                kiln_c99_gc_aligned_free(slab);
+            }
+            /* else: leaked with a live survivor inside; the heap is being torn down anyway. */
+        } else if (slab->free_count == slab->slot_count) {
+            kiln_c99_gc_slab_maybe_destroy(heap, slab);
+        }
+        slab = next_slab;
     }
     heap->survived = survived;
     heap->since_collection = 0;
@@ -5236,6 +5516,13 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         if (heap->epoch == 0) ++heap->epoch;
         for (kiln_gc_block *block = heap->head; block != NULL; block = block->next)
             block->mark = heap->epoch;
+        for (kiln_gc_slab *slab = heap->all_slabs; slab != NULL; slab = slab->all_next) {
+            uint32_t index;
+            for (index = 0; index < slab->slot_count; ++index) {
+                kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
+                if (slot->size != KILN_GC_SLOT_FREE) slot->mark = heap->epoch;
+            }
+        }
     }
     kiln_c99_gc_sweep(heap, 1);
     if (heap->trace) {
@@ -5247,7 +5534,8 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
         kiln_c99_gc_trace_count(heap->freed_bytes);
         kiln_c99_gc_trace_text(" bytes) freed in total\n");
     }
-    free(heap->table);
+    free(heap->large_table.table);
+    free(heap->slab_table.table);
     free(heap->stack);
     free(heap);
 }
