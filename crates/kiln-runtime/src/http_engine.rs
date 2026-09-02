@@ -348,22 +348,42 @@ pub struct ResponseSlot {
     inner: RefCell<SlotInner>,
 }
 
-enum SlotBody {
-    /// Nothing written yet. `end(data)` makes this a complete body; `write` makes it a stream.
-    Unstarted,
+enum ResponseBodyState {
     Complete(Bytes),
-    Streaming(ResponseBodyDriver),
+    Streaming {
+        driver: ResponseBodyDriver,
+        ended: bool,
+    },
+}
+
+enum SlotState {
+    /// No response has been started yet.
+    Empty,
+    /// Head provided by `start`, waiting for `write` or `end` to determine framing.
+    Parked {
+        status: u16,
+        headers: HeaderMap,
+        high_water_mark: usize,
+    },
+    /// Head is committed, waiting for Hyper's `SlotReady` future to take it.
+    Ready {
+        status: u16,
+        headers: HeaderMap,
+        body: ResponseBodyState,
+        bodyless: bool,
+    },
+    /// Hyper took the response head; body stream is open for subsequent writes.
+    Streaming {
+        driver: ResponseBodyDriver,
+        bodyless: bool,
+    },
+    /// Response has ended; no further writes or ends accepted.
+    Finished,
 }
 
 struct SlotInner {
     head_request: bool,
-    /// The head as the language gave it, parked until framing is knowable.
-    head: Option<(u16, HeaderMap)>,
-    body: SlotBody,
-    high_water_mark: usize,
-    /// The head is committed: a write forced chunking, or `end` declared the length.
-    committed: Option<(u16, HeaderMap)>,
-    bodyless: bool,
+    state: SlotState,
     waker: Option<Waker>,
 }
 
@@ -372,11 +392,7 @@ impl ResponseSlot {
         Self {
             inner: RefCell::new(SlotInner {
                 head_request,
-                head: None,
-                body: SlotBody::Unstarted,
-                high_water_mark: crate::node_stream::DEFAULT_HIGH_WATER_MARK,
-                committed: None,
-                bodyless: false,
+                state: SlotState::Empty,
                 waker: None,
             }),
         }
@@ -384,36 +400,14 @@ impl ResponseSlot {
 
     fn start(&self, status: u16, headers: HeaderMap, high_water_mark: usize) -> bool {
         let mut inner = self.inner.borrow_mut();
-        if inner.head.is_some() || inner.committed.is_some() {
+        if !matches!(inner.state, SlotState::Empty) {
             return false;
         }
-        inner.head = Some((status, headers));
-        inner.high_water_mark = high_water_mark.max(1);
-        true
-    }
-
-    /// Commit the parked head. A complete body declares its length unless the language framed
-    /// the response itself; a HEAD answer or a bodiless status never carries a body.
-    fn commit(inner: &mut SlotInner, complete_body: Option<usize>) -> bool {
-        if inner.committed.is_some() {
-            return true;
-        }
-        let Some((status, mut headers)) = inner.head.take() else {
-            return false;
+        inner.state = SlotState::Parked {
+            status,
+            headers,
+            high_water_mark: high_water_mark.max(1),
         };
-        let carries_body = status_allows_body(status) && !inner.head_request;
-        inner.bodyless = !carries_body;
-        if let Some(length) = complete_body
-            && carries_body
-            && !headers.contains_key(hyper::header::CONTENT_LENGTH)
-            && !headers.contains_key(hyper::header::TRANSFER_ENCODING)
-        {
-            headers.insert(hyper::header::CONTENT_LENGTH, HeaderValue::from(length));
-        }
-        inner.committed = Some((status, headers));
-        if let Some(waker) = inner.waker.take() {
-            waker.wake();
-        }
         true
     }
 
@@ -424,51 +418,119 @@ impl ResponseSlot {
         data: &[u8],
     ) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
-        if !Self::commit(&mut inner, None) {
-            return None;
-        }
-        let high_water_mark = inner.high_water_mark;
-        match &mut inner.body {
-            SlotBody::Streaming(driver) => Some(driver.write(data.to_vec())),
-            SlotBody::Unstarted => {
+        let head_request = inner.head_request;
+        match &mut inner.state {
+            SlotState::Parked {
+                status,
+                headers,
+                high_water_mark,
+            } => {
+                let status = *status;
+                let headers = std::mem::take(headers);
+                let high_water_mark = *high_water_mark;
+                let carries_body = status_allows_body(status) && !head_request;
+                let bodyless = !carries_body;
                 let mut driver = body_driver(shared, id, high_water_mark);
                 let disposition = driver.write(data.to_vec());
-                inner.body = SlotBody::Streaming(driver);
+                inner.state = SlotState::Ready {
+                    status,
+                    headers,
+                    body: ResponseBodyState::Streaming {
+                        driver,
+                        ended: false,
+                    },
+                    bodyless,
+                };
+                if let Some(waker) = inner.waker.take() {
+                    waker.wake();
+                }
                 Some(disposition)
             }
-            SlotBody::Complete(_) => None,
+            SlotState::Ready {
+                body: ResponseBodyState::Streaming { driver, ended },
+                ..
+            } => {
+                if *ended {
+                    return None;
+                }
+                Some(driver.write(data.to_vec()))
+            }
+            SlotState::Streaming { driver, .. } => Some(driver.write(data.to_vec())),
+            SlotState::Empty
+            | SlotState::Ready {
+                body: ResponseBodyState::Complete(_),
+                ..
+            }
+            | SlotState::Finished => None,
         }
     }
 
     fn end(&self, shared: &Rc<ConnectionShared>, id: u64, data: &[u8]) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
-        if !Self::commit(&mut inner, Some(data.len())) {
-            return None;
-        }
-        let bodyless = inner.bodyless;
-        match &mut inner.body {
-            SlotBody::Streaming(driver) => {
-                let disposition = driver.end(data.to_vec());
-                if bodyless {
-                    driver.finish_without_body();
+        let head_request = inner.head_request;
+        match &mut inner.state {
+            SlotState::Parked {
+                status, headers, ..
+            } => {
+                let status = *status;
+                let mut headers = std::mem::take(headers);
+                let carries_body = status_allows_body(status) && !head_request;
+                let bodyless = !carries_body;
+                if carries_body
+                    && !headers.contains_key(hyper::header::CONTENT_LENGTH)
+                    && !headers.contains_key(hyper::header::TRANSFER_ENCODING)
+                {
+                    headers.insert(hyper::header::CONTENT_LENGTH, HeaderValue::from(data.len()));
                 }
-                Some(disposition)
-            }
-            SlotBody::Unstarted => {
-                // The whole body arrived with `end`: one frame, one copy out of the language's
-                // span, and `finish` as soon as the language's call has returned.
-                inner.body = if bodyless || data.is_empty() {
-                    SlotBody::Complete(Bytes::new())
+                let bytes = if bodyless || data.is_empty() {
+                    Bytes::new()
                 } else {
-                    SlotBody::Complete(Bytes::copy_from_slice(data))
+                    Bytes::copy_from_slice(data)
                 };
+                inner.state = SlotState::Ready {
+                    status,
+                    headers,
+                    body: ResponseBodyState::Complete(bytes),
+                    bodyless,
+                };
+                if let Some(waker) = inner.waker.take() {
+                    waker.wake();
+                }
                 shared.defer(id, BodyEvent::Finish);
                 Some(WriteDisposition {
                     ready: true,
                     submit_now: false,
                 })
             }
-            SlotBody::Complete(_) => None,
+            SlotState::Ready {
+                body: ResponseBodyState::Streaming { driver, ended },
+                bodyless,
+                ..
+            } => {
+                if *ended {
+                    return None;
+                }
+                let disposition = driver.end(data.to_vec());
+                if *bodyless {
+                    driver.finish_without_body();
+                }
+                *ended = true;
+                Some(disposition)
+            }
+            SlotState::Streaming { driver, bodyless } => {
+                let disposition = driver.end(data.to_vec());
+                if *bodyless {
+                    driver.finish_without_body();
+                }
+                inner.state = SlotState::Finished;
+                Some(disposition)
+            }
+            SlotState::Empty
+            | SlotState::Ready {
+                body: ResponseBodyState::Complete(_),
+                ..
+            }
+            | SlotState::Finished => None,
         }
     }
 }
@@ -512,21 +574,44 @@ impl Future for SlotReady {
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let mut inner = self.slot.inner.borrow_mut();
-        if let Some((status, headers)) = inner.committed.take() {
-            let body = match std::mem::replace(&mut inner.body, SlotBody::Unstarted) {
-                SlotBody::Unstarted => EngineBody::Empty,
-                SlotBody::Complete(bytes) if bytes.is_empty() => EngineBody::Empty,
-                SlotBody::Complete(bytes) => EngineBody::Complete(Some(bytes)),
-                SlotBody::Streaming(driver) => EngineBody::Streaming(driver.into_body()),
-            };
-            return Poll::Ready(EngineResponse {
+        match std::mem::replace(&mut inner.state, SlotState::Finished) {
+            SlotState::Ready {
                 status,
                 headers,
                 body,
-            });
+                bodyless,
+            } => {
+                let response_body = match body {
+                    ResponseBodyState::Complete(bytes) => {
+                        inner.state = SlotState::Finished;
+                        if bytes.is_empty() {
+                            EngineBody::Empty
+                        } else {
+                            EngineBody::Complete(Some(bytes))
+                        }
+                    }
+                    ResponseBodyState::Streaming { driver, ended } => {
+                        let response_body = EngineBody::Streaming(driver.into_body());
+                        if ended {
+                            inner.state = SlotState::Finished;
+                        } else {
+                            inner.state = SlotState::Streaming { driver, bodyless };
+                        }
+                        response_body
+                    }
+                };
+                Poll::Ready(EngineResponse {
+                    status,
+                    headers,
+                    body: response_body,
+                })
+            }
+            other => {
+                inner.state = other;
+                inner.waker = Some(context.waker().clone());
+                Poll::Pending
+            }
         }
-        inner.waker = Some(context.waker().clone());
-        Poll::Pending
     }
 }
 
