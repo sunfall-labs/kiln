@@ -44760,6 +44760,75 @@ fn intrinsic_static_property_names(target: &Value) -> &'static [&'static str] {
     &[]
 }
 
+/// The globals whose static surface [`intrinsic_static_members`] can report, spelled the way a
+/// program spells them.
+///
+/// Kept beside the accessor rather than derived from it because `intrinsic_tabulated_property_names`
+/// is keyed by [`Native`] and a match cannot be walked. Every name here is compared against the
+/// native backend's own table by `builtin_surface_drift`, so adding a global to this list is what
+/// enrols it in the check; a global that is absent is silently unchecked, which is the failure
+/// this whole seam exists to make impossible. See ADR 0043.
+pub const INTRINSIC_SURFACE_GLOBALS: &[&str] = &[
+    "Array",
+    "Object",
+    "String",
+    "Number",
+    "Date",
+    "Promise",
+    "JSON",
+    "Reflect",
+    "Proxy",
+    "ArrayBuffer",
+    "RegExp",
+    "Error",
+    "BigInt",
+    "Map",
+    "Symbol",
+    "Iterator",
+    "Buffer",
+    "Atomics",
+    "Math",
+];
+
+/// The static members a built-in global carries in this interpreter, or `None` for a name that
+/// is not one of [`INTRINSIC_SURFACE_GLOBALS`].
+///
+/// ONE SURFACE, ASKED OF BOTH ENGINES. This is a reader over
+/// `intrinsic_tabulated_property_names`, which is the interpreter's single list of what each
+/// built-in has; it exists so the native backend's `BUILTIN_SURFACE` can be diffed against that
+/// list in a test rather than by an npm bundle in production. A `@@`-prefixed entry is
+/// symbol-keyed. `length`, `name` and `prototype` are not listed: they belong to every callable
+/// and `own_property_keys` supplies them.
+pub fn intrinsic_static_members(global: &str) -> Option<&'static [&'static str]> {
+    // The realm never reaches the tabulated list, so any id answers.
+    let realm = RealmId(0);
+    let native = match global {
+        "Array" => Native::ArrayConstructor,
+        "Object" => Native::ObjectConstructor,
+        "String" => Native::StringConstructor,
+        "Number" => Native::NumberConstructor,
+        "Date" => Native::DateConstructor,
+        "Promise" => Native::PromiseConstructor,
+        "JSON" => Native::Json,
+        "Reflect" => Native::Reflect,
+        "Proxy" => Native::ProxyConstructor,
+        "ArrayBuffer" => Native::ArrayBufferConstructor,
+        "RegExp" => Native::RegExpConstructor,
+        "Error" => Native::Error(ErrorKind::Error),
+        "BigInt" => Native::BigIntConstructor,
+        "Map" => Native::MapConstructor,
+        "Symbol" => Native::SymbolConstructor,
+        "Iterator" => Native::IteratorConstructor,
+        "Buffer" => Native::NodeBuffer,
+        "Atomics" => Native::Atomics,
+        "Math" => Native::Math,
+        _ => return None,
+    };
+    Some(intrinsic_tabulated_property_names(&Value::Native(
+        native, realm,
+    )))
+}
+
 fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str] {
     match target {
         Value::Native(Native::ArrayConstructor, _) => {
