@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Every runtime, both workloads, several client processes, interleaved passes: the table a claim
+# about throughput should come from. Servers are started on PORT one at a time.
+#
+# usage: bench/server/compare.sh <kiln-hello-binary> <kiln-app-binary>
+# Environment: PASSES (3), PROCS (4), CONNS (16 per process), DURATION_MS (5000), PORT (18088),
+# RUNTIMES ("kiln node bun deno").
+set -euo pipefail
+kiln_hello="${1:?path to the natively compiled serve.mjs}"
+kiln_app="${2:?path to the natively compiled app.mjs}"
+PASSES="${PASSES:-3}"; PROCS="${PROCS:-4}"; CONNS="${CONNS:-16}"; DURATION_MS="${DURATION_MS:-5000}"
+PORT="${PORT:-18088}"; RUNTIMES="${RUNTIMES:-kiln node bun deno}"
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+work="$(mktemp -d)"
+sed "s/const port = 18088;/const port = ${PORT};/" "$HERE/serve.mjs" > "$work/serve.mjs"
+sed "s/const port = 18088;/const port = ${PORT};/" "$HERE/app.mjs" > "$work/app.mjs"
+
+start() { # runtime workload
+	local js="$work/serve.mjs" bin="$kiln_hello"
+	[[ $2 == mixed ]] && js="$work/app.mjs" && bin="$kiln_app"
+	case "$1" in
+	kiln) "$bin" ;;
+	node) node "$js" ;;
+	bun) bun run "$js" ;;
+	deno) deno run --allow-net --quiet "$js" ;;
+	esac
+}
+
+uptime | sed 's/.*load/load/'
+for pass in $(seq 1 "$PASSES"); do
+	for workload in hello mixed; do
+		for runtime in $RUNTIMES; do
+			if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+				echo "compare.sh: port $PORT is busy" >&2; exit 2
+			fi
+			start "$runtime" "$workload" >/dev/null 2>&1 &
+			server=$!
+			for _ in $(seq 1 50); do curl -s -o /dev/null "http://127.0.0.1:$PORT/" && break; sleep 0.1; done
+			printf 'pass=%s workload=%-5s runtime=%-4s ' "$pass" "$workload" "$runtime"
+			bash "$HERE/drive-multi.sh" "$PROCS" "$CONNS" "$DURATION_MS" "$PORT" "$workload"
+			echo "  rss_kib=$(ps -o rss= -p "$server" | tr -d ' ')"
+			kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true
+			sleep 0.3
+		done
+	done
+done
+uptime | sed 's/.*load/load/'
+rm -rf "$work"
