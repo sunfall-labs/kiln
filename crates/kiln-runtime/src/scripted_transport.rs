@@ -23,6 +23,10 @@ pub struct ScriptedTransport {
     /// a read past the script stays pending, as a keep-alive socket waiting for the next
     /// request would.
     eof: bool,
+    /// The recorded bytes are a reply: they arrive only once the engine has written
+    /// something, as a server's response follows the client's request.
+    after_write: bool,
+    read_waker: Option<std::task::Waker>,
     log: ScriptedTransportLog,
 }
 
@@ -58,8 +62,18 @@ impl ScriptedTransport {
         Self {
             inbound: inbound.into_iter().collect(),
             eof,
+            after_write: false,
+            read_waker: None,
             log: ScriptedTransportLog::default(),
         }
+    }
+
+    /// A transport whose recorded bytes are the peer's reply: they arrive only after the
+    /// engine has written something, so a scripted client sends its request first.
+    pub fn replying(inbound: impl IntoIterator<Item = Vec<u8>>, eof: bool) -> Self {
+        let mut transport = Self::new(inbound, eof);
+        transport.after_write = true;
+        transport
     }
 
     pub fn log(&self) -> ScriptedTransportLog {
@@ -76,9 +90,13 @@ impl Drop for ScriptedTransport {
 impl AsyncRead for ScriptedTransport {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
+        context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if self.after_write && self.log.written.borrow().is_empty() {
+            self.read_waker = Some(context.waker().clone());
+            return Poll::Pending;
+        }
         let Some(mut chunk) = self.inbound.pop_front() else {
             // Nothing else is scripted to arrive. With no peer to wake this read, a pending
             // read stays pending until the engine drops the transport, which is what an open
@@ -101,11 +119,14 @@ impl AsyncRead for ScriptedTransport {
 
 impl AsyncWrite for ScriptedTransport {
     fn poll_write(
-        self: Pin<&mut Self>,
+        mut self: Pin<&mut Self>,
         _context: &mut Context<'_>,
         data: &[u8],
     ) -> Poll<io::Result<usize>> {
         self.log.written.borrow_mut().extend_from_slice(data);
+        if let Some(waker) = self.read_waker.take() {
+            waker.wake();
+        }
         Poll::Ready(Ok(data.len()))
     }
 

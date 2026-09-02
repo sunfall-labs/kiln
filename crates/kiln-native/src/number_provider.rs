@@ -445,12 +445,14 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-temporal/src/lib.rs",
         "crates/kiln-runtime/Cargo.toml",
         "crates/kiln-runtime/src/http_body.rs",
-        "crates/kiln-runtime/src/http_transport.rs",
-        "crates/kiln-runtime/src/hyper_http.rs",
+        "crates/kiln-runtime/src/http_client.rs",
+        "crates/kiln-runtime/src/http_engine.rs",
         "crates/kiln-runtime/src/lib.rs",
         "crates/kiln-runtime/src/node_http.rs",
+        "crates/kiln-runtime/src/node_http_agent.rs",
         "crates/kiln-runtime/src/node_net.rs",
         "crates/kiln-runtime/src/node_stream.rs",
+        "crates/kiln-runtime/src/scripted_transport.rs",
     ];
     let mut identity = Vec::new();
     for relative in paths {
@@ -681,12 +683,17 @@ mod tests {
             ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
             ("crates/kiln-runtime/src/http_body.rs", b"body\n"),
-            ("crates/kiln-runtime/src/http_transport.rs", b"transport\n"),
-            ("crates/kiln-runtime/src/hyper_http.rs", b"hyper\n"),
+            ("crates/kiln-runtime/src/http_client.rs", b"client\n"),
+            ("crates/kiln-runtime/src/http_engine.rs", b"engine\n"),
             ("crates/kiln-runtime/src/lib.rs", b"runtime\n"),
             ("crates/kiln-runtime/src/node_http.rs", b"http\n"),
+            ("crates/kiln-runtime/src/node_http_agent.rs", b"agent\n"),
             ("crates/kiln-runtime/src/node_net.rs", b"net\n"),
             ("crates/kiln-runtime/src/node_stream.rs", b"stream\n"),
+            (
+                "crates/kiln-runtime/src/scripted_transport.rs",
+                b"scripted\n",
+            ),
         ] {
             let path = root.0.join(relative);
             fs::create_dir_all(path.parent().expect("fixture path has parent"))
@@ -696,7 +703,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("77404309a771d9a232ca29d4e29df315be7443170d1ffd228418bf59f10784af")
+            Digest::from_hex("b69378155ab3da243892d4a3d273f24d6c1e7d6faecf38c2da364897bb42a320")
                 .expect("fixture digest")
         );
     }
