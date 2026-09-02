@@ -14875,6 +14875,55 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
     }
 }
 
+/* Flatten a header object into the NUL-separated block the runtime's HTTP frame takes.
+ *
+ * Sized once from the property list instead of grown into.  `kiln_c99_text_append` doubles
+ * through `realloc` and was called four times per header, so a response with a handful of
+ * headers reallocated several times per request to build a block whose exact length the property
+ * list already knew.  Two passes over a few properties cost less than those reallocs, and the
+ * buffer ends up exactly the size of the frame rather than up to twice it.
+ *
+ * The second pass re-reads each value through `kiln_c99_text`, which is free for the strings
+ * these objects actually hold -- `setHeader` and `writeHead` both store text -- and is
+ * deterministic for anything else, so the two passes cannot disagree about a length.  The bound
+ * check keeps that a checked invariant rather than a promise.
+ *
+ * On success the caller owns `out->bytes`, which is what the three call sites already expected of
+ * the builder they replaced. */
+static int kiln_c99_node_flatten_headers(kiln_object *headers, kiln_text *out) {
+    size_t needed = 0;
+    size_t at = 0;
+    size_t index;
+    char *bytes;
+    out->bytes = NULL;
+    out->len = 0;
+    out->capacity = 0;
+    for (index = 0; index < headers->count; ++index)
+        needed += headers->properties[index].key_len +
+                  kiln_c99_text(headers->properties[index].value).len + 2;
+    if (needed == 0) return KILN_C99_OK;
+    bytes = (char *)malloc(needed);
+    if (bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < headers->count; ++index) {
+        kiln_property *property = &headers->properties[index];
+        kiln_value value = kiln_c99_text(property->value);
+        if (at + property->key_len + value.len + 2 > needed) {
+            free(bytes);
+            return KILN_C99_CONTROL_ERROR;
+        }
+        if (property->key_len != 0) memcpy(bytes + at, property->key, property->key_len);
+        at += property->key_len;
+        bytes[at++] = '\0';
+        if (value.len != 0) memcpy(bytes + at, value.ptr, value.len);
+        at += value.len;
+        bytes[at++] = '\0';
+    }
+    out->bytes = bytes;
+    out->len = at;
+    out->capacity = needed;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *thrown) {
@@ -14941,21 +14990,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         status = KILN_C99_OK;
         if (headers_value.tag == KILN_VALUE_UNDEFINED) {
         } else if (headers_value.tag == KILN_VALUE_OBJECT) {
-            kiln_object *provided = kiln_c99_object_of(headers_value);
-            kiln_text flattened = {NULL, 0, 0};
-            size_t index;
-            status = KILN_C99_OK;
-            for (index = 0; index < provided->count && status == KILN_C99_OK; ++index) {
-                kiln_property *property = &provided->properties[index];
-                kiln_value value;
-                value = kiln_c99_text(property->value);
-                if (kiln_c99_text_append(&flattened, property->key, property->key_len) !=
-                        KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK)
-                    status = KILN_C99_OUT_OF_MEMORY;
-            }
+            kiln_text flattened;
+            status = kiln_c99_node_flatten_headers(kiln_c99_object_of(headers_value), &flattened);
             request->headers = flattened.bytes;
             request->headers_len = flattened.len;
         } else {
@@ -15226,21 +15262,11 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                         "write after end");
         if (!response->started) {
-            kiln_object *headers = kiln_c99_object_of(response->headers);
-            kiln_text flattened = {NULL, 0, 0};
+            kiln_text flattened;
             kiln_realm_http_response framed;
-            size_t index;
-            for (index = 0; index < headers->count; ++index) {
-                kiln_value value = kiln_c99_text(headers->properties[index].value);
-                if (kiln_c99_text_append(&flattened, headers->properties[index].key,
-                                         headers->properties[index].key_len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK) {
-                    free(flattened.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-            }
+            status = kiln_c99_node_flatten_headers(kiln_c99_object_of(response->headers),
+                                                   &flattened);
+            if (status != KILN_C99_OK) return status;
             memset(&framed, 0, sizeof framed);
             framed.status = response->status;
             framed.headers = (const uint8_t *)flattened.bytes;
@@ -15265,22 +15291,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         kiln_object *headers;
         kiln_text flattened = {NULL, 0, 0};
         kiln_realm_http_response framed;
-        size_t index;
         int status;
         if (response->ended) { *result = receiver; return KILN_C99_OK; }
         if (!response->started) {
             headers = kiln_c99_object_of(response->headers);
-            for (index = 0; index < headers->count; ++index) {
-                kiln_value value = kiln_c99_text(headers->properties[index].value);
-                if (kiln_c99_text_append(&flattened, headers->properties[index].key,
-                                         headers->properties[index].key_len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK) {
-                    free(flattened.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-            }
+            status = kiln_c99_node_flatten_headers(headers, &flattened);
+            if (status != KILN_C99_OK) return status;
             memset(&framed, 0, sizeof framed);
             framed.status = response->status;
             framed.headers = (const uint8_t *)flattened.bytes;
