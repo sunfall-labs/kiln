@@ -1004,6 +1004,17 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.state.host.has_referenced_work()
     }
 
+    /// Whether any host operation is pending, referenced or not: whether a completion can
+    /// still arrive.
+    pub fn has_pending_host_work(&self) -> bool {
+        self.state.host.has_pending_work()
+    }
+
+    /// Requests in flight on direct server connections.
+    pub fn requests_in_flight(&self) -> usize {
+        self.state.http_server.requests_in_flight()
+    }
+
     /// A one-line description of the host's pending work, for `KILN_HTTP_TRACE`.
     pub fn describe_host_work(&self) -> String
     where
