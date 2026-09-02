@@ -4601,6 +4601,16 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_HOOKS_VERSION 1u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)2 * 1024 * 1024)
 
+/* `kind` carries `kiln_gc_kind` in its low bits and, for a `KILN_GC_STRING` block only, a cached
+ * answer to "is this string all ASCII" (ADR 0022: ASCII is exactly the case where a code-unit
+ * index equals a byte offset, which is what every position-taking string operation walks UTF-8 to
+ * find) in its top two. `KILN_GC_KIND_COUNT` is nowhere near the mask's ~30 low bits, so the two
+ * high bits are free; every reader of `block->kind` as a `kiln_gc_kind` must mask with
+ * `KILN_GC_KIND_MASK` first. */
+#define KILN_GC_KIND_MASK ((uint32_t)0x3FFFFFFFu)
+#define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
+#define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
+
 typedef struct kiln_gc_block {
     struct kiln_gc_block *prev;
     struct kiln_gc_block *next;
@@ -4807,6 +4817,49 @@ static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *p
     return NULL;
 }
 
+/* A branch-light ASCII test, 8 bytes at a time: ASCII is exactly the bytes with their top bit
+ * clear, so a single mask-and-compare per word answers for all eight at once. The tail below
+ * 8 bytes falls back to one byte at a time. */
+static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
+    size_t index = 0;
+    while (index + 8 <= len) {
+        uint64_t word;
+        memcpy(&word, bytes + index, sizeof word);
+        if ((word & UINT64_C(0x8080808080808080)) != 0) return 0;
+        index += 8;
+    }
+    while (index < len) {
+        if (((unsigned char)bytes[index]) & 0x80u) return 0;
+        ++index;
+    }
+    return 1;
+}
+
+/* Is this string value entirely ASCII, where a UTF-16 code unit is a byte and `length` is `len`
+ * (ADR 0022)? A heap string (`kiln_c99_gc_lookup` finds its block) caches the answer in the
+ * block's otherwise-unused `kind` high bits (ADR 0041) after the first scan, so a string read
+ * more than once -- a repeated header name, a request path used by several route checks --
+ * pays for the scan at most once. A constant or foreign pointer has no block to cache in and is
+ * scanned every call; constants are short (path segments, JSON keys, literals a program wrote)
+ * and the scan is cheap relative to the UTF-8 decode it replaces. */
+static int kiln_c99_string_is_ascii(kiln_value value) {
+    kiln_gc_heap *heap;
+    kiln_gc_block *block;
+    int ascii;
+    if (value.len == 0) return 1;
+    heap = kiln_c99_gc_heap();
+    block = heap != NULL ? kiln_c99_gc_lookup(heap, value.ptr) : NULL;
+    if (block != NULL && (block->kind & KILN_GC_FLAG_ASCII_KNOWN) != 0) {
+        return (block->kind & KILN_GC_FLAG_ASCII) != 0;
+    }
+    ascii = kiln_c99_ascii_scan(value.ptr, value.len);
+    if (block != NULL) {
+        block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
+                      (ascii ? KILN_GC_FLAG_ASCII : 0u);
+    }
+    return ascii;
+}
+
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     kiln_gc_block *block;
@@ -4901,7 +4954,7 @@ static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values
 
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     void *payload = block + 1;
-    switch (block->kind) {
+    switch (block->kind & KILN_GC_KIND_MASK) {
     case KILN_GC_OBJECT: {
         kiln_object *object = (kiln_object *)payload;
         size_t index;
@@ -5085,7 +5138,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
  * here. A kind whose payload owns a provider handle releases it here too. */
 static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     void *payload = block + 1;
-    switch (block->kind) {
+    switch (block->kind & KILN_GC_KIND_MASK) {
     case KILN_GC_OBJECT:
         free(((kiln_object *)payload)->properties);
         break;

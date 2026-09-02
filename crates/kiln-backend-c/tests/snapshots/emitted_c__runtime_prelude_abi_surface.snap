@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 482
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -989,6 +990,9 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 1u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)2 * 1024 * 1024)
+#define KILN_GC_KIND_MASK ((uint32_t)0x3FFFFFFFu)
+#define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
+#define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
 typedef struct kiln_gc_block {
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -1002,6 +1006,8 @@ static int kiln_c99_gc_table_grow(kiln_gc_heap *heap, size_t wanted) {
 static int kiln_c99_gc_table_insert(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_table_remove(kiln_gc_heap *heap, const kiln_gc_block *block) {
 static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *payload) {
+static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
+static int kiln_c99_string_is_ascii(kiln_value value) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
