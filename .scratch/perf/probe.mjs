@@ -1,7 +1,9 @@
-// Property-semantics probe for the accessor_count / same_key / defineProperty changes.
-// Run interpreted (`kiln run`) and natively (`kiln build --native-release` then execute) and
-// diff stdout. Every line is a self-contained assertion; failures print rather than throw, so
-// one bad case does not hide the rest.
+// Property-semantics probe for the accessor_count / same_key / defineProperty / node_event
+// changes. Run with --node (test 10 needs node:events), interpreted (`kiln run`) and natively
+// (`kiln build --node --profile native-release` then execute), and diff stdout. Every line is a
+// self-contained assertion; failures print rather than throw, so one bad case does not hide the
+// rest.
+import { EventEmitter } from "node:events";
 
 function report(name, cond, extra) {
   console.log((cond ? "PASS " : "FAIL ") + name + (extra !== undefined ? " " + JSON.stringify(extra) : ""));
@@ -110,6 +112,25 @@ function report(name, cond, extra) {
   const built = "dynamic" + "Key";
   o[built] = 2;
   report("dynamic key with same content as an interned one overwrites, not duplicates", o.dynamicKey === 2 && Object.keys(o).length === 1, Object.keys(o));
+}
+
+// 10. EventEmitter: emit with no listeners for the name is falsy and does not disturb other
+//     names' listeners; on/emit/once/removeListener still behave once something is registered.
+{
+  const e = new EventEmitter();
+  const r1 = e.emit("nobody-home");
+  report("emit with zero listeners ever registered returns false", r1 === false);
+  let a = 0, b = 0;
+  e.on("x", () => { a += 1; });
+  e.once("y", () => { b += 1; });
+  const r2 = e.emit("still-nobody");
+  report("emit for an unregistered name after other names exist returns false", r2 === false);
+  e.emit("x"); e.emit("x");
+  e.emit("y"); e.emit("y");
+  report("on fires every time, once fires once", a === 2 && b === 1, { a, b });
+  e.removeAllListeners("x");
+  const r3 = e.emit("x");
+  report("emit after removeAllListeners(name) returns false", r3 === false);
 }
 
 console.log("done");

@@ -14628,6 +14628,20 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
     }
     {
         kiln_property *state = kiln_c99_own_private(receiver, "@@node:events", 13);
+        /* No listener has ever been registered on this receiver -- the common case for `finish`
+         * and `close` on a response nothing is listening for. `on`/`once` are the only codes
+         * that need somewhere to put a listener; every other code has a fixed answer for "no
+         * listeners", the same one the bucket-not-found path below gives once a private array
+         * does exist and simply has nothing under this name. Answering it here skips building
+         * that array -- and the private property that would otherwise hold it -- for a call that
+         * was never going to find anything in it. */
+        if ((state == NULL || state->value.tag != KILN_VALUE_ARRAY) &&
+            code != KILN_C99_METHOD_NODE_EVENT_ON && code != KILN_C99_METHOD_NODE_EVENT_ONCE) {
+            if (code == KILN_C99_METHOD_NODE_EVENT_EMIT) *result = kiln_c99_boolean(0);
+            else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS) return kiln_c99_new_array(result);
+            else *result = receiver;
+            return KILN_C99_OK;
+        }
         if (state == NULL) {
             kiln_object *object = kiln_c99_object_of(receiver);
             status = kiln_c99_put(NULL, receiver, "@@node:events", 13,
