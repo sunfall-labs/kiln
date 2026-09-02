@@ -166,6 +166,9 @@ struct ConnectionShared {
     deferred_wake: Notify,
     shutdown: Notify,
     closing: Cell<bool>,
+    /// An abort has been requested and its `Closed` has not been published yet. Counted as
+    /// work in flight so a drive does not return before the language hears it.
+    abort_pending: Cell<bool>,
     failed: Cell<bool>,
 }
 
@@ -477,6 +480,7 @@ impl HttpServerEngine {
             deferred_wake: Notify::new(),
             shutdown: Notify::new(),
             closing: Cell::new(false),
+            abort_pending: Cell::new(false),
             failed: Cell::new(false),
         });
         trace!("{resource:?} attach half_close={allow_half_close}");
@@ -551,11 +555,14 @@ impl HttpServerEngine {
             }
             ServerCloseMode::Abort => {
                 connection.task.abort();
+                connection.shared.abort_pending.set(true);
                 let shared = Rc::clone(&connection.shared);
                 let table = Rc::clone(&self.connections);
                 drop(table.borrow());
+                // Published from a task, never from inside the caller's own call.
                 tokio::task::spawn_local(async move {
                     let _ = shared.dispatch(&ServerEvent::bare(ServerEventKind::Closed, 0));
+                    shared.abort_pending.set(false);
                     table.borrow_mut().remove(&shared.resource);
                 });
                 return true;
@@ -574,7 +581,10 @@ impl HttpServerEngine {
         self.connections
             .borrow()
             .values()
-            .map(|connection| connection.shared.requests.borrow().len())
+            .map(|connection| {
+                connection.shared.requests.borrow().len()
+                    + usize::from(connection.shared.abort_pending.get())
+            })
             .sum()
     }
 

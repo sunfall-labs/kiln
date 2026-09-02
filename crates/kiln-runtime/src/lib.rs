@@ -2585,6 +2585,9 @@ impl TokioHost {
                 referenced,
             },
         );
+        // An immediate completion still has to reach a drive that is parked on the completion
+        // signal: `server.close()` issued from inside a connection callback is exactly that.
+        self.completed.notify_one();
         self.ready.insert(
             sequence,
             Completion {
