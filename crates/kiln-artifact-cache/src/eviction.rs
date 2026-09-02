@@ -1549,11 +1549,27 @@ mod tests {
             assert_eq!(report.records_evicted + report.records_raced, 60);
             assert!(!report.over_budget_after_sweep);
         }
-        // Deliberately not asserting that the successes sum to sixty. `unlink` is not an election
-        // primitive: on Darwin/APFS several threads are told they won the same path. The guarantee
-        // this design actually rests on is convergence, asserted next, plus the fact that a
-        // content-addressed record can only ever be rebuilt, never replaced.
-        assert!(reports.iter().all(|report| report.records_evicted > 0));
+        // Deliberately not asserting that the successes sum to *exactly* sixty. `unlink` is not an
+        // election primitive: on Darwin/APFS several threads are told they won the same path, so
+        // the successes there run to about a hundred and seventy. The guarantee this design rests
+        // on is convergence, asserted next, plus the fact that a content-addressed record can only
+        // ever be rebuilt, never replaced.
+        //
+        // Nor that every sweeper evicted something. That is a fairness property and nothing here
+        // provides one: this module's header says `records_evicted` measures a sweeper's own
+        // effort rather than a partition of the records, so a sweeper that arrives after another
+        // has finished evicts nothing and races sixty times -- the race resolving exactly as
+        // designed, not a starved thread. It only ever held because Darwin's non-exclusive
+        // `unlink` hands every thread plenty of wins; where `unlink` really is an election, as on
+        // Linux, a loaded machine finishes one sweeper before the last has started and the
+        // assertion fails on a cache that behaved perfectly.
+        //
+        // What must hold is coverage: every record was removed by somebody.
+        let evicted: usize = reports.iter().map(|report| report.records_evicted).sum();
+        assert!(
+            evicted >= 60,
+            "sixty records must each have been evicted by some sweeper, saw {evicted}"
+        );
         assert_eq!(cache.layer_usage(0).expect("usage"), 0);
         for index in 0..60 {
             let entry = key(ArtifactKind::GeneratedC, "compiler-1", &format!("r{index}"));
