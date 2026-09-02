@@ -1,6 +1,6 @@
 # Interpreter: queued dispatch onto the engines
 
-Status: ready-for-agent
+Status: done
 
 The interpreter (`crates/kiln-interpreter/src/lib.rs`) reaches HTTP through
 `ActiveHttpRuntime`, and every method of that seam today returns `HttpStreamAction`s the
@@ -21,3 +21,12 @@ consumes, pushes it on a per-resource queue in the realm state, and signals the 
 - `checkpoint_runtime_http` drains queues; `start_runtime_http_stream_action`,
   `poll_runtime_http_writes` and the `runtime_http` branch of the `Stream` completion are deleted.
   `PendingNodeRequest::Stream` remains for raw `node:net` sockets.
+
+## Comments
+
+- Done (commit "Interpreter: attach HTTP connections through the queued adapter").
+  `conformance/node --node` 35/35 and `conformance/server --node` 4/4 (2 skipped for missing
+  packages), unchanged from the baseline; the node corpus runs in 11 ms against 87 ms before.
+- One safety valve worth knowing: `checkpoint_runtime_http` discards queued events for any
+  resource the realm no longer tracks. A queue nobody drains would otherwise keep
+  `next_referenced_turn` waiting forever, because queued events count as live HTTP work.
