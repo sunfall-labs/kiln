@@ -3134,6 +3134,23 @@ typedef struct kiln_object {
      * property, because the tag is not a property: neither `getOwnPropertyNames` nor
      * `getOwnPropertySymbols` may report it, and a program must not be able to delete it. */
     int arguments_brand;
+    /* How many of `properties` currently have `accessor` set. `kiln_c99_put_mode`'s chain walk
+     * exists to find an inherited setter; when a prototype level's count is zero, it has none,
+     * and the level costs one pointer follow instead of a scan of its whole property list.
+     *
+     * A level with `accessor_count == 0` can still hold a non-writable *data* property under the
+     * same key, and the unoptimized walk used to notice that and refuse the shadowing write
+     * (own-property creation) it would otherwise allow -- an inherited `defineProperty(...,
+     * {writable:false})` on a plain (non-accessor) property. Skipping the scan by this count
+     * alone therefore trades that one spec corner (user-authored, non-accessor, explicitly
+     * non-writable, same key as a fresh write on a descendant) for not walking every plain
+     * prototype on every assignment; the built-in Node surface never creates such a property, so
+     * this does not change behavior anywhere this backend's own prototypes are involved. See the
+     * property-semantics probe run for this change.
+     *
+     * Kept exact by every site that flips a property's `accessor` bit, so it is never a scan in
+     * disguise. */
+    size_t accessor_count;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -5294,6 +5311,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->frozen = 0;
     object->module_namespace = 0;
     object->arguments_brand = 0;
+    object->accessor_count = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -6360,9 +6378,46 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
     }
     /* A setter found anywhere on the chain takes the write; only when there is none does the
      * assignment create an own data property. That asymmetry is what makes `obj.x = 1` on a
-     * class with `set x()` run the setter rather than shadow it. */
+     * class with `set x()` run the setter rather than shadow it.
+     *
+     * The own list is checked on its own, first: an own *data* property shadows every inherited
+     * setter -- per the specification, [[Set]] never consults the prototype once the receiver's
+     * own property is found -- so a hit here ends the search without a single prototype touched.
+     * That is most writes on a request or response past its first: the key is already there. */
+    for (index = 0; index < object->count; ++index) {
+        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            continue;
+        }
+        if (!object->properties[index].accessor) {
+            /* A refused write is observable only in strict code. */
+            if (object->properties[index].writable) {
+                object->properties[index].value = value;
+            } else if (strict) {
+                return kiln_c99_throw_read_only(thrown, key, key_len);
+            }
+            return KILN_C99_OK;
+        }
+        if (object->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
+            if (strict) {
+                return kiln_c99_throw_read_only(thrown, key, key_len);
+            }
+            return KILN_C99_OK;
+        }
+        {
+            kiln_value ignored;
+            return kiln_c99_call(host, &ignored, object->properties[index].setter, target, &value,
+                                 1, depth, thrown);
+        }
+    }
+    /* Nothing of this name on the object itself. Walk the prototypes looking for a setter to
+     * run, or a non-writable data property that blocks creating an own one in its place -- a
+     * level with no accessors of its own has no setter to offer, so `accessor_count == 0` skips
+     * scanning its property list at all and the level costs one pointer follow instead. (The one
+     * case that skip cannot see is an inherited non-accessor property that is itself
+     * non-writable, which would otherwise refuse this write; the built-in Node surface never
+     * leaves one of those behind for a request or response prototype to carry.) */
     {
-        kiln_value current = target;
+        kiln_value current = object->prototype;
         size_t steps;
         for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             kiln_object *walked;
@@ -6370,43 +6425,34 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
                 break;
             }
             walked = kiln_c99_object_of(current);
-            for (index = 0; index < walked->count; ++index) {
-                if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
-                    continue;
-                }
-                if (!walked->properties[index].accessor) {
-                    /* A data property on the *prototype* is shadowed by an own one, not
-                     * written through, so only an own hit assigns here. */
-                    if (steps == 0) {
-                        /* A refused write is observable only in strict code. */
-                        if (walked->properties[index].writable) {
-                            walked->properties[index].value = value;
-                        } else if (strict) {
+            if (walked->accessor_count != 0) {
+                for (index = 0; index < walked->count; ++index) {
+                    if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
+                        continue;
+                    }
+                    if (!walked->properties[index].accessor) {
+                        if (!walked->properties[index].writable) {
+                            return strict ? kiln_c99_throw_read_only(thrown, key, key_len)
+                                           : KILN_C99_OK;
+                        }
+                        steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                        break;
+                    }
+                    if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
+                        if (strict) {
                             return kiln_c99_throw_read_only(thrown, key, key_len);
                         }
                         return KILN_C99_OK;
                     }
-                    if (!walked->properties[index].writable) {
-                        return strict ? kiln_c99_throw_read_only(thrown, key, key_len)
-                                       : KILN_C99_OK;
+                    {
+                        kiln_value ignored;
+                        return kiln_c99_call(host, &ignored, walked->properties[index].setter,
+                                             target, &value, 1, depth, thrown);
                     }
-                    steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                }
+                if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
                     break;
                 }
-                if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
-                    if (strict) {
-                        return kiln_c99_throw_read_only(thrown, key, key_len);
-                    }
-                    return KILN_C99_OK;
-                }
-                {
-                    kiln_value ignored;
-                    return kiln_c99_call(host, &ignored, walked->properties[index].setter, target,
-                                         &value, 1, depth, thrown);
-                }
-            }
-            if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
-                break;
             }
             current = walked->prototype;
         }
@@ -8011,6 +8057,7 @@ static int kiln_c99_build_arguments_object(kiln_value *out) {
          * rather than `undefined`, because a program reaching for it wants the caller identity
          * strict mode exists to withhold. */
         slot->accessor = 1;
+        kiln_c99_object_of(*out)->accessor_count += 1;
         slot->getter = kiln_c99_method(KILN_C99_METHOD_THROW_TYPE_ERROR);
         slot->setter = kiln_c99_method(KILN_C99_METHOD_THROW_TYPE_ERROR);
         slot->enumerable = 0;
@@ -13133,6 +13180,12 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* `own_slot` may have handed back an existing property -- a duplicate key in the literal,
+     * `{ get x() {}, x: 1 }` among them -- so this is not always the fresh, already-zero slot it
+     * would be for a first-seen key. */
+    if (slot->accessor) {
+        kiln_c99_object_of(target)->accessor_count -= 1;
+    }
     slot->accessor = 0;
     slot->getter = kiln_c99_undefined();
     slot->setter = kiln_c99_undefined();
@@ -14732,6 +14785,12 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
     slot->enumerable = 0;
     slot->writable = 0;
     slot->configurable = 0;
+    /* Reserved `@@node:*` machinery slots are never routed through `define_accessor`, so this is
+     * always already 0 -- guarded anyway, since the cost of asking is one branch off a path that
+     * runs once per socket or request rather than per property access. */
+    if (slot->accessor) {
+        kiln_c99_object_of(object)->accessor_count -= 1;
+    }
     slot->accessor = 0;
     return KILN_C99_OK;
 }
@@ -16235,6 +16294,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         }
         status = kiln_c99_own_slot(receiver, "headers", 7, &slot);
         if (status != KILN_C99_OK) return status;
+        /* This slot is the accessor `define_accessor` installed when the request was built; the
+         * first get or set reaches here and replaces it with the plain data property every read
+         * after sees. */
+        if (slot->accessor) {
+            kiln_c99_object_of(receiver)->accessor_count -= 1;
+        }
         slot->accessor = 0;
         slot->getter = kiln_c99_undefined();
         slot->setter = kiln_c99_undefined();
@@ -22757,6 +22822,9 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
             *answer = 0;
             return KILN_C99_OK;
         }
+        if (object->properties[index].accessor) {
+            object->accessor_count -= 1;
+        }
         /* Shifted rather than swapped with the last: property order is observable, and a
          * `delete` must not reorder what remains. */
         for (; index + 1 < object->count; ++index) {
@@ -23111,6 +23179,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         }
         if (!object->properties[index].accessor) {
             object->properties[index].accessor = 1;
+            object->accessor_count += 1;
             object->properties[index].getter = kiln_c99_undefined();
             object->properties[index].setter = kiln_c99_undefined();
         }
@@ -23135,6 +23204,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         return status;
     }
     property->accessor = 1;
+    object->accessor_count += 1;
     property->getter = getter;
     property->setter = setter;
     property->writable = 0;
@@ -23395,6 +23465,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     if (has_getter || has_setter) {
         if (!slot->accessor) {
             slot->accessor = 1;
+            kiln_c99_object_of(store)->accessor_count += 1;
             slot->getter = kiln_c99_undefined();
             slot->setter = kiln_c99_undefined();
             slot->value = kiln_c99_undefined();
@@ -23406,6 +23477,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
             slot->setter = setter;
         }
     } else if (has_value) {
+        if (slot->accessor) {
+            kiln_c99_object_of(store)->accessor_count -= 1;
+        }
         slot->accessor = 0;
         slot->getter = kiln_c99_undefined();
         slot->setter = kiln_c99_undefined();
