@@ -4545,6 +4545,31 @@ typedef struct kiln_gc_ptrset {
     size_t count;
 } kiln_gc_ptrset;
 
+/* Interned property keys (ADR 0047). One entry per distinct key spelling the realm has ever
+ * stored or registered, mapping the bytes to the one pointer every property with that name
+ * carries -- so `property->key == key` is the whole of a key comparison and a linear scan never
+ * touches key bytes. The table is the heap's because the heap is the one struct every
+ * translation unit shares: two units each keeping their own would have two canonical pointers
+ * for one name, which is exactly the situation this exists to end.
+ *
+ * An entry is *pinned* when its bytes are immortal (a unit's constant table, a prelude literal,
+ * a symbol's reserved key) or when the table itself has undertaken to keep a block alive because
+ * a unit registered the same spelling after a computed key had already claimed it. Every other
+ * entry is weak: its bytes are a string block that the properties holding the key keep marked,
+ * and the collection that finds the block unmarked drops the entry before the sweep frees it. */
+typedef struct kiln_key_entry {
+    const char *bytes; /* NULL when the slot is empty */
+    size_t len;
+    uint64_t hash;
+    int pinned;
+} kiln_key_entry;
+
+typedef struct kiln_key_table {
+    kiln_key_entry *entries;
+    size_t capacity; /* zero or a power of two */
+    size_t count;
+} kiln_key_table;
+
 typedef struct kiln_gc_heap {
     const kiln_gc_hooks *hooks;
     kiln_gc_block *head; /* large blocks only; slab blocks are found by walking slabs */
@@ -4572,6 +4597,10 @@ typedef struct kiln_gc_heap {
     uint64_t collections;
     uint64_t freed_blocks;
     uint64_t freed_bytes;
+    kiln_key_table keys;
+    /* `KILN_KEYS_CHECK=1`: every pointer-identity scan is re-run by bytes and a disagreement
+     * aborts naming the key. The acceptance test for "interning is total", not a mode to ship. */
+    int keys_check;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -4590,6 +4619,8 @@ static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
     heap->stress = setting != NULL && setting[0] != '\0' && setting[0] != '0';
     setting = getenv("KILN_GC_TRACE");
     heap->trace = setting != NULL && setting[0] != '\0' && setting[0] != '0';
+    setting = getenv("KILN_KEYS_CHECK");
+    heap->keys_check = setting != NULL && setting[0] != '\0' && setting[0] != '0';
     setting = getenv("KILN_GC_FLOOR_KIB");
     if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
         size_t kib = 0;
@@ -4998,6 +5029,217 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
     return payload;
 }
 
+/* ---- Interned keys ------------------------------------------------------------------------
+ *
+ * Three entry points, and the difference between them is the whole design:
+ *
+ *   kiln_c99_intern        canonical pointer, inserting. The one a *write* uses.
+ *   kiln_c99_intern_static canonical pointer, inserting, for bytes that never die; pins.
+ *   kiln_c99_interned      canonical pointer or NULL, never inserting. The one a *read* uses,
+ *                          because storage is total: a spelling the table has never seen is a
+ *                          key no object anywhere has, and the read can skip the scan.
+ *
+ * Canonical pointers are distinct as pointers: a block is adopted as canonical only when its
+ * size is exactly the key's length, so two keys can never share an address with different
+ * lengths, and the empty key is one static byte rather than whichever empty string came first. */
+static const char kiln_c99_key_empty[1] = "";
+static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
+
+static uint64_t kiln_c99_key_hash(const char *bytes, size_t len) {
+    /* FNV-1a, then the top half folded down: the table masks the low bits, and FNV's low bits
+     * are the weakest for the short keys that are nearly all of them. */
+    uint64_t hash = UINT64_C(0xcbf29ce484222325);
+    size_t index;
+    for (index = 0; index < len; ++index) {
+        hash ^= (unsigned char)bytes[index];
+        hash *= UINT64_C(0x100000001b3);
+    }
+    return hash ^ (hash >> 32);
+}
+
+static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const char *bytes,
+                                          size_t len, uint64_t hash) {
+    size_t mask;
+    size_t at;
+    if (table->capacity == 0) return NULL;
+    mask = table->capacity - 1;
+    at = (size_t)hash & mask;
+    for (;;) {
+        kiln_key_entry *entry = &table->entries[at];
+        if (entry->bytes == NULL) return NULL;
+        if (entry->hash == hash && entry->len == len &&
+            (entry->bytes == bytes || memcmp(entry->bytes, bytes, len) == 0))
+            return entry;
+        at = (at + 1) & mask;
+    }
+}
+
+static void kiln_c99_key_place(kiln_key_table *table, kiln_key_entry entry) {
+    size_t mask = table->capacity - 1;
+    size_t at = (size_t)entry.hash & mask;
+    while (table->entries[at].bytes != NULL) at = (at + 1) & mask;
+    table->entries[at] = entry;
+    table->count += 1;
+}
+
+static int kiln_c99_key_grow(kiln_key_table *table) {
+    kiln_key_entry *old = table->entries;
+    size_t old_capacity = table->capacity;
+    size_t capacity = old_capacity == 0 ? 256 : old_capacity * 2;
+    kiln_key_entry *grown;
+    size_t index;
+    if (capacity > ((size_t)-1) / sizeof *grown) return KILN_C99_OUT_OF_MEMORY;
+    grown = (kiln_key_entry *)calloc(capacity, sizeof *grown);
+    if (grown == NULL) return KILN_C99_OUT_OF_MEMORY;
+    table->entries = grown;
+    table->capacity = capacity;
+    table->count = 0;
+    for (index = 0; index < old_capacity; ++index)
+        if (old[index].bytes != NULL) kiln_c99_key_place(table, old[index]);
+    free(old);
+    return KILN_C99_OK;
+}
+
+static const char *kiln_c99_key_insert(kiln_key_table *table, const char *bytes, size_t len,
+                                       uint64_t hash, int pinned) {
+    kiln_key_entry entry;
+    if ((table->count + 1) * 2 > table->capacity && kiln_c99_key_grow(table) != KILN_C99_OK)
+        return NULL;
+    entry.bytes = bytes;
+    entry.len = len;
+    entry.hash = hash;
+    entry.pinned = pinned;
+    kiln_c99_key_place(table, entry);
+    return bytes;
+}
+
+/* Linear probing deletes by shifting the entries after the hole back over it: an entry moves
+ * into the hole when the hole lies on the probe path from its home slot to where it sits. */
+static void kiln_c99_key_delete_at(kiln_key_table *table, size_t hole) {
+    size_t mask = table->capacity - 1;
+    size_t at = (hole + 1) & mask;
+    table->entries[hole].bytes = NULL;
+    table->count -= 1;
+    while (table->entries[at].bytes != NULL) {
+        size_t home = (size_t)table->entries[at].hash & mask;
+        if (((hole - home) & mask) < ((at - home) & mask)) {
+            table->entries[hole] = table->entries[at];
+            table->entries[at].bytes = NULL;
+            hole = at;
+        }
+        at = (at + 1) & mask;
+    }
+}
+
+static const char *kiln_c99_interned_in(kiln_gc_heap *heap, const char *bytes, size_t len) {
+    const kiln_key_entry *entry;
+    if (len == 0) return kiln_c99_key_empty;
+    if (heap == NULL) return NULL;
+    entry = kiln_c99_key_probe(&heap->keys, bytes, len, kiln_c99_key_hash(bytes, len));
+    return entry == NULL ? NULL : entry->bytes;
+}
+
+static const char *kiln_c99_interned(const char *bytes, size_t len) {
+    return kiln_c99_interned_in(kiln_c99_gc_heap(), bytes, len);
+}
+
+static const char *kiln_c99_intern(const char *bytes, size_t len) {
+    kiln_gc_heap *heap;
+    uint64_t hash;
+    kiln_key_entry *entry;
+    kiln_gc_block *block;
+    const char *canonical;
+    if (len == 0) return kiln_c99_key_empty;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return NULL;
+    hash = kiln_c99_key_hash(bytes, len);
+    entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
+    if (entry != NULL) return entry->bytes;
+    /* A string block of exactly this size is adopted as the canonical bytes: the properties
+     * that hold the key keep it marked, and nothing is copied. Anything else -- a constant this
+     * unit did not register, a slice, foreign memory borrowed for a callback -- is copied into a
+     * block of its own, because a weak entry has to name something the collector can see die. */
+    block = kiln_c99_gc_lookup(heap, bytes);
+    if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING &&
+        block->size == len) {
+        canonical = bytes;
+    } else {
+        char *copy = (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len);
+        if (copy == NULL) return NULL;
+        memcpy(copy, bytes, len);
+        canonical = copy;
+    }
+    return kiln_c99_key_insert(&heap->keys, canonical, len, hash, 0);
+}
+
+/* For bytes that outlive the heap. Never NULL: a table that cannot grow hands the bytes back
+ * uncanonical, and a read of that spelling then reports it absent -- which is consistent,
+ * because the write that would have stored it fails with the same out-of-memory first. */
+static const char *kiln_c99_intern_static(const char *bytes, size_t len) {
+    kiln_gc_heap *heap;
+    uint64_t hash;
+    kiln_key_entry *entry;
+    const char *canonical;
+    if (len == 0) return kiln_c99_key_empty;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return bytes;
+    hash = kiln_c99_key_hash(bytes, len);
+    entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
+    if (entry != NULL) {
+        entry->pinned = 1;
+        return entry->bytes;
+    }
+    canonical = kiln_c99_key_insert(&heap->keys, bytes, len, hash, 1);
+    return canonical == NULL ? bytes : canonical;
+}
+
+/* A string block released by hand (`kiln_c99_gc_release`) must not stay canonical. */
+static void kiln_c99_key_forget(kiln_gc_heap *heap, const char *bytes, size_t len) {
+    kiln_key_table *table = &heap->keys;
+    size_t mask;
+    size_t at;
+    if (table->capacity == 0) return;
+    mask = table->capacity - 1;
+    at = (size_t)kiln_c99_key_hash(bytes, len) & mask;
+    while (table->entries[at].bytes != NULL) {
+        if (table->entries[at].bytes == bytes) {
+            kiln_c99_key_delete_at(table, at);
+            return;
+        }
+        at = (at + 1) & mask;
+    }
+}
+
+static void kiln_c99_key_mark_pinned(kiln_gc_heap *heap) {
+    size_t index;
+    for (index = 0; index < heap->keys.capacity; ++index) {
+        const kiln_key_entry *entry = &heap->keys.entries[index];
+        if (entry->bytes != NULL && entry->pinned) kiln_c99_gc_mark_block(heap, entry->bytes);
+    }
+}
+
+/* After marking and before the sweep: drop every weak entry whose block did not survive. In
+ * place, so a purge needs no memory at the one moment the collector must not fail for lack of
+ * it. A slot is re-examined after a deletion because the shift moves a later entry into it. */
+static void kiln_c99_key_purge(kiln_gc_heap *heap) {
+    kiln_key_table *table = &heap->keys;
+    size_t index = 0;
+    while (index < table->capacity) {
+        const kiln_key_entry *entry = &table->entries[index];
+        kiln_gc_block *block;
+        if (entry->bytes == NULL || entry->pinned) {
+            ++index;
+            continue;
+        }
+        block = kiln_c99_gc_lookup(heap, entry->bytes);
+        if (block != NULL && block->mark != heap->epoch) {
+            kiln_c99_key_delete_at(table, index);
+            continue;
+        }
+        ++index;
+    }
+}
+
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
     if (block->prev != NULL) block->prev->next = block->next;
     else heap->head = block->next;
@@ -5021,6 +5263,8 @@ static void kiln_c99_gc_release(void *payload) {
     if (heap == NULL) return;
     block = kiln_c99_gc_lookup_slab(heap, payload, &slab);
     if (block == NULL) return;
+    if ((block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING)
+        kiln_c99_key_forget(heap, (const char *)payload, block->size);
     kiln_c99_gc_finalize(block);
     heap->freed_blocks += 1;
     heap->freed_bytes += block->size;
@@ -5419,8 +5663,10 @@ static void kiln_c99_gc_collect(void *opaque, int force) {
     before_bytes = heap->freed_bytes;
     kiln_c99_gc_begin(heap);
     (void)kiln_realm_gc_mark_roots(heap);
+    kiln_c99_key_mark_pinned(heap);
     kiln_c99_gc_drain(heap);
     if (!heap->mark_failed) {
+        kiln_c99_key_purge(heap);
         kiln_c99_gc_sweep(heap, 0);
         heap->collections += 1;
     }
@@ -5480,6 +5726,7 @@ static void kiln_c99_gc_teardown_end(void *opaque) {
     free(heap->large_table.table);
     free(heap->slab_table.table);
     free(heap->stack);
+    free(heap->keys.entries);
     free(heap);
 }
 
@@ -6474,6 +6721,44 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
     return memcmp(property->key, key, key_len) == 0;
 }
 
+/* The slot on `object` holding the canonical key `ikey`, or `object->count` when there is none.
+ * A NULL `ikey` is a spelling the realm never interned, and since every stored key is interned
+ * (`kiln_c99_own_slot` is the one place a key is written and it always canonicalizes) that is a
+ * key no object has: the scan is skipped rather than run. `KILN_KEYS_CHECK=1` re-runs it by
+ * bytes and aborts on a disagreement, which is how "every stored key is interned" is tested
+ * rather than assumed. */
+static size_t kiln_c99_own_index(const kiln_gc_heap *heap, const kiln_object *object,
+                                 const char *ikey, const char *key, size_t key_len) {
+    size_t index;
+    size_t found = object->count;
+    if (ikey != NULL) {
+        for (index = 0; index < object->count; ++index) {
+            if (object->properties[index].key == ikey) {
+                found = index;
+                break;
+            }
+        }
+    }
+    if (heap != NULL && heap->keys_check) {
+        size_t by_bytes = object->count;
+        for (index = 0; index < object->count; ++index) {
+            if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+                by_bytes = index;
+                break;
+            }
+        }
+        if (by_bytes != found) {
+            fputs("kiln: interned-key invariant broken for `", stderr);
+            fwrite(key, 1, key_len, stderr);
+            fputs(found == object->count ? "`: stored under a non-canonical pointer\n"
+                                         : "`: two slots answer one key\n",
+                  stderr);
+            abort();
+        }
+    }
+    return found;
+}
+
 /* A write to an existing key replaces it in place, so insertion order is the order of first
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -6481,6 +6766,8 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
     kiln_object *object;
     size_t index;
     int status;
+    kiln_gc_heap *heap;
+    const char *ikey;
     /* Node resource pointers are represented by reserved values in the ordinary property store,
      * but they are not JavaScript properties.  A program can spell the key as a string, so hide
      * and ignore these protocol slots explicitly instead of exposing a C pointer as an object or
@@ -6600,6 +6887,11 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
     if (object->frozen) {
         return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
     }
+    /* Looked up, not inserted: a spelling the realm has never stored has no own property and
+     * no setter anywhere on the chain, and `kiln_c99_own_slot` is what interns it when the
+     * write turns out to create one. */
+    heap = kiln_c99_gc_heap();
+    ikey = kiln_c99_interned_in(heap, key, key_len);
     if (kiln_c99_same_name(key, key_len, "__proto__") &&
         object->prototype.tag != KILN_VALUE_NULL) {
         /* The other half of the accessor above: a write relinks the object instead of giving it
@@ -6619,10 +6911,8 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
      * setter -- per the specification, [[Set]] never consults the prototype once the receiver's
      * own property is found -- so a hit here ends the search without a single prototype touched.
      * That is most writes on a request or response past its first: the key is already there. */
-    for (index = 0; index < object->count; ++index) {
-        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
-            continue;
-        }
+    index = kiln_c99_own_index(heap, object, ikey, key, key_len);
+    if (index != object->count) {
         if (!object->properties[index].accessor) {
             /* A refused write is observable only in strict code. */
             if (object->properties[index].writable) {
@@ -6660,16 +6950,15 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
             }
             walked = kiln_c99_object_of(current);
             if (walked->accessor_count != 0 || walked->read_only_seen) {
-                for (index = 0; index < walked->count; ++index) {
-                    if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
-                        continue;
-                    }
+                index = kiln_c99_own_index(heap, walked, ikey, key, key_len);
+                if (index != walked->count) {
                     if (!walked->properties[index].accessor) {
                         if (!walked->properties[index].writable) {
                             return strict ? kiln_c99_throw_read_only(thrown, key, key_len)
                                            : KILN_C99_OK;
                         }
-                        steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                        /* A writable data property up the chain: nothing intercepts, and the
+                         * write shadows it with an own property below. */
                         break;
                     }
                     if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
@@ -6684,9 +6973,6 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
                                              target, &value, 1, depth, thrown);
                     }
                 }
-                if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
-                    break;
-                }
             }
             current = walked->prototype;
         }
@@ -6698,15 +6984,7 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
          * set means this key would be a new one. The wording is the frozen write's on purpose:
          * the interpreter words both the same, and `error.message` is program-visible. */
         if (object->not_extensible) {
-            size_t existing;
-            int found = 0;
-            for (existing = 0; existing < object->count; ++existing) {
-                if (kiln_c99_same_key(&object->properties[existing], key, key_len)) {
-                    found = 1;
-                    break;
-                }
-            }
-            if (!found) {
+            if (kiln_c99_own_index(heap, object, ikey, key, key_len) == object->count) {
                 return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
             }
         }
@@ -6738,15 +7016,21 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
     kiln_object *object;
     size_t index;
     int status;
+    const char *ikey;
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(target);
-    for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
-            *out = &object->properties[index];
-            return KILN_C99_OK;
-        }
+    /* The one place a key is stored, so the one place interning has to be total (ADR 0047):
+     * whatever spelling arrived, the property carries the realm's canonical pointer for it. */
+    ikey = kiln_c99_intern(key, key_len);
+    if (ikey == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    index = kiln_c99_own_index(kiln_c99_gc_heap(), object, ikey, key, key_len);
+    if (index != object->count) {
+        *out = &object->properties[index];
+        return KILN_C99_OK;
     }
     status = kiln_c99_reserve((void **)&object->properties, &object->capacity, object->count + 1,
                               sizeof *object->properties);
@@ -6773,7 +7057,7 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
         for (index = object->count; index > position; --index) {
             object->properties[index] = object->properties[index - 1];
         }
-        object->properties[position].key = key;
+        object->properties[position].key = ikey;
         object->properties[position].key_len = key_len;
         /* A `@@` key is the machine's, not the program's: a private member, an error's kind, a
          * combinator's bookkeeping. Nothing that enumerates own string properties may see one, and
@@ -9216,6 +9500,9 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
      * `Symbol(String(x))` -- is kept alive by the symbol that carries it. */
     symbol->key = key.bytes;
     symbol->key_len = key.len;
+    /* Registered as immortal so a property stored under the symbol carries these very bytes
+     * rather than a copy; the malloc above is the reason `intern_static` is the right form. */
+    symbol->key = kiln_c99_intern_static(symbol->key, symbol->key_len);
     if (description.tag == KILN_VALUE_UNDEFINED) {
         /* `Symbol()` has no description, which prints as `Symbol()` rather than
          * `Symbol(undefined)`. */
@@ -9263,6 +9550,9 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     memcpy(property_key + sizeof property_prefix - 1, &id, sizeof id);
     symbol->key = property_key;
     symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
+    /* Two `Symbol.for("x")` calls make two of these structs with one key: interning is what
+     * makes a property stored through either findable through the other by pointer. */
+    symbol->key = kiln_c99_intern_static(symbol->key, symbol->key_len);
     symbol->description = (const char *)registered_key;
     symbol->description_len = (size_t)registered_key_len;
     symbol->registry_id = id;
@@ -12102,10 +12392,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
         size_t steps;
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        /* Canonicalized once for the whole walk (ADR 0047). NULL is a spelling the realm has
+         * never stored, so no level of the chain can hold it and the walk is not made at all --
+         * unless the check mode is on, which wants every level's scan run by bytes. */
+        const char *ikey = kiln_c99_interned_in(heap, key, key_len);
+        int walk = ikey != NULL || (heap != NULL && heap->keys_check);
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
          * the walk is on the C stack, and a program can build a chain long enough to exhaust
          * it. */
-        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+        for (steps = 0; walk && steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             kiln_object *object;
             /* A constructor's statics live in its own store, so a chain that reaches one
              * continues *into* that store rather than stopping at the function. */
@@ -12116,10 +12412,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 break;
             }
             object = kiln_c99_object_of(current);
-            for (index = 0; index < object->count; ++index) {
-                if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
-                    continue;
-                }
+            index = kiln_c99_own_index(heap, object, ikey, key, key_len);
+            if (index != object->count) {
                 if (!object->properties[index].accessor) {
                     *out = object->properties[index].value;
                     return KILN_C99_OK;
@@ -13437,6 +13731,8 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
 static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_t key_len) {
     kiln_value current = target;
     size_t steps;
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    const char *ikey = kiln_c99_interned_in(heap, key, key_len);
 
     if (target.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(target);
@@ -13465,11 +13761,9 @@ static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
         if (steps == 0 && object->frozen) {
             return 0;
         }
-        for (index = 0; index < object->count; ++index) {
-            kiln_property *property = &object->properties[index];
-            if (!kiln_c99_same_key(property, key, key_len)) {
-                continue;
-            }
+        index = kiln_c99_own_index(heap, object, ikey, key, key_len);
+        if (index != object->count) {
+            const kiln_property *property = &object->properties[index];
             if (property->accessor) {
                 return property->setter.tag != KILN_VALUE_UNDEFINED;
             }
@@ -15266,6 +15560,11 @@ static int kiln_c99_is_node_hidden_key(const char *key, size_t key_len) {
         "@@kiln:node:is-file", "@@kiln:node:is-directory",
     };
     size_t index;
+    /* Every reserved name is `@@`-prefixed and nearly every key a program reads is not, so the
+     * read that reaches here on every property access answers in two byte compares. */
+    if (key_len < 2 || key[0] != '@' || key[1] != '@') {
+        return 0;
+    }
     for (index = 0; index < sizeof names / sizeof names[0]; ++index) {
         size_t length = strlen(names[index]);
         if (key_len == length && memcmp(key, names[index], length) == 0) {
@@ -23250,20 +23549,21 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
                   kiln_c99_array_method(key, key_len) != 0;
         return KILN_C99_OK;
     }
-    for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
-        kiln_object *object;
-        size_t index;
-        if (current.tag != KILN_VALUE_OBJECT) {
-            break;
-        }
-        object = kiln_c99_object_of(current);
-        for (index = 0; index < object->count; ++index) {
-            if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
+    {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        const char *ikey = kiln_c99_interned_in(heap, key, key_len);
+        for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
+            kiln_object *object;
+            if (current.tag != KILN_VALUE_OBJECT) {
+                break;
+            }
+            object = kiln_c99_object_of(current);
+            if (kiln_c99_own_index(heap, object, ikey, key, key_len) != object->count) {
                 *answer = 1;
                 return KILN_C99_OK;
             }
+            current = object->prototype;
         }
-        current = object->prototype;
     }
     /* `in` has to agree with the read about what the end of the chain carries. */
     if (target.tag == KILN_VALUE_OBJECT &&
@@ -23361,10 +23661,12 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
         *answer = 0;
         return KILN_C99_OK;
     }
-    for (index = 0; index < object->count; ++index) {
-        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
-            continue;
-        }
+    {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        index = kiln_c99_own_index(heap, object, kiln_c99_interned_in(heap, key, key_len), key,
+                                   key_len);
+    }
+    if (index != object->count) {
         if (!object->properties[index].configurable) {
             /* `delete` answers about the end state, and the property is still there. */
             *answer = 0;
@@ -25784,12 +26086,12 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     } else {
         return NULL;
     }
-    for (index = 0; index < object->count; ++index) {
-        if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
-            return &object->properties[index];
-        }
+    {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        index = kiln_c99_own_index(heap, object, kiln_c99_interned_in(heap, key, key_len), key,
+                                   key_len);
     }
-    return NULL;
+    return index == object->count ? NULL : &object->properties[index];
 }
 
 /* A private element refusing what was asked of it: a TypeError naming the member.
@@ -29246,14 +29548,91 @@ fn render_constant_declarations(output: &mut String, program: &Program, symbol: 
     }
 }
 
+/// The constants a named-property instruction uses as its key, sorted and deduplicated: the
+/// unit's share of the realm's intern table (ADR 0047).
+fn property_key_constants(program: &Program) -> Vec<u32> {
+    fn key_of(instruction: &Instruction) -> Option<u32> {
+        match instruction {
+            Instruction::GetProperty(name)
+            | Instruction::SetProperty(name)
+            | Instruction::DeleteProperty(name)
+            | Instruction::LoadSuperProperty(name)
+            | Instruction::SetPropertyStrict { name, .. }
+            | Instruction::DeletePropertyStrict { name, .. }
+            | Instruction::CallMethod { name, .. } => Some(*name),
+            _ => None,
+        }
+    }
+    let mut keys: Vec<u32> = program
+        .code
+        .iter()
+        .chain(program.functions.iter().flat_map(|proto| proto.code.iter()))
+        .filter_map(key_of)
+        .collect();
+    keys.sort_unstable();
+    keys.dedup();
+    keys
+}
+
+/// One canonical pointer per key the unit names, filled at the first entry into a realm and
+/// cleared by the unit's `KILN_GC_PHASE_RESET` when that realm is destroyed. Interned as static:
+/// the constant table outlives every heap, so the entry is pinned and nothing is copied.
+fn render_key_table(output: &mut String, program: &Program, symbol: &str, keys: &[u32]) {
+    if keys.is_empty() {
+        return;
+    }
+    for index in keys {
+        writeln!(output, "static const char *{symbol}_key_{index};").unwrap();
+    }
+    writeln!(output, "static int {symbol}_keys_ready;").unwrap();
+    writeln!(output, "static void {symbol}_intern_keys(void) {{").unwrap();
+    for index in keys {
+        let Constant::String(text) = &program.constants[*index as usize] else {
+            unreachable!("verification rejects a non-string property name before emission")
+        };
+        writeln!(
+            output,
+            "    {symbol}_key_{index} = kiln_c99_intern_static({symbol}_constant_{index}, {});",
+            text.len()
+        )
+        .unwrap();
+    }
+    writeln!(output, "    {symbol}_keys_ready = 1;\n}}").unwrap();
+}
+
+/// The line a unit's entry point runs to canonicalize its keys before the first access.
+fn render_key_prologue(output: &mut String, symbol: &str, keyed: bool) {
+    if keyed {
+        writeln!(
+            output,
+            "    if (!{symbol}_keys_ready) {symbol}_intern_keys();"
+        )
+        .unwrap();
+    }
+}
+
 /// The root function this unit registers with the realm (ADR 0041): its module-scope slots,
 /// when it has them, and the prelude statics every unit owns a copy of.
-fn render_unit_roots(output: &mut String, symbol: &str, module_scope: bool, local_count: u32) {
+fn render_unit_roots(
+    output: &mut String,
+    symbol: &str,
+    module_scope: bool,
+    local_count: u32,
+    keyed: bool,
+) {
     writeln!(
         output,
         "static void {symbol}_gc_roots(void *heap, void *context, int phase) {{"
     )
     .unwrap();
+    if keyed {
+        // The canonical pointers belong to the realm's intern table, which dies with the realm.
+        writeln!(
+            output,
+            "    if (phase == KILN_GC_PHASE_RESET) {symbol}_keys_ready = 0;"
+        )
+        .unwrap();
+    }
     if module_scope {
         writeln!(
             output,
@@ -29485,8 +29864,15 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
         /* Namespace export keys stay in the linker's lexical order. Ordinary object insertion
          * would move integer-looking names to numeric order, which is not the namespace exotic
          * object's [[OwnPropertyKeys]] rule. */
-        slot = &data->properties[data->count++];
-        slot->key = names[source];
+        slot = &data->properties[data->count];
+        /* Canonical like every stored key (ADR 0047). Copied rather than registered as static:
+         * the launcher's names are its own, and this seam promises nothing about their life. */
+        slot->key = kiln_c99_intern(names[source], name_lengths[source]);
+        if (slot->key == NULL) {{
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto namespace_failure;
+        }}
+        data->count += 1;
         slot->key_len = name_lengths[source];
         slot->value = value;
         slot->writable = 1;
@@ -29584,6 +29970,8 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
+    let keys = property_key_constants(program);
+    render_key_table(&mut output, program, symbol, &keys);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -29597,6 +29985,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         symbol,
         uses_module_scope(program),
         program.local_count,
+        !keys.is_empty(),
     );
     render_functions(
         &mut output,
@@ -29618,6 +30007,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
     )
     .unwrap();
+    render_key_prologue(&mut output, symbol, !keys.is_empty());
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -29728,6 +30118,8 @@ fn render_module(
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
+    let keys = property_key_constants(program);
+    render_key_table(&mut output, program, symbol, &keys);
     if uses_module_scope(program) {
         writeln!(
             output,
@@ -29741,6 +30133,7 @@ fn render_module(
         symbol,
         uses_module_scope(program),
         program.local_count,
+        !keys.is_empty(),
     );
     render_functions(
         &mut output,
@@ -29762,6 +30155,7 @@ fn render_module(
         "    (void)kiln_realm_gc_register_roots({symbol}_gc_roots, NULL, 0);"
     )
     .unwrap();
+    render_key_prologue(&mut output, symbol, !keys.is_empty());
     if uses_this(&program.code) {
         output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
     }
@@ -30462,7 +30856,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get(host, target, {symbol}_constant_{name}, {}, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get(host, target, {symbol}_key_{name}, {}, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len()
             )
             .unwrap();
@@ -30475,7 +30869,7 @@ fn emit_instruction(
             // The written value stays on the stack, which is what makes `a = b.c = d` work.
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put(host, stack[sp - 1], {symbol}_constant_{name}, {}, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put(host, stack[sp - 1], {symbol}_key_{name}, {}, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len()
             )
             .unwrap();
@@ -30487,7 +30881,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put_mode(host, stack[sp - 1], {symbol}_constant_{name}, {}, member, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put_mode(host, stack[sp - 1], {symbol}_key_{name}, {}, member, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len(),
                 i32::from(*strict)
             )
@@ -30637,7 +31031,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int answer; int status = kiln_c99_delete(host, stack[sp - 1], {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                "    {{ int answer; int status = kiln_c99_delete(host, stack[sp - 1], {symbol}_key_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
                 text.len()
             )
             .unwrap();
@@ -30649,7 +31043,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int answer; int status = kiln_c99_delete_or_throw(host, stack[sp - 1], {symbol}_constant_{name}, {}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                "    {{ int answer; int status = kiln_c99_delete_or_throw(host, stack[sp - 1], {symbol}_key_{name}, {}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
                 text.len(),
                 i32::from(*strict)
             )
@@ -30765,7 +31159,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, stack[sp - 1], kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {}), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, stack[sp - 1], kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len()
             )
             .unwrap();
@@ -30835,7 +31229,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get(host, self_value, {symbol}_constant_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
