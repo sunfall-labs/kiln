@@ -121,8 +121,6 @@ pub enum HttpCloseMode {
 /// per-resource queue and the adapter drains it with `take_events` / `take_client_events` at
 /// its own checkpoint.
 pub trait ActiveHttpRuntime {
-    /// Poll protocol tasks that may have become runnable without a new HostOps completion.
-    fn poll_tasks(&mut self);
     fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision;
     fn client_connection_connected(
         &mut self,
@@ -1562,10 +1560,6 @@ fn flatten_headers(headers: &[(String, String)]) -> Vec<u8> {
 }
 
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
-    fn poll_tasks(&mut self) {
-        self.poll_http_tasks();
-    }
-
     fn acquire_client_connection(&mut self, origin: HttpOrigin, request: u64) -> AgentDecision {
         assert!(
             !self.is_shutdown(),

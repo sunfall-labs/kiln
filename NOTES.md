@@ -4210,3 +4210,10 @@ question it answered now asked once, in `Executor::run`. Numbers are in
 - `mbx` was not installed on this host. `mise use -g cargo:mbx` installs 1.4.1 into the shims
   directory, which is not on `PATH`; `~/.local/share/mise/shims/mbx` works, and the
   scripts' `kiln_cargo` falls back to bare `cargo` unless the shims are on `PATH`.
+- **The interpreter's checkpoint does not need `poll_http_tasks`.** The 4 reactor turns were
+  carried over from the pre-ADR 0046 bridge engine, where pumping `TcpRead`/`TcpWrite` through
+  the duplex bridge hung without turns. Under ADR 0046, Hyper tasks wake on the `LocalSet` and
+  advance during `next_referenced_turn`'s `block_on`. Draining the queued adapter directly
+  without `poll_http_tasks` passes all 35 node conformance tests (12 ms) and 4 server tests (23 ms);
+  `poll_tasks` was removed from `ActiveHttpRuntime`.
+
