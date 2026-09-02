@@ -543,29 +543,34 @@ impl HttpServerEngine {
     /// Stop a connection. Graceful lets the response in flight finish; abort drops the
     /// transport and reports `Closed` on the next task turn, never inside the caller.
     pub fn close(&mut self, resource: ResourceId, mode: ServerCloseMode) -> bool {
-        let table = self.connections.borrow();
-        let Some(connection) = table.get(&resource) else {
-            return false;
+        let shared = {
+            let table = self.connections.borrow();
+            let Some(connection) = table.get(&resource) else {
+                return false;
+            };
+            if mode == ServerCloseMode::Abort {
+                connection.task.abort();
+            }
+            Rc::clone(&connection.shared)
         };
         trace!("{resource:?} close {mode:?}");
         match mode {
             ServerCloseMode::Graceful => {
-                connection.shared.closing.set(true);
-                connection.shared.shutdown.notify_one();
+                shared.closing.set(true);
+                shared.shutdown.notify_one();
             }
             ServerCloseMode::Abort => {
-                connection.task.abort();
-                connection.shared.abort_pending.set(true);
-                let shared = Rc::clone(&connection.shared);
+                // The abort takes effect at the task's next poll; until `Closed` has been
+                // published the connection counts as in flight, and it is published from a
+                // task, never from inside the caller's own call.
+                shared.abort_pending.set(true);
+                shared.failed.set(false);
                 let table = Rc::clone(&self.connections);
-                drop(table.borrow());
-                // Published from a task, never from inside the caller's own call.
                 tokio::task::spawn_local(async move {
                     let _ = shared.dispatch(&ServerEvent::bare(ServerEventKind::Closed, 0));
                     shared.abort_pending.set(false);
                     table.borrow_mut().remove(&shared.resource);
                 });
-                return true;
             }
         }
         true

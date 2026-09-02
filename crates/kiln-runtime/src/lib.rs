@@ -2893,29 +2893,66 @@ impl RealmHostProvider for TokioHost {
 
     fn take_transport(&mut self, resource: ResourceId) -> Option<HostTransport> {
         // Both halves must be held by the table alone: a read or write still in flight owns a
-        // clone and the socket cannot be reunited under it. The entry stays so a later discrete
-        // operation on this stream fails cleanly and referencing still resolves.
-        let (reader, writer) = match self.resources.get(&resource) {
-            Some(HostResource::TcpStream { reader, writer, .. })
-                if Rc::strong_count(reader) == 1 && Rc::strong_count(writer) == 1 =>
-            {
-                (Rc::clone(reader), Rc::clone(writer))
-            }
-            _ => return None,
-        };
-        let Some(HostResource::TcpStream { info, .. }) = self.resources.remove(&resource) else {
+        // clone and the socket cannot be reunited under it. The entry is rewritten only once
+        // the socket is whole again, so a refusal leaves the table exactly as it was.
+        let Some(HostResource::TcpStream {
+            reader,
+            writer,
+            info,
+            referenced,
+            read_closed,
+            write_closed,
+        }) = self.resources.remove(&resource)
+        else {
             return None;
+        };
+        let restore = |this: &mut Self, reader, writer| {
+            this.resources.insert(
+                resource,
+                HostResource::TcpStream {
+                    reader,
+                    writer,
+                    info: info.clone(),
+                    referenced,
+                    read_closed,
+                    write_closed,
+                },
+            );
+        };
+        let reader = match Rc::try_unwrap(reader) {
+            Ok(reader) => reader.into_inner(),
+            Err(reader) => {
+                restore(self, reader, writer);
+                return None;
+            }
+        };
+        let writer = match Rc::try_unwrap(writer) {
+            Ok(writer) => writer.into_inner(),
+            Err(writer) => {
+                restore(self, Rc::new(tokio::sync::Mutex::new(reader)), writer);
+                return None;
+            }
+        };
+        let stream = match reader.reunite(writer) {
+            Ok(stream) => stream,
+            Err(tokio::net::tcp::ReuniteError(reader, writer)) => {
+                restore(
+                    self,
+                    Rc::new(tokio::sync::Mutex::new(reader)),
+                    Rc::new(tokio::sync::Mutex::new(writer)),
+                );
+                return None;
+            }
         };
         // A connection the engine drives does not keep the realm alive; the listener does, as
         // with the bridged path, where the accepted socket is unreferenced on attach.
-        let taken = HostResource::TcpTaken {
-            info,
-            referenced: false,
-        };
-        self.resources.insert(resource, taken);
-        let reader = Rc::try_unwrap(reader).ok()?.into_inner();
-        let writer = Rc::try_unwrap(writer).ok()?.into_inner();
-        let stream = reader.reunite(writer).ok()?;
+        self.resources.insert(
+            resource,
+            HostResource::TcpTaken {
+                info,
+                referenced: false,
+            },
+        );
         Some(HostTransport(Box::new(stream)))
     }
 
