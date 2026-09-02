@@ -112,7 +112,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 27;
+pub const PROVIDER_ABI_VERSION: u32 = 28;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -123,8 +123,12 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        assert_eq!(PROVIDER_ABI_VERSION, 27);
-        assert_eq!(PROVIDER_EXPORTS.len(), 83);
+        // 28, and 85 exports: `kiln_node_path_part` and `kiln_node_path_relative` joined the
+        // contract when `node:path` stopped being implemented twice (ADR 0048). A shipped archive
+        // built before that does not export them, and the version is how a resolver knows to
+        // rebuild rather than to fail at link time.
+        assert_eq!(PROVIDER_ABI_VERSION, 28);
+        assert_eq!(PROVIDER_EXPORTS.len(), 85);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_temporal_last_error"));
     }
