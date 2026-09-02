@@ -639,9 +639,67 @@ mod realm {
         /// The `host` and `thrown` slots of the drive in progress, for callbacks the HTTP engine
         /// makes from inside a Tokio task (ADR 0042). Null outside a drive.
         drive_context: Cell<(*mut c_void, *mut c_void)>,
+        /// Which clock this realm keeps (ADR 0044): the deterministic virtual clock unless the
+        /// launcher asked for the host's wall clock before entering the realm.
+        clock: Cell<NativeClock>,
         /// Declared last so it is dropped last: `Drop for NativeRealm` tears the heap down only
         /// after every field above has released what it held.
         gc: RefCell<GcState>,
+    }
+
+    /// The clock a realm keeps (ADR 0044).
+    #[derive(Clone, Copy)]
+    enum NativeClock {
+        /// ADR 0012's virtual clock: `now` advances only when a timer runs, and Tokio time is
+        /// paused so a distant timer costs nothing. Every realm starts here; it is the clock the
+        /// conformance harness compares.
+        Virtual,
+        /// The host's wall clock: `now` is Unix time, advanced at every turn boundary, and timers
+        /// wait on live Tokio time so they fire on schedule while the realm is busy.
+        Wall {
+            epoch: std::time::Duration,
+            started: std::time::Instant,
+        },
+    }
+
+    impl NativeClock {
+        fn wall() -> Self {
+            let epoch = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO);
+            Self::Wall {
+                epoch,
+                started: std::time::Instant::now(),
+            }
+        }
+
+        /// The host's reading now, or `None` for a virtual realm, whose clock is its own.
+        fn reading(self) -> Option<std::time::Duration> {
+            match self {
+                Self::Virtual => None,
+                Self::Wall { epoch, started } => Some(epoch + started.elapsed()),
+            }
+        }
+    }
+
+    /// A turn boundary for the realm's clock: a wall-clock realm reads the host now, so timers
+    /// armed by the callbacks that follow measure from this instant, as Node's loop time does.
+    /// A virtual realm's clock is not touched.
+    fn tick_clock(realm: &NativeRealm) {
+        if let Some(now) = realm.clock.get().reading()
+            && let Ok(mut work) = realm.work.try_borrow_mut()
+        {
+            work.advance_to(now);
+        }
+    }
+
+    /// What the realm's clock reads: the host's wall clock for a wall-clock realm, otherwise the
+    /// realm's virtual instant. `None` only while the virtual clock is mid-mutation.
+    fn realm_clock_reading(realm: &NativeRealm) -> Option<std::time::Duration> {
+        match realm.clock.get().reading() {
+            Some(now) => Some(now),
+            None => realm.work.try_borrow().ok().map(|work| work.now()),
+        }
     }
 
     #[derive(Default)]
@@ -872,6 +930,7 @@ mod realm {
                 entered: Cell::new(false),
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
                 drive_context: Cell::new((std::ptr::null_mut(), std::ptr::null_mut())),
+                clock: Cell::new(NativeClock::Virtual),
                 gc: RefCell::new(GcState::default()),
             })
         }
@@ -883,6 +942,8 @@ mod realm {
 
     impl ActiveRealm {
         fn enter(handle: u64, realm: Rc<NativeRealm>) -> Option<Self> {
+            // Entering the realm is a turn boundary for a wall-clock realm (ADR 0044).
+            tick_clock(&realm);
             if realm.entered.replace(true) {
                 return None;
             }
@@ -1656,6 +1717,7 @@ mod realm {
 
     async fn drive_async(realm: &NativeRealm) -> i32 {
         loop {
+            tick_clock(realm);
             collect_if_due(realm);
             let status = drain_realm_queues(realm);
             if status != 0 {
@@ -1670,7 +1732,9 @@ mod realm {
             }
             let turn = {
                 let mut runtime = realm.runtime.borrow_mut();
-                runtime.pause_time();
+                if matches!(realm.clock.get(), NativeClock::Virtual) {
+                    runtime.pause_time();
+                }
                 runtime.ready_turn::<NativeWork, NativeWork>()
             };
             match turn {
@@ -1734,8 +1798,17 @@ mod realm {
             // response outstanding is alive on its own. Otherwise only virtual timers remain.
             let completions_possible = referenced && pending;
             if !completions_possible && in_flight == 0 {
-                if deadline.is_none() {
+                let Some(deadline) = deadline else {
                     return 0;
+                };
+                // A wall-clock realm (ADR 0044) waits the real interval; the next turn finds the
+                // timer due. A virtual realm jumps its clock to the deadline instead.
+                if matches!(realm.clock.get(), NativeClock::Wall { .. }) {
+                    let Some(signal) = signal else {
+                        return RUNTIME_ERROR;
+                    };
+                    kiln_runtime::wait_for_turn(signal, Some(deadline.saturating_sub(now))).await;
+                    continue;
                 }
                 let timer = realm.work.borrow_mut().run_next_timer();
                 if let Some(WorkItem::Timer { work, .. }) = timer {
@@ -2457,7 +2530,31 @@ mod realm {
         })
     }
 
-    /// Writes the active Realm's deterministic clock in ECMAScript milliseconds.
+    /// Switches a realm to the host's wall clock (ADR 0044) before it is entered.
+    ///
+    /// Every realm starts on the deterministic virtual clock; a launcher built with the
+    /// host-clock policy calls this once, right after `kiln_realm_create`. From then on
+    /// `Date.now()` is Unix time, and timers fire when their wall-clock deadline passes whether
+    /// or not the realm is idle. `INVALID_ARGUMENT` for an unknown handle or an entered realm.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_use_wall_clock(handle: u64) -> i32 {
+        ffi(|| {
+            let Some(realm) = realm(handle) else {
+                return INVALID_ARGUMENT;
+            };
+            if realm.entered.get() {
+                return INVALID_ARGUMENT;
+            }
+            realm.clock.set(NativeClock::wall());
+            // The realm's clock jumps from the epoch to the present here, before any timer
+            // measures from it.
+            tick_clock(&realm);
+            0
+        })
+    }
+
+    /// Writes the active Realm's clock in ECMAScript milliseconds: the virtual instant, or the
+    /// host's wall clock for a realm switched by [`kiln_realm_use_wall_clock`].
     ///
     /// # Safety
     ///
@@ -2471,10 +2568,10 @@ mod realm {
             let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
-            let Ok(work) = realm.work.try_borrow() else {
+            let Some(now) = realm_clock_reading(&realm) else {
                 return RUNTIME_ERROR;
             };
-            let milliseconds = work.now().as_millis() as f64;
+            let milliseconds = now.as_millis() as f64;
             // SAFETY: null was rejected and the caller supplies a writable slot.
             unsafe { out_milliseconds.write(milliseconds) };
             0
@@ -2506,10 +2603,10 @@ mod realm {
             let Some(realm) = active_realm() else {
                 return INVALID_ARGUMENT;
             };
-            let Ok(work) = realm.work.try_borrow() else {
+            let Some(now) = realm_clock_reading(&realm) else {
                 return RUNTIME_ERROR;
             };
-            let nanoseconds = work.now().as_nanos() as i128;
+            let nanoseconds = now.as_nanos() as i128;
             // SAFETY: null was rejected and the caller supplies writable slots.
             unsafe { out_high.write((nanoseconds >> 64) as i64) };
             // SAFETY: as above.
@@ -2782,6 +2879,7 @@ mod realm {
             let Some(realm) = self.realm.upgrade() else {
                 return INVALID_ARGUMENT;
             };
+            tick_clock(&realm);
             let (host, thrown) = realm.drive_context.get();
             let kind = match event.kind {
                 ServerEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
@@ -5508,6 +5606,86 @@ mod realm {
             assert_eq!(now, 0.0);
             // SAFETY: the slot is live, but no Realm is active now.
             assert_eq!(unsafe { kiln_realm_now(&raw mut now) }, INVALID_ARGUMENT);
+            assert_eq!(kiln_realm_destroy(handle), 0);
+        }
+
+        unsafe extern "C" fn arms_short_timer(context: *mut c_void) -> i32 {
+            // SAFETY: the test supplies one live `Instant` slot for the timer to stamp.
+            let fired = context.cast::<Option<std::time::Instant>>();
+            unsafe extern "C" fn stamp(
+                context: *mut c_void,
+                _host: *mut c_void,
+                _thrown: *mut c_void,
+            ) -> i32 {
+                // SAFETY: the slot outlives the drive that runs this timer.
+                unsafe {
+                    context
+                        .cast::<Option<std::time::Instant>>()
+                        .write(Some(std::time::Instant::now()))
+                };
+                0
+            }
+            unsafe extern "C" fn no_drop(_: *mut c_void) {}
+            let mut id = 0;
+            // SAFETY: the callbacks and the slot stay live through the drive.
+            unsafe {
+                kiln_realm_set_timeout(30.0, Some(stamp), Some(no_drop), fired.cast(), &raw mut id)
+            }
+        }
+
+        #[test]
+        fn wall_clock_realm_reads_the_host_and_fires_timers_on_it() {
+            let mut handle = 0;
+            let mut now = f64::NAN;
+            let mut fired: Option<std::time::Instant> = None;
+            // SAFETY: every slot outlives the calls that use it.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(kiln_realm_use_wall_clock(0), INVALID_ARGUMENT);
+            assert_eq!(kiln_realm_use_wall_clock(handle), 0);
+            let before = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as f64;
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(reads_realm_clock),
+                        (&raw mut now).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            assert!(
+                now >= before,
+                "wall clock {now} reads before the test started {before}"
+            );
+            let armed = std::time::Instant::now();
+            assert_eq!(
+                unsafe {
+                    kiln_realm_enter(
+                        handle,
+                        Some(arms_short_timer),
+                        (&raw mut fired).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            let mut host = 0_u8;
+            let mut thrown = 0_u8;
+            assert_eq!(
+                unsafe {
+                    kiln_realm_drive(
+                        handle,
+                        (&raw mut host).cast::<c_void>(),
+                        (&raw mut thrown).cast::<c_void>(),
+                    )
+                },
+                0
+            );
+            let fired = fired.expect("the timer ran during the drive");
+            // Virtual time would have jumped the 30 ms; wall time waits for them.
+            assert!(fired.duration_since(armed) >= std::time::Duration::from_millis(30));
             assert_eq!(kiln_realm_destroy(handle), 0);
         }
 
