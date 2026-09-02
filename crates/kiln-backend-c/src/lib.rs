@@ -26161,6 +26161,15 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
         kiln_value promise;
         kiln_value settlers[2];
         kiln_value ignored;
+        /* The executor is checked before anything is built, which is the order the specification
+         * gives and the order that is observable: `new Promise()` throws a TypeError the program
+         * can catch, and must not hand back a promise that can never settle. This backend was
+         * building one and calling `undefined` as the executor, so the throw never happened and
+         * the caller got a forever-pending promise -- a wrong answer, and a quiet one. */
+        if (argc == 0 || !kiln_c99_is_callable(args[0])) {
+            return kiln_c99_throw_not_a(thrown, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                        "function");
+        }
         status = kiln_c99_new_promise(&promise);
         if (status == KILN_C99_OK) {
             status = kiln_c99_new_settler(&settlers[0], promise, 0);
@@ -29951,7 +29960,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
+                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; if (stack[sp - {argc} - 1].tag == KILN_VALUE_BUILTIN) {{ const char *named = kiln_c99_builtin_name(stack[sp - {argc} - 1].bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
                 argc + 1
             )
             .unwrap();
