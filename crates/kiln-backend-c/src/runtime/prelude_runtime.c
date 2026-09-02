@@ -244,14 +244,21 @@ static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double valu
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out);
+static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
+                                  const char *ikey, kiln_property **out);
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
                              kiln_value value);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                              kiln_value value, int strict, int depth, kiln_value *thrown);
+static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
+                                  size_t key_len, const char *ikey, kiln_value value, int strict,
+                                  int depth, kiln_value *thrown);
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown);
+static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             const char *ikey, kiln_value *out, int depth, kiln_value *thrown);
 static kiln_value *kiln_c99_exotic_store(kiln_value target);
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
                                kiln_value *trap, int depth, kiln_value *thrown);
@@ -300,7 +307,8 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                               kiln_value *out, int depth, kiln_value *thrown, int *found);
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
-                                 size_t key_len, kiln_value *out, int depth, kiln_value *thrown);
+                                 size_t key_len, const char *ikey, kiln_value *out, int depth,
+                                 kiln_value *thrown);
 static int kiln_c99_array_push(kiln_value target, kiln_value value);
 static int kiln_c99_prototype_object(kiln_value function, kiln_value *out);
 static int kiln_c99_callable_prototype(kiln_value callable, kiln_value *out);
@@ -958,9 +966,6 @@ typedef struct kiln_gc_heap {
     uint64_t freed_blocks;
     uint64_t freed_bytes;
     kiln_key_table keys;
-    /* `KILN_KEYS_CHECK=1`: every pointer-identity scan is re-run by bytes and a disagreement
-     * aborts naming the key. The acceptance test for "interning is total", not a mode to ship. */
-    int keys_check;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -979,8 +984,6 @@ static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
     heap->stress = setting != NULL && setting[0] != '\0' && setting[0] != '0';
     setting = getenv("KILN_GC_TRACE");
     heap->trace = setting != NULL && setting[0] != '\0' && setting[0] != '0';
-    setting = getenv("KILN_KEYS_CHECK");
-    heap->keys_check = setting != NULL && setting[0] != '\0' && setting[0] != '0';
     setting = getenv("KILN_GC_FLOOR_KIB");
     if (setting != NULL && setting[0] >= '0' && setting[0] <= '9') {
         size_t kib = 0;
@@ -1405,6 +1408,20 @@ static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static const char kiln_c99_key_empty[1] = "";
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
 
+/* `KILN_KEYS_CHECK=1`: every pointer-identity scan is re-run by bytes and a disagreement aborts
+ * naming the key. The acceptance test for "interning is total", not a mode to ship. Read once
+ * per unit rather than kept on the heap, so a compiled site that never touches the heap is
+ * checked too. */
+static int kiln_c99_keys_check_mode = -1;
+
+static int kiln_c99_keys_checked(void) {
+    if (kiln_c99_keys_check_mode < 0) {
+        const char *setting = getenv("KILN_KEYS_CHECK");
+        kiln_c99_keys_check_mode = setting != NULL && setting[0] != '\0' && setting[0] != '0';
+    }
+    return kiln_c99_keys_check_mode;
+}
+
 static uint64_t kiln_c99_key_hash(const char *bytes, size_t len) {
     /* FNV-1a, then the top half folded down: the table masks the low bits, and FNV's low bits
      * are the weakest for the short keys that are nearly all of them. */
@@ -1532,25 +1549,23 @@ static const char *kiln_c99_intern(const char *bytes, size_t len) {
     return kiln_c99_key_insert(&heap->keys, canonical, len, hash, 0);
 }
 
-/* For bytes that outlive the heap. Never NULL: a table that cannot grow hands the bytes back
- * uncanonical, and a read of that spelling then reports it absent -- which is consistent,
- * because the write that would have stored it fails with the same out-of-memory first. */
+/* For bytes that outlive the heap. NULL only when the table cannot grow; a unit that gets NULL
+ * for one of its keys fails its entry with out-of-memory rather than run a site with a pointer
+ * that is not canonical. */
 static const char *kiln_c99_intern_static(const char *bytes, size_t len) {
     kiln_gc_heap *heap;
     uint64_t hash;
     kiln_key_entry *entry;
-    const char *canonical;
     if (len == 0) return kiln_c99_key_empty;
     heap = kiln_c99_gc_heap();
-    if (heap == NULL) return bytes;
+    if (heap == NULL) return NULL;
     hash = kiln_c99_key_hash(bytes, len);
     entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
     if (entry != NULL) {
         entry->pinned = 1;
         return entry->bytes;
     }
-    canonical = kiln_c99_key_insert(&heap->keys, bytes, len, hash, 1);
-    return canonical == NULL ? bytes : canonical;
+    return kiln_c99_key_insert(&heap->keys, bytes, len, hash, 1);
 }
 
 /* A string block released by hand (`kiln_c99_gc_release`) must not stay canonical. */
@@ -3087,8 +3102,8 @@ static int kiln_c99_same_key(const kiln_property *property, const char *key, siz
  * key no object has: the scan is skipped rather than run. `KILN_KEYS_CHECK=1` re-runs it by
  * bytes and aborts on a disagreement, which is how "every stored key is interned" is tested
  * rather than assumed. */
-static size_t kiln_c99_own_index(const kiln_gc_heap *heap, const kiln_object *object,
-                                 const char *ikey, const char *key, size_t key_len) {
+static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, const char *key,
+                                 size_t key_len) {
     size_t index;
     size_t found = object->count;
     if (ikey != NULL) {
@@ -3099,7 +3114,7 @@ static size_t kiln_c99_own_index(const kiln_gc_heap *heap, const kiln_object *ob
             }
         }
     }
-    if (heap != NULL && heap->keys_check) {
+    if (kiln_c99_keys_checked()) {
         size_t by_bytes = object->count;
         for (index = 0; index < object->count; ++index) {
             if (kiln_c99_same_key(&object->properties[index], key, key_len)) {
@@ -3123,11 +3138,17 @@ static size_t kiln_c99_own_index(const kiln_gc_heap *heap, const kiln_object *ob
  * appearance -- which is the order `Object.keys` reports and the order a console prints. */
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                              kiln_value value, int strict, int depth, kiln_value *thrown) {
+    return kiln_c99_put_mode_ikey(host, target, key, key_len, NULL, value, strict, depth, thrown);
+}
+
+/* `ikey` as for `kiln_c99_get_ikey`: a compiled site's canonical pointer, or NULL to look it
+ * up. */
+static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
+                                  size_t key_len, const char *ikey, kiln_value value, int strict,
+                                  int depth, kiln_value *thrown) {
     kiln_object *object;
     size_t index;
     int status;
-    kiln_gc_heap *heap;
-    const char *ikey;
     /* Node resource pointers are represented by reserved values in the ordinary property store,
      * but they are not JavaScript properties.  A program can spell the key as a string, so hide
      * and ignore these protocol slots explicitly instead of exposing a C pointer as an object or
@@ -3247,11 +3268,16 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
     if (object->frozen) {
         return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
     }
-    /* Looked up, not inserted: a spelling the realm has never stored has no own property and
-     * no setter anywhere on the chain, and `kiln_c99_own_slot` is what interns it when the
-     * write turns out to create one. */
-    heap = kiln_c99_gc_heap();
-    ikey = kiln_c99_interned_in(heap, key, key_len);
+    /* Interned here, once, rather than looked up here and interned again in `own_slot` when
+     * the write turns out to create the property: a fresh object being filled by the prelude --
+     * a request, a response, a URL -- is a run of new-key writes, and each was paying two
+     * hashes. A refused write leaves a weak entry behind, which the next collection drops. */
+    if (ikey == NULL) {
+        ikey = kiln_c99_intern(key, key_len);
+        if (ikey == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+    }
     if (kiln_c99_same_name(key, key_len, "__proto__") &&
         object->prototype.tag != KILN_VALUE_NULL) {
         /* The other half of the accessor above: a write relinks the object instead of giving it
@@ -3271,7 +3297,7 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
      * setter -- per the specification, [[Set]] never consults the prototype once the receiver's
      * own property is found -- so a hit here ends the search without a single prototype touched.
      * That is most writes on a request or response past its first: the key is already there. */
-    index = kiln_c99_own_index(heap, object, ikey, key, key_len);
+    index = kiln_c99_own_index(object, ikey, key, key_len);
     if (index != object->count) {
         if (!object->properties[index].accessor) {
             /* A refused write is observable only in strict code. */
@@ -3310,7 +3336,7 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
             }
             walked = kiln_c99_object_of(current);
             if (walked->accessor_count != 0 || walked->read_only_seen) {
-                index = kiln_c99_own_index(heap, walked, ikey, key, key_len);
+                index = kiln_c99_own_index(walked, ikey, key, key_len);
                 if (index != walked->count) {
                     if (!walked->properties[index].accessor) {
                         if (!walked->properties[index].writable) {
@@ -3344,11 +3370,11 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
          * set means this key would be a new one. The wording is the frozen write's on purpose:
          * the interpreter words both the same, and `error.message` is program-visible. */
         if (object->not_extensible) {
-            if (kiln_c99_own_index(heap, object, ikey, key, key_len) == object->count) {
+            if (kiln_c99_own_index(object, ikey, key, key_len) == object->count) {
                 return strict ? kiln_c99_throw_read_only(thrown, key, key_len) : KILN_C99_OK;
             }
         }
-        status = kiln_c99_own_slot(target, key, key_len, &slot);
+        status = kiln_c99_own_slot_ikey(target, key, key_len, ikey, &slot);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -3373,21 +3399,29 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
  * A definition then overwrites exactly the fields its descriptor mentions. */
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out) {
+    return kiln_c99_own_slot_ikey(target, key, key_len, NULL, out);
+}
+
+/* `ikey` is the canonical pointer when the caller holds one that is already in the table -- a
+ * compiled site's, or a write path's successful lookup -- or NULL to intern here. */
+static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
+                                  const char *ikey, kiln_property **out) {
     kiln_object *object;
     size_t index;
     int status;
-    const char *ikey;
     if (target.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
     }
     object = kiln_c99_object_of(target);
     /* The one place a key is stored, so the one place interning has to be total (ADR 0047):
      * whatever spelling arrived, the property carries the realm's canonical pointer for it. */
-    ikey = kiln_c99_intern(key, key_len);
     if (ikey == NULL) {
-        return KILN_C99_OUT_OF_MEMORY;
+        ikey = kiln_c99_intern(key, key_len);
+        if (ikey == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
     }
-    index = kiln_c99_own_index(kiln_c99_gc_heap(), object, ikey, key, key_len);
+    index = kiln_c99_own_index(object, ikey, key, key_len);
     if (index != object->count) {
         *out = &object->properties[index];
         return KILN_C99_OK;
@@ -5862,7 +5896,10 @@ static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
     symbol->key_len = key.len;
     /* Registered as immortal so a property stored under the symbol carries these very bytes
      * rather than a copy; the malloc above is the reason `intern_static` is the right form. */
-    symbol->key = kiln_c99_intern_static(symbol->key, symbol->key_len);
+    {
+        const char *canonical = kiln_c99_intern_static(symbol->key, symbol->key_len);
+        if (canonical != NULL) symbol->key = canonical;
+    }
     if (description.tag == KILN_VALUE_UNDEFINED) {
         /* `Symbol()` has no description, which prints as `Symbol()` rather than
          * `Symbol(undefined)`. */
@@ -5912,7 +5949,10 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     symbol->key_len = (sizeof property_prefix - 1) + sizeof id;
     /* Two `Symbol.for("x")` calls make two of these structs with one key: interning is what
      * makes a property stored through either findable through the other by pointer. */
-    symbol->key = kiln_c99_intern_static(symbol->key, symbol->key_len);
+    {
+        const char *canonical = kiln_c99_intern_static(symbol->key, symbol->key_len);
+        if (canonical != NULL) symbol->key = canonical;
+    }
     symbol->description = (const char *)registered_key;
     symbol->description_len = (size_t)registered_key_len;
     symbol->registry_id = id;
