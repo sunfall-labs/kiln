@@ -1242,9 +1242,9 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// deliberately does not turn the reactor, so readiness that has not arrived yet will not be
     /// discovered here. That is not a gap the checkpoint has to cover. A round that applies no
     /// actions and drains no events ends the checkpoint, control returns to the drive, and the
-    /// drive's own await parks and turns the reactor; the work resumes through
-    /// [`Self::poll_http_tasks_after_wake`]. Progress that needs the kernel still waits for the
-    /// kernel, in the one place that was already going to park.
+    /// drive's own await parks and turns the reactor, and the tasks it wakes run there. Progress
+    /// that needs the kernel still waits for the kernel, in the one place that was already going
+    /// to park.
     pub fn poll_http_tasks_once(&mut self) {
         // Polling the set as a future needs it exclusively. During an async drive (ADR 0042) a
         // DriveExecutor holds the executor and the set is already being run by that drive's
@@ -1272,33 +1272,13 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             // depends on those turns: with fewer than four, or with direct LocalSet polls in
             // their place, it parks in `next_turn` and never wakes, which the conformance
             // coordinator reproduces on every server probe. The native drive has no such
-            // dependency and uses `poll_http_tasks_after_wake`, which polls directly; why the two
-            // loops differ here is not yet established and is worth its own measurement.
+            // dependency: its connections dispatch from their own tasks (ADR 0042) and its one
+            // `block_on` runs the set, so it never calls this. Why the interpreter's loop needs
+            // the reactor turns is not yet established and is worth its own measurement.
             for _ in 0..4 {
                 tokio::task::yield_now().await;
             }
         });
-    }
-
-    /// Advance protocol tasks after the caller has just delivered a completion or command that
-    /// woke them. Unlike [`Self::poll_http_tasks`], this path may await one scheduler yield: the
-    /// concrete wake guarantees progress and the adapter immediately drains the resulting events.
-    /// The native drive's checkpoint after a host completion: the four cooperative turns
-    /// without a reactor turn.
-    ///
-    /// The drive reaches this from `next_turn`'s own park, which just delivered every readiness
-    /// the kernel had, so there is nothing for a reactor turn to find. Not paying for one is the
-    /// difference between a server whose throughput is flat from one connection to sixty-four
-    /// and one whose throughput rises with concurrency: measured 2.1x / 7.4x / 4.9x at
-    /// concurrency 1 / 16 / 64 on `bench/server` (2026-09-01).
-    #[doc(hidden)]
-    pub fn poll_http_tasks_after_wake(&mut self) {
-        if self.is_shutdown() {
-            return;
-        }
-        for _ in 0..4 {
-            self.poll_http_tasks_once();
-        }
     }
 
     /// Drives `realm` until it has no microtasks or timers left.

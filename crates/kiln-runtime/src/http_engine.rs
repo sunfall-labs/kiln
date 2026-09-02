@@ -220,7 +220,7 @@ impl ConnectionShared {
 
 /// The body Hyper sends: nothing, one frame the language handed over whole, or a stream the
 /// language is still writing.
-pub enum EngineBody {
+pub(crate) enum EngineBody {
     Empty,
     Complete(Option<Bytes>),
     Streaming(ResponseBody),

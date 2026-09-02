@@ -727,7 +727,7 @@ mod realm {
     /// as its first word.
     #[repr(C)]
     #[derive(Clone, Copy)]
-    struct GcHooks {
+    pub struct GcHooks {
         version: u32,
         size: u32,
         collect: Option<unsafe extern "C" fn(*mut c_void, i32)>,
@@ -1041,17 +1041,6 @@ mod realm {
         })
     }
 
-    fn run_in_runtime(realm: &NativeRealm, work: impl FnOnce() -> i32) -> i32 {
-        let runtime = realm.runtime.as_ptr();
-        let _active = ActiveRuntime::enter(runtime);
-        // `RealmRuntime::enter` may synchronously call generated language code. That code can
-        // re-enter the private active-runtime ABI (for example, an HTTP response callback can
-        // call `ClientRequest.end`). Keep ownership explicit through `ACTIVE_RUNTIME`, but do not
-        // hold the RefCell guard across the callback: active-runtime operations exclusively use
-        // this pointer while `entered` prevents a nested realm drive.
-        unsafe { &mut *runtime }.enter(work)
-    }
-
     unsafe fn borrowed_bytes<'a>(pointer: *const u8, length: u64) -> Option<&'a [u8]> {
         let length = usize::try_from(length).ok()?;
         if length == 0 {
@@ -1269,11 +1258,6 @@ mod realm {
             }
         }
         0
-    }
-
-    fn checkpoint_http_after_wake(realm: &NativeRealm) -> Result<usize, i32> {
-        realm.runtime.borrow_mut().poll_http_tasks_after_wake();
-        checkpoint_http(realm, false)
     }
 
     fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> Result<usize, i32> {
