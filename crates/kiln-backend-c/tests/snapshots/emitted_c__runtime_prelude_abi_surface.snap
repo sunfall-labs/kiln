@@ -1141,6 +1141,8 @@ static const uint16_t kiln_c99_method_codes[] = {KILN_C99_METHOD_ARRAY_AT, KILN_
 static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, uint32_t group) {
 static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t first,
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
+static int kiln_c99_is_array_member(const char *key, size_t key_len) {
+static int kiln_c99_is_date_member(const char *key, size_t key_len) {
 static int kiln_c99_is_string_member(const char *key, size_t key_len) {
 static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
 static int kiln_c99_is_typed_array_member(const char *key, size_t key_len) {
@@ -1153,6 +1155,9 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 typedef struct {
 static const kiln_builtin_member kiln_c99_builtin_members[] = {
 #define KILN_C99_SURFACE_MEMBER_COUNT \
+typedef struct {
+static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
+static int kiln_c99_backlog_names(const char *owner, const char *key, size_t key_len) {
 static int kiln_c99_has_surface(uint64_t builtin) {
 static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
 static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_t key_len,
