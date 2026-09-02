@@ -20,11 +20,12 @@ sed "s/18088/${PORT}/g" "$HERE/app.mjs" > "$work/app.mjs"
 start() { # runtime workload
 	local js="$work/serve.mjs" bin="$kiln_hello"
 	[[ $2 == mixed ]] && js="$work/app.mjs" && bin="$kiln_app"
+	# exec so the background job *is* the server and killing $! kills it, not a wrapper shell.
 	case "$1" in
-	kiln) "$bin" ;;
-	node) node "$js" ;;
-	bun) bun run "$js" ;;
-	deno) deno run --allow-net --quiet "$js" ;;
+	kiln) exec "$bin" ;;
+	node) exec node "$js" ;;
+	bun) exec bun run "$js" ;;
+	deno) exec deno run --allow-net --quiet "$js" ;;
 	esac
 }
 
