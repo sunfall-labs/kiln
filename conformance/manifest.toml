@@ -45,7 +45,7 @@
 
 [corpus]
 name = "porffor-effect-findings"
-source_repo = "/Users/alee/Developer/Personal/oss/porffor-effect-findings"
+source_repo = "porffor-effect-findings (a local checkout; not published)"
 source_commit = "bfdd2b0"
 source_commit_subject = "porffor/Effect: findings, and the three regression gates"
 ported = "2026-08-29"
