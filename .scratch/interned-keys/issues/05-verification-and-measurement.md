@@ -1,6 +1,6 @@
 # 05 — Verification, measurement, ADR and NOTES entry
 
-Status: ready-for-agent
+Status: done
 Depends on: 04
 
 ## What

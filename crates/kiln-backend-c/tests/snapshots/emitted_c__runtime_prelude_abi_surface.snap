@@ -582,6 +582,7 @@ typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 typedef struct kiln_c99_site {
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
+#define KILN_C99_SITE_GIVE_UP 8u
 typedef struct kiln_proxy {
 typedef struct kiln_array {
 typedef struct kiln_generator {
@@ -801,10 +802,13 @@ static double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
 static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value);
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static kiln_value *kiln_c99_exotic_store(kiln_value target);
 static int kiln_c99_proxy_trap(kiln_host *host, kiln_value proxy, const char *name,
 static int kiln_c99_proxy_get(kiln_host *host, kiln_value proxy, kiln_value key,
@@ -1035,6 +1039,8 @@ static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
 static const char kiln_c99_key_empty[1] = "";
 static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
+static int kiln_c99_keys_check_mode = -1;
+static int kiln_c99_keys_checked(void) {
 static uint64_t kiln_c99_key_hash(const char *bytes, size_t len) {
 static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const char *bytes,
 static void kiln_c99_key_place(kiln_key_table *table, kiln_key_entry entry) {
@@ -1098,10 +1104,12 @@ static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_
 static double kiln_c99_key_index(const char *key, size_t key_len) {
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
-static size_t kiln_c99_own_index(const kiln_gc_heap *heap, const kiln_object *object,
+static size_t kiln_c99_own_index(const kiln_object *object, const char *ikey, const char *key,
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
@@ -1299,7 +1307,8 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
-static void kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
+static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
 static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,

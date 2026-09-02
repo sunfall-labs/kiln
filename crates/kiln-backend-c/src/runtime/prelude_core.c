@@ -2497,7 +2497,8 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
 }
 
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
-                                 size_t key_len, kiln_value *out, int depth, kiln_value *thrown) {
+                                 size_t key_len, const char *ikey, kiln_value *out, int depth,
+                                 kiln_value *thrown) {
     /* `length` only means anything special to an array or a string; every other kind -- and an
      * ordinary object, the one a request or response property read is, most of all -- paid for
      * this `memcmp` on every read whether or not the key could possibly be it. Checked instead at
@@ -2507,12 +2508,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
         size_t steps;
-        kiln_gc_heap *heap = kiln_c99_gc_heap();
-        /* Canonicalized once for the whole walk (ADR 0047). NULL is a spelling the realm has
-         * never stored, so no level of the chain can hold it and the walk is not made at all --
-         * unless the check mode is on, which wants every level's scan run by bytes. */
-        const char *ikey = kiln_c99_interned_in(heap, key, key_len);
-        int walk = ikey != NULL || (heap != NULL && heap->keys_check);
+        int walk;
+        /* Canonicalized once for the whole walk (ADR 0047), unless a compiled site already holds
+         * the canonical pointer. NULL is a spelling the realm has never stored, so no level of
+         * the chain can hold it and the walk is not made at all -- unless the check mode is on,
+         * which wants every level's scan run by bytes. */
+        if (ikey == NULL) ikey = kiln_c99_interned(key, key_len);
+        walk = ikey != NULL || kiln_c99_keys_checked();
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
          * the walk is on the C stack, and a program can build a chain long enough to exhaust
          * it. */
@@ -2527,7 +2529,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 break;
             }
             object = kiln_c99_object_of(current);
-            index = kiln_c99_own_index(heap, object, ikey, key, key_len);
+            index = kiln_c99_own_index(object, ikey, key, key_len);
             if (index != object->count) {
                 if (!object->properties[index].accessor) {
                     *out = object->properties[index].value;
@@ -3653,6 +3655,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
  * function" three frames from the cause. */
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value *out, int depth, kiln_value *thrown) {
+    return kiln_c99_get_ikey(host, target, key, key_len, NULL, out, depth, thrown);
+}
+
+/* `ikey` is the key's canonical pointer when the caller already holds it (a compiled site), or
+ * NULL to have the object walk look it up. */
+static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             const char *ikey, kiln_value *out, int depth, kiln_value *thrown) {
     int status;
     if (kiln_c99_is_node_hidden_key(key, key_len)) {
         *out = kiln_c99_undefined();
@@ -3665,7 +3674,7 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
                                   kiln_c99_value(KILN_VALUE_STRING, 0, key, key_len), target, out,
                                   depth, thrown);
     }
-    status = kiln_c99_get_own_kind(host, target, key, key_len, out, depth, thrown);
+    status = kiln_c99_get_own_kind(host, target, key, key_len, ikey, out, depth, thrown);
     if (status == KILN_C99_CONTROL_ERROR && key_len >= 2 && key[0] == '@' && key[1] == '@') {
         *out = kiln_c99_undefined();
         return KILN_C99_OK;
@@ -3676,18 +3685,18 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
 /* Remember where `key` sits on `object`, or on its immediate prototype, for next time. A
  * machine-private (`@@`) key has hiding rules and `__proto__` a relinking rule; both stay the
  * slow path's alone, so a site never learns either. */
-static void kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
-                                size_t key_len) {
+static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
+                               size_t key_len) {
     size_t index;
     if ((key_len >= 2 && key[0] == '@' && key[1] == '@') ||
         (key_len == 9 && memcmp(key, "__proto__", 9) == 0)) {
-        return;
+        return 0;
     }
     for (index = 0; index < object->count; ++index) {
         if (object->properties[index].key == key) {
             site->own = index < KILN_C99_SITE_NONE ? (uint32_t)index : KILN_C99_SITE_NONE;
             site->proto = KILN_C99_SITE_NONE;
-            return;
+            return 1;
         }
     }
     if (object->prototype.tag == KILN_VALUE_OBJECT) {
@@ -3696,10 +3705,11 @@ static void kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, 
             if (parent->properties[index].key == key) {
                 site->own = KILN_C99_SITE_NONE;
                 site->proto = index < KILN_C99_SITE_NONE ? (uint32_t)index : KILN_C99_SITE_NONE;
-                return;
+                return 1;
             }
         }
     }
+    return 0;
 }
 
 /* `kiln_c99_get` with a site. `key` is the unit's canonical pointer for the name.
@@ -3737,9 +3747,10 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                 }
             }
         }
-        status = kiln_c99_get(host, target, key, key_len, out, depth, thrown);
-        if (status == KILN_C99_OK) {
-            kiln_c99_site_learn(site, object, key, key_len);
+        status = kiln_c99_get_ikey(host, target, key, key_len, key, out, depth, thrown);
+        if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP &&
+            !kiln_c99_site_learn(site, object, key, key_len)) {
+            site->misses += 1;
         }
         return status;
     }
@@ -3767,9 +3778,11 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                 return KILN_C99_OK;
             }
         }
-        status = kiln_c99_put_mode(host, target, key, key_len, value, strict, depth, thrown);
-        if (status == KILN_C99_OK) {
-            kiln_c99_site_learn(site, object, key, key_len);
+        status = kiln_c99_put_mode_ikey(host, target, key, key_len, key, value, strict, depth,
+                                        thrown);
+        if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP &&
+            !kiln_c99_site_learn(site, object, key, key_len)) {
+            site->misses += 1;
         }
         return status;
     }
@@ -3978,7 +3991,7 @@ static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_
         if (steps == 0 && object->frozen) {
             return 0;
         }
-        index = kiln_c99_own_index(heap, object, ikey, key, key_len);
+        index = kiln_c99_own_index(object, ikey, key, key_len);
         if (index != object->count) {
             const kiln_property *property = &object->properties[index];
             if (property->accessor) {
@@ -13809,7 +13822,7 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
                 break;
             }
             object = kiln_c99_object_of(current);
-            if (kiln_c99_own_index(heap, object, ikey, key, key_len) != object->count) {
+            if (kiln_c99_own_index(object, ikey, key, key_len) != object->count) {
                 *answer = 1;
                 return KILN_C99_OK;
             }
@@ -13914,7 +13927,7 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
     }
     {
         kiln_gc_heap *heap = kiln_c99_gc_heap();
-        index = kiln_c99_own_index(heap, object, kiln_c99_interned_in(heap, key, key_len), key,
+        index = kiln_c99_own_index(object, kiln_c99_interned_in(heap, key, key_len), key,
                                    key_len);
     }
     if (index != object->count) {
@@ -16339,7 +16352,7 @@ static kiln_property *kiln_c99_own_private(kiln_value target, const char *key, s
     }
     {
         kiln_gc_heap *heap = kiln_c99_gc_heap();
-        index = kiln_c99_own_index(heap, object, kiln_c99_interned_in(heap, key, key_len), key,
+        index = kiln_c99_own_index(object, kiln_c99_interned_in(heap, key, key_len), key,
                                    key_len);
     }
     return index == object->count ? NULL : &object->properties[index];

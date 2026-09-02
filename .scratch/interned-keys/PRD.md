@@ -146,8 +146,55 @@ Commit `8aec5b8ffdc947dfc2b791a2b6319d232f777a7b`, worktree binary
 
 ## After
 
-(filled in at the end)
+Working tree at the final commit; binary `target/debug/kiln` rebuilt from it (mtime in
+`final-meta.log` of the scratchpad, and stated in the final report).
+
+| Check | Result |
+| --- | --- |
+| `cargo test -p kiln-backend-c` | 59 passed, 1 ignored (unit); 25 passed (emitted_c) — snapshots regenerated and reviewed at each step |
+| `cargo test -p kiln-cli` | 123 + 1 + 5 passed (unchanged crate) |
+| `cargo test -p kiln-native` | FINAL_KILN_NATIVE |
+| `kiln test conformance/guard` | FINAL_GUARD |
+| `kiln test conformance/effect` | FINAL_EFFECT |
+| `kiln test conformance/regress` | FINAL_REGRESS |
+| `scripts/native.sh` | FINAL_NATIVE |
+| `KILN_GC_STRESS=1 KILN_KEYS_CHECK=1 scripts/native.sh` | FINAL_NATIVE_STRESS |
+| `.scratch/perf/probe.mjs` interpreted vs native | FINAL_PROBE |
+| `cargo clippy --workspace --offline` | **fails on main too**: `crates/kiln-native-number-ffi/src/lib.rs:680` `Some(epoch + started.elapsed())` under `deny(clippy::arithmetic_side_effects)`; untouched by this branch |
+| `cargo fmt --check` | clean |
+
+### Perf: `.scratch/perf/app-props.mjs`, four client processes x sixteen connections x five seconds
+
+First after-run (three passes, right after the corpora, load 1.21): `rps 42800 / 42243 / 43796`.
+Interleaved base/after/base/after, two passes each, load 3.0-5.2 (other agents building):
+
+| | pass 1 | pass 2 |
+| --- | --- | --- |
+| base round 1 | 46420 | 44272 |
+| after round 1 | 41231 | 41532 |
+| base round 2 | 43902 | 44053 |
+| after round 2 | 42246 | 41977 |
+
+**About 5% slower on this workload.** Per-operation microbenchmark
+(`.scratch/interned-keys/bench-props.mjs`, native-release, ms, two rounds each, base -> after):
+own read 32.5 -> 14.8; own write 114 -> 102; proto read 34 -> 21; proto method call 107 -> 75;
+missing read 197-210 -> 162; computed read 85-91 -> 104-109; computed write 82-85 -> 105-113;
+literal create (+ one computed read) 199-205 -> 236-247; json parse 182-196 -> 191-201; json
+stringify 185-189 -> 191-200; keys 78-81 -> 77-81; `in` 48.6 -> 63.4; dict grow 324-339 -> 306-312.
+
+Reading: the compiled-site paths (the point of the change) are 1.1-2.2x faster; every path that
+arrives without a canonical pointer now hashes the key once, and for a small object that is more
+than the byte scan it replaced. The server workload is dominated by the prelude building request,
+response and URL objects with prelude literal keys -- none of which is a compiled site -- so it
+lands on the losing side. Two mitigations are in: sites thread their canonical pointer through
+`get`/`put_mode`/`own_slot` (`_ikey` forms) and hash nothing, and a new-key write interns once
+instead of looking up and then interning. The remaining step -- a pre-interned static per
+prelude literal key, validated against the realm -- is several hundred call sites and is recorded
+in ADR 0047 as the next step rather than done here.
 
 ## Commits
 
-(listed at the end)
+- `942cb87` Intern property keys so a key comparison is a pointer comparison (issues 01-03)
+- `c48fbe0` Give each named-access site a slot cache validated by the key (issue 04)
+- (final) Thread a site's canonical key through get, put and own_slot; intern once on a new-key write
+- (final) ADR 0047, NOTES entry, PRD and issues, microbenchmark

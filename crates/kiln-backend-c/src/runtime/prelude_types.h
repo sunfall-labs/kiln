@@ -265,8 +265,12 @@ typedef struct kiln_object {
 typedef struct kiln_c99_site {
     uint32_t own;
     uint32_t proto;
+    /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
+     * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
+    uint32_t misses;
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
+#define KILN_C99_SITE_GIVE_UP 8u
 
 /* A proxy's two halves.
  *
