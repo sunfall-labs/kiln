@@ -563,6 +563,7 @@ extern int kiln_realm_value_slot(uint32_t key, void **out_slot);
 extern int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
 typedef struct kiln_gc_hooks {
+extern void *kiln_realm_gc_current_heap(void);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);

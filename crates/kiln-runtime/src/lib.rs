@@ -2934,7 +2934,12 @@ impl RealmHostProvider for TokioHost {
             }
         };
         let stream = match reader.reunite(writer) {
-            Ok(stream) => stream,
+            Ok(stream) => {
+                // Node sets TCP_NODELAY on HTTP sockets; a small response must not wait for
+                // Nagle behind the previous segment's acknowledgement.
+                let _ = stream.set_nodelay(true);
+                stream
+            }
             Err(tokio::net::tcp::ReuniteError(reader, writer)) => {
                 restore(
                     self,
