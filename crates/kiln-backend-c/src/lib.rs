@@ -15228,7 +15228,10 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             if (status == KILN_C99_OK) {
                 kiln_value headers;
                 size_t at = 0;
-                status = kiln_c99_new_object(&headers);
+                /* Same shape as the server-side request headers object: a byte buffer of names
+                 * and values with no header count of its own, and an ordinary response carries
+                 * under a dozen. */
+                status = kiln_c99_new_object_with_capacity(&headers, 8);
                 while (status == KILN_C99_OK && at < event->headers_len) {
                     const char *name = (const char *)event->headers + at;
                     size_t name_len = strlen(name);
@@ -16302,7 +16305,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             built = argc > 0 ? args[0] : kiln_c99_undefined();
         } else {
             size_t at = 0;
-            status = kiln_c99_new_object(&built);
+            /* The byte buffer this reads carries names and values, not a count, so the exact
+             * number of headers is not known before the loop below without a first pass just to
+             * find it. Most requests carry under a dozen; hinting 8 gets an ordinary one there in
+             * one allocation instead of the 4 -> 8 -> 16 a capacity-0 object would walk through
+             * one `kiln_c99_put` at a time, and costs nothing when there turn out to be fewer. */
+            status = kiln_c99_new_object_with_capacity(&built, 8);
             if (status != KILN_C99_OK) return status;
             while (response != NULL && response->request_headers != NULL &&
                    at < response->request_headers_len) {
@@ -29855,7 +29863,22 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             let count = usize::try_from(*count).unwrap();
             output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
-            output.push_str("        status = kiln_c99_new_object(&built);\n");
+            if count > 0 {
+                // `count` is pairs, not final properties -- a literal with a duplicate key
+                // (`{ a: 1, a: 2 }`) asks for one more slot than it ends up filling, which
+                // `kiln_c99_new_object_with_capacity` already documents as a hint rather than a
+                // promise. Sizing once here is what a template-filling caller (this loop is
+                // exactly that: a fixed member count known before the first store) should do
+                // instead of paying `kiln_c99_reserve`'s 4 -> 8 -> ... walk one `define_computed`
+                // at a time.
+                writeln!(
+                    output,
+                    "        status = kiln_c99_new_object_with_capacity(&built, (size_t){count});"
+                )
+                .unwrap();
+            } else {
+                output.push_str("        status = kiln_c99_new_object(&built);\n");
+            }
             output.push_str("        if (status != KILN_C99_OK) return status;\n");
             if count > 0 {
                 writeln!(
