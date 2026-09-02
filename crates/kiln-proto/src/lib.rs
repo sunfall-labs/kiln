@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 25;
+pub const PROTOCOL_VERSION: u32 = 26;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -448,8 +448,15 @@ pub struct FileId(pub u32);
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     /// Liveness plus version negotiation.
+    ///
+    /// `protocol` says whether the two sides can understand each other and is bumped by hand when
+    /// the wire shape changes. `build` says whether they are the *same build*, and is derived from
+    /// the executable, because the far more common skew has no protocol change in it at all: a
+    /// rebuilt CLI talking to a daemon holding the previous build's answers looks perfectly well
+    /// formed, and is wrong.
     Ping {
         protocol: u32,
+        build: u64,
     },
     /// Replace a file's contents using a compare-and-swap against the authoritative source view.
     /// Returns [`Response::SourceUpdated`] with the new view.
@@ -580,6 +587,8 @@ pub enum Response {
     Pong {
         protocol: u32,
         pid: u32,
+        /// The daemon's own build identity, for the client to compare with its own.
+        build: u64,
     },
     Checked(ModuleSummary),
     Ran(RunSummary),
@@ -894,7 +903,7 @@ mod tests {
 
     #[test]
     fn protocol_v25_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 25);
+        assert_eq!(PROTOCOL_VERSION, 26);
 
         let requests = [
             (

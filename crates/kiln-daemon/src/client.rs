@@ -43,11 +43,12 @@ impl Client {
     ///
     /// Worth doing on every connection: a daemon outlives the binary that started it, so the
     /// common skew is a rebuilt CLI talking to yesterday's daemon.
-    pub fn handshake(&mut self) -> io::Result<u32> {
+    pub fn handshake(&mut self) -> io::Result<(u32, u64)> {
         match self.request(&Request::Ping {
             protocol: PROTOCOL_VERSION,
+            build: crate::build_identity(),
         })? {
-            Response::Pong { pid, .. } => Ok(pid),
+            Response::Pong { pid, build, .. } => Ok((pid, build)),
             Response::Error { message } => Err(io::Error::new(ErrorKind::InvalidData, message)),
             other => Err(io::Error::new(
                 ErrorKind::InvalidData,

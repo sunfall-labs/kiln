@@ -66,20 +66,35 @@ impl DaemonClient {
     /// `kiln check` is the command a developer runs all day, so needing a separate
     /// `kiln daemon start` would be a papercut on the one path that has to feel instant.
     pub fn connect_or_start(socket: &Path) -> Result<DaemonClient> {
-        match DaemonClient::connect(socket) {
+        let mut client = match DaemonClient::connect(socket) {
             Err(Error::NotRunning) => {
                 let child = spawn_daemon(socket)?;
-                wait_for_daemon(socket, child)
+                wait_for_daemon(socket, child)?
             }
-            other => other,
+            other => other?,
+        };
+        // A daemon outlives the binary that started it, and a rebuilt CLI talking to the previous
+        // build's daemon is the skew no protocol version catches: every message is well formed and
+        // every answer is stale. `PROTOCOL_VERSION` only moves when the wire shape does, so a
+        // change that alters what an answer *is* leaves it untouched.
+        //
+        // Replaced rather than reported, because there is nothing for the user to decide: the
+        // binary they just invoked is the one they meant to run.
+        let mine = kiln_daemon::build_identity();
+        let (_, theirs) = client.handshake()?;
+        if mine != 0 && theirs != 0 && mine != theirs {
+            client.shutdown()?;
+            let child = spawn_daemon(socket)?;
+            client = wait_for_daemon(socket, child)?;
         }
+        Ok(client)
     }
 
     /// Exchange versions and learn the daemon's pid.
     ///
     /// Worth doing on every connection: a daemon outlives the binary that started it, so the
     /// usual skew is a freshly built CLI talking to yesterday's daemon.
-    pub fn handshake(&mut self) -> Result<u32> {
+    pub fn handshake(&mut self) -> Result<(u32, u64)> {
         self.inner
             .handshake()
             .map_err(|source| match source.kind() {
@@ -289,7 +304,7 @@ mod tests {
 
         let mut client = DaemonClient::connect(&socket).expect("connect");
         assert_eq!(
-            client.handshake().expect("handshake"),
+            client.handshake().expect("handshake").0,
             std::process::id(),
             "the in-process daemon should report this process"
         );
