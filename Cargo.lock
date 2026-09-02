@@ -1255,6 +1255,7 @@ dependencies = [
  "hyper-util",
  "kiln-artifact-cache",
  "kiln-host-abi",
+ "libc",
  "tokio",
  "tokio-metrics",
  "tokio-util",

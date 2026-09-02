@@ -1891,8 +1891,7 @@ impl TokioHost {
             }
             AsyncHostOp::TcpListen { host, port } => {
                 self.spawn_task(request, sequence, referenced, async move {
-                    let result = TcpListener::bind((host.as_str(), port))
-                        .await
+                    let result = bind_tcp_listener(host.as_str(), port)
                         .map(|listener| HostCompletionValue::TcpListener {
                             listener,
                             referenced,
@@ -2592,6 +2591,99 @@ fn stream_closed(syscall: &str, resource: ResourceId) -> AsyncHostError {
         None,
         format!("stream resource {} has ended", resource.get()),
     )
+}
+
+fn bind_tcp_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
+    use std::net::ToSocketAddrs;
+    use std::os::fd::FromRawFd;
+
+    let address = (host, port)
+        .to_socket_addrs()?
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid address"))?;
+
+    let (domain, sockaddr_storage, socklen) = match address {
+        std::net::SocketAddr::V4(v4) => {
+            let mut sin: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = v4.port().to_be();
+            sin.sin_addr.s_addr = u32::from_ne_bytes(v4.ip().octets());
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &sin as *const _ as *const u8,
+                    &mut storage as *mut _ as *mut u8,
+                    std::mem::size_of::<libc::sockaddr_in>(),
+                );
+            }
+            (
+                libc::AF_INET,
+                storage,
+                std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+            )
+        }
+        std::net::SocketAddr::V6(v6) => {
+            let mut sin6: libc::sockaddr_in6 = unsafe { std::mem::zeroed() };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = v6.port().to_be();
+            sin6.sin6_addr.s6_addr = v6.ip().octets();
+            let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    &sin6 as *const _ as *const u8,
+                    &mut storage as *mut _ as *mut u8,
+                    std::mem::size_of::<libc::sockaddr_in6>(),
+                );
+            }
+            (
+                libc::AF_INET6,
+                storage,
+                std::mem::size_of::<libc::sockaddr_in6>() as libc::socklen_t,
+            )
+        }
+    };
+
+    let fd = unsafe {
+        let fd = libc::socket(
+            domain,
+            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            0,
+        );
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let optval: libc::c_int = 1;
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEADDR,
+            &optval as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        #[cfg(all(unix, not(target_os = "solaris"), not(target_os = "illumos")))]
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_REUSEPORT,
+            &optval as *const _ as *const libc::c_void,
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        );
+        let sockaddr_ptr = &sockaddr_storage as *const _ as *const libc::sockaddr;
+        if libc::bind(fd, sockaddr_ptr, socklen) < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(err);
+        }
+        if libc::listen(fd, 1024) < 0 {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(err);
+        }
+        fd
+    };
+
+    let std_listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
+    TcpListener::from_std(std_listener)
 }
 
 fn socket_error(syscall: &str, error: std::io::Error) -> AsyncHostError {
@@ -3895,6 +3987,46 @@ mod tests {
             );
         }
         assert!(!runtime.host().has_referenced_work());
+    }
+
+    #[test]
+    fn tcp_listeners_support_reuseport_across_runtimes() {
+        let mut runtime1 = RealmRuntime::new().expect("runtime 1");
+        let mut runtime2 = RealmRuntime::new().expect("runtime 2");
+        runtime1.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            true,
+        );
+        let listener1 = match next_host_completion(&mut runtime1)
+            .expect("listen 1 completes")
+            .result
+            .expect("listen 1 succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener resource, got {other:?}"),
+        };
+        let port = listener1.port.expect("port");
+
+        // runtime2 listens on the exact same port thanks to SO_REUSEPORT
+        runtime2.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port,
+            },
+            true,
+        );
+        let listener2 = match next_host_completion(&mut runtime2)
+            .expect("listen 2 completes")
+            .result
+            .expect("listen 2 succeeds with reuseport")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener resource, got {other:?}"),
+        };
+        assert_eq!(listener2.port, Some(port));
     }
 
     #[test]

@@ -106,10 +106,38 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             node,
             native: false,
             steps,
+            workers,
             ..
         } => {
-            let mut backend = open(one_shot, &socket)?;
-            report(commands::run(backend.as_mut(), &path, &root, node, steps)?)
+            if workers > 1 {
+                let mut handles = Vec::with_capacity(workers);
+                for _ in 0..workers {
+                    let path = path.clone();
+                    let root = root.clone();
+                    let socket = socket.clone();
+                    handles.push(std::thread::spawn(move || {
+                        let mut backend = open(one_shot, &socket)?;
+                        commands::run(backend.as_mut(), &path, &root, node, steps)
+                    }));
+                }
+                let mut status = 0;
+                for handle in handles {
+                    match handle.join() {
+                        Ok(Ok(output)) => {
+                            let worker_status = report(output)?;
+                            if worker_status != 0 {
+                                status = worker_status;
+                            }
+                        }
+                        Ok(Err(err)) => return Err(err),
+                        Err(_) => return Err(Error::Protocol("worker thread panicked".to_owned())),
+                    }
+                }
+                Ok(status)
+            } else {
+                let mut backend = open(one_shot, &socket)?;
+                report(commands::run(backend.as_mut(), &path, &root, node, steps)?)
+            }
         }
         Command::Run {
             path,
@@ -118,15 +146,43 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             profile,
             // Refused by the parser: the native backend does not count steps.
             steps: _,
+            workers,
         } => {
-            let mut backend = open(one_shot, &socket)?;
-            report(commands::native_run(
-                backend.as_mut(),
-                &path,
-                &root,
-                profile,
-                node,
-            )?)
+            if workers > 1 {
+                let mut handles = Vec::with_capacity(workers);
+                for _ in 0..workers {
+                    let path = path.clone();
+                    let root = root.clone();
+                    let socket = socket.clone();
+                    handles.push(std::thread::spawn(move || {
+                        let mut backend = open(one_shot, &socket)?;
+                        commands::native_run(backend.as_mut(), &path, &root, profile, node)
+                    }));
+                }
+                let mut status = 0;
+                for handle in handles {
+                    match handle.join() {
+                        Ok(Ok(output)) => {
+                            let worker_status = report(output)?;
+                            if worker_status != 0 {
+                                status = worker_status;
+                            }
+                        }
+                        Ok(Err(err)) => return Err(err),
+                        Err(_) => return Err(Error::Protocol("worker thread panicked".to_owned())),
+                    }
+                }
+                Ok(status)
+            } else {
+                let mut backend = open(one_shot, &socket)?;
+                report(commands::native_run(
+                    backend.as_mut(),
+                    &path,
+                    &root,
+                    profile,
+                    node,
+                )?)
+            }
         }
         Command::Build {
             path,
