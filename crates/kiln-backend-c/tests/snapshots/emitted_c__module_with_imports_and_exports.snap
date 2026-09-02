@@ -147,6 +147,7 @@ int kiln_module_c6d415922e92ef41bcd0947f5dad550a_namespace_wrapper(kiln_value *r
             tag->value = kiln_c99_copy_text("Module", 6);
             if (tag->value.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
             tag->writable = 0;
+            kiln_c99_object_of(object)->read_only_seen = 1;
             tag->enumerable = 0;
             tag->configurable = 0;
             tag->accessor = 0;

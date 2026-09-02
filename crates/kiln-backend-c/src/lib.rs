@@ -3140,18 +3140,17 @@ typedef struct kiln_object {
      * and the level costs one pointer follow instead of a scan of its whole property list.
      *
      * A level with `accessor_count == 0` can still hold a non-writable *data* property under the
-     * same key, and the unoptimized walk used to notice that and refuse the shadowing write
-     * (own-property creation) it would otherwise allow -- an inherited `defineProperty(...,
-     * {writable:false})` on a plain (non-accessor) property. Skipping the scan by this count
-     * alone therefore trades that one spec corner (user-authored, non-accessor, explicitly
-     * non-writable, same key as a fresh write on a descendant) for not walking every plain
-     * prototype on every assignment; the built-in Node surface never creates such a property, so
-     * this does not change behavior anywhere this backend's own prototypes are involved. See the
-     * property-semantics probe run for this change.
+     * same key, which must refuse the shadowing write; `read_only_seen` below covers that, so
+     * the two together make the skip exact rather than a bet on what the Node surface defines.
      *
      * Kept exact by every site that flips a property's `accessor` bit, so it is never a scan in
      * disguise. */
     size_t accessor_count;
+    /* Set once a data property of this object has been made non-writable, and never cleared:
+     * with `accessor_count`, it is what lets `kiln_c99_put_mode` skip a prototype level's scan
+     * exactly. A level that never held an accessor or a read-only data property has nothing
+     * that could intercept a write from a descendant. */
+    int read_only_seen;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -5656,6 +5655,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->module_namespace = 0;
     object->arguments_brand = 0;
     object->accessor_count = 0;
+    object->read_only_seen = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -6774,10 +6774,9 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
     /* Nothing of this name on the object itself. Walk the prototypes looking for a setter to
      * run, or a non-writable data property that blocks creating an own one in its place -- a
      * level with no accessors of its own has no setter to offer, so `accessor_count == 0` skips
-     * scanning its property list at all and the level costs one pointer follow instead. (The one
-     * case that skip cannot see is an inherited non-accessor property that is itself
-     * non-writable, which would otherwise refuse this write; the built-in Node surface never
-     * leaves one of those behind for a request or response prototype to carry.) */
+     * scanning its property list at all and the level costs one pointer follow instead, unless a
+     * data property of that level was ever made read-only (`read_only_seen`), which is the other
+     * thing a prototype can do to a write. */
     {
         kiln_value current = object->prototype;
         size_t steps;
@@ -6787,7 +6786,7 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
                 break;
             }
             walked = kiln_c99_object_of(current);
-            if (walked->accessor_count != 0) {
+            if (walked->accessor_count != 0 || walked->read_only_seen) {
                 for (index = 0; index < walked->count; ++index) {
                     if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
                         continue;
@@ -8824,6 +8823,7 @@ static int kiln_c99_global_object(kiln_value *out) {
             slot->enumerable = 0;
             slot->writable = 0;
             slot->configurable = 0;
+            kiln_c99_object_of(*globals)->read_only_seen = 1;
         }
     }
     /* It holds itself under both of its names, which is how a program reaches it without a
@@ -15263,6 +15263,7 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
     slot->enumerable = 0;
     slot->writable = 0;
     slot->configurable = 0;
+    kiln_c99_object_of(object)->read_only_seen = 1;
     /* Reserved `@@node:*` machinery slots are never routed through `define_accessor`, so this is
      * always already 0 -- guarded anyway, since the cost of asking is one branch off a path that
      * runs once per socket or request rather than per property access. */
@@ -16008,6 +16009,7 @@ static int kiln_c99_node_fs_stat(kiln_value *out, const kiln_async_completion *c
             property->enumerable = 0;
             property->writable = 0;
             property->configurable = 0;
+            kiln_c99_object_of(stat)->read_only_seen = 1;
         }
     }
     if (status == KILN_C99_OK) {
@@ -16018,6 +16020,7 @@ static int kiln_c99_node_fs_stat(kiln_value *out, const kiln_async_completion *c
             property->enumerable = 0;
             property->writable = 0;
             property->configurable = 0;
+            kiln_c99_object_of(stat)->read_only_seen = 1;
         }
     }
     if (status == KILN_C99_OK)
@@ -23987,6 +23990,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     if (has_configurable) {
         slot->configurable = kiln_c99_truthy(configurable);
     }
+    if (!slot->accessor && !slot->writable) {
+        kiln_c99_object_of(store)->read_only_seen = 1;
+    }
     return KILN_C99_OK;
 }
 
@@ -24362,6 +24368,7 @@ static int kiln_c99_define_private(kiln_value target, const char *key, size_t ke
         return KILN_C99_CONTROL_ERROR;
     }
     slot->writable = 0;
+    kiln_c99_object_of(target)->read_only_seen = 1;
     return KILN_C99_OK;
 }
 
@@ -29423,6 +29430,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             tag->value = kiln_c99_copy_text("Module", 6);
             if (tag->value.tag != KILN_VALUE_STRING) status = KILN_C99_OUT_OF_MEMORY;
             tag->writable = 0;
+            kiln_c99_object_of(object)->read_only_seen = 1;
             tag->enumerable = 0;
             tag->configurable = 0;
             tag->accessor = 0;
