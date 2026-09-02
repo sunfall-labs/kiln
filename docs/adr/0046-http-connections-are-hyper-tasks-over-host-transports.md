@@ -5,11 +5,17 @@
 Accepted. Refines ADR 0032 (which keeps its ownership split) and completes ADR 0040 step 4 for the
 HTTP path. ADR 0041's collector is unchanged.
 
-Implementation state (2026-09-02): the server path is on this design (`kiln-runtime/src/
-http_engine.rs`; the native drive is one future). The HTTP client path and the interpreter still
-use the bridged engine, so `http_transport.rs`, the client half of `hyper_http.rs`,
-`checkpoint_http` and the `_in_context` family remain until they migrate; the archive routes by
-whether the engine owns the resource. The consequences below describe the end state.
+Implementation state (2026-09-02, later the same day): complete. Server connections are
+`kiln-runtime/src/http_engine.rs`, client connections `http_client.rs`, and both attach the same
+way: the host hands over its transport (`TokioHost` the socket, `ScriptedHost` a
+`ScriptedTransport`) and one `HttpDispatch` receives every event. The native drive is one
+future and its dispatch calls generated C directly; the interpreter uses the queued adapter
+(`QueuedDispatch`, drained by its checkpoint, with `RuntimeTurn::Protocol` as the wake). The
+bridge (`http_transport.rs`, `hyper_http.rs`, the runtime's bridged connection table), the
+archive's `checkpoint_http` and `apply_http_actions`, and the `_in_context` family are deleted;
+`start_host_op` answers "am I inside the executor" itself. The one departure from the text
+below: the interpreter's checkpoint still turns the scheduler with `poll_http_tasks` between
+drains, the open question the consequences mention.
 
 ## Context
 

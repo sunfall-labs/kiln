@@ -604,7 +604,7 @@ mod realm {
         fn reading(self) -> Option<std::time::Duration> {
             match self {
                 Self::Virtual => None,
-                Self::Wall { epoch, started } => Some(epoch + started.elapsed()),
+                Self::Wall { epoch, started } => Some(epoch.saturating_add(started.elapsed())),
             }
         }
     }
@@ -1210,9 +1210,7 @@ mod realm {
     /// failure status.
     fn route_completion(realm: &NativeRealm, completion: kiln_host_abi::Completion) -> Option<i32> {
         let continuation = realm.continuations.borrow_mut().remove(&completion.request);
-        let Some(continuation) = continuation else {
-            return None;
-        };
+        let continuation = continuation?;
         let payload = CompletionPayload::from_result(
             completion.request,
             completion.sequence,

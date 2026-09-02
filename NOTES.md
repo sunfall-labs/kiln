@@ -4167,3 +4167,46 @@ under 2 ms. `bench/server/compare.sh` runs the interleaved version of that table
 sessions. The HTTP one is now 0046 (0045 is kiln-a7's dynamic-compilation decision, itself
 renumbered from 0044 for the same reason). Third collision this week; `ls docs/adr/` immediately
 before the commit, not before the draft.
+
+## The HTTP engine migration finished, and what it cost to find out (2026-09-02, Claude `http-engine-migration`)
+
+ADR 0046 landed with the native server on the direct engine and everything else on the bridge.
+The rest moved today in four commits on `worktree-agent-a02548ac292ec3275`: the client engine
+(`http_client.rs`), the archive's client path, the interpreter on the queued adapter, and then
+the deletion, which is the part that matters: `http_transport.rs` and `hyper_http.rs` gone,
+`lib.rs` down ~2,500 lines, the archive down ~760, the `_in_context` family gone with the
+question it answered now asked once, in `Executor::run`. Numbers are in
+`.scratch/http-engine-migration/PRD.md`. Things worth not rediscovering:
+
+- **A queued event nobody drains is a hang, not a leak.** The interpreter's loop keeps waiting
+  while an engine has a request in flight *or a queue is non-empty*, because a taken transport
+  is unreferenced by design and something has to keep the loop alive. That makes an event for a
+  connection the realm no longer tracks a wait that never ends. `checkpoint_runtime_http`
+  discards queued events for unknown resources before it waits; keep that when touching it.
+- **A scripted client must not see its reply before it has written.** The first scripted
+  client test recorded an empty request: the transport handed Hyper the response on the first
+  read, before the request went out, and a client conn that receives an unsolicited response
+  closes. `ScriptedTransport::replying` holds the bytes until the first write. The server side
+  never had this problem because the request *is* the first thing on the wire.
+- **`socket.destroy()` after the peer closed must be a no-op.** The engine forgets a
+  connection the moment its task ends, which can be before the interpreter has drained its
+  `Closed`. A close of an unowned resource answers `false`; the interpreter ignores it, as Node
+  ignores `destroy` on a closed socket. Turning that into an error failed programs that were
+  behaving.
+- **The provider identity lists are a build-time trap.** `number_provider.rs`, the packager and
+  `check-native-number-ffi.sh` each enumerate the runtime sources whose bytes make up the
+  archive's identity, and a listed file that does not exist fails the native build outright,
+  with no hint that a list is the reason. They now name every `kiln-runtime` source file.
+  `http_engine.rs` and `node_http_agent.rs` had never been on them, so for as long as they
+  existed a change to the engine did not change the archive's identity: the divergence the
+  temporal comment in that file warns about, already happening one crate over.
+- **The archive's error message never reached C.** `NativeServerDispatch` put an error's
+  message in the event view's `reason` slot; the generated kind-9 handler reads `data`. Every
+  direct-engine error had been emitted with an empty message. It fills both now.
+- **`deterministic_entropy_is_one_realm_stream_and_rejects_policy_drift` aborts at baseline.**
+  A misaligned-pointer dereference (`context.cast::<[u64; 2]>()` on a 4-aligned address) in
+  the test helper, under debug alignment checks, on this Linux host at `8aec5b8` before any
+  change here. Skipped with `--skip deterministic_entropy`; not mine, and not fixed here.
+- `mbx` was not installed on this host. `mise use -g cargo:mbx` installs 1.4.1 into the shims
+  directory, which is not on `PATH`; `/home/coder/.local/share/mise/shims/mbx` works, and the
+  scripts' `kiln_cargo` falls back to bare `cargo` unless the shims are on `PATH`.

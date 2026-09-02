@@ -1,6 +1,6 @@
 # Verification, ADR 0046 state paragraph, NOTES entry
 
-Status: ready-for-agent
+Status: done
 
 After issues 01-05:
 
@@ -15,3 +15,10 @@ After issues 01-05:
 Then: replace the "Implementation state" paragraph of
 `docs/adr/0046-http-connections-are-hyper-tasks-over-host-transports.md` with the finished
 state, append a dated entry to `NOTES.md`, and record the after-numbers in `PRD.md`.
+
+## Comments
+
+- Done. Numbers in `PRD.md`. `mbx clippy --workspace` had one pre-existing *error* on main
+  (`arithmetic_side_effects` on `epoch + started.elapsed()` in the archive's wall clock);
+  changed to `saturating_add` so the gate passes. ADR 0046's state paragraph and a dated
+  `NOTES.md` entry are in the final commit.

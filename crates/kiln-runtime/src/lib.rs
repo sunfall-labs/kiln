@@ -1414,17 +1414,12 @@ impl QueuedHttp {
     }
 
     fn retain_resources(&self, known: &[ResourceId]) -> usize {
-        let mut dropped = 0;
-        for map in [&self.server] {
-            let mut map = map.borrow_mut();
-            let before = map.len();
-            map.retain(|resource, _| known.contains(resource));
-            dropped += before - map.len();
-        }
+        let mut server = self.server.borrow_mut();
         let mut client = self.client.borrow_mut();
-        let before = client.len();
+        let before = server.len() + client.len();
+        server.retain(|resource, _| known.contains(resource));
         client.retain(|resource, _| known.contains(resource));
-        dropped + before - client.len()
+        before - server.len() - client.len()
     }
 
     /// Whether an event was queued since the last wait, consuming the flag. The `Notify`
