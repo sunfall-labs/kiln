@@ -1766,13 +1766,10 @@ impl NativeBuilder {
         let mut private_options = options.clone();
         private_options.output = private_output.clone();
         let mut build = self.build_graph(graph, &private_options)?;
-        let output = Command::new(&private_output)
-            .env(NATIVE_RESULT_PATH_ENV, &result_path)
-            .output()
-            .map_err(|source| NativeError::Launch {
-                executable: private_output.clone(),
-                source,
-            })?;
+        let output = run_executable(
+            Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
+            &private_output,
+        )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
         materialize(&options.output, &executable, true)?;
@@ -1805,13 +1802,10 @@ impl NativeBuilder {
         let mut private_options = options.clone();
         private_options.output = private_output.clone();
         let mut build = self.build(program, &private_options)?;
-        let output = Command::new(&private_output)
-            .env(NATIVE_RESULT_PATH_ENV, &result_path)
-            .output()
-            .map_err(|source| NativeError::Launch {
-                executable: private_output.clone(),
-                source,
-            })?;
+        let output = run_executable(
+            Command::new(&private_output).env(NATIVE_RESULT_PATH_ENV, &result_path),
+            &private_output,
+        )?;
         let result = decode_run_result(&result_path, output.status.success())?;
         let executable = read(&private_output, "read private native executable")?;
         materialize(&options.output, &executable, true)?;
@@ -4589,6 +4583,85 @@ fn decode_run_result(
         })
 }
 
+/// Run a freshly linked executable, waiting out the kernel's `ETXTBSY` if it fires.
+///
+/// A process may not `execve` a file that any process still holds open for writing. Nothing here
+/// holds one -- the linker wrote the file and exited -- but this is a multithreaded program, and
+/// between `fork` and `execve` a child briefly owns a duplicate of every descriptor its parent had
+/// open at the moment of the fork. So one thread spawning a compiler can, for a few microseconds,
+/// be holding a write descriptor to the executable another thread is trying to launch. Rust opens
+/// files `O_CLOEXEC`, which closes the duplicate at the child's `execve`; it does not remove the
+/// window before it.
+///
+/// The condition is therefore real, transient, and no fault of the caller's -- the same reason
+/// cargo, rustc and every build system that writes and then runs a binary retries it. Waiting is
+/// the whole fix; the window is microseconds and the bound is generous enough that a genuine
+/// `ETXTBSY` -- a file somebody really is writing -- still surfaces as an error rather than a hang.
+/// Retry `operation` while the kernel says the executable is still open for writing somewhere.
+///
+/// `execve` refuses a file any process holds open for writing. Nothing here holds one -- the
+/// linker wrote the file and exited -- but this is a multithreaded program, and between `fork` and
+/// `execve` a child briefly owns a duplicate of every descriptor its parent had open at the moment
+/// of the fork. One thread spawning a compiler can therefore hold, for a few microseconds, a write
+/// descriptor to the binary another thread is launching. Rust opens files `O_CLOEXEC`, which closes
+/// the duplicate at the child's `execve`; it does not remove the window before it.
+///
+/// So the condition is real, transient and no fault of the caller's, which is why cargo, rustc and
+/// every build system that writes a binary and then runs it does exactly this. The bound is
+/// generous next to a window measured in microseconds, and keeps a file somebody genuinely is
+/// writing surfacing as an error rather than a hang.
+fn retry_while_executable_is_busy<T>(
+    mut operation: impl FnMut() -> io::Result<T>,
+) -> io::Result<T> {
+    const ATTEMPTS: u32 = 12;
+    let mut backoff = Duration::from_millis(2);
+    for attempt in 1..=ATTEMPTS {
+        match operation() {
+            Err(source)
+                if source.kind() == io::ErrorKind::ExecutableFileBusy && attempt < ATTEMPTS =>
+            {
+                std::thread::sleep(backoff);
+                backoff = backoff.saturating_mul(2).min(Duration::from_millis(100));
+            }
+            other => return other,
+        }
+    }
+    unreachable!("the final attempt returns rather than looping")
+}
+
+/// `Command`, for the case where the program was built moments ago by this same process.
+trait RunsABuiltBinary {
+    /// [`Command::output`], waiting out a transient `ETXTBSY`.
+    fn output_when_launchable(&mut self) -> io::Result<std::process::Output>;
+    /// [`Command::spawn`], waiting out a transient `ETXTBSY`. Only the tests launch a built
+    /// binary without waiting for it; the shipped paths all want its output.
+    #[cfg(test)]
+    fn spawn_when_launchable(&mut self) -> io::Result<std::process::Child>;
+}
+
+impl RunsABuiltBinary for Command {
+    fn output_when_launchable(&mut self) -> io::Result<std::process::Output> {
+        retry_while_executable_is_busy(|| self.output())
+    }
+
+    #[cfg(test)]
+    fn spawn_when_launchable(&mut self) -> io::Result<std::process::Child> {
+        retry_while_executable_is_busy(|| self.spawn())
+    }
+}
+
+fn run_executable(
+    command: &mut Command,
+    executable: &Path,
+) -> Result<std::process::Output, NativeError> {
+    command
+        .output_when_launchable()
+        .map_err(|source| NativeError::Launch {
+            executable: executable.to_path_buf(),
+            source,
+        })
+}
+
 fn materialize(path: &Path, bytes: &[u8], executable: bool) -> Result<(), NativeError> {
     let temporary = write_materialized_temporary(path, bytes, executable)?;
     let result = install_materialized(&temporary, path);
@@ -5306,7 +5379,7 @@ mod tests {
             )
             .expect("native node:http graph builds");
         let output = Command::new(&report.output)
-            .output()
+            .output_when_launchable()
             .expect("run native node:http fixture");
         assert!(
             output.status.success(),
@@ -5782,7 +5855,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
             )
             .expect("native process.nextTick graph builds");
         let output = Command::new(&report.output)
-            .output()
+            .output_when_launchable()
             .expect("run native process.nextTick fixture");
         assert!(
             output.status.success(),
@@ -5868,7 +5941,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
             )
             .expect("native node:fs/promises graph builds");
         let output = Command::new(&report.output)
-            .output()
+            .output_when_launchable()
             .expect("run native node:fs/promises fixture");
         assert!(
             output.status.success(),
@@ -6098,7 +6171,7 @@ console.log("pass");
             )
             .expect("native invalid-options graph builds");
         let output = Command::new(&report.output)
-            .output()
+            .output_when_launchable()
             .expect("run native invalid-options fixture");
         assert!(
             output.status.success(),
@@ -6164,7 +6237,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         let mut child = Command::new(&report.output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("start native node:net server");
         let stdout = child.stdout.take().expect("capture server stdout");
         let mut stdout = std::io::BufReader::new(stdout);
@@ -6269,7 +6342,7 @@ socket.on("close", () => {{
             )
             .expect("native node:net client builds");
         let output = Command::new(&report.output)
-            .output()
+            .output_when_launchable()
             .expect("run native node:net client");
         server.join().expect("loopback server completes");
         assert!(
@@ -6320,7 +6393,7 @@ socket.on("close", () => {{
         let mut child = Command::new(&report.output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("run native HTTP half-close fixture");
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
@@ -6407,7 +6480,7 @@ server.listen({port}, "127.0.0.1");
         let mut child = Command::new(&report.output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("run native HTTP pipelining fixture");
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut client = loop {
@@ -6599,7 +6672,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         let mut child = Command::new(&report.output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("start native node:http server");
         let stdout = child.stdout.take().expect("capture server stdout");
         let mut stdout = std::io::BufReader::new(stdout);
@@ -6718,7 +6791,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         let mut child = Command::new(&report.output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("run native Fastify graph");
         let deadline = Instant::now() + Duration::from_secs(15);
         let (status, timed_out) = loop {
@@ -6821,7 +6894,7 @@ server.listen(0, "127.0.0.1", () => {
             )
             .expect("native node:http setEncoding graph builds");
         let output = Command::new(&report.output)
-            .output()
+            .output_when_launchable()
             .expect("run native node:http setEncoding program");
         assert!(
             output.status.success(),
@@ -6891,7 +6964,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         let mut child = Command::new(&report.output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("run native delayed-close fixture");
         let stdout = child.stdout.take().expect("capture server stdout");
         let mut stdout = std::io::BufReader::new(stdout);
@@ -7016,7 +7089,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         let mut child = Command::new(&report.output)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_when_launchable()
             .expect("run native HTTP destroy fixture");
         let stdout = child.stdout.take().expect("capture destroy stdout");
         let mut stdout = std::io::BufReader::new(stdout);
@@ -7628,7 +7701,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             .expect("process.argv graph builds natively");
 
         let bare = std::process::Command::new(&output)
-            .output()
+            .output_when_launchable()
             .expect("run the compiled program");
         assert_eq!(bare.status.code(), Some(0));
         assert_eq!(
@@ -7640,7 +7713,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
 
         let passed = std::process::Command::new(&output)
             .args(["a", "b", "c"])
-            .output()
+            .output_when_launchable()
             .expect("run the compiled program with arguments");
         assert_eq!(passed.status.code(), Some(0));
         assert_eq!(
