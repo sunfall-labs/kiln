@@ -580,6 +580,8 @@ static kiln_native_constructor kiln_c99_native_constructors[] = {
 typedef struct kiln_property {
 typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
+typedef struct kiln_c99_site {
+#define KILN_C99_SITE_NONE 0xFFFFFFFFu
 typedef struct kiln_proxy {
 typedef struct kiln_array {
 typedef struct kiln_generator {
@@ -1297,6 +1299,9 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
 static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
 static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static void kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
+static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_t key_len) {
