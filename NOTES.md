@@ -4168,6 +4168,70 @@ sessions. The HTTP one is now 0046 (0045 is kiln-a7's dynamic-compilation decisi
 renumbered from 0044 for the same reason). Third collision this week; `ls docs/adr/` immediately
 before the commit, not before the draft.
 
+## Interned keys and a slot per site (2026-09-02, Claude `perf/interned-keys`)
+
+The native object model compared keys by bytes. `kiln_c99_same_key` tried the pointer first, but
+the pointer only ever matched inside one translation unit -- a literal is one static array *per
+unit*, and a `JSON.parse` key or an `Object.keys` result is a heap string that matches nothing by
+address -- so every same-length mismatch in every scan paid a `memcmp`, and nothing remembered
+anything between two reads of `this.count`. ADR 0047 is the decision; the short version:
+
+- **The heap owns a weak intern table** and interning is total for stored keys: `own_slot` and
+  the namespace wrapper are the two places a `kiln_property.key` is written, and both canonicalize.
+  Reads canonicalize the query with a lookup that never inserts; a spelling the table has never
+  seen is a key no object has, and the read skips the scan. The memcmp fallback is gone from the
+  converted paths. `KILN_KEYS_CHECK=1` re-runs every pointer scan by bytes and aborts on a
+  disagreement, and the native corpus passed that way under `KILN_GC_STRESS=1` -- which is the
+  sentence that lets the fallback go.
+- **A unit interns its own constants at body entry** (`{symbol}_intern_keys`, cleared by the
+  unit's GC reset when the realm dies) and passes the canonical pointer at every named site. A
+  site's pointer is only an optimization: every entry point looks the query up by bytes.
+- **A site caches a slot, validated by the key.** No shapes: a key is on an object at most once
+  and the pointer is canonical, so `properties[own].key == key` proves the slot is the property on
+  *any* object, and objects built by the same code put keys at the same indices. The prototype
+  hit costs a pointer scan of the receiver to prove the own miss. `@@` keys and `__proto__` are
+  never learned.
+
+Three things worth knowing:
+
+- A canonical pointer is adopted from a string block only when the block's size is *exactly*
+  the key's length. Otherwise two keys of different lengths could share an address, and pointer
+  identity would say they were one key.
+- A unit that registers a spelling a computed key already claimed pins the existing heap block
+  rather than replacing the canonical pointer; the table marks pinned blocks as roots. Replacing
+  it would have left every property already holding the old pointer unfindable.
+- The purge runs in place with backward-shift deletion, so it needs no memory at the moment the
+  collector must not fail for lack of it. The slot is re-examined after a deletion because the
+  shift moves a later entry into it.
+
+**Measured, same worktree, same session, `.scratch/perf/app-props.mjs` compiled
+`--profile native-release --node`, four client processes, sixteen connections each, five seconds,
+three passes:** before 46235 / 46274 / 45096 rps (p50 1.12-1.19 ms); after, first attempt,
+42800 / 42243 / 43796. Interleaved base/after/base/after to be sure (two passes each): base
+46420 / 44272, after 41231 / 41532, base 43902 / 44053, after 42246 / 41977. **About 5% slower,
+consistently.** The microbenchmark (`.scratch/interned-keys/bench-props.mjs`) says why: the
+site hits are a clear win (own read 32.5 -> 14.8 ms, proto read 34 -> 21, proto method call
+107 -> 75, own write 114 -> 102) and everything that arrives without a canonical pointer now
+hashes once, which for a small object costs more than the byte scan it replaced (computed read
+85 -> 104, `in` 48 -> 63, literal create + computed read 200 -> 238). The server workload is the
+second kind: the prelude builds every request, response and URL object with *prelude literal*
+keys, and none of those is a compiled site. Threading the canonical pointer through the sites
+(`_ikey` forms of get/put_mode/own_slot) and interning once instead of twice on a new-key write
+recovered part of it; the rest wants a pre-interned static per prelude literal key, which is
+several hundred call sites and a change of its own. Recorded in ADR 0047 as the next step, and
+the branch is left as a measured trade rather than a claimed win.
+
+Suites and corpora are at baseline on both sides (the two `kiln-native` failures are
+pre-existing: an `ExecutableFileBusy` race and an `@@KILN_1` symbol-suffix assertion),
+`scripts/native.sh` is 76 matched / 2 refused / 0 diverged on both, and the same under stress
+with the key check. `.scratch/perf/probe.mjs` differs between the engines in two lines
+(`duplicate literal key: last (data) wins` and the frozen-prototype shadow write) *with the
+baseline binary too*; both are pre-existing native gaps, not this change.
+
+`mbx` is not installed on this machine -- not in mise, not in `~/.cargo/bin`, not on disk -- so
+every number here came from bare `cargo` under `nice`. The PRD under
+`.scratch/interned-keys/` records that beside each command.
+
 ## The HTTP engine migration finished, and what it cost to find out (2026-09-02, Claude `http-engine-migration`)
 
 ADR 0046 landed with the native server on the direct engine and everything else on the bridge.
