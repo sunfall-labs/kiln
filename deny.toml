@@ -46,6 +46,9 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Unlicense",
+    # foldhash, reached through oxc_resolver -> simd-json -> halfbrown -> hashbrown. Zlib is a
+    # permissive notice license, compatible with MIT publication.
+    "Zlib",
 ]
 confidence-threshold = 0.93
 
