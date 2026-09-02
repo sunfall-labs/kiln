@@ -1,195 +1,116 @@
 # kiln
 
-kiln is a compiler from JavaScript and TypeScript to native executables, written in Rust.
+kiln compiles JavaScript and TypeScript to native executables. It is written in Rust, emits C,
+and links the result against a small Rust runtime built on Tokio and Hyper. There is no
+JavaScript engine inside the binary.
 
-Its distinguishing bet is stated in [docs/design.md](docs/design.md): iteration speed is a
-primary architectural constraint, ranked directly after correctness and above native runtime
-performance. The consequence is that the incremental query database, the persistent compiler
-process and the artifact cache are foundational rather than later enhancements — incrementality
-is built before the compiler gets large, not retrofitted once it hurts. The intended end state
-is a tool that feels like an interpreter or a modern dev server while still producing
-aggressively optimized native binaries.
+A ten-line `node:http` server compiles to a 3.8 MB executable that starts in 8 ms, holds
+about 30 MB resident under load, and serves requests at the same rate as Node, Bun and Deno on
+the same machine. The interpreter that ships alongside the compiler runs the same program
+immediately, so the edit-run loop never waits for a native build.
 
-## Status: first linked interpreter and native slices work
+## Status
 
-This repository is at v0. It now has a production Oxc frontend, owned executable HIR, memoized
-stack bytecode, an exact-path module graph, a scalar interpreter, deterministic per-module C
-emission, a versioned HostOps boundary, and a layered native artifact cache. `kiln run` executes a
-deliberately small but real JavaScript/TypeScript subset immediately; `kiln build` and
-`kiln run --native` compile that same graph to a native executable through Zig, Clang, `cc`, or
-GCC.
+kiln is at v0 and under active development. Today it runs and compiles a real but bounded subset
+of the language and of Node's API: modules (ESM and CommonJS), classes, closures, generators,
+async functions and promises, the standard built-ins including `Map`, `Set`, typed arrays, JSON,
+regular expressions, BigInt and Temporal, and the `node:http`, `node:net`, `node:fs`,
+`node:events`, `node:stream`, `node:buffer`, `node:path` and `node:url` surfaces that small
+services use. What is not implemented is refused with a source location rather than
+approximated; `docs/language-coverage.md` records the ladder.
 
-What exists today:
+Conformance is measured, not asserted. The native backend is held to byte-identical output with
+the interpreter on every probe in `conformance/native`, and the interpreter is held to Test262.
 
-| Crate | What it is |
-| --- | --- |
-| `crates/kiln-hir` | Dependency-free, compiler-owned module and executable HIR. No Oxc type or arena lifetime crosses this boundary. |
-| `crates/frontend-oxc` | The Oxc adapter. Parses JS, JSX, TS and TSX and lowers into owned HIR. |
-| `crates/kiln-ir` | Parser-independent, versioned stack bytecode and HIR compiler. |
-| `crates/kiln-interpreter` | Deterministic scalar VM with bounded execution. |
-| `crates/kiln-module-resolver` / `crates/kiln-module-graph` | Project-confined exact-path resolution, deterministic graph construction, link validation, and acyclic execution order. |
-| `crates/kiln-host-abi` / `crates/kiln-runtime` | Versioned native-operation contract and the capturing CLI host. |
-| `crates/kiln-backend-c` | Deterministic, validated C translation units for the scalar bytecode surface. |
-| `crates/kiln-native-number` | Versioned, locale-free Ryu/fast_float runtime for ECMAScript-exact native number conversion. |
-| `crates/kiln-native-runtime` | Cacheable CLI HostOps runtime, per-module launcher, and generated embedding headers with borrowed ABI-v1 and explicitly owned ABI-v2 results. |
-| `crates/kiln-digest` | Dependency-free, pinned SHA-256 shared by source coherence and artifact keys. |
-| `crates/kiln-artifact-cache` | Layered SHA-256 artifact keys, validated records, and atomic writes. |
-| `crates/kiln-native-toolchain` / `crates/kiln-native` | Portable compiler/linker boundary and cached native build coordinator. |
-| `crates/kiln-db` | Incremental query database. Memoizes parse, bytecode and interface queries with early cutoff. |
-| `crates/kiln-test262` / `crates/kiln-conformance` | Test262 metadata discovery and explicit parser/interpreter variant classification. |
-| `crates/kiln-test-selector` | Deterministic failures-first, smoke, and affected-test selection. |
-| `crates/kiln-proto` | CLI-to-daemon wire contract, versioned by its exported `PROTOCOL_VERSION`, including collision-resistant source synchronization, pinned Node source formats and package conditions, and structured interpreter, native-build, native-run, shared-library, and test results. |
-| `crates/kiln-daemon` | The long-lived process that owns a database and answers requests over the protocol. |
-| `crates/kiln-cli` | The `kiln` binary: a thin client over the daemon. |
-| `bench` | The timing harness (`kiln-bench`), which measures the loops §13 wants gated and writes results under `bench/results/`. |
+## Measured
 
-The executable subset currently covers scalar literals, variables, arithmetic, strict equality
-and comparisons, assignment, blocks, `if`/`else`, `while`, short-circuit expressions,
-conditionals, `console.log`, side-effect imports, and named/default scalar imports and exports in
-acyclic graphs. Unsupported valid syntax is rejected with a source range during IR compilation.
-Live bindings and cycles, namespace imports, re-exports, functions, objects, exceptions, async
-behavior, built-ins, the full Test262 harness, realms, and broad language coverage remain to be
-implemented. Native number-to-string conversion now uses shortest ECMAScript spelling;
-process-lifetime string allocations remain explicit ownership work rather than conformance
-success.
+`bench/server`, 2026-09-01, one machine, keep-alive, median of three interleaved passes.
 
-The useful thing that does work is the invalidation behavior. Editing a file's contents
-reparses that file; if the edit does not change what the module exports, the project-level query
-is not recomputed. `Stats` makes that observable, and the tests and the harness assert on it.
-That property is the foundation everything else in the design rests on, which is why it is the
-first thing built.
+A hello-world server:
 
-## Priorities
+| runtime | 1 connection | 16 connections | 64 connections | resident |
+|---|---|---|---|---|
+| kiln native | 25.5k rps | 71.2k rps | 67.3k rps | 27 MB |
+| node 25.9 | 27.2k rps | 78.2k rps | 70.7k rps | 83 MB |
+| bun 1.4 | 23.7k rps | 64.8k rps | 67.9k rps | 67 MB |
+| deno 2.9 | 25.9k rps | 80.8k rps | 74.3k rps | 108 MB |
 
-The design document's ordering, which is load-bearing rather than decorative:
+A small service (URL routing, query parsing, JSON in and out, a POST body, an 8 KB response,
+header echo, an async handler), every answer checked by the client:
 
-1. Correctness
-2. Iteration speed
-3. Architectural flexibility
-4. Native runtime performance
-5. Maximum compatibility
+| runtime | 16 connections | 64 connections | resident |
+|---|---|---|---|
+| kiln native | 68.6k rps | 62.2k rps | 35 MB |
+| node 25.9 | 70.8k rps | 41.9k rps | 96 MB |
+| bun 1.4 | 52.7k rps | 58.2k rps | 85 MB |
+| deno 2.9 | 46.7k rps | 59.9k rps | 120 MB |
 
-The interesting entries are the second and third. Putting iteration speed above native runtime
-performance is what justifies an interpreter-first execution path and a daemon that never dies;
-putting architectural flexibility above maximum compatibility is what justifies declining a
-convenient dependency, or a convenient shortcut through the query graph, in order to keep a
-seam. Where those trade-offs have been made concretely, they are in `docs/adr/`.
+The machine was shared while these ran; the ranges are in
+`.scratch/server-throughput/measurements-2026-09-01.md`. `bench/server/run.sh` reproduces a row.
 
-## The three loops
+## Using it
 
-kiln optimizes three separate edit-to-feedback loops, and they are served by different parts of
-the system.
-
-The compiler developer edits Rust, rebuilds and runs tests. This loop is served by workspace
-discipline: small foundational crates, a shallow dependency graph, Oxc isolated behind a
-frontend crate, and `cargo build --timings` inspected regularly. ADR 0004 has the rules.
-
-The language developer changes semantics or a built-in and runs the affected conformance tests.
-This loop is served by keeping built-ins in JS/TS so that changing one does not recompile Rust
-(§5), by a stable HostOps ABI (§6), and by test selection that runs what a change can actually
-affect (§9). ADR 0005 covers what that buys and what it risks.
-
-The compiler user edits JS/TS and runs the program. This loop is served by the daemon, the query
-database and the interpreter-first execution path (§1, §2, §4), with native compilation happening
-in the background rather than on the critical path.
-
-All three loops now have a first end-to-end slice. The language-developer loop discovers an
-external Test262 tree, prioritizes prior failures and smoke/affected tests, and executes the
-selected variants in one resident daemon request. Unsupported semantics remain visible rather
-than being counted as passes.
-
-## Running it
-
-Rust 1.97.1 and edition 2024. The toolchain is pinned in `rust-toolchain.toml`, so `rustup` will
-fetch the right one on first build. Cargo is enough for interpreter development; native commands
-also need Zig, Clang, a compatible `cc`, or GCC on `PATH`.
+Rust 1.97.1 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.
 
 ```sh
-cargo build              # build the workspace
-cargo test               # the invalidation tests are the interesting ones
-cargo run -p kiln-cli -- --one-shot run examples/hello.ts
-cargo run -p kiln-cli -- watch examples/hello.ts
-cargo run -p kiln-cli -- --one-shot run examples/modules/main.ts
-cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native
-cargo run -p kiln-cli -- --one-shot build examples/hello.ts --profile native-dev
-cargo run -p kiln-cli -- --one-shot test tests/conformance/smoke
-cargo run -p kiln-cli -- test /path/to/test262/test --changed
-bash scripts/test262.sh --out target/test262/results.json
-cargo run -p kiln-bench  # the timing harness; results land in bench/results/
-cargo build --timings    # the compiler developer's loop, measured (ADR 0004)
+cargo build
+cargo run -p kiln-cli -- --one-shot run examples/hello.ts                    # interpret
+cargo run -p kiln-cli -- --one-shot run examples/hello.ts --native           # compile and run
+cargo run -p kiln-cli -- --one-shot build server.mjs --node --profile native-release --output server
+./server
 ```
 
-`kiln watch` runs the entry in the interpreter immediately and after each byte-changing save.
-Program output stays on stdout, diagnostics stay on stderr, and a failed run does not end the
-watch—the next edit gets another chance.
+`--node` selects Node's module resolution and installs the Tokio-owned adapter for `node:*`.
+`kiln watch` re-runs an entry in the interpreter on every save. `kiln test <dir>` runs a
+conformance corpus; the corpora and the runner each one needs are listed in `AGENTS.md`.
 
-The daemon speaks the request set in `crates/kiln-proto/src/lib.rs`: `Ping` for liveness and
-protocol negotiation, `SetSource` to replace a file's contents, `Check` for one module's
-summary, `Run` for interpreted execution, `NativeBuild` / `NativeRun` for cached native work,
-`NativeSharedBuild` for embedding libraries, `Test` for resident conformance batches, `Project`
-for the whole-project rollup, and `Stats` / `ResetStats` for the recompute counters. A complete
-source sync also removes files that disappeared from the client's project view. Test failures and
-native artifacts are remembered under `.kiln/`. The exact CLI spelling is in `kiln --help`.
+## How it is built
 
-## Design and decisions
+The priority order in `docs/design.md` is correctness, iteration speed, architectural
+flexibility, native performance, compatibility, in that order, and the shape of the repository
+follows from it.
 
-[docs/design.md](docs/design.md) is the founding document, kept as written. It is not edited in
-place; deviations and refinements are recorded as ADRs beside it, so that a change to the plan
-is visible next to the reasoning for it.
+- **An incremental query database is the foundation, not a later optimisation.** Parsing,
+  lowering and interface hashing are memoised queries with early cutoff; editing a file that does
+  not change what it exports recomputes nothing downstream. `kiln-db` is the smallest crate and
+  the most load-bearing.
+- **One owned intermediate representation.** Oxc parses; `kiln-hir` is dependency-free and no
+  parser type crosses it. The interpreter and the C backend consume the same versioned stack
+  bytecode from `kiln-ir`, which is what makes byte-identical differential testing possible.
+- **One runtime for interpreted and native code.** A realm is one local task on a current-thread
+  Tokio runtime. Promise jobs, timers and HTTP events are ordered by the realm's own queues and
+  sequence numbers; Tokio schedules, the realm decides. Generated C reaches the runtime through a
+  private, versioned C ABI of opaque handles.
+- **Hyper owns HTTP; the realm owns Node semantics.** A server connection is one Hyper task over
+  the accepted socket, and protocol events call the compiled handler directly.
+- **The native heap is collected at the turn boundary.** A precise mark-sweep collector runs
+  between callbacks; every allocation a value can point at is a tagged block, and marking never
+  trusts a pointer it cannot look up.
 
-- [0001](docs/adr/0001-query-layer-behind-our-own-trait.md) — the query layer sits behind our own
-  trait rather than a library's types, so the compiler is not permanently tied to one engine.
-- 0002 — what we require of a candidate query-engine backend, such as salsa.
-- [0003](docs/adr/0003-interface-hash-is-early-cutoff.md) — §3's interface hash is realized as an
-  early-cutoff query rather than a second hash maintained by hand.
-- [0004](docs/adr/0004-rust-workspace-discipline.md) — §12's workspace rules restated as
-  enforceable rules, with a stated cost for breaking one.
-- [0005](docs/adr/0005-builtins-in-js-bootstrap-risk.md) — keeping built-ins in JS/TS, and the
-  bootstrap risk that comes with a compiler depending on its own output.
-- [0006](docs/adr/0006-owned-hir-and-injected-frontends.md) — Oxc lowers into dependency-free,
-  compiler-owned HIR and is injected into the query engine rather than becoming its dependency.
-- [0007](docs/adr/0007-interpreter-bytecode-and-hostops-boundary.md) — interpreter bytecode is a
-  memoized parser-independent query, while side-effecting execution crosses a versioned HostOps
-  boundary and is replayed on every run.
-- [0008](docs/adr/0008-test262-is-an-external-explicit-conformance-input.md) — Test262 remains an
-  external corpus and every execution variant and unsupported outcome stays explicit.
-- [0009](docs/adr/0009-native-c-units-have-layered-content-addressed-artifacts.md) — deterministic
-  per-module C, the HostOps runtime, launcher, objects, and executable are separately keyed native
-  artifacts behind a portable compiler boundary.
-- [0010](docs/adr/0010-hashing-strategy.md) — sole-decision source and artifact identities use
-  full-width SHA-256 digests, while compact FNV summaries remain hints rather than authorities.
-- [0011](docs/adr/0011-explicit-module-graph-and-acyclic-scalar-linking.md) — module resolution and
-  graph traversal are explicit, deterministic layers; the first linkage slice copies acyclic
-  scalar exports while reserving live cells and strongly connected components for the next step.
-- [0012](docs/adr/0012-virtual-time-event-loop.md) — the interpreter drains a deterministic
-  virtual-time event loop to quiescence for timers, microtasks, and async work.
-- [0013](docs/adr/0013-native-number-formatting-uses-a-vendored-c-runtime.md) — emitted artifacts
-  use a hidden, cached C Ryu runtime for ECMAScript-exact binary64 formatting.
-- [0014](docs/adr/0014-string-numeric-literals-use-a-bounded-runtime-parser.md) — string numeric
-  coercion uses a bounded decimal core plus explicit ECMAScript grammar and radix rounding.
-- [0016](docs/adr/0016-native-specialization-is-profile-driven-and-falls-back-in-unit.md) — observed
-  types are a query input and specialization guards fall back in-unit; deoptimizing into the
-  interpreter is rejected.
-- [0017](docs/adr/0017-an-unresolved-identifier-is-a-runtime-error.md) — an identifier that resolves
-  to nothing is a runtime `ReferenceError` rather than a compile error, so a bundle's `typeof`
-  guards get to run.
-- [0019](docs/adr/0019-a-closure-carries-its-module.md) — a closure holds its own program and its
-  module-scope bindings are ordinary captures, so a function value survives the module boundary
-  it was exported across.
-- [0020](docs/adr/0020-conformance-is-measured-by-specification-coverage.md) — conformance
-  is steered by feature-sensitive specification-step coverage; pass rate is an outcome, not a
-  target.
-- [0028](docs/adr/0028-one-tokio-runtime-owns-interpreted-and-native-execution.md) — one shipped
-  Tokio-backed Rust runtime owns asynchronous execution for the interpreter and native artifacts,
-  while each realm retains only the queues and checkpoints ECMAScript makes observable.
-- [0029](docs/adr/0029-use-mature-rust-implementations-at-existing-seams.md) — mature Rust Modules
-  own general-purpose scheduling, resolution, concurrency testing and standards engines behind
-  existing Kiln Seams; heap and query-engine choices remain gated, and Cranelift is not planned.
-- [0038](docs/adr/0038-a-realm-owns-its-intrinsics-and-a-value-says-which-realm-made-it.md) — a
-  realm owns its intrinsics and a value says which realm made it, mostly through the prototype it
-  links to; creating one is a host capability, and `gc-arena` is still not adopted, with the seam
-  it would need written down.
+Every decision of that kind is an ADR under `docs/adr/`, numbered and never edited in place;
+`docs/design.md` is the founding document, kept as written.
+
+## Layout
+
+| crate | role |
+|---|---|
+| `kiln-hir`, `frontend-oxc`, `kiln-ir` | owned HIR, the Oxc adapter, and the bytecode compiler |
+| `kiln-db` | the incremental query database |
+| `kiln-module-resolver`, `kiln-module-graph` | exact-path resolution and the module graph |
+| `kiln-interpreter` | the deterministic bytecode VM |
+| `kiln-backend-c` | the C emitter and the C runtime prelude |
+| `kiln-runtime`, `kiln-host-abi` | the Tokio/Hyper realm runtime and the host-operation contract |
+| `kiln-native-number-ffi`, `kiln-native`, `kiln-native-toolchain` | the runtime archive linked into executables, the native build coordinator, the compiler boundary |
+| `kiln-daemon`, `kiln-cli` | the resident compiler process and the `kiln` binary |
+| `kiln-conformance`, `kiln-test262`, `kiln-test-selector` | corpus discovery, classification and failures-first selection |
+| `bench` | the timing harness and the server benchmarks |
+
+## Contributing
+
+`AGENTS.md` holds the working rules for this repository: which runner each corpus needs, why
+measurements are taken in a private worktree, how the native runtime archive is built, and what
+to do when the disk fills. `NOTES.md` is the dated log of what was tried and what it cost.
 
 ## License
 
-The workspace manifest declares MIT. A `LICENSE` file has not been added yet.
+MIT. See `LICENSE`.
