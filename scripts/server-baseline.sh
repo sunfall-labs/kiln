@@ -178,7 +178,7 @@ def script_target(name, binary, argv_extra, note):
         })
         return
     metrics, failure = measure([path] + argv_extra + [os.path.abspath(probe)])
-    entry = {"target": name, "form": "script", "available": failure is None, "runtime_path": path, "note": note}
+    entry = {"target": name, "form": "script", "available": failure is None, "runtime_path": os.path.basename(path), "note": note}
     if failure is None:
         entry.update(metrics)
     else:
@@ -236,7 +236,7 @@ else:
     metrics, failure = measure(argv)
     kiln = {
         "target": "kiln", "form": "script", "available": failure is None,
-        "runtime_path": os.path.abspath(kiln_bin),
+        "runtime_path": os.path.basename(kiln_bin),
         "note": "explicit Node interpreter mode; Tokio owns both loopback I/O paths",
     }
     if failure is None:

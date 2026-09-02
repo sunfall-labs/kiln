@@ -334,7 +334,7 @@ where
     })
 }
 
-fn kiln_request_parts(parts: &hyper::http::request::Parts) -> HttpRequest {
+pub(crate) fn kiln_request_parts(parts: &hyper::http::request::Parts) -> HttpRequest {
     let version = match parts.version {
         hyper::Version::HTTP_10 => HttpVersion::Http10,
         _ => HttpVersion::Http11,
@@ -376,7 +376,7 @@ fn kiln_request_parts(parts: &hyper::http::request::Parts) -> HttpRequest {
     }
 }
 
-fn hyper_response(response: ResponseCommand, http_10: bool) -> Response<ResponseBody> {
+pub(crate) fn hyper_response(response: ResponseCommand, http_10: bool) -> Response<ResponseBody> {
     let mut builder = Response::builder().status(response.status);
     if http_10 {
         // Hyper decides keep-alive against the response's version, so a close-delimited body has
@@ -392,14 +392,14 @@ fn hyper_response(response: ResponseCommand, http_10: bool) -> Response<Response
 }
 
 /// The only framing an HTTP/1.0 response can carry other than the close itself.
-fn declares_content_length(headers: &[(String, String)]) -> bool {
+pub(crate) fn declares_content_length(headers: &[(String, String)]) -> bool {
     headers
         .iter()
         .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
 }
 
 /// Statuses that carry no body, and so are never close-delimited.
-fn response_status_allows_body(status: u16) -> bool {
+pub(crate) fn response_status_allows_body(status: u16) -> bool {
     !matches!(status, 204 | 304) && !(100..200).contains(&status)
 }
 

@@ -13,7 +13,9 @@
 #   bench/server/run.sh node node bench/server/serve.mjs
 #   bench/server/run.sh bun  bun  bench/server/serve.mjs
 #
-# Environment: DURATION_MS (default 5000), ROUNDS (default 3), CONCURRENCIES (default "1 16 64").
+# Environment: DURATION_MS (default 5000), ROUNDS (default 3), CONCURRENCIES (default "1 16 64"),
+# WORKLOAD (default "hello": drive.mjs against serve.mjs; "mixed": drive-mix.mjs against app.mjs),
+# PORT (default 18088; the server you pass must listen there).
 # Never gates. The numbers are properties of this machine on this afternoon.
 set -euo pipefail
 
@@ -27,7 +29,16 @@ fi
 DURATION_MS="${DURATION_MS:-5000}"
 ROUNDS="${ROUNDS:-3}"
 CONCURRENCIES="${CONCURRENCIES:-1 16 64}"
-PORT=18088
+WORKLOAD="${WORKLOAD:-hello}"
+PORT="${PORT:-18088}"
+case "$WORKLOAD" in
+hello) DRIVER=drive.mjs ;;
+mixed) DRIVER=drive-mix.mjs ;;
+*)
+	echo "run.sh: WORKLOAD must be hello or mixed, not '$WORKLOAD'" >&2
+	exit 2
+	;;
+esac
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
@@ -51,11 +62,11 @@ fi
 
 rss() { ps -o rss= -p "$server" | tr -d ' '; }
 
-echo "server=$label pid=$server rss_start_kib=$(rss)"
+echo "server=$label workload=$WORKLOAD pid=$server rss_start_kib=$(rss)"
 for round in $(seq 1 "$ROUNDS"); do
 	for c in $CONCURRENCIES; do
 		printf 'round=%s c=%-3s ' "$round" "$c"
-		node "$HERE/drive.mjs" "$DURATION_MS" "$c"
+		node "$HERE/$DRIVER" "$DURATION_MS" "$c" "$PORT" | cut -c1-160
 	done
 done
 echo "server=$label rss_end_kib=$(rss) alive=$(ps -p "$server" -o pid= | tr -d ' ')"

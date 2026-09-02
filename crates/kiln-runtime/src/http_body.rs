@@ -21,6 +21,34 @@ pub(crate) struct ResponseBodyDriver {
     shared: Rc<RefCell<Shared>>,
 }
 
+/// Where a body's `drain` and `finish` go: a channel the old checkpoint drains, or a callback
+/// the direct engine defers to its next safe point (ADR 0042).
+#[derive(Clone)]
+pub(crate) enum BodySink {
+    Channel(tokio::sync::mpsc::UnboundedSender<BodyEvent>),
+    Direct(Rc<dyn Fn(BodyEvent)>),
+}
+
+impl std::fmt::Debug for BodySink {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Channel(_) => formatter.write_str("BodySink::Channel"),
+            Self::Direct(_) => formatter.write_str("BodySink::Direct"),
+        }
+    }
+}
+
+impl BodySink {
+    fn send(&self, event: BodyEvent) {
+        match self {
+            Self::Channel(sender) => {
+                let _ = sender.send(event);
+            }
+            Self::Direct(callback) => callback(event),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Shared {
     state: DuplexState<Vec<u8>>,
@@ -28,7 +56,7 @@ struct Shared {
     in_flight: Option<RequestId>,
     finish_emitted: bool,
     waker: Option<Waker>,
-    events: Option<tokio::sync::mpsc::UnboundedSender<BodyEvent>>,
+    events: Option<BodySink>,
 }
 
 impl Shared {
@@ -51,7 +79,7 @@ impl Shared {
             return;
         };
         self.finish_emitted = true;
-        let _ = events.send(BodyEvent::Finish);
+        events.send(BodyEvent::Finish);
     }
 }
 
@@ -124,14 +152,22 @@ impl ResponseBodyDriver {
         &self,
         events: tokio::sync::mpsc::UnboundedSender<BodyEvent>,
     ) -> ResponseBody {
-        {
-            let mut shared = self.shared.borrow_mut();
-            shared.events = Some(events);
-            // A body ended before Hyper was handed it is already complete.
-            if shared.complete() {
-                shared.finish();
-            }
+        self.set_sink(BodySink::Channel(events));
+        self.into_body()
+    }
+
+    /// Route this body's events to `sink`. A body ended before it was handed over is already
+    /// complete and reports its finish at once.
+    pub(crate) fn set_sink(&self, sink: BodySink) {
+        let mut shared = self.shared.borrow_mut();
+        shared.events = Some(sink);
+        if shared.complete() {
+            shared.finish();
         }
+    }
+
+    /// The Hyper body over this driver's state, sharing it with the driver.
+    pub(crate) fn into_body(&self) -> ResponseBody {
         ResponseBody {
             shared: Rc::clone(&self.shared),
         }
@@ -161,9 +197,9 @@ impl hyper::body::Body for ResponseBody {
             let (events, _) = shared.state.write_completed(request);
             for event in events {
                 if event == StreamEvent::Drain
-                    && let Some(sender) = &shared.events
+                    && let Some(sink) = &shared.events
                 {
-                    let _ = sender.send(BodyEvent::Drain);
+                    sink.send(BodyEvent::Drain);
                 }
             }
             if shared.complete() {
