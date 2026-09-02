@@ -129,8 +129,15 @@ int kiln_module_c6d415922e92ef41bcd0947f5dad550a_namespace_wrapper(kiln_value *r
         /* Namespace export keys stay in the linker's lexical order. Ordinary object insertion
          * would move integer-looking names to numeric order, which is not the namespace exotic
          * object's [[OwnPropertyKeys]] rule. */
-        slot = &data->properties[data->count++];
-        slot->key = names[source];
+        slot = &data->properties[data->count];
+        /* Canonical like every stored key (ADR 0047). Copied rather than registered as static:
+         * the launcher's names are its own, and this seam promises nothing about their life. */
+        slot->key = kiln_c99_intern(names[source], name_lengths[source]);
+        if (slot->key == NULL) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto namespace_failure;
+        }
+        data->count += 1;
         slot->key_len = name_lengths[source];
         slot->value = value;
         slot->writable = 1;

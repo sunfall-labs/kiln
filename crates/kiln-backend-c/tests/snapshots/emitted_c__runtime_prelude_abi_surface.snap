@@ -1,6 +1,5 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
-assertion_line: 482
 expression: abi_surface(prelude)
 ---
 #include <ctype.h>
@@ -1003,6 +1002,8 @@ typedef struct kiln_gc_block {
 #define KILN_GC_SLOT_FREE ((size_t)-1) /* block->size sentinel: this slot is on the free list */
 typedef struct kiln_gc_slab {
 typedef struct kiln_gc_ptrset {
+typedef struct kiln_key_entry {
+typedef struct kiln_key_table {
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
@@ -1030,6 +1031,21 @@ static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
 static int kiln_c99_string_is_ascii(kiln_value value) {
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
 static void *kiln_c99_gc_calloc(uint32_t kind, size_t size) {
+static const char kiln_c99_key_empty[1] = "";
+static void kiln_c99_gc_mark_block(kiln_gc_heap *heap, const void *payload);
+static uint64_t kiln_c99_key_hash(const char *bytes, size_t len) {
+static kiln_key_entry *kiln_c99_key_probe(const kiln_key_table *table, const char *bytes,
+static void kiln_c99_key_place(kiln_key_table *table, kiln_key_entry entry) {
+static int kiln_c99_key_grow(kiln_key_table *table) {
+static const char *kiln_c99_key_insert(kiln_key_table *table, const char *bytes, size_t len,
+static void kiln_c99_key_delete_at(kiln_key_table *table, size_t hole) {
+static const char *kiln_c99_interned_in(kiln_gc_heap *heap, const char *bytes, size_t len) {
+static const char *kiln_c99_interned(const char *bytes, size_t len) {
+static const char *kiln_c99_intern(const char *bytes, size_t len) {
+static const char *kiln_c99_intern_static(const char *bytes, size_t len) {
+static void kiln_c99_key_forget(kiln_gc_heap *heap, const char *bytes, size_t len) {
+static void kiln_c99_key_mark_pinned(kiln_gc_heap *heap) {
+static void kiln_c99_key_purge(kiln_gc_heap *heap) {
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {
 static void kiln_c99_gc_finalize(kiln_gc_block *block);
 static void kiln_c99_gc_release(void *payload) {
@@ -1080,6 +1096,7 @@ static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_
 static double kiln_c99_key_index(const char *key, size_t key_len) {
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name) {
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
+static size_t kiln_c99_own_index(const kiln_gc_heap *heap, const kiln_object *object,
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
