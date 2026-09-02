@@ -5,6 +5,12 @@
 Accepted. Refines ADR 0032 (which keeps its ownership split) and completes ADR 0040 step 4 for the
 HTTP path. ADR 0041's collector is unchanged.
 
+Implementation state (2026-09-02): the server path is on this design (`kiln-runtime/src/
+http_engine.rs`; the native drive is one future). The HTTP client path and the interpreter still
+use the bridged engine, so `http_transport.rs`, the client half of `hyper_http.rs`,
+`checkpoint_http` and the `_in_context` family remain until they migrate; the archive routes by
+whether the engine owns the resource. The consequences below describe the end state.
+
 ## Context
 
 After ADR 0041 and the checkpoint fix, a natively compiled `node:http` server serves about 56k
