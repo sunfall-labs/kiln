@@ -1630,8 +1630,8 @@ mod realm {
                 let runtime = unsafe { &mut *runtime };
                 if runtime.http_server().is_attached(resource) {
                     let engine_mode = match mode {
-                        HttpCloseMode::Graceful => kiln_runtime::ServerCloseMode::Graceful,
-                        HttpCloseMode::Abort => kiln_runtime::ServerCloseMode::Abort,
+                        HttpCloseMode::Graceful => kiln_runtime::HttpCloseMode::Graceful,
+                        HttpCloseMode::Abort => kiln_runtime::HttpCloseMode::Abort,
                     };
                     return if runtime.http_server().close(resource, engine_mode) {
                         0
@@ -1740,7 +1740,9 @@ mod realm {
                 Some(RuntimeTurn::Timer(WorkItem::Microtask(_))) => {
                     unreachable!("the native drive drains microtasks before selecting a turn")
                 }
-                None => {}
+                // The native dispatch calls the language directly; nothing is ever queued for
+                // this drive, so a ready turn never reports it.
+                Some(RuntimeTurn::Protocol) | None => {}
             }
             let (referenced, pending, in_flight, deadline, now, signal) = {
                 let runtime = realm.runtime.borrow();
@@ -2857,33 +2859,47 @@ mod realm {
         owner: Rc<HttpEventOwner>,
     }
 
-    impl kiln_runtime::ServerDispatch for NativeServerDispatch {
-        fn event(&self, event: &kiln_runtime::ServerEvent<'_>) -> i32 {
-            use kiln_runtime::ServerEventKind;
+    impl kiln_runtime::HttpDispatch for NativeServerDispatch {
+        fn event(&self, event: &kiln_runtime::HttpEvent<'_>) -> i32 {
+            use kiln_runtime::HttpEventKind;
             let Some(realm) = self.realm.upgrade() else {
                 return INVALID_ARGUMENT;
             };
             tick_clock(&realm);
             let (host, thrown) = realm.drive_context.get();
             let kind = match event.kind {
-                ServerEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
-                ServerEventKind::RequestData => HTTP_EVENT_REQUEST_DATA,
-                ServerEventKind::RequestEnd => HTTP_EVENT_REQUEST_END,
-                ServerEventKind::Drain => HTTP_EVENT_DRAIN,
-                ServerEventKind::Finish => HTTP_EVENT_FINISH,
-                ServerEventKind::Error => HTTP_EVENT_ERROR,
-                ServerEventKind::Closed => HTTP_EVENT_CLOSED,
+                HttpEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
+                HttpEventKind::RequestData => HTTP_EVENT_REQUEST_DATA,
+                HttpEventKind::RequestEnd => HTTP_EVENT_REQUEST_END,
+                HttpEventKind::Drain => HTTP_EVENT_DRAIN,
+                HttpEventKind::Finish => HTTP_EVENT_FINISH,
+                HttpEventKind::ResponseHead => HTTP_EVENT_RESPONSE_HEAD,
+                HttpEventKind::ResponseData => HTTP_EVENT_RESPONSE_DATA,
+                HttpEventKind::ResponseEnd => HTTP_EVENT_RESPONSE_END,
+                HttpEventKind::Error => HTTP_EVENT_ERROR,
+                HttpEventKind::Closed => HTTP_EVENT_CLOSED,
             };
             let (method, method_len) = HttpEventPayload::bytes(event.method);
             let (target, target_len) = HttpEventPayload::bytes(event.target);
-            let (reason, reason_len) = HttpEventPayload::bytes(event.message);
+            // The view's `reason` slot carries the status text of a response head and the
+            // message of an error; the generated handler reads it by kind.
+            let (reason, reason_len) =
+                HttpEventPayload::bytes(if event.kind == HttpEventKind::Error {
+                    event.message
+                } else {
+                    event.reason
+                });
             let (headers, headers_len) = HttpEventPayload::bytes(event.headers);
-            let (data, data_len) = HttpEventPayload::bytes(event.data);
+            let (data, data_len) = HttpEventPayload::bytes(if event.kind == HttpEventKind::Error {
+                event.message
+            } else {
+                event.data
+            });
             let view = HttpEventView {
                 kind,
                 flags: u32::from(event.keep_alive),
                 id: event.id,
-                status: 0,
+                status: event.status,
                 version_minor: event.version_minor,
                 reserved: 0,
                 method,
@@ -2903,7 +2919,10 @@ mod realm {
                 unsafe { (self.owner.run)(self.owner.pointer, &raw const view, host, thrown) };
             if matches!(
                 event.kind,
-                ServerEventKind::Finish | ServerEventKind::Closed | ServerEventKind::Error
+                HttpEventKind::Finish
+                    | HttpEventKind::ResponseEnd
+                    | HttpEventKind::Closed
+                    | HttpEventKind::Error
             ) {
                 // The drive may be waiting for exactly this request to finish.
                 let runtime = realm.runtime.borrow();
@@ -2911,7 +2930,7 @@ mod realm {
                     runtime.wake_drive();
                 }
             }
-            if event.kind == ServerEventKind::Closed {
+            if event.kind == HttpEventKind::Closed {
                 realm.http_connections.borrow_mut().remove(&self.resource);
                 let _ = realm
                     .runtime

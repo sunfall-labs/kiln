@@ -13101,6 +13101,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 return Ok(());
             };
             match turn {
+                // The HTTP engines queued events; the checkpoint at the top of the loop
+                // drains them.
+                RuntimeTurn::Protocol => {}
                 RuntimeTurn::Completion(completion) => {
                     runtime.enter(|| self.settle_host_completion(completion))?;
                 }
