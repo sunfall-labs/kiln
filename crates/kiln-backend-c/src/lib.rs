@@ -3027,6 +3027,19 @@ typedef struct kiln_object {
  * interpreter's. */
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 
+/* A compiled named-access site's memory of where its key was last found (ADR 0047): a slot on
+ * the receiver, or a slot on the receiver's immediate prototype. Objects have no shape, so a
+ * hit is validated by the key itself: keys are unique within an object and canonical across
+ * the realm, so `properties[own].key == key` proves the slot *is* the property, on any object
+ * whatsoever -- and objects built by the same code put their keys at the same indices, which is
+ * what makes one guess right for every instance of a class that does not exist. One of these is
+ * a block-scope static at each GetProperty, SetProperty, SetPropertyStrict and CallMethod. */
+typedef struct kiln_c99_site {
+    uint32_t own;
+    uint32_t proto;
+} kiln_c99_site;
+#define KILN_C99_SITE_NONE 0xFFFFFFFFu
+
 /* A proxy's two halves.
  *
  * Both are held as ordinary values because both are: a handler is a plain object whose
@@ -13556,6 +13569,108 @@ static int kiln_c99_get(kiln_host *host, kiln_value target, const char *key, siz
         return KILN_C99_OK;
     }
     return status;
+}
+
+/* Remember where `key` sits on `object`, or on its immediate prototype, for next time. A
+ * machine-private (`@@`) key has hiding rules and `__proto__` a relinking rule; both stay the
+ * slow path's alone, so a site never learns either. */
+static void kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
+                                size_t key_len) {
+    size_t index;
+    if ((key_len >= 2 && key[0] == '@' && key[1] == '@') ||
+        (key_len == 9 && memcmp(key, "__proto__", 9) == 0)) {
+        return;
+    }
+    for (index = 0; index < object->count; ++index) {
+        if (object->properties[index].key == key) {
+            site->own = index < KILN_C99_SITE_NONE ? (uint32_t)index : KILN_C99_SITE_NONE;
+            site->proto = KILN_C99_SITE_NONE;
+            return;
+        }
+    }
+    if (object->prototype.tag == KILN_VALUE_OBJECT) {
+        const kiln_object *parent = kiln_c99_object_of(object->prototype);
+        for (index = 0; index < parent->count; ++index) {
+            if (parent->properties[index].key == key) {
+                site->own = KILN_C99_SITE_NONE;
+                site->proto = index < KILN_C99_SITE_NONE ? (uint32_t)index : KILN_C99_SITE_NONE;
+                return;
+            }
+        }
+    }
+}
+
+/* `kiln_c99_get` with a site. `key` is the unit's canonical pointer for the name.
+ *
+ * A hit answers exactly what the slow path would. The own hit is the property the slow path's
+ * first scan finds, because a key is on an object at most once. The prototype hit is taken only
+ * after the receiver's own list has been scanned and missed -- by pointer, no bytes -- and only
+ * when the immediate prototype is an ordinary object, which is precisely the slow path's second
+ * step. An accessor is never answered here: reading one is a call. */
+static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             kiln_value *out, int depth, kiln_value *thrown, kiln_c99_site *site) {
+    int status;
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return kiln_c99_get(host, target, key, key_len, out, depth, thrown);
+    }
+    {
+        const kiln_object *object = kiln_c99_object_of(target);
+        uint32_t own = site->own;
+        if (own < object->count && object->properties[own].key == key) {
+            if (!object->properties[own].accessor) {
+                *out = object->properties[own].value;
+                return KILN_C99_OK;
+            }
+        } else if (site->proto != KILN_C99_SITE_NONE &&
+                   object->prototype.tag == KILN_VALUE_OBJECT) {
+            size_t index = 0;
+            while (index < object->count && object->properties[index].key != key) ++index;
+            if (index == object->count) {
+                const kiln_object *parent = kiln_c99_object_of(object->prototype);
+                uint32_t at = site->proto;
+                if (at < parent->count && parent->properties[at].key == key &&
+                    !parent->properties[at].accessor) {
+                    *out = parent->properties[at].value;
+                    return KILN_C99_OK;
+                }
+            }
+        }
+        status = kiln_c99_get(host, target, key, key_len, out, depth, thrown);
+        if (status == KILN_C99_OK) {
+            kiln_c99_site_learn(site, object, key, key_len);
+        }
+        return status;
+    }
+}
+
+/* `kiln_c99_put_mode` with a site. A hit is an own writable data property on an object that is
+ * neither frozen nor a module namespace, which is the case the slow path answers by assigning
+ * in place after its own-list scan; every other case, a setter on the chain included, is the
+ * slow path's. */
+static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+                             kiln_value value, int strict, int depth, kiln_value *thrown,
+                             kiln_c99_site *site) {
+    int status;
+    if (target.tag != KILN_VALUE_OBJECT) {
+        return kiln_c99_put_mode(host, target, key, key_len, value, strict, depth, thrown);
+    }
+    {
+        kiln_object *object = kiln_c99_object_of(target);
+        uint32_t own = site->own;
+        if (own < object->count && object->properties[own].key == key && !object->frozen &&
+            !object->module_namespace) {
+            kiln_property *property = &object->properties[own];
+            if (!property->accessor && property->writable) {
+                property->value = value;
+                return KILN_C99_OK;
+            }
+        }
+        status = kiln_c99_put_mode(host, target, key, key_len, value, strict, depth, thrown);
+        if (status == KILN_C99_OK) {
+            kiln_c99_site_learn(site, object, key, key_len);
+        }
+        return status;
+    }
 }
 
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
@@ -30856,7 +30971,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get(host, target, {symbol}_key_{name}, {}, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE}}; kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len()
             )
             .unwrap();
@@ -30869,7 +30984,7 @@ fn emit_instruction(
             // The written value stays on the stack, which is what makes `a = b.c = d` work.
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put(host, stack[sp - 1], {symbol}_key_{name}, {}, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE}}; kiln_value member = stack[--sp]; int status = kiln_c99_put_site(host, stack[sp - 1], {symbol}_key_{name}, {}, member, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len()
             )
             .unwrap();
@@ -30881,7 +30996,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; int status = kiln_c99_put_mode(host, stack[sp - 1], {symbol}_key_{name}, {}, member, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE}}; kiln_value member = stack[--sp]; int status = kiln_c99_put_site(host, stack[sp - 1], {symbol}_key_{name}, {}, member, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
                 text.len(),
                 i32::from(*strict)
             )
@@ -31229,7 +31344,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE}}; kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_site(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )

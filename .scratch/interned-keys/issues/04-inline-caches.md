@@ -1,6 +1,6 @@
 # 04 — Per-site slot caches for named access
 
-Status: ready-for-agent
+Status: done
 Depends on: 03
 
 ## What
