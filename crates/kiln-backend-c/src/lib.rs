@@ -4601,6 +4601,16 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_HOOKS_VERSION 1u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
 
+/* `kind` carries `kiln_gc_kind` in its low bits and, for a `KILN_GC_STRING` block only, a cached
+ * answer to "is this string all ASCII" (ADR 0022: ASCII is exactly the case where a code-unit
+ * index equals a byte offset, which is what every position-taking string operation walks UTF-8 to
+ * find) in its top two. `KILN_GC_KIND_COUNT` is nowhere near the mask's ~30 low bits, so the two
+ * high bits are free; every reader of `block->kind` as a `kiln_gc_kind` must mask with
+ * `KILN_GC_KIND_MASK` first. */
+#define KILN_GC_KIND_MASK ((uint32_t)0x3FFFFFFFu)
+#define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
+#define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
+
 typedef struct kiln_gc_block {
     struct kiln_gc_block *prev;
     struct kiln_gc_block *next;
@@ -5008,6 +5018,49 @@ static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *p
     return kiln_c99_gc_lookup_slab(heap, payload, NULL);
 }
 
+/* A branch-light ASCII test, 8 bytes at a time: ASCII is exactly the bytes with their top bit
+ * clear, so a single mask-and-compare per word answers for all eight at once. The tail below
+ * 8 bytes falls back to one byte at a time. */
+static int kiln_c99_ascii_scan(const char *bytes, size_t len) {
+    size_t index = 0;
+    while (index + 8 <= len) {
+        uint64_t word;
+        memcpy(&word, bytes + index, sizeof word);
+        if ((word & UINT64_C(0x8080808080808080)) != 0) return 0;
+        index += 8;
+    }
+    while (index < len) {
+        if (((unsigned char)bytes[index]) & 0x80u) return 0;
+        ++index;
+    }
+    return 1;
+}
+
+/* Is this string value entirely ASCII, where a UTF-16 code unit is a byte and `length` is `len`
+ * (ADR 0022)? A heap string (`kiln_c99_gc_lookup` finds its block) caches the answer in the
+ * block's otherwise-unused `kind` high bits (ADR 0041) after the first scan, so a string read
+ * more than once -- a repeated header name, a request path used by several route checks --
+ * pays for the scan at most once. A constant or foreign pointer has no block to cache in and is
+ * scanned every call; constants are short (path segments, JSON keys, literals a program wrote)
+ * and the scan is cheap relative to the UTF-8 decode it replaces. */
+static int kiln_c99_string_is_ascii(kiln_value value) {
+    kiln_gc_heap *heap;
+    kiln_gc_block *block;
+    int ascii;
+    if (value.len == 0) return 1;
+    heap = kiln_c99_gc_heap();
+    block = heap != NULL ? kiln_c99_gc_lookup(heap, value.ptr) : NULL;
+    if (block != NULL && (block->kind & KILN_GC_FLAG_ASCII_KNOWN) != 0) {
+        return (block->kind & KILN_GC_FLAG_ASCII) != 0;
+    }
+    ascii = kiln_c99_ascii_scan(value.ptr, value.len);
+    if (block != NULL) {
+        block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
+                      (ascii ? KILN_GC_FLAG_ASCII : 0u);
+    }
+    return ascii;
+}
+
 static void *kiln_c99_gc_alloc(uint32_t kind, size_t size) {
     kiln_gc_heap *heap = kiln_c99_gc_heap();
     size_t payload = size == 0 ? 1 : size;
@@ -5135,7 +5188,7 @@ static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values
 
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     void *payload = block + 1;
-    switch (block->kind) {
+    switch (block->kind & KILN_GC_KIND_MASK) {
     case KILN_GC_OBJECT: {
         kiln_object *object = (kiln_object *)payload;
         size_t index;
@@ -5319,7 +5372,7 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
  * here. A kind whose payload owns a provider handle releases it here too. */
 static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     void *payload = block + 1;
-    switch (block->kind) {
+    switch (block->kind & KILN_GC_KIND_MASK) {
     case KILN_GC_OBJECT:
         free(((kiln_object *)payload)->properties);
         break;
@@ -10927,10 +10980,16 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     kiln_value l = kiln_c99_text(left);
     kiln_value r = kiln_c99_text(right);
     char *copy;
+    int ascii;
     if ((l.len != 0 && l.ptr == NULL) || (r.len != 0 && r.ptr == NULL) ||
         l.len > (size_t)-1 - r.len) {
         return kiln_c99_undefined();
     }
+    /* ASCII is closed under concatenation. Knowing both halves before the copy means the new
+     * block can be marked known-ASCII on the way out instead of leaving it to be rescanned the
+     * first time anything asks its length or slices it -- the common case for `"x" + suffix`
+     * request-path assembly (ADR 0041's header is where the answer is cached). */
+    ascii = kiln_c99_string_is_ascii(l) && kiln_c99_string_is_ascii(r);
     copy = kiln_c99_gc_alloc_text(l.len + r.len);
     if (copy == NULL) {
         return kiln_c99_undefined();
@@ -10940,6 +10999,14 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     }
     if (r.len != 0) {
         memcpy(copy + l.len, r.ptr, r.len);
+    }
+    if (ascii) {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, copy) : NULL;
+        if (block != NULL) {
+            block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
+                          KILN_GC_FLAG_ASCII;
+        }
     }
     return kiln_c99_value(KILN_VALUE_STRING, 0, copy, l.len + r.len);
 }
@@ -11123,11 +11190,21 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
 }
 
 /* `length` in UTF-16 code units, which is what JavaScript counts and is neither bytes nor
- * characters. */
+ * characters. For ASCII text a code unit is a byte (ADR 0022), so `value.len` -- already known,
+ * already paid for -- is the answer without walking a single byte. */
 static size_t kiln_c99_string_length(kiln_value value) {
-    kiln_c99_utf16_iter iterator = {value.ptr, value.len, 0, 0, 0};
-    size_t units = 0;
+    kiln_c99_utf16_iter iterator;
+    size_t units;
     uint16_t unit;
+    if (kiln_c99_string_is_ascii(value)) {
+        return value.len;
+    }
+    iterator.text = value.ptr;
+    iterator.length = value.len;
+    iterator.offset = 0;
+    iterator.pending = 0;
+    iterator.has_pending = 0;
+    units = 0;
     while (kiln_c99_utf16_next(&iterator, &unit)) {
         units += 1;
     }
@@ -13884,11 +13961,41 @@ static kiln_value kiln_c99_inspect(kiln_value value) {
  *
  * The caller owns the returned array and frees it. */
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
-    kiln_c99_utf16_iter iterator = {value.ptr, value.len, 0, 0, 0};
-    uint16_t *units = NULL;
-    size_t capacity = 0;
-    size_t length = 0;
+    kiln_c99_utf16_iter iterator;
+    uint16_t *units;
+    size_t capacity;
+    size_t length;
     uint16_t unit;
+    /* ASCII text has one code unit per byte and no surrogate pairing to do, so the whole
+     * decode state machine (kiln_c99_utf8_next by way of kiln_c99_utf16_next) is replaced with
+     * a straight widening copy -- still O(len), but branch-free per byte instead of walking a
+     * UTF-8 length table and a surrogate split for every unit. */
+    if (kiln_c99_string_is_ascii(value)) {
+        size_t index;
+        if (value.len == 0) {
+            *out = NULL;
+            *count = 0;
+            return KILN_C99_OK;
+        }
+        units = (uint16_t *)malloc(value.len * sizeof *units);
+        if (units == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < value.len; ++index) {
+            units[index] = (uint16_t)(unsigned char)value.ptr[index];
+        }
+        *out = units;
+        *count = value.len;
+        return KILN_C99_OK;
+    }
+    iterator.text = value.ptr;
+    iterator.length = value.len;
+    iterator.offset = 0;
+    iterator.pending = 0;
+    iterator.has_pending = 0;
+    units = NULL;
+    capacity = 0;
+    length = 0;
     while (kiln_c99_utf16_next(&iterator, &unit)) {
         if (kiln_c99_reserve((void **)&units, &capacity, length + 1, sizeof *units) !=
             KILN_C99_OK) {
@@ -13903,12 +14010,59 @@ static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
     return KILN_C99_OK;
 }
 
+/* Every unit below 0x80, 4 at a time: a code unit is ASCII exactly when its top 9 bits (the
+ * surrogate range and the rest of the non-Latin1 unit space) are clear, so masking each 16-bit
+ * lane's high byte down to the 0x80 bit and comparing the 64-bit word to zero answers for four
+ * units at once. */
+static int kiln_c99_units_ascii(const uint16_t *units, size_t count) {
+    size_t index = 0;
+    while (index + 4 <= count) {
+        uint64_t word;
+        memcpy(&word, units + index, sizeof word);
+        if ((word & UINT64_C(0xFF80FF80FF80FF80)) != 0) return 0;
+        index += 4;
+    }
+    while (index < count) {
+        if (units[index] >= 0x80) return 0;
+        ++index;
+    }
+    return 1;
+}
+
 /* Re-encode, pairing surrogates back up.  An *unpaired* surrogate has no scalar value, so it
  * becomes U+FFFD -- a kiln string cannot hold one, which is the divergence ADR 0022 records and
- * the interpreter's `String::from_utf16_lossy` makes the same substitution. */
+ * the interpreter's `String::from_utf16_lossy` makes the same substitution.
+ *
+ * When every unit is ASCII there is no pairing, no variable width and no growable builder to
+ * drive: a unit is a byte, so this narrows straight into a fresh block and marks it known-ASCII
+ * on the way out, which is what buys the *next* read of a slice or split result a free length
+ * and a free re-decode (ADR 0041's block header is the cache; kiln_c99_string_is_ascii is the
+ * reader). */
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
     kiln_text text = {NULL, 0, 0};
     size_t index;
+    if (kiln_c99_units_ascii(units, count)) {
+        char *copy;
+        kiln_gc_heap *heap;
+        kiln_gc_block *block;
+        if (count == 0) {
+            return kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0);
+        }
+        copy = kiln_c99_gc_alloc_text(count);
+        if (copy == NULL) {
+            return kiln_c99_undefined();
+        }
+        for (index = 0; index < count; ++index) {
+            copy[index] = (char)units[index];
+        }
+        heap = kiln_c99_gc_heap();
+        block = heap != NULL ? kiln_c99_gc_lookup(heap, copy) : NULL;
+        if (block != NULL) {
+            block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
+                          KILN_GC_FLAG_ASCII;
+        }
+        return kiln_c99_value(KILN_VALUE_STRING, 0, copy, count);
+    }
     for (index = 0; index < count; ++index) {
         uint32_t point = units[index];
         char bytes[4];
@@ -24124,11 +24278,31 @@ static int kiln_c99_define_method(kiln_value target, const char *key, size_t key
  *
  * Serialising can *call*: `toJSON` runs before anything else is decided about a value, and a
  * property may be an accessor. So this takes a host and a depth like every other read does. */
+/* Whether any byte in this span needs `\"`, `\\` or `\u00XX` escaping. A single predicate pass
+ * over plain comparisons, with no per-byte call into the text builder, is what lets the common
+ * case below become one bulk append instead of one append per byte -- and it is exactly as valid
+ * for a multi-byte UTF-8 string as for ASCII, since every continuation and lead byte is >= 0x80
+ * and so never equals a quote, a backslash or a C0 control. */
+static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
+    size_t index;
+    for (index = 0; index < len; ++index) {
+        unsigned char byte = (unsigned char)bytes[index];
+        if (byte == '"' || byte == '\\' || byte < 0x20) return 1;
+    }
+    return 0;
+}
+
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
     static const char digits[] = "0123456789abcdef";
     size_t index;
     if (kiln_c99_text_append(text, "\"", 1) != KILN_C99_OK) {
         return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (!kiln_c99_json_needs_escape(bytes, len)) {
+        if (kiln_c99_text_append(text, bytes, len) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        return kiln_c99_text_append(text, "\"", 1);
     }
     for (index = 0; index < len; ++index) {
         char byte = bytes[index];
