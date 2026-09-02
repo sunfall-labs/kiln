@@ -10,3 +10,12 @@ console.log(new Set([1, 2]), new Map([['k', 1]]), new Set(), new Map());
 console.log(function named() {}, () => {}, Symbol('s'), Symbol.iterator);
 console.log({ s: "it's", t: 'a\tb\nc' });
 console.log(-0, [-0], 1e21, [1e21]);
+// A weak collection shows neither its size nor its contents, because it cannot: an entry is
+// reachable only through a key the console does not hold, and enumerating one would make the
+// collector's timing observable. Both engines showed `Map(0) {}` for a `WeakMap` -- the right
+// count, the wrong container, and a label naming a type the value is not.
+const weakKey = {};
+const weakMap = new WeakMap([[weakKey, 1]]);
+const weakSet = new WeakSet([weakKey]);
+console.log(new WeakMap(), new WeakSet());
+console.log(weakMap, weakSet);
