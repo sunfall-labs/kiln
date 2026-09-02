@@ -636,6 +636,9 @@ mod realm {
         entropy: Cell<Option<(u64, u64)>>,
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
+        /// The `host` and `thrown` slots of the drive in progress, for callbacks the HTTP engine
+        /// makes from inside a Tokio task (ADR 0042). Null outside a drive.
+        drive_context: Cell<(*mut c_void, *mut c_void)>,
         /// Declared last so it is dropped last: `Drop for NativeRealm` tears the heap down only
         /// after every field above has released what it held.
         gc: RefCell<GcState>,
@@ -868,6 +871,7 @@ mod realm {
                 entropy: Cell::new(None),
                 entered: Cell::new(false),
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
+                drive_context: Cell::new((std::ptr::null_mut(), std::ptr::null_mut())),
                 gc: RefCell::new(GcState::default()),
             })
         }
@@ -1221,8 +1225,9 @@ mod realm {
             let resources = realm
                 .http_connections
                 .borrow()
-                .keys()
-                .copied()
+                .iter()
+                .filter(|(_, connection)| connection.role == HttpRole::Client)
+                .map(|(resource, _)| *resource)
                 .collect::<Vec<_>>();
             for resource in resources {
                 loop {
@@ -1566,6 +1571,21 @@ mod realm {
                 _ => return INVALID_ARGUMENT,
             };
             let resource = kiln_host_abi::ResourceId::new(resource);
+            {
+                // SAFETY: this private ABI call runs synchronously inside the active realm.
+                let runtime = unsafe { &mut *runtime };
+                if runtime.http_server().is_attached(resource) {
+                    let engine_mode = match mode {
+                        HttpCloseMode::Graceful => kiln_runtime::ServerCloseMode::Graceful,
+                        HttpCloseMode::Abort => kiln_runtime::ServerCloseMode::Abort,
+                    };
+                    return if runtime.http_server().close(resource, engine_mode) {
+                        0
+                    } else {
+                        INVALID_ARGUMENT
+                    };
+                }
+            }
             let abort_owner = if mode == HttpCloseMode::Abort {
                 realm
                     .http_connections
@@ -1611,113 +1631,172 @@ mod realm {
     }
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
+        // One `block_on` for the life of the drive (ADR 0040 step 4, ADR 0042). Every callback
+        // the language makes back into this archive is already in context, and the HTTP engine's
+        // tasks call the language while this future is parked, so no RefCell of the realm may be
+        // held across an await here.
+        let executor = realm.runtime.borrow().drive_executor();
+        let _active = ActiveRuntime::enter(realm.runtime.as_ptr());
+        realm.drive_context.set((host, thrown));
+        let status = executor.block_on(drive_async(realm));
+        realm
+            .drive_context
+            .set((std::ptr::null_mut(), std::ptr::null_mut()));
+        status
+    }
+
+    async fn drive_async(realm: &NativeRealm) -> i32 {
         loop {
             collect_if_due(realm);
-            // Neither lane checkpoints between items. A checkpoint drives the Tokio scheduler,
-            // and doing that after every microtask made the per-request cost scale with how many
-            // microtasks a request happens to enqueue rather than with the work it does. The
-            // checkpoint below still runs before the loop can block, so nothing a callback wrote
-            // waits on a socket: it is deferred to the end of the drain, not past it. Batching it
-            // also lets one flush carry the writes of a whole turn.
-            let next_tick = realm.work.borrow_mut().pop_next_tick();
-            if let Some(work) = next_tick {
-                let status = run_in_runtime(realm, || work.run(host, thrown));
-                if status != 0 {
-                    return status;
-                }
-                continue;
+            let status = drain_realm_queues(realm);
+            if status != 0 {
+                return status;
             }
-
-            let microtask = realm.work.borrow_mut().pop_microtask();
-            if let Some(work) = microtask {
-                let status = run_in_runtime(realm, || work.run(host, thrown));
-                if status != 0 {
-                    return status;
-                }
-                continue;
-            }
-
-            // HTTP protocol futures can become runnable without a HostOps completion. A
-            // checkpoint publishes their events into the same FIFO microtask lane; when it did,
-            // loop immediately so callbacks run before any blocking host turn is selected.
-            match checkpoint_http(realm, false) {
+            // Client connections still use the bridged engine and are checkpointed here; their
+            // events enter the microtask lane, so loop when any did.
+            match checkpoint_http(realm, true) {
                 Ok(events) if events != 0 => continue,
                 Ok(_) => {}
                 Err(status) => return status,
             }
             let turn = {
                 let mut runtime = realm.runtime.borrow_mut();
-                let mut work = realm.work.borrow_mut();
-                runtime.next_referenced_turn(&mut work)
+                runtime.pause_time();
+                runtime.ready_turn::<NativeWork, NativeWork>()
             };
             match turn {
                 Some(RuntimeTurn::Completion(completion)) => {
-                    let http_resource =
-                        { realm.http_requests.borrow_mut().remove(&completion.request) };
-                    if let Some(resource) = http_resource {
-                        let Some(actions) = realm
-                            .runtime
-                            .borrow_mut()
-                            .complete_http_connection(resource, completion)
-                        else {
-                            return RUNTIME_ERROR;
-                        };
-                        let status = apply_http_actions(realm, resource, actions, false);
-                        if status != 0 {
-                            return status;
-                        }
-                        if let Err(status) = checkpoint_http_after_wake(realm) {
-                            return status;
-                        }
-                        continue;
+                    if let Some(status) = route_completion(realm, completion) {
+                        return status;
                     }
-                    let continuation = realm.continuations.borrow_mut().remove(&completion.request);
-                    let Some(continuation) = continuation else {
-                        continue;
-                    };
-                    let payload = CompletionPayload::from_result(
-                        completion.request,
-                        completion.sequence,
-                        completion.result,
-                    );
-                    let completion_work = Box::new(CompletionWork {
-                        request: completion.request,
-                        continuation: Some(continuation),
-                        payload,
-                        cancelled: Rc::clone(&realm.cancelled),
-                        queued: Rc::clone(&realm.queued),
-                    });
-                    realm.queued.borrow_mut().insert(completion.request);
-                    let pointer = Box::into_raw(completion_work).cast::<c_void>();
-                    let Some(work) = NativeWork::with_roots(
-                        pointer,
-                        Some(run_completion),
-                        Some(drop_completion),
-                        WorkRoots::Completion,
-                    ) else {
-                        // SAFETY: `pointer` was produced by Box::into_raw and ownership has not
-                        // been transferred because the callback pair was rejected.
-                        unsafe { drop_completion(pointer) };
-                        return RUNTIME_ERROR;
-                    };
-                    realm.work.borrow_mut().queue_microtask(work);
+                    continue;
                 }
                 Some(RuntimeTurn::Failure(_)) => return RUNTIME_ERROR,
                 Some(RuntimeTurn::Timer(WorkItem::Timer { work, .. })) => {
-                    let status = run_in_runtime(realm, || work.run(host, thrown));
+                    let (host, thrown) = realm.drive_context.get();
+                    let status = work.run(host, thrown);
                     if status != 0 {
                         return status;
                     }
-                    if let Err(status) = checkpoint_http(realm, false) {
+                    continue;
+                }
+                Some(RuntimeTurn::Timer(WorkItem::Microtask(_))) => {
+                    unreachable!("the native drive drains microtasks before selecting a turn")
+                }
+                None => {}
+            }
+            let (referenced, pending, in_flight, deadline, now, signal) = {
+                let runtime = realm.runtime.borrow();
+                let mut work = realm.work.borrow_mut();
+                (
+                    runtime.has_referenced_host_work(),
+                    runtime.has_pending_host_work(),
+                    runtime.requests_in_flight(),
+                    work.next_timer_deadline(),
+                    work.now(),
+                    runtime.completion_signal(),
+                )
+            };
+            if kiln_runtime::http_engine::trace_enabled() {
+                eprintln!(
+                    "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
+                    realm.runtime.borrow().describe_host_work(),
+                );
+            }
+            // A completion can arrive only while an operation is pending, and it matters only
+            // while something referenced keeps the realm alive; a direct connection with a
+            // response outstanding is alive on its own. Otherwise only virtual timers remain.
+            let completions_possible = referenced && pending;
+            if !completions_possible && in_flight == 0 {
+                if deadline.is_none() {
+                    return 0;
+                }
+                let timer = realm.work.borrow_mut().run_next_timer();
+                if let Some(WorkItem::Timer { work, .. }) = timer {
+                    let (host, thrown) = realm.drive_context.get();
+                    let status = work.run(host, thrown);
+                    if status != 0 {
                         return status;
                     }
                 }
-                Some(RuntimeTurn::Timer(WorkItem::Microtask(_))) => {
-                    unreachable!("native drive drains microtasks before selecting a turn")
+                continue;
+            }
+            let Some(signal) = signal else {
+                return RUNTIME_ERROR;
+            };
+            // Yield first: a task woken by the last turn (a Hyper connection with a request to
+            // dispatch, a completion about to land) runs now, before anything parks.
+            kiln_runtime::yield_to_tasks().await;
+            // The yield may have run a bridged client connection's Hyper task; what it produced
+            // must reach the microtask lane before anything parks.
+            match checkpoint_http(realm, true) {
+                Ok(events) if events != 0 => continue,
+                Ok(_) => {}
+                Err(status) => return status,
+            }
+            let delay = deadline.map(|deadline| deadline.saturating_sub(now));
+            if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer {
+                let timer = realm.work.borrow_mut().run_next_timer();
+                if let Some(WorkItem::Timer { work, .. }) = timer {
+                    let (host, thrown) = realm.drive_context.get();
+                    let status = work.run(host, thrown);
+                    if status != 0 {
+                        return status;
+                    }
                 }
-                None => return 0,
             }
         }
+    }
+
+    /// Route one host completion: an HTTP client completion to its bridged connection, any
+    /// other to its continuation, which runs as a microtask. `Some` is a failure status.
+    fn route_completion(realm: &NativeRealm, completion: kiln_host_abi::Completion) -> Option<i32> {
+        let http_resource = { realm.http_requests.borrow_mut().remove(&completion.request) };
+        if let Some(resource) = http_resource {
+            let actions = realm
+                .runtime
+                .borrow_mut()
+                .complete_http_connection(resource, completion);
+            let Some(actions) = actions else {
+                return Some(RUNTIME_ERROR);
+            };
+            let status = apply_http_actions(realm, resource, actions, true);
+            if status != 0 {
+                return Some(status);
+            }
+            return None;
+        }
+        let continuation = realm.continuations.borrow_mut().remove(&completion.request);
+        let Some(continuation) = continuation else {
+            return None;
+        };
+        let payload = CompletionPayload::from_result(
+            completion.request,
+            completion.sequence,
+            completion.result,
+        );
+        let completion_work = Box::new(CompletionWork {
+            request: completion.request,
+            continuation: Some(continuation),
+            payload,
+            cancelled: Rc::clone(&realm.cancelled),
+            queued: Rc::clone(&realm.queued),
+        });
+        realm.queued.borrow_mut().insert(completion.request);
+        let pointer = Box::into_raw(completion_work).cast::<c_void>();
+        let Some(work) = NativeWork::with_roots(
+            pointer,
+            Some(run_completion),
+            Some(drop_completion),
+            WorkRoots::Completion,
+        ) else {
+            // SAFETY: `pointer` was produced by Box::into_raw and ownership has not been
+            // transferred because the callback pair was rejected.
+            unsafe { drop_completion(pointer) };
+            return Some(RUNTIME_ERROR);
+        };
+        realm.work.borrow_mut().queue_microtask(work);
+        None
     }
 
     /// Creates one current-thread Realm Runtime and writes its opaque identity to `out`.
@@ -2544,6 +2623,9 @@ mod realm {
             // `flags & 1` is the generic request-liveness bit; zero leaves incidental inspection
             // requests unreferenced while resource creation still records its own resource state.
             let referenced = operation_view.flags & 1 != 0;
+            if kiln_runtime::http_engine::trace_enabled() {
+                eprintln!("[kiln-host] start {operation:?} referenced={referenced}");
+            }
             let request = unsafe { &mut *runtime }.start_host_op_in_context(operation, referenced);
             let continuation = AsyncContinuation {
                 pointer: work,
@@ -2621,6 +2703,116 @@ mod realm {
         unsafe { kiln_realm_cancel_request(handle, request) }
     }
 
+    /// Runs every queued next-tick and microtask. This is the checkpoint the drive performs
+    /// between turns and the one the HTTP engine performs after every direct callback (ADR
+    /// 0042); both are in context.
+    fn drain_realm_queues(realm: &NativeRealm) -> i32 {
+        let (host, thrown) = realm.drive_context.get();
+        loop {
+            let next_tick = realm.work.borrow_mut().pop_next_tick();
+            if let Some(work) = next_tick {
+                let status = work.run(host, thrown);
+                if status != 0 {
+                    return status;
+                }
+                continue;
+            }
+            let microtask = realm.work.borrow_mut().pop_microtask();
+            if let Some(work) = microtask {
+                let status = work.run(host, thrown);
+                if status != 0 {
+                    return status;
+                }
+                continue;
+            }
+            // The queues are empty and no generated frame is on the stack: this is the turn
+            // boundary ADR 0041 collects at. With connections driven by their own tasks (ADR
+            // 0042) it is the boundary a server reaches once per callback, so it is offered here
+            // rather than only from the drive loop.
+            collect_if_due(realm);
+            return 0;
+        }
+    }
+
+    /// The realm's side of a direct server connection: protocol events become the private ABI's
+    /// event view and go straight to the generated C handler; the checkpoint drains the queues.
+    struct NativeServerDispatch {
+        realm: std::rc::Weak<NativeRealm>,
+        resource: kiln_host_abi::ResourceId,
+        owner: Rc<HttpEventOwner>,
+    }
+
+    impl kiln_runtime::ServerDispatch for NativeServerDispatch {
+        fn event(&self, event: &kiln_runtime::ServerEvent<'_>) -> i32 {
+            use kiln_runtime::ServerEventKind;
+            let Some(realm) = self.realm.upgrade() else {
+                return INVALID_ARGUMENT;
+            };
+            let (host, thrown) = realm.drive_context.get();
+            let kind = match event.kind {
+                ServerEventKind::RequestHead => HTTP_EVENT_REQUEST_HEAD,
+                ServerEventKind::RequestData => HTTP_EVENT_REQUEST_DATA,
+                ServerEventKind::RequestEnd => HTTP_EVENT_REQUEST_END,
+                ServerEventKind::Drain => HTTP_EVENT_DRAIN,
+                ServerEventKind::Finish => HTTP_EVENT_FINISH,
+                ServerEventKind::Error => HTTP_EVENT_ERROR,
+                ServerEventKind::Closed => HTTP_EVENT_CLOSED,
+            };
+            let (method, method_len) = HttpEventPayload::bytes(event.method);
+            let (target, target_len) = HttpEventPayload::bytes(event.target);
+            let (reason, reason_len) = HttpEventPayload::bytes(event.message);
+            let (headers, headers_len) = HttpEventPayload::bytes(event.headers);
+            let (data, data_len) = HttpEventPayload::bytes(event.data);
+            let view = HttpEventView {
+                kind,
+                flags: u32::from(event.keep_alive),
+                id: event.id,
+                status: 0,
+                version_minor: event.version_minor,
+                reserved: 0,
+                method,
+                method_len,
+                target,
+                target_len,
+                reason,
+                reason_len,
+                headers,
+                headers_len,
+                data,
+                data_len,
+            };
+            // SAFETY: the engine keeps every span live for this synchronous call, and the
+            // owner's adapter allocation lives until the connection is removed below.
+            let status =
+                unsafe { (self.owner.run)(self.owner.pointer, &raw const view, host, thrown) };
+            if matches!(
+                event.kind,
+                ServerEventKind::Finish | ServerEventKind::Closed | ServerEventKind::Error
+            ) {
+                // The drive may be waiting for exactly this request to finish.
+                let runtime = realm.runtime.borrow();
+                if !runtime.has_pending_host_work() {
+                    runtime.wake_drive();
+                }
+            }
+            if event.kind == ServerEventKind::Closed {
+                realm.http_connections.borrow_mut().remove(&self.resource);
+                let _ = realm
+                    .runtime
+                    .borrow_mut()
+                    .retire_http_connection(self.resource);
+            }
+            status
+        }
+
+        fn checkpoint(&self) -> i32 {
+            let Some(realm) = self.realm.upgrade() else {
+                return INVALID_ARGUMENT;
+            };
+            drain_realm_queues(&realm)
+        }
+    }
+
     fn attach_http(
         resource: u64,
         role: HttpRole,
@@ -2649,6 +2841,25 @@ mod realm {
             });
             // SAFETY: active_runtime points at this active realm's exclusively-entered runtime.
             let runtime = unsafe { &mut *runtime };
+            if role == HttpRole::Server {
+                // ADR 0042: Hyper drives the socket; events call the C handler directly.
+                let dispatch = Rc::new(NativeServerDispatch {
+                    realm: Rc::downgrade(&realm),
+                    resource,
+                    owner: Rc::clone(&owner),
+                });
+                if !runtime.server_attach(resource, allow_half_close, dispatch) {
+                    return INVALID_ARGUMENT;
+                }
+                realm.http_connections.borrow_mut().insert(
+                    resource,
+                    NativeHttpConnection {
+                        role,
+                        events: owner,
+                    },
+                );
+                return 0;
+            }
             let actions = match role {
                 HttpRole::Server => {
                     runtime.start_http1_connection_with_options(resource, allow_half_close)
@@ -2970,25 +3181,43 @@ mod realm {
             };
             // SAFETY: this private frame remains live for the synchronous call.
             let response = unsafe { &*response };
-            let Some(headers) = (unsafe { parse_headers(response.headers, response.headers_len) })
-            else {
-                return INVALID_ARGUMENT;
-            };
             let Ok(high_water_mark) = usize::try_from(high_water_mark) else {
                 return INVALID_ARGUMENT;
             };
+            let resource = kiln_host_abi::ResourceId::new(resource);
             // SAFETY: active_runtime is exclusively owned by the active realm callback.
-            if unsafe { &mut *runtime }.start_http1_response(
-                kiln_host_abi::ResourceId::new(resource),
-                id,
-                response.status,
-                headers,
-                high_water_mark,
-            ) {
-                0
+            let runtime = unsafe { &mut *runtime };
+            let started = if runtime.http_server().is_attached(resource) {
+                // The engine parses the flattened span itself, straight into Hyper's map.
+                // SAFETY: the adapter keeps the span live for this synchronous call.
+                let Some(headers) =
+                    (unsafe { borrowed_bytes(response.headers, response.headers_len) })
+                else {
+                    return INVALID_ARGUMENT;
+                };
+                runtime.http_server().start_response(
+                    resource,
+                    id,
+                    response.status,
+                    headers,
+                    high_water_mark,
+                )
             } else {
-                RUNTIME_ERROR
-            }
+                // SAFETY: the adapter keeps the span live for this synchronous call.
+                let Some(headers) =
+                    (unsafe { parse_headers(response.headers, response.headers_len) })
+                else {
+                    return INVALID_ARGUMENT;
+                };
+                runtime.start_http1_response(
+                    resource,
+                    id,
+                    response.status,
+                    headers,
+                    high_water_mark,
+                )
+            };
+            if started { 0 } else { RUNTIME_ERROR }
         })
     }
 
@@ -3007,19 +3236,19 @@ mod realm {
             let Some(data) = (unsafe { borrowed_bytes(data, data_len) }) else {
                 return INVALID_ARGUMENT;
             };
+            let resource = kiln_host_abi::ResourceId::new(resource);
             // SAFETY: active_runtime is exclusively owned by this active realm callback.
-            let disposition = if end {
-                unsafe { &mut *runtime }.end_http1_response(
-                    kiln_host_abi::ResourceId::new(resource),
-                    id,
-                    data.to_vec(),
-                )
+            let runtime = unsafe { &mut *runtime };
+            let disposition = if runtime.http_server().is_attached(resource) {
+                if end {
+                    runtime.http_server().end_response(resource, id, data)
+                } else {
+                    runtime.http_server().write_response(resource, id, data)
+                }
+            } else if end {
+                runtime.end_http1_response(resource, id, data.to_vec())
             } else {
-                unsafe { &mut *runtime }.write_http1_response(
-                    kiln_host_abi::ResourceId::new(resource),
-                    id,
-                    data.to_vec(),
-                )
+                runtime.write_http1_response(resource, id, data.to_vec())
             };
             match disposition {
                 Some(disposition) => i32::from(!disposition.ready),
@@ -3079,6 +3308,13 @@ mod realm {
             } else {
                 queue.set_timeout(delay, work)
             };
+            std::mem::drop(queue);
+            // A timer armed from inside a connection's callback (ADR 0042) changes what the
+            // parked drive must wait for; tell it.
+            if let Some(runtime) = active_runtime() {
+                // SAFETY: the active runtime pointer is valid for the whole drive.
+                unsafe { &*runtime }.wake_drive();
+            }
             // SAFETY: null was rejected and the caller supplies a writable identity slot.
             unsafe { out_id.write(id.get()) };
             0

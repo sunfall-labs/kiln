@@ -1036,8 +1036,8 @@ method_ids! {
     (KILN_C99_METHOD_ADOPT_STEP, 142, Generic),
     (KILN_C99_METHOD_OBJECT_FREEZE, 143, Generic),
     (KILN_C99_METHOD_OBJECT_IS_FROZEN, 144, Generic),
-    (KILN_C99_METHOD_OBJECT_PREVENT_EXTENSIONS, 434, Generic),
-    (KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE, 435, Generic),
+    (KILN_C99_METHOD_OBJECT_PREVENT_EXTENSIONS, 436, Generic),
+    (KILN_C99_METHOD_OBJECT_IS_EXTENSIBLE, 437, Generic),
     (KILN_C99_METHOD_FUNCTION_CALL, 145, Generic),
     (KILN_C99_METHOD_FUNCTION_APPLY, 146, Generic),
     (KILN_C99_METHOD_FUNCTION_BIND, 147, Generic),
@@ -1213,6 +1213,11 @@ method_ids! {
     (KILN_C99_METHOD_CONSOLE_LOG, 431, Direct),
     (KILN_C99_METHOD_CONSOLE_UNAVAILABLE, 432, Direct),
     (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS, 433, Generic),
+    /* The two halves of `req.headers`. They are a method pair rather than a stored object so
+     * that the header table is built only if a program reads it -- see the accessor installed in
+     * `kiln_c99_node_http_event`. */
+    (KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET, 434, Direct, NodeHttp),
+    (KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET, 435, Direct, NodeHttp),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -2577,6 +2582,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_REQUEST),
     emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_WRITE),
     emit_method_define!(KILN_C99_METHOD_NODE_CLIENT_REQUEST_END),
+    emit_method_define!(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
+    emit_method_define!(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET),
     emit_method_define!(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING),
     emit_method_define!(KILN_C99_METHOD_NODE_NET_CONNECT),
     emit_method_define!(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET),
@@ -3343,6 +3350,12 @@ typedef struct kiln_node_response {
     kiln_value request;
     kiln_value object;
     kiln_value headers;
+    /* The request's headers as the runtime flattened them: NUL-separated name/value pairs,
+     * copied because the event that carried them is the runtime's and does not outlive the
+     * callback.  A malloc'd inner buffer of this block, released by its finaliser (ADR 0041) or
+     * as soon as `req.headers` is read and the object it describes exists instead. */
+    char *request_headers;
+    size_t request_headers_len;
     uint16_t status;
     int started;
     int ended;
@@ -3837,6 +3850,7 @@ static kiln_value kiln_c99_text_value(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
+static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_array(kiln_value *out);
 static int kiln_c99_new_abort_signal(kiln_value *out);
 static int kiln_c99_new_abort_controller(kiln_value *out);
@@ -3854,6 +3868,8 @@ static void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double valu
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part);
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
                              kiln_property **out);
+static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
+                             kiln_value value);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -3984,6 +4000,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *out, uint64_t code,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
                                 int depth, kiln_value *thrown);
 static kiln_value kiln_c99_copy_text(const char *bytes, size_t len);
+static kiln_value kiln_c99_static_text(const char *text, size_t len);
 static kiln_value kiln_c99_control_diagnostic(void);
 static int64_t kiln_c99_days_from_civil(int64_t year, int64_t month, int64_t day);
 static kiln_date_parts kiln_c99_date_parts(double time);
@@ -4098,6 +4115,8 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
                                    int depth, kiln_value *thrown);
 static int kiln_c99_define_method(kiln_value target, const char *key, size_t key_len,
                                   kiln_value method);
+static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t key_len,
+                                    kiln_value getter, kiln_value setter, int enumerable);
 static int kiln_c99_set_function_name(kiln_value function, kiln_value key,
                                      const char *prefix);
 static double kiln_c99_key_index(const char *key, size_t key_len);
@@ -4972,6 +4991,9 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
     case KILN_GC_NODE_SERVER:
         free(((kiln_node_server *)payload)->address);
         break;
+    case KILN_GC_NODE_RESPONSE:
+        free(((kiln_node_response *)payload)->request_headers);
+        break;
     case KILN_GC_NODE_CLIENT_REQUEST: {
         kiln_node_client_request *request = (kiln_node_client_request *)payload;
         free(request->host_name);
@@ -5147,6 +5169,27 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->arguments_brand = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* An object whose property array is sized once, for a caller that already knows how many members
+ * it is about to add.
+ *
+ * `kiln_c99_reserve` doubles from four, which is the right policy for a program building an
+ * object a member at a time and the wrong one for the runtime filling a fixed template: a
+ * `node:http` request with twelve own properties walked 4 -> 8 -> 16, paying a `realloc` and a
+ * copy at each step to arrive at the capacity it could have asked for. The capacity is a hint,
+ * not a limit -- passing a number too small only restores the doubling. */
+static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
+    kiln_object *object;
+    int status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object = kiln_c99_object_of(*out);
+    /* The object is already on the heap, so a failure here leaves it to the collector rather
+     * than to a partially built caller. */
+    return kiln_c99_reserve((void **)&object->properties, &object->capacity, capacity,
+                            sizeof *object->properties);
 }
 
 /* Cancellation is ordinary object state, not a new value kind. That keeps the hot value layout
@@ -6021,7 +6064,14 @@ static double kiln_c99_key_index(const char *key, size_t key_len) {
     char buffer[64];
     double number;
     int length;
-    if (key_len == 0 || key_len > 20) {
+    /* Every canonical index spelling is one to ten ASCII digits with no sign and no leading
+     * space: the largest index is 4294967294, and a number that round-trips cannot begin with
+     * anything but a digit.  Both are *necessary* conditions, so failing either is a decision
+     * this can make without the provider -- which matters because the provider call is a
+     * cross-crate FFI hop and every property write on every object makes one.  Nothing about
+     * `a["01"]` or `a["1"]` moves: the round-trip below still decides those. */
+    if (key_len == 0 || key_len > 10 ||
+        (unsigned char)(key[0] - '0') > 9u) {
         return -1.0;
     }
     number = kiln_string_to_number(key, key_len);
@@ -6338,6 +6388,30 @@ static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
     return KILN_C99_OK;
 }
 
+/* Write an own data property the way an assignment would have left it, without asking the
+ * prototype chain for permission first.
+ *
+ * `kiln_c99_put` walks the chain for a setter before every write, because for *program* code a
+ * setter above has first claim.  The runtime's own initialisers are not program code: they fill
+ * a freshly created object whose prototype is one the runtime just linked, so no setter can
+ * exist to claim the write and the walk can only ever fail.  Building a `node:http` request ran
+ * that walk twelve times per request over a three-deep prototype chain, for nothing.
+ *
+ * This is *not* a faster `put`.  It skips the hidden-key guard, the exotic-target dispatch, the
+ * frozen and module-namespace refusals and `__proto__`'s relinking, so it is correct only for a
+ * plain object the caller just made and a key the caller wrote as a literal.  Program-visible
+ * assignment keeps going through `kiln_c99_put`. */
+static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
+                             kiln_value value) {
+    kiln_property *slot;
+    int status = kiln_c99_own_slot(target, key, key_len, &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->value = value;
+    return KILN_C99_OK;
+}
+
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
     return (kiln_generator *)(uintptr_t)value.bits;
 }
@@ -6490,6 +6564,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     }
     switch (code) {
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
+    case KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET: return "headers";
+    case KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET: return "headers";
     case KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER: return "createServer";
     case KILN_C99_METHOD_NODE_QUERYSTRING_PARSE: return "parse";
     case KILN_C99_METHOD_PROCESS_NEXT_TICK: return "nextTick";
@@ -7876,6 +7952,10 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
 #define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
 #define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
 #define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
+/* The prototype every `node:http` request object links to. A realm slot rather than a static,
+ * because a realm owns it and the runtime archive already enumerates these slots as GC roots
+ * (ADR 0041) -- and because one identity across translation units is what a prototype is for. */
+#define KILN_C99_REALM_SLOT_INCOMING_MESSAGE UINT32_C(5)
 
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     void *slot = NULL;
@@ -10082,6 +10162,18 @@ static int kiln_c99_truthy(kiln_value value) {
     default:
         return 0;
     }
+}
+
+/* A string value that borrows bytes the program cannot outlive: a literal in this translation
+ * unit's own read-only data.
+ *
+ * The collector is precise about edges and paranoid about targets (ADR 0041): every candidate
+ * pointer is looked up in the block table and marked only on a hit, so a string pointing at a
+ * literal is ignored by the tracer, never swept, and never released -- `kiln_c99_gc_release`
+ * returns on a table miss for the same reason. That is what makes a constant answer free where
+ * `kiln_c99_copy_text` would allocate a block per request. */
+static kiln_value kiln_c99_static_text(const char *text, size_t len) {
+    return kiln_c99_value(KILN_VALUE_STRING, 0, text, len);
 }
 
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
@@ -14387,6 +14479,46 @@ static int kiln_c99_install_server_response_methods(kiln_value target) {
     return status;
 }
 
+/* The prototype a `node:http` request links to.
+ *
+ * `req` and `res` are built from nothing on every request, and installing their methods on each
+ * *instance* was the largest single cost in the object model on a keep-alive server: seventeen
+ * or more `kiln_c99_define_method` calls, each a chain walk, a linear scan and an insert, all
+ * producing the same method values every time. One shared prototype per realm replaces them, and
+ * the lookup that finds them was already a chain walk.
+ *
+ * Nothing about listeners moves: `kiln_c99_node_event` keeps its state in an *own*
+ * `@@node:events` property of whichever receiver the method was called on, so buckets land on
+ * the instance and two requests never share listeners. Nor does shadowing: a method on a
+ * prototype is writable, so `req.on = f` still creates an own property that wins.
+ *
+ * There is no registered `IncomingMessage` constructor to hang this on, so it is a realm value
+ * slot. The response has one -- see `kiln_c99_callable_prototype` -- and uses it. */
+static int kiln_c99_node_incoming_message_prototype(kiln_value *out) {
+    kiln_value *slot = NULL;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_INCOMING_MESSAGE, &slot);
+    if (status != KILN_C99_OK) return status;
+    if (slot == NULL) return KILN_C99_CONTROL_ERROR;
+    if (slot->tag == KILN_VALUE_OBJECT) {
+        *out = *slot;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_object(slot);
+    if (status == KILN_C99_OK) status = kiln_c99_install_event_emitter_methods(*slot);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(
+            *slot, "setEncoding", 11,
+            kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+    if (status != KILN_C99_OK) {
+        /* A half-built prototype must not be handed out or cached: leave the slot empty so the
+         * next request builds it again rather than inheriting a surface with holes in it. */
+        *slot = kiln_c99_undefined();
+        return status;
+    }
+    *out = *slot;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t code,
                                kiln_value receiver, const kiln_value *args, size_t argc,
                                int depth, kiln_value *thrown) {
@@ -14789,6 +14921,28 @@ static int kiln_c99_node_socket_ready_state(kiln_node_socket *socket,
                         kiln_c99_copy_text(state, state_len), 0, NULL);
 }
 
+static const char kiln_c99_http_version_11[] = "1.1";
+static const char kiln_c99_http_version_10[] = "1.0";
+static const char kiln_c99_transfer_encoding_chunked[] = "chunked";
+
+/* A request method as a value, without copying bytes that are always one of nine spellings.
+ *
+ * Every method a server sees is a token from a fixed registry, so the string a program reads
+ * back can be this unit's own literal rather than a fresh block per request. An extension method
+ * -- the registry is open -- still copies, so nothing depends on the list being complete. */
+static kiln_value kiln_c99_node_http_method_text(const char *bytes, size_t len) {
+    static const char *const known[] = {"GET",     "POST",    "PUT",  "DELETE", "HEAD",
+                                        "OPTIONS", "PATCH",   "CONNECT", "TRACE"};
+    size_t index;
+    for (index = 0; index < sizeof known / sizeof known[0]; ++index) {
+        const char *name = known[index];
+        if (name[0] == bytes[0] && strlen(name) == len && memcmp(name, bytes, len) == 0) {
+            return kiln_c99_static_text(name, len);
+        }
+    }
+    return kiln_c99_copy_text(bytes, len);
+}
+
 static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *event,
                                     void *host, void *thrown) {
     kiln_node_socket *socket = (kiln_node_socket *)opaque;
@@ -14808,128 +14962,106 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         response->socket = socket;
         response->request_id = event->id;
         response->status = 200;
-        status = kiln_c99_new_object(&request);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_event(socket->host, &ignored,
-                                         KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                         request, NULL, 0, 0, exception);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(
-                request, "setEncoding", 11,
-                kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
+        /* Twelve own properties follow: the hidden response pointer, ten data members and the
+         * lazy `headers` accessor. Sizing the array for them once is one allocation instead of
+         * three. */
+        status = kiln_c99_new_object_with_capacity(&request, 12);
+        if (status == KILN_C99_OK) {
+            kiln_value prototype;
+            status = kiln_c99_node_incoming_message_prototype(&prototype);
+            if (status == KILN_C99_OK) status = kiln_c99_set_prototype(request, prototype);
+        }
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(request, "@@node:response", 15, response);
+        /* Every property below is a first write to an object created three statements ago, onto a
+         * prototype chain the runtime linked itself.  `kiln_c99_own_data` is what `kiln_c99_put`
+         * would have produced -- writable, enumerable, configurable data -- without the walk up
+         * that chain looking for a setter that cannot be there. */
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "method", 6,
-                                  kiln_c99_copy_text((const char *)event->method,
-                                                     (size_t)event->method_len), 0, NULL);
+            status = kiln_c99_own_data(request, "method", 6,
+                                       kiln_c99_node_http_method_text(
+                                           (const char *)event->method,
+                                           (size_t)event->method_len));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "url", 3,
-                                  kiln_c99_copy_text((const char *)event->target,
-                                                     (size_t)event->target_len), 0, NULL);
+            status = kiln_c99_own_data(request, "url", 3,
+                                       kiln_c99_copy_text((const char *)event->target,
+                                                          (size_t)event->target_len));
+        /* Two spellings, both constants: a copy per request bought nothing a literal does not
+         * already give, and the string a program reads is indistinguishable either way. */
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "httpVersion", 11,
-                                  event->version_minor ? kiln_c99_copy_text("1.1", 3)
-                                                       : kiln_c99_copy_text("1.0", 3), 0, NULL);
+            status = kiln_c99_own_data(request, "httpVersion", 11,
+                                       event->version_minor
+                                           ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
+                                           : kiln_c99_static_text(kiln_c99_http_version_10, 3));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "httpVersionMajor", 16,
-                                  kiln_c99_number(1.0), 0, NULL);
+            status = kiln_c99_own_data(request, "httpVersionMajor", 16, kiln_c99_number(1.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "httpVersionMinor", 16,
-                                  kiln_c99_number(event->version_minor ? 1.0 : 0.0), 0, NULL);
+            status = kiln_c99_own_data(request, "httpVersionMinor", 16,
+                                       kiln_c99_number(event->version_minor ? 1.0 : 0.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "aborted", 7,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(request, "aborted", 7, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "complete", 8,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(request, "complete", 8, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "destroyed", 9,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(request, "destroyed", 9, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "socket", 6, socket->object, 0, NULL);
+            status = kiln_c99_own_data(request, "socket", 6, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, request, "connection", 10, socket->object, 0, NULL);
-        if (status == KILN_C99_OK) {
-            kiln_value request_headers;
-            size_t at = 0;
-            status = kiln_c99_new_object(&request_headers);
-            while (status == KILN_C99_OK && at < event->headers_len) {
-                const char *name = (const char *)event->headers + at;
-                size_t name_len = strlen(name);
-                char *owned_name;
-                const char *value;
-                size_t value_len;
-                at += name_len + 1;
-                if (at > event->headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
-                value = (const char *)event->headers + at;
-                value_len = strlen(value);
-                at += value_len + 1;
-                if (at > event->headers_len) { status = KILN_C99_CONTROL_ERROR; break; }
-                owned_name = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
-                if (name_len != 0 && owned_name == NULL) {
-                    status = KILN_C99_OUT_OF_MEMORY;
-                    break;
-                }
-                if (name_len != 0) memcpy(owned_name, name, name_len);
-                status = kiln_c99_put(NULL, request_headers, owned_name, name_len,
-                                      kiln_c99_copy_text(value, value_len), 0, NULL);
+            status = kiln_c99_own_data(request, "connection", 10, socket->object);
+        /* `headers` is an accessor until it is read.  Building the table eagerly cost one
+         * object and two heap strings per header on every request, and the common server reads
+         * one header or none.  The flattened bytes are copied instead -- one malloc and one
+         * memcpy of the whole block -- and the first read turns them into the object, in the
+         * same own slot, at the same position in the key order.  See
+         * KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET in `kiln_c99_node_http`. */
+        if (status == KILN_C99_OK && event->headers_len != 0) {
+            response->request_headers = (char *)malloc(event->headers_len);
+            if (response->request_headers == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+            } else {
+                memcpy(response->request_headers, event->headers, event->headers_len);
+                response->request_headers_len = event->headers_len;
             }
-            if (status == KILN_C99_OK)
-                status = kiln_c99_put(NULL, request, "headers", 7, request_headers, 0, NULL);
         }
-        if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->object);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_define_accessor(
+                request, "headers", 7,
+                kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
+                kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
+        /* Eight on the response: the hidden pointer and seven data members. */
+        if (status == KILN_C99_OK)
+            status = kiln_c99_new_object_with_capacity(&response->object, 8);
         if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_node_event(socket->host, &ignored,
-                                         KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                         response->object, NULL, 0, 0, exception);
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "setHeader", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "getHeader", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "getHeaders", 10,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_GET_HEADERS));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "hasHeader", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_HAS_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "removeHeader", 12,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_REMOVE_HEADER));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "writeHead", 9,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE_HEAD));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "write", 5,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_WRITE));
-        if (status == KILN_C99_OK)
-            status = kiln_c99_define_method(response->object, "end", 3,
-                kiln_c99_method(KILN_C99_METHOD_NODE_RESPONSE_END));
+        /* The registered native constructor graph already builds exactly this surface --
+         * EventEmitter, Writable, then the eight response methods -- once per realm.  Linking
+         * the live response to it costs one pointer instead of seventeen inserts, and makes a
+         * served `res` and a `new http.ServerResponse()` the same shape for the first time. */
+        if (status == KILN_C99_OK) {
+            kiln_value prototype;
+            status = kiln_c99_callable_prototype(
+                kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE), &prototype);
+            if (status == KILN_C99_OK)
+                status = kiln_c99_set_prototype(response->object, prototype);
+        }
         if (status == KILN_C99_OK)
             status = kiln_c99_node_set_hidden_pointer(response->object, "@@node:response", 15,
                                                       response);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "req", 3, request, 0, NULL);
+            status = kiln_c99_own_data(response->object, "req", 3, request);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "socket", 6, socket->object, 0, NULL);
+            status = kiln_c99_own_data(response->object, "socket", 6, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "connection", 10,
-                                  socket->object, 0, NULL);
+            status = kiln_c99_own_data(response->object, "connection", 10, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "statusCode", 10,
-                                  kiln_c99_number(200.0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "statusCode", 10,
+                                       kiln_c99_number(200.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "headersSent", 11,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "writableEnded", 13,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "writableEnded", 13,
+                                       kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_put(NULL, response->object, "destroyed", 9,
-                                  kiln_c99_boolean(0), 0, NULL);
+            status = kiln_c99_own_data(response->object, "destroyed", 9, kiln_c99_boolean(0));
         if (status != KILN_C99_OK) return status;
         response->request = request;
         response->next = socket->responses;
@@ -14975,10 +15107,12 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
     }
     if (client != NULL && event->kind == 6) {
         status = kiln_c99_new_object(&client->response);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_node_event(client->host, &ignored,
-                                             KILN_C99_METHOD_NODE_EVENT_EMITTER,
-                                             client->response, NULL, 0, 0, exception);
+            if (status == KILN_C99_OK) {
+                kiln_value prototype;
+                status = kiln_c99_node_incoming_message_prototype(&prototype);
+                if (status == KILN_C99_OK)
+                    status = kiln_c99_set_prototype(client->response, prototype);
+            }
             if (status == KILN_C99_OK)
                 status = kiln_c99_put(NULL, client->response, "statusCode", 10,
                                       kiln_c99_number((double)event->status), 0, NULL);
@@ -14986,10 +15120,6 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 status = kiln_c99_put(NULL, client->response, "statusMessage", 13,
                                       kiln_c99_copy_text((const char *)event->reason,
                                                          (size_t)event->reason_len), 0, NULL);
-            if (status == KILN_C99_OK)
-                status = kiln_c99_define_method(
-                    client->response, "setEncoding", 11,
-                    kiln_c99_method(KILN_C99_METHOD_NODE_READABLE_SET_ENCODING));
             if (status == KILN_C99_OK) {
                 kiln_value headers;
                 size_t at = 0;
@@ -15828,6 +15958,55 @@ static int kiln_c99_node_net(kiln_host *host, kiln_value *result, uint64_t code,
     }
 }
 
+/* Flatten a header object into the NUL-separated block the runtime's HTTP frame takes.
+ *
+ * Sized once from the property list instead of grown into.  `kiln_c99_text_append` doubles
+ * through `realloc` and was called four times per header, so a response with a handful of
+ * headers reallocated several times per request to build a block whose exact length the property
+ * list already knew.  Two passes over a few properties cost less than those reallocs, and the
+ * buffer ends up exactly the size of the frame rather than up to twice it.
+ *
+ * The second pass re-reads each value through `kiln_c99_text`, which is free for the strings
+ * these objects actually hold -- `setHeader` and `writeHead` both store text -- and is
+ * deterministic for anything else, so the two passes cannot disagree about a length.  The bound
+ * check keeps that a checked invariant rather than a promise.
+ *
+ * On success the caller owns `out->bytes`, which is what the three call sites already expected of
+ * the builder they replaced. */
+static int kiln_c99_node_flatten_headers(kiln_object *headers, kiln_text *out) {
+    size_t needed = 0;
+    size_t at = 0;
+    size_t index;
+    char *bytes;
+    out->bytes = NULL;
+    out->len = 0;
+    out->capacity = 0;
+    for (index = 0; index < headers->count; ++index)
+        needed += headers->properties[index].key_len +
+                  kiln_c99_text(headers->properties[index].value).len + 2;
+    if (needed == 0) return KILN_C99_OK;
+    bytes = (char *)malloc(needed);
+    if (bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
+    for (index = 0; index < headers->count; ++index) {
+        kiln_property *property = &headers->properties[index];
+        kiln_value value = kiln_c99_text(property->value);
+        if (at + property->key_len + value.len + 2 > needed) {
+            free(bytes);
+            return KILN_C99_CONTROL_ERROR;
+        }
+        if (property->key_len != 0) memcpy(bytes + at, property->key, property->key_len);
+        at += property->key_len;
+        bytes[at++] = '\0';
+        if (value.len != 0) memcpy(bytes + at, value.ptr, value.len);
+        at += value.len;
+        bytes[at++] = '\0';
+    }
+    out->bytes = bytes;
+    out->len = at;
+    out->capacity = needed;
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code,
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *thrown) {
@@ -15894,21 +16073,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         status = KILN_C99_OK;
         if (headers_value.tag == KILN_VALUE_UNDEFINED) {
         } else if (headers_value.tag == KILN_VALUE_OBJECT) {
-            kiln_object *provided = kiln_c99_object_of(headers_value);
-            kiln_text flattened = {NULL, 0, 0};
-            size_t index;
-            status = KILN_C99_OK;
-            for (index = 0; index < provided->count && status == KILN_C99_OK; ++index) {
-                kiln_property *property = &provided->properties[index];
-                kiln_value value;
-                value = kiln_c99_text(property->value);
-                if (kiln_c99_text_append(&flattened, property->key, property->key_len) !=
-                        KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK)
-                    status = KILN_C99_OUT_OF_MEMORY;
-            }
+            kiln_text flattened;
+            status = kiln_c99_node_flatten_headers(kiln_c99_object_of(headers_value), &flattened);
             request->headers = flattened.bytes;
             request->headers_len = flattened.len;
         } else {
@@ -16016,6 +16182,61 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         *result = receiver;
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET ||
+        code == KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET) {
+        /* Both halves end the same way: the accessor is replaced, in place, by the ordinary
+         * writable data property the eager build used to leave behind.  So a program sees an
+         * accessor only until it touches `headers` once, and every read after the first is a
+         * plain property read rather than a call. */
+        kiln_property *slot;
+        kiln_value built;
+        int status;
+        if (receiver.tag != KILN_VALUE_OBJECT)
+            return kiln_c99_throw_not_a(thrown, receiver, "IncomingMessage");
+        if (code == KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET) {
+            built = argc > 0 ? args[0] : kiln_c99_undefined();
+        } else {
+            size_t at = 0;
+            status = kiln_c99_new_object(&built);
+            if (status != KILN_C99_OK) return status;
+            while (response != NULL && response->request_headers != NULL &&
+                   at < response->request_headers_len) {
+                const char *name = response->request_headers + at;
+                size_t name_len = strlen(name);
+                const char *value;
+                size_t value_len;
+                char *owned_name;
+                at += name_len + 1;
+                if (at > response->request_headers_len) return KILN_C99_CONTROL_ERROR;
+                value = response->request_headers + at;
+                value_len = strlen(value);
+                at += value_len + 1;
+                if (at > response->request_headers_len) return KILN_C99_CONTROL_ERROR;
+                owned_name = name_len == 0 ? NULL : kiln_c99_gc_alloc_text(name_len);
+                if (name_len != 0 && owned_name == NULL) return KILN_C99_OUT_OF_MEMORY;
+                if (name_len != 0) memcpy(owned_name, name, name_len);
+                status = kiln_c99_put(NULL, built, owned_name, name_len,
+                                      kiln_c99_copy_text(value, value_len), 0, NULL);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
+        status = kiln_c99_own_slot(receiver, "headers", 7, &slot);
+        if (status != KILN_C99_OK) return status;
+        slot->accessor = 0;
+        slot->getter = kiln_c99_undefined();
+        slot->setter = kiln_c99_undefined();
+        slot->writable = 1;
+        slot->configurable = 1;
+        slot->enumerable = 1;
+        slot->value = built;
+        if (response != NULL) {
+            free(response->request_headers);
+            response->request_headers = NULL;
+            response->request_headers_len = 0;
+        }
+        *result = built;
+        return KILN_C99_OK;
+    }
     if (response == NULL) return kiln_c99_throw_not_a(thrown, receiver, "ServerResponse");
     if (code == KILN_C99_METHOD_NODE_RESPONSE_SET_HEADER) {
         kiln_value name = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
@@ -16111,7 +16332,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             !(response->status >= 100 && response->status < 200) &&
             !kiln_c99_node_response_is_framed(kiln_c99_object_of(response->headers))) {
             status = kiln_c99_put(NULL, response->headers, "transfer-encoding", 17,
-                                  kiln_c99_copy_text("chunked", 7), 0, NULL);
+                                  kiln_c99_static_text(kiln_c99_transfer_encoding_chunked, 7),
+                                  0, NULL);
             if (status != KILN_C99_OK) return status;
         }
         *result = receiver;
@@ -16124,21 +16346,11 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
                                         "write after end");
         if (!response->started) {
-            kiln_object *headers = kiln_c99_object_of(response->headers);
-            kiln_text flattened = {NULL, 0, 0};
+            kiln_text flattened;
             kiln_realm_http_response framed;
-            size_t index;
-            for (index = 0; index < headers->count; ++index) {
-                kiln_value value = kiln_c99_text(headers->properties[index].value);
-                if (kiln_c99_text_append(&flattened, headers->properties[index].key,
-                                         headers->properties[index].key_len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK) {
-                    free(flattened.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-            }
+            status = kiln_c99_node_flatten_headers(kiln_c99_object_of(response->headers),
+                                                   &flattened);
+            if (status != KILN_C99_OK) return status;
             memset(&framed, 0, sizeof framed);
             framed.status = response->status;
             framed.headers = (const uint8_t *)flattened.bytes;
@@ -16163,22 +16375,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         kiln_object *headers;
         kiln_text flattened = {NULL, 0, 0};
         kiln_realm_http_response framed;
-        size_t index;
         int status;
         if (response->ended) { *result = receiver; return KILN_C99_OK; }
         if (!response->started) {
             headers = kiln_c99_object_of(response->headers);
-            for (index = 0; index < headers->count; ++index) {
-                kiln_value value = kiln_c99_text(headers->properties[index].value);
-                if (kiln_c99_text_append(&flattened, headers->properties[index].key,
-                                         headers->properties[index].key_len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, value.ptr, value.len) != KILN_C99_OK ||
-                    kiln_c99_text_append(&flattened, "\0", 1) != KILN_C99_OK) {
-                    free(flattened.bytes);
-                    return KILN_C99_OUT_OF_MEMORY;
-                }
-            }
+            status = kiln_c99_node_flatten_headers(headers, &flattened);
+            if (status != KILN_C99_OK) return status;
             memset(&framed, 0, sizeof framed);
             framed.status = response->status;
             framed.headers = (const uint8_t *)flattened.bytes;
@@ -32439,7 +32641,7 @@ static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
-static kiln_value kiln_test_value_slots[3];
+static kiln_value kiln_test_value_slots[5];
 static uint64_t kiln_test_entropy_seed = 0;
 static uint64_t kiln_test_entropy_state = 0;
 static int kiln_test_entropy_initialized = 0;
@@ -32540,7 +32742,7 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     return KILN_C99_OK;
 }
 int kiln_realm_value_slot(uint32_t key, void **out_slot) {
-    if (!kiln_test_realm_active || key == 0 || key > 3 || out_slot == NULL)
+    if (!kiln_test_realm_active || key == 0 || key > 5 || out_slot == NULL)
         return KILN_C99_INVALID_ARGUMENT;
     *out_slot = &kiln_test_value_slots[key - 1];
     return KILN_C99_OK;

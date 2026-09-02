@@ -6,6 +6,10 @@
 //! runs. Tokio types are deliberately private to this crate.
 
 mod http_body;
+pub mod http_engine;
+pub use http_engine::{
+    HostTransport, HttpServerEngine, ServerCloseMode, ServerDispatch, ServerEvent, ServerEventKind,
+};
 mod http_transport;
 mod hyper_http;
 pub mod node_http;
@@ -427,6 +431,25 @@ pub trait RealmHostProvider: AsyncHostOps {
     }
 
     /// Whether the provider still owns a request that can complete.
+    /// Hand the byte transport of an accepted or connected stream to the HTTP engine (ADR
+    /// 0042). A provider that cannot (no such stream, or bytes still in flight through the
+    /// discrete read/write operations) answers `None` and the caller keeps the bridged path.
+    fn take_transport(&mut self, _resource: ResourceId) -> Option<HostTransport> {
+        None
+    }
+
+    /// A signal that fires whenever a host operation completes, so a drive can wait for
+    /// completions without borrowing the host across the wait (ADR 0042: language callbacks
+    /// run inside I/O tasks while the drive is parked, and they borrow the realm).
+    fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
+        None
+    }
+
+    /// Forget a transport handed over earlier, once its connection has ended.
+    fn release_transport(&mut self, _resource: ResourceId) -> bool {
+        false
+    }
+
     fn has_pending_work(&self) -> bool;
 
     /// Returns the sticky realm failure, if the provider's asynchronous supervisor failed.
@@ -618,6 +641,48 @@ struct Executor {
     local: tokio::task::LocalSet,
 }
 
+/// What ended a drive's wait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DriveWake {
+    /// A host operation completed.
+    Completion,
+    /// Virtual time reached the earliest timer.
+    Timer,
+}
+
+/// Wait for a host completion or the next timer, whichever comes first, holding nothing. With
+/// a paused clock the sleep costs no wall time once no task can make progress (ADR 0028).
+pub async fn wait_for_turn(signal: Rc<tokio::sync::Notify>, delay: Option<Duration>) -> DriveWake {
+    match delay {
+        Some(delay) => {
+            tokio::select! {
+                biased;
+                _ = signal.notified() => DriveWake::Completion,
+                _ = tokio::time::sleep(delay) => DriveWake::Timer,
+            }
+        }
+        None => {
+            signal.notified().await;
+            DriveWake::Completion
+        }
+    }
+}
+
+/// Let every task woken so far run before the caller parks.
+pub async fn yield_to_tasks() {
+    tokio::task::yield_now().await;
+}
+
+/// A handle on a realm's executor that owes nothing to the realm's borrow.
+pub struct DriveExecutor(Rc<Executor>);
+
+impl DriveExecutor {
+    /// Run `future` to completion on the realm's current-thread runtime and `LocalSet`.
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.0.local.block_on(&self.0.runtime, future)
+    }
+}
+
 /// Everything a drive reads and writes, owning nothing that runs futures.
 /// Everything a realm owns that is not the executor: the host, its capabilities, the
 /// HTTP connection table, and the metrics stream. See ADR 0040.
@@ -628,11 +693,13 @@ pub struct RealmState<H> {
     capabilities: RealmCapabilities,
     http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
     http_agent: HttpAgent,
+    /// Server connections that are Hyper tasks over host transports (ADR 0042).
+    http_server: HttpServerEngine,
     lifecycle: RealmRuntimeLifecycle,
 }
 
 pub struct RealmRuntime<H: RealmHostProvider = TokioHost> {
-    executor: Executor,
+    executor: Rc<Executor>,
     state: RealmState<H>,
     // A runtime owns a current-thread realm and must not accidentally become a cross-thread
     // executor. `Runtime` itself can be moved, but the realm's language state cannot.
@@ -690,10 +757,10 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .map_err(RuntimeBuildError)?;
         let runtime_metrics = tokio_metrics::RuntimeMonitor::new(runtime.handle()).intervals();
         Ok(Self {
-            executor: Executor {
+            executor: Rc::new(Executor {
                 runtime,
                 local: tokio::task::LocalSet::new(),
-            },
+            }),
             state: RealmState {
                 runtime_metrics,
                 time_paused: false,
@@ -701,6 +768,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 capabilities,
                 http_connections: BTreeMap::new(),
                 http_agent: HttpAgent::default(),
+                http_server: HttpServerEngine::default(),
                 lifecycle: RealmRuntimeLifecycle::Open,
             },
             _not_send: PhantomData,
@@ -719,6 +787,13 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     #[allow(dead_code)]
     fn split(&mut self) -> (&Executor, &mut RealmState<H>) {
         (&self.executor, &mut self.state)
+    }
+
+    /// The executor, detached from this runtime's borrow, so a drive can `block_on` one future
+    /// for the life of a program while callbacks inside it borrow the runtime (ADR 0040 step 4,
+    /// ADR 0042).
+    pub fn drive_executor(&self) -> DriveExecutor {
+        DriveExecutor(Rc::clone(&self.executor))
     }
 
     /// Try to start one host operation, rejecting admission after teardown begins.
@@ -850,6 +925,102 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             return None;
         }
         self.next_turn(realm)
+    }
+
+    /// Attach the HTTP engine to an accepted stream (ADR 0042): the host hands over its
+    /// transport and Hyper drives it, calling `dispatch` directly for every protocol event.
+    pub fn server_attach(
+        &mut self,
+        resource: ResourceId,
+        allow_half_close: bool,
+        dispatch: Rc<dyn ServerDispatch>,
+    ) -> bool {
+        if self.is_shutdown() || self.state.http_server.is_attached(resource) {
+            return false;
+        }
+        let Some(transport) = self.state.host.take_transport(resource) else {
+            return false;
+        };
+        self.state
+            .http_server
+            .attach(resource, transport, allow_half_close, dispatch)
+    }
+
+    /// The direct HTTP server engine.
+    pub fn http_server(&mut self) -> &mut HttpServerEngine {
+        &mut self.state.http_server
+    }
+
+    /// Whether any direct server connection is still open.
+    pub fn has_open_server_connections(&self) -> bool {
+        self.state.http_server.open_connections() != 0
+    }
+
+    /// The host's completion signal, for a drive that waits outside any borrow of this runtime.
+    pub fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
+        self.state.host.completion_signal()
+    }
+
+    /// Wake a parked drive: something it was not waiting for has changed what it should wait
+    /// for, such as a timer armed from inside a connection callback.
+    pub fn wake_drive(&self) {
+        if let Some(signal) = self.state.host.completion_signal() {
+            signal.notify_one();
+        }
+    }
+
+    /// Pause Tokio time for the deterministic clock, once.
+    pub fn pause_time(&mut self) {
+        if !self.state.time_paused {
+            let _entered = self.executor.runtime.enter();
+            tokio::time::pause();
+            self.state.time_paused = true;
+        }
+    }
+
+    /// A turn that is ready now, without parking: a failure, an already-completed host
+    /// operation, or nothing. The caller decides how to wait when this is `None`.
+    pub fn ready_turn<M, T>(&mut self) -> Option<RuntimeTurn<M, T>>
+    where
+        T: Clone,
+    {
+        if self.is_shutdown() {
+            return None;
+        }
+        if let Some(failure) = self.state.host.runtime_failure() {
+            return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        if let Some(completion) = AsyncHostOps::next_completion(&mut self.state.host) {
+            return Some(RuntimeTurn::Completion(completion));
+        }
+        if let Some(failure) = self.state.host.runtime_failure() {
+            return Some(RuntimeTurn::Failure(failure.clone()));
+        }
+        None
+    }
+
+    /// Whether a drive still has something to wait for: referenced host work, or a timer.
+    pub fn has_referenced_host_work(&self) -> bool {
+        self.state.host.has_referenced_work()
+    }
+
+    /// Whether any host operation is pending, referenced or not: whether a completion can
+    /// still arrive.
+    pub fn has_pending_host_work(&self) -> bool {
+        self.state.host.has_pending_work()
+    }
+
+    /// Requests in flight on direct server connections.
+    pub fn requests_in_flight(&self) -> usize {
+        self.state.http_server.requests_in_flight()
+    }
+
+    /// A one-line description of the host's pending work, for `KILN_HTTP_TRACE`.
+    pub fn describe_host_work(&self) -> String
+    where
+        H: std::fmt::Debug,
+    {
+        format!("{:?}", self.state.host)
     }
 
     /// Runs one synchronous realm operation as the current Tokio task.
@@ -1075,9 +1246,15 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// [`Self::poll_http_tasks_after_wake`]. Progress that needs the kernel still waits for the
     /// kernel, in the one place that was already going to park.
     pub fn poll_http_tasks_once(&mut self) {
-        let _entered = self.executor.runtime.enter();
+        // Polling the set as a future needs it exclusively. During an async drive (ADR 0042) a
+        // DriveExecutor holds the executor and the set is already being run by that drive's
+        // `block_on`, so there is nothing to do here; the drive yields instead.
+        let Some(executor) = Rc::get_mut(&mut self.executor) else {
+            return;
+        };
+        let _entered = executor.runtime.enter();
         let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        let _ = std::pin::Pin::new(&mut self.executor.local).poll(&mut context);
+        let _ = std::pin::Pin::new(&mut executor.local).poll(&mut context);
     }
 
     pub fn poll_http_tasks(&mut self) {
@@ -1318,7 +1495,8 @@ impl<H: RealmHostProvider> RealmState<H> {
     /// Retiring is the caller's call because its own checkpoint may still want to observe the
     /// closed connection once more before it lets go.
     pub fn retire_http_connection(&mut self, resource: ResourceId) -> bool {
-        self.http_connections.remove(&resource).is_some()
+        let released = self.host.release_transport(resource);
+        self.http_connections.remove(&resource).is_some() || released
     }
 
     /// Retire an HTTP transport after Hyper has completed its connection future.
@@ -2013,6 +2191,7 @@ pub struct TokioHost {
     resources: BTreeMap<ResourceId, HostResource>,
     ready: BTreeMap<u64, Completion>,
     tasks: JoinMap<RequestId, HostCompletion>,
+    completed: Rc<tokio::sync::Notify>,
     failure: Option<RuntimeFailure>,
     shutdown: bool,
     _not_send: PhantomData<Rc<()>>,
@@ -2050,6 +2229,12 @@ enum HostResource {
         info: ResourceInfo,
         referenced: bool,
     },
+    /// A stream whose transport the HTTP engine owns now (ADR 0042). Discrete reads and
+    /// writes on it fail; close and referencing still resolve.
+    TcpTaken {
+        info: ResourceInfo,
+        referenced: bool,
+    },
     TcpStream {
         reader: Rc<tokio::sync::Mutex<OwnedReadHalf>>,
         writer: Rc<tokio::sync::Mutex<OwnedWriteHalf>>,
@@ -2070,6 +2255,23 @@ impl std::fmt::Debug for TokioHost {
         formatter
             .debug_struct("TokioHost")
             .field("pending", &self.pending.len())
+            .field(
+                "referenced_pending",
+                &self.pending.values().filter(|p| p.referenced).count(),
+            )
+            .field("resources", &self.resources.len())
+            .field(
+                "referenced_resources",
+                &self
+                    .resources
+                    .values()
+                    .filter(|r| match r {
+                        HostResource::TcpListener { referenced, .. }
+                        | HostResource::TcpStream { referenced, .. }
+                        | HostResource::TcpTaken { referenced, .. } => *referenced,
+                    })
+                    .count(),
+            )
             .field("ready", &self.ready.len())
             .finish_non_exhaustive()
     }
@@ -2086,6 +2288,7 @@ impl TokioHost {
             resources: BTreeMap::new(),
             ready: BTreeMap::new(),
             tasks: JoinMap::new(),
+            completed: Rc::new(tokio::sync::Notify::new()),
             failure: None,
             shutdown: false,
             _not_send: PhantomData,
@@ -2096,7 +2299,12 @@ impl TokioHost {
     where
         F: Future<Output = HostCompletion> + 'static,
     {
-        self.tasks.spawn_local(request, task);
+        let completed = Rc::clone(&self.completed);
+        self.tasks.spawn_local(request, async move {
+            let completion = task.await;
+            completed.notify_one();
+            completion
+        });
         let replaced = self.pending.insert(
             request,
             PendingRequest {
@@ -2377,6 +2585,9 @@ impl TokioHost {
                 referenced,
             },
         );
+        // An immediate completion still has to reach a drive that is parked on the completion
+        // signal: `server.close()` issued from inside a connection callback is exactly that.
+        self.completed.notify_one();
         self.ready.insert(
             sequence,
             Completion {
@@ -2410,6 +2621,10 @@ impl TokioHost {
             | HostResource::TcpStream {
                 referenced: current,
                 ..
+            }
+            | HostResource::TcpTaken {
+                referenced: current,
+                ..
             } => *current = referenced,
         }
         Ok(AsyncHostValue::Undefined)
@@ -2439,6 +2654,12 @@ impl TokioHost {
                 referenced: *referenced,
                 read_closed: *read_closed,
                 write_closed: *write_closed,
+            },
+            HostResource::TcpTaken { info, referenced } => ResourceState {
+                info: info.clone(),
+                referenced: *referenced,
+                read_closed: false,
+                write_closed: false,
             },
         };
         Ok(AsyncHostValue::ResourceState(state))
@@ -2615,7 +2836,8 @@ impl AsyncHostOps for TokioHost {
         self.pending.values().any(|request| request.referenced)
             || self.resources.values().any(|resource| match resource {
                 HostResource::TcpListener { referenced, .. }
-                | HostResource::TcpStream { referenced, .. } => *referenced,
+                | HostResource::TcpStream { referenced, .. }
+                | HostResource::TcpTaken { referenced, .. } => *referenced,
             })
     }
 
@@ -2656,6 +2878,82 @@ impl RealmHostProvider for TokioHost {
 
     fn set_resource_referenced_now(&mut self, resource: ResourceId, referenced: bool) -> bool {
         self.set_resource_referenced(resource, referenced).is_ok()
+    }
+
+    fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
+        Some(Rc::clone(&self.completed))
+    }
+
+    fn release_transport(&mut self, resource: ResourceId) -> bool {
+        match self.resources.get(&resource) {
+            Some(HostResource::TcpTaken { .. }) => self.resources.remove(&resource).is_some(),
+            _ => false,
+        }
+    }
+
+    fn take_transport(&mut self, resource: ResourceId) -> Option<HostTransport> {
+        // Both halves must be held by the table alone: a read or write still in flight owns a
+        // clone and the socket cannot be reunited under it. The entry is rewritten only once
+        // the socket is whole again, so a refusal leaves the table exactly as it was.
+        let Some(HostResource::TcpStream {
+            reader,
+            writer,
+            info,
+            referenced,
+            read_closed,
+            write_closed,
+        }) = self.resources.remove(&resource)
+        else {
+            return None;
+        };
+        let restore = |this: &mut Self, reader, writer| {
+            this.resources.insert(
+                resource,
+                HostResource::TcpStream {
+                    reader,
+                    writer,
+                    info: info.clone(),
+                    referenced,
+                    read_closed,
+                    write_closed,
+                },
+            );
+        };
+        let reader = match Rc::try_unwrap(reader) {
+            Ok(reader) => reader.into_inner(),
+            Err(reader) => {
+                restore(self, reader, writer);
+                return None;
+            }
+        };
+        let writer = match Rc::try_unwrap(writer) {
+            Ok(writer) => writer.into_inner(),
+            Err(writer) => {
+                restore(self, Rc::new(tokio::sync::Mutex::new(reader)), writer);
+                return None;
+            }
+        };
+        let stream = match reader.reunite(writer) {
+            Ok(stream) => stream,
+            Err(tokio::net::tcp::ReuniteError(reader, writer)) => {
+                restore(
+                    self,
+                    Rc::new(tokio::sync::Mutex::new(reader)),
+                    Rc::new(tokio::sync::Mutex::new(writer)),
+                );
+                return None;
+            }
+        };
+        // A connection the engine drives does not keep the realm alive; the listener does, as
+        // with the bridged path, where the accepted socket is unreferenced on attach.
+        self.resources.insert(
+            resource,
+            HostResource::TcpTaken {
+                info,
+                referenced: false,
+            },
+        );
+        Some(HostTransport(Box::new(stream)))
     }
 
     fn next_completion_async<'a>(
@@ -2918,7 +3216,8 @@ impl<M, T> Realm<M, T> {
         !self.next_ticks.is_empty() || !self.microtasks.is_empty() || !self.active_timers.is_empty()
     }
 
-    fn next_timer_deadline(&mut self) -> Option<Duration> {
+    /// The earliest armed timer's virtual deadline, discarding cancelled entries.
+    pub fn next_timer_deadline(&mut self) -> Option<Duration> {
         self.discard_cancelled_timers();
         self.timers.peek().map(|timer| timer.deadline)
     }
@@ -2934,7 +3233,8 @@ impl<M, T> Realm<M, T> {
         }
     }
 
-    fn run_next_timer(&mut self) -> Option<WorkItem<M, T>>
+    /// Advance virtual time to the earliest timer and take it, re-arming an interval.
+    pub fn run_next_timer(&mut self) -> Option<WorkItem<M, T>>
     where
         T: Clone,
     {
@@ -3437,11 +3737,9 @@ mod tests {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         let failed = RequestId::new(90);
         let sibling = RequestId::new(91);
-        let (local, tokio_runtime, host) = (
-            &mut runtime.executor.local,
-            &runtime.executor.runtime,
-            &mut runtime.state.host,
-        );
+        let executor = Rc::clone(&runtime.executor);
+        let (local, tokio_runtime, host) =
+            (&executor.local, &executor.runtime, &mut runtime.state.host);
         local.block_on(tokio_runtime, async {
             host.spawn_task(failed, 90, true, async {
                 panic!("supervised task panic");
