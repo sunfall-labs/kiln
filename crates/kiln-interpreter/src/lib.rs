@@ -630,6 +630,15 @@ pub enum Native {
     NodeClientRequestWrite,
     NodeClientRequestEnd,
     NodeBuffer,
+    /// The *global* `Buffer`, as distinct from the `node:buffer` namespace above.
+    ///
+    /// They publish the same members and differ in exactly one answer: node reports
+    /// `typeof require("buffer")` as "object" and `typeof Buffer` as "function", because the
+    /// first is a module namespace and the second is a constructor. One value for both made the
+    /// global read as an object here while the native backend read it as a function -- the same
+    /// bytecode, two answers -- and made this engine disagree with node about a name every Node
+    /// bundle feature-detects on.
+    NodeBufferGlobal,
     NodeBufferFrom,
     NodeBufferAlloc,
     NodeBufferIsBuffer,
@@ -1812,25 +1821,33 @@ impl Native {
                     .map(|method| Value::String((*method).to_owned()))
                     .collect(),
             ))),
-            (Self::NodeBuffer, "from") => {
+            (Self::NodeBuffer | Self::NodeBufferGlobal, "from") => {
                 Some(Value::Native(Self::NodeBufferFrom, RealmId::PRIMARY))
             }
-            (Self::NodeBuffer, "alloc" | "allocUnsafe" | "allocUnsafeSlow") => {
-                Some(Value::Native(Self::NodeBufferAlloc, RealmId::PRIMARY))
-            }
-            (Self::NodeBuffer, "isBuffer") => {
+            (
+                Self::NodeBuffer | Self::NodeBufferGlobal,
+                "alloc" | "allocUnsafe" | "allocUnsafeSlow",
+            ) => Some(Value::Native(Self::NodeBufferAlloc, RealmId::PRIMARY)),
+            (Self::NodeBuffer | Self::NodeBufferGlobal, "isBuffer") => {
                 Some(Value::Native(Self::NodeBufferIsBuffer, RealmId::PRIMARY))
             }
-            (Self::NodeBuffer, "byteLength") => {
+            (Self::NodeBuffer | Self::NodeBufferGlobal, "byteLength") => {
                 Some(Value::Native(Self::NodeBufferByteLength, RealmId::PRIMARY))
             }
-            (Self::NodeBuffer, "concat") => {
+            (Self::NodeBuffer | Self::NodeBufferGlobal, "concat") => {
                 Some(Value::Native(Self::NodeBufferConcat, RealmId::PRIMARY))
             }
-            (Self::NodeBuffer, "Buffer" | "default") => {
+            // `require("buffer").Buffer` is the constructor, and has to be the *same* value as
+            // the global `Buffer` -- that identity is what every `Buffer.isBuffer` shim relies
+            // on. `default` stays the namespace: an ESM default import of a Node builtin is the
+            // namespace object, not the constructor.
+            (Self::NodeBuffer | Self::NodeBufferGlobal, "Buffer") => {
+                Some(Value::Native(Self::NodeBufferGlobal, RealmId::PRIMARY))
+            }
+            (Self::NodeBuffer, "default") => {
                 Some(Value::Native(Self::NodeBuffer, RealmId::PRIMARY))
             }
-            (Self::NodeBuffer, "constants") => Some(ordinary_object([(
+            (Self::NodeBuffer | Self::NodeBufferGlobal, "constants") => Some(ordinary_object([(
                 "MAX_STRING_LENGTH".to_owned(),
                 Value::Number(536_870_888.0),
             )])),
@@ -13982,7 +13999,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 self.stack.push(process);
                                 continue;
                             }
-                            kiln_ir::Builtin::Buffer => Native::NodeBuffer,
+                            kiln_ir::Builtin::Buffer => Native::NodeBufferGlobal,
                             kiln_ir::Builtin::Url => Native::UrlConstructor,
                             kiln_ir::Builtin::TextDecoder => Native::TextDecoderConstructor,
                             kiln_ir::Builtin::Array => Native::ArrayConstructor,
@@ -17552,9 +17569,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     None => {
                         // Only a reference value can carry one, and asking a primitive would
                         // reach the string and number method tables for nothing.
+                        // A `Temporal` value carries a `toJSON` and it is the whole reason the
+                        // step exists: without it here the ISO string was never asked for and
+                        // `JSON.stringify(plainDate)` answered `{}` -- an object with no own
+                        // enumerable properties, which is what the value looks like from the
+                        // outside and not what the language says to write.
                         if !matches!(
                             receiver,
-                            Value::Object(_) | Value::Array(_) | Value::Date(_) | Value::Proxy(_)
+                            Value::Object(_)
+                                | Value::Array(_)
+                                | Value::Date(_)
+                                | Value::Temporal(_)
+                                | Value::Proxy(_)
                         ) {
                             return Ok(receiver.clone());
                         }
@@ -26181,7 +26207,30 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             "ArrayBuffer",
             Value::Native(Native::ArrayBufferConstructor, realm),
         );
-        globals.set_non_enumerable("Buffer", Value::Native(Native::NodeBuffer, realm));
+        globals.set_non_enumerable("Buffer", Value::Native(Native::NodeBufferGlobal, realm));
+        // Cancellation and the two text codecs. Every one of them already resolved as a bare
+        // name -- `Builtin::AbortController` and its three neighbours are in the compiler's
+        // table -- and none of them was on the global object, so `typeof AbortController` said
+        // "function" while `typeof globalThis.AbortController` said "undefined". That is the
+        // realm holding two lists for one question, and `globalThis.X` is the spelling a bundle's
+        // feature detection uses. The native backend publishes all four; this is the side that
+        // was short.
+        globals.set_non_enumerable(
+            "AbortController",
+            Value::Native(Native::AbortControllerConstructor, realm),
+        );
+        globals.set_non_enumerable(
+            "AbortSignal",
+            Value::Native(Native::AbortSignalConstructor, realm),
+        );
+        globals.set_non_enumerable(
+            "TextEncoder",
+            Value::Native(Native::TextEncoderConstructor, realm),
+        );
+        globals.set_non_enumerable(
+            "TextDecoder",
+            Value::Native(Native::TextDecoderConstructor, realm),
+        );
         globals.set_non_enumerable("URL", Value::Native(Native::UrlConstructor, realm));
         globals.set_non_enumerable(
             "SharedArrayBuffer",
@@ -37898,6 +37947,7 @@ fn call_native(
         | Native::NodeClientRequestWrite
         | Native::NodeClientRequestEnd
         | Native::NodeBuffer
+        | Native::NodeBufferGlobal
         | Native::NodeBufferFrom
         | Native::NodeBufferAlloc
         | Native::NodeBufferIsBuffer
@@ -40812,6 +40862,15 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
             .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone, _)))
             .cloned()
             .collect();
+        // A weak collection shows neither its size nor its contents. It cannot: an entry is
+        // reachable only through a key the console does not hold, and printing a count would make
+        // the collector's timing observable from the program. `Map(0) {}` was the wrong label
+        // twice over -- it named a type the value is not, so a log line said `Map` about
+        // something `x instanceof Map` is false of.
+        if matches!(object.get_own("@@weak"), Some(&Value::Boolean(true))) {
+            let label = if is_map { "WeakMap" } else { "WeakSet" };
+            return format!("{label} {{ <items unknown> }}");
+        }
         let label = if is_map { "Map" } else { "Set" };
         if live.is_empty() {
             return format!("{label}(0) {{}}");
@@ -44811,7 +44870,7 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             "unscopables",
         ],
         Value::Native(Native::IteratorConstructor, _) => &["from", "concat", "zip", "zipKeyed"],
-        Value::Native(Native::NodeBuffer, _) => &[
+        Value::Native(Native::NodeBuffer | Native::NodeBufferGlobal, _) => &[
             "from",
             "alloc",
             "allocUnsafe",
