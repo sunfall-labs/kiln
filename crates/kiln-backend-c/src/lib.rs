@@ -1742,7 +1742,6 @@ builtin_backlog! {
      "refused by name: shared memory has no representation here"),
 }
 
-
 const fn surface_answers(surface: &[BuiltinMember], global: &str, member: &str) -> bool {
     let mut index = 0;
     while index < surface.len() {
