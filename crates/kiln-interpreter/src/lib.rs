@@ -12890,11 +12890,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         runtime: &mut RealmRuntime,
     ) -> Result<(), ExecutionError> {
-        // Response slots and body wakeups make the engine tasks runnable without another
-        // HostOps completion. Let Tokio advance them before inspecting their queues; otherwise
-        // a pipelined request already buffered by Hyper can sit behind an unrelated pending
-        // socket read forever.
-        runtime.poll_http_tasks();
         let shared = self.module_realm.as_ref().map(|realm| realm.borrow());
         let servers = shared
             .as_ref()
@@ -12922,26 +12917,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .collect::<Vec<_>>();
         runtime.discard_queued_http_events_except(&known);
         for (server, resource) in connections {
-            loop {
-                let had_events = runtime.enter(|| {
-                    let event_count = if server.borrow().protocol == ServerProtocol::HttpClient {
-                        self.dispatch_runtime_http_client_events(
-                            &server,
-                            resource,
-                            self.instruction,
-                        )?
-                    } else {
-                        self.dispatch_runtime_http_events(&server, resource, self.instruction)?
-                    };
-                    Ok::<_, ExecutionError>(event_count != 0)
-                })?;
-                if !had_events {
-                    break;
+            let _ = runtime.enter(|| {
+                if server.borrow().protocol == ServerProtocol::HttpClient {
+                    self.dispatch_runtime_http_client_events(&server, resource, self.instruction)
+                } else {
+                    self.dispatch_runtime_http_events(&server, resource, self.instruction)
                 }
-                // A handler answered, or ended a body: the connection's task has work again
-                // (the next pipelined request, `finish`, `Closed`), and it may queue more.
-                runtime.poll_http_tasks();
-            }
+            })?;
         }
         Ok(())
     }

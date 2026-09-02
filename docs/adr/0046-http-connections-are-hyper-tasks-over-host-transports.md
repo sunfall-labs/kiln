@@ -12,10 +12,11 @@ way: the host hands over its transport (`TokioHost` the socket, `ScriptedHost` a
 future and its dispatch calls generated C directly; the interpreter uses the queued adapter
 (`QueuedDispatch`, drained by its checkpoint, with `RuntimeTurn::Protocol` as the wake). The
 bridge (`http_transport.rs`, `hyper_http.rs`, the runtime's bridged connection table), the
-archive's `checkpoint_http` and `apply_http_actions`, and the `_in_context` family are deleted;
-`start_host_op` answers "am I inside the executor" itself. The one departure from the text
-below: the interpreter's checkpoint still turns the scheduler with `poll_http_tasks` between
-drains, the open question the consequences mention.
+archive's `checkpoint_http` and `apply_http_actions`, the `_in_context` family, and the
+redundant `poll_http_tasks` reactor turns are deleted; `start_host_op` answers "am I inside the
+executor" itself. The open question regarding scheduler turns is resolved: under the new
+engine, Hyper tasks wake cooperatively on the `LocalSet` and the interpreter needs no intermediate
+reactor turns.
 
 ## Context
 
@@ -98,8 +99,9 @@ through the realm per connection; it is gone.
   arrive, these bytes must leave". That is a large mechanical rewrite of the runtime's tests and
   the reason this is a decision rather than a tuning pass.
 - The interpreter keeps working through the queued adapter and can adopt the direct one when its
-  loop is ready. Its checkpoint's dependence on reactor turns (noted in the runtime) is
-  unaffected by this change and remains an open question.
+  loop is ready. The suspected dependence of its checkpoint on reactor turns was an artifact of the
+  old bridge engine; with Hyper driving tasks over the host transport, those turns are deleted and
+  events drain without polling turns.
 - Concurrency order across connections is Hyper's task order, as it already was in effect.
   Single-connection scripted runs are fully deterministic.
 
