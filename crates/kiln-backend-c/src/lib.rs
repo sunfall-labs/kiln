@@ -6235,8 +6235,26 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 }
 
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
-    return property->key_len == key_len &&
-           (key_len == 0 || memcmp(property->key, key, key_len) == 0);
+    if (property->key_len != key_len) {
+        return 0;
+    }
+    if (key_len == 0) {
+        return 1;
+    }
+    /* Two pointers into the same bytes are the same key -- trivially, not by assumption -- and
+     * are common: an emitted constant is one static array shared by every read and write of a
+     * given literal name, and a property that was itself interned this way keeps that pointer
+     * when it is looked up again by the same literal. Different pointers say nothing either way,
+     * which is why this falls through to a real comparison rather than refusing on the strength
+     * of not matching -- a dynamic key can hold the same bytes as an interned one at some other
+     * address. */
+    if (property->key == key) {
+        return 1;
+    }
+    if (property->key[0] != key[0]) {
+        return 0;
+    }
+    return memcmp(property->key, key, key_len) == 0;
 }
 
 /* A write to an existing key replaces it in place, so insertion order is the order of first
@@ -11732,10 +11750,11 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
 
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
                                  size_t key_len, kiln_value *out, int depth, kiln_value *thrown) {
-    static const char length_key[] = "length";
+    /* `length` only means anything special to an array or a string; every other kind -- and an
+     * ordinary object, the one a request or response property read is, most of all -- paid for
+     * this `memcmp` on every read whether or not the key could possibly be it. Checked instead at
+     * the two places that use it, so the cost is real only where the answer can matter. */
     size_t index;
-    int is_length = key_len == sizeof(length_key) - 1 &&
-                    memcmp(key, length_key, sizeof(length_key) - 1) == 0;
     switch (target.tag) {
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
@@ -12147,7 +12166,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
             return KILN_C99_OK;
         }
-        if (is_length) {
+        if (kiln_c99_same_name(key, key_len, "length")) {
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
             return KILN_C99_OK;
         }
@@ -12225,7 +12244,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
             return KILN_C99_OK;
         }
-        if (is_length) {
+        if (kiln_c99_same_name(key, key_len, "length")) {
             *out = kiln_c99_number((double)kiln_c99_string_length(target));
             return KILN_C99_OK;
         }
