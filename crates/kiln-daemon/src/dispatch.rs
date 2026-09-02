@@ -1439,7 +1439,7 @@ pub(crate) fn native_build_program(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::default(),
+            realm: kiln_native::NativeRealmPolicy::host_clock(),
         },
     ) {
         Ok(report) => native_built(&project_root, &builder, report),
@@ -1599,7 +1599,7 @@ pub(crate) fn native_build_graph(
         &kiln_native::NativeBuildOptions {
             output,
             profile: native_profile(profile),
-            realm: kiln_native::NativeRealmPolicy::default(),
+            realm: kiln_native::NativeRealmPolicy::host_clock(),
         },
     ) {
         Ok(report) => native_built(&project_root, &builder, report),

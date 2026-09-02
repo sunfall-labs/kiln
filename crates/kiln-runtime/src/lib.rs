@@ -3128,6 +3128,14 @@ impl<M, T> Realm<M, T> {
         self.now
     }
 
+    /// Moves the clock forward to `now` when that is later than it reads. A wall-clock realm
+    /// (ADR 0044) does this at every turn boundary so timers armed by the callbacks that follow
+    /// measure from the present; the virtual clock never calls it, and advances only when a
+    /// timer runs.
+    pub fn advance_to(&mut self, now: Duration) {
+        self.now = self.now.max(now);
+    }
+
     /// Visits every queued next-tick and microtask, in queue order, without running or
     /// removing it. The native collector enumerates the roots queued work holds this way.
     pub fn for_each_queued(&self, mut visit: impl FnMut(&M)) {

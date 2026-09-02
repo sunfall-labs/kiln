@@ -51,7 +51,7 @@ static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-const PRIVATE_ASYNC_ABI_VERSION: u32 = 5;
+const PRIVATE_ASYNC_ABI_VERSION: u32 = 6;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
@@ -1471,7 +1471,7 @@ impl NativeBuilder {
             logical_paths.push(logical_path);
             modules.push((node, emitted));
         }
-        let launcher = graph_launcher_source(graph, &modules)?;
+        let launcher = graph_launcher_source(graph, &modules, &options.realm)?;
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();
 
@@ -3387,6 +3387,7 @@ fn render_graph_roots(
 fn graph_launcher_source(
     graph: &ModuleGraph,
     modules: &[(&kiln_module_graph::ModuleNode, kiln_backend_c::CModule)],
+    policy: &NativeRealmPolicy,
 ) -> Result<String, NativeError> {
     if modules.is_empty() {
         return Err(NativeError::Graph(
@@ -3480,6 +3481,7 @@ extern void kiln_cli_report_failure(int status, kiln_value value);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
+extern int kiln_realm_use_wall_clock(uint64_t realm);
 extern int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
 extern int kiln_realm_destroy(uint64_t realm);
 typedef void (*kiln_gc_roots_fn)(void *heap, void *context, int phase);
@@ -3801,7 +3803,15 @@ static int kiln_graph_enter(void *opaque) {
     }
     output.push_str(&evaluation);
     output.push_str(
-        "    return 0;\n}\n\n/* argc/argv reach the realm before it is entered, so the first `process` a module builds\n * already has the command line. The strings are copied on the other side of this call. */\nint main(int argc, char **argv) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0 && argc > 0)\n        status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);\n    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
+        "    return 0;\n}\n\n/* argc/argv reach the realm before it is entered, so the first `process` a module builds\n * already has the command line. The strings are copied on the other side of this call. */\nint main(int argc, char **argv) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0 && argc > 0)\n        status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);\n",
+    );
+    if policy.host_clock {
+        // ADR 0044: a shipped realm keeps wall time, and the switch happens before the realm is
+        // entered so no timer is ever armed against the virtual clock.
+        output.push_str("    if (status == 0) status = kiln_realm_use_wall_clock(realm);\n");
+    }
+    output.push_str(
+        "    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
     );
     Ok(output)
 }
@@ -5432,7 +5442,7 @@ mod tests {
                  makes two different ABIs hash alike and every cached artifact is then suspect"
             );
         }
-        assert!(runtime_abi_identity().contains("async-5"));
+        assert!(runtime_abi_identity().contains("async-6"));
         // Same reasoning as above, and the same history: this pin was 14, then 15, then 18, and
         // is 23 as this is written -- all intended, none caught by being pinned.
         // What matters is that the provider's version reaches the identity at all: if it did not,
@@ -7934,7 +7944,8 @@ int main(void) {{
             })
             .collect::<Vec<_>>();
 
-        let launcher = graph_launcher_source(&graph, &modules).expect("launcher emits");
+        let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
+            .expect("launcher emits");
         assert!(launcher.contains("kiln_imports_2[0] = kiln_exports_0[0];"));
         assert!(!launcher.contains("kiln_imports_1[0] ="));
         assert_eq!(launcher.matches("kiln_realm_create(&realm)").count(), 1);
@@ -7946,6 +7957,21 @@ int main(void) {{
             1
         );
         assert!(!launcher.contains("kiln_graph_enter_module"));
+        // ADR 0044: only a host-clock launcher switches the realm to wall time, and it does so
+        // between creating the realm and entering it.
+        assert!(!launcher.contains("kiln_realm_use_wall_clock(realm)"));
+        let wall = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::host_clock())
+            .expect("wall-clock launcher emits");
+        let switch = wall
+            .find("kiln_realm_use_wall_clock(realm)")
+            .expect("the host-clock launcher switches the clock");
+        assert!(wall.find("kiln_realm_create(&realm)").unwrap() < switch);
+        assert!(
+            switch
+                < wall
+                    .find("kiln_realm_enter(realm, kiln_graph_enter, &graph)")
+                    .unwrap()
+        );
         let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_star_graph")
             .expect("shared wrapper emits");
         assert!(wrapper.contains("import_arrays[2][0] = export_arrays[0][0];"));
@@ -8026,7 +8052,8 @@ int main(void) {{
             })
             .collect::<Vec<_>>();
 
-        let launcher = graph_launcher_source(&graph, &modules).expect("launcher reserves wrappers");
+        let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
+            .expect("launcher reserves wrappers");
         let commonjs_index = modules
             .iter()
             .position(|(node, _)| node.source == ModuleSource::CommonJs)
@@ -8212,7 +8239,8 @@ int main(void) {{
             format!("*result = kiln_exports_{util_index}[{default_index}]; return 0;");
         let expected_shared =
             format!("*result = graph->exports[{util_index}][{default_index}]; return KILN_C99_OK;");
-        let launcher = graph_launcher_source(&graph, &modules).expect("launcher emits");
+        let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
+            .expect("launcher emits");
         assert!(launcher.contains(&expected_standalone));
         let wrapper = graph_shared_wrapper_source(&graph, &modules, "kiln_builtin_projection")
             .expect("shared wrapper emits");
@@ -8642,7 +8670,8 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             })
             .collect::<Vec<_>>();
 
-        let launcher = graph_launcher_source(&graph, &modules).expect("launcher emits");
+        let launcher = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
+            .expect("launcher emits");
         assert!(launcher.contains("kiln_imports_1[0] = kiln_namespaces[0];"));
         assert_eq!(launcher.matches("kiln_namespaces[0]").count(), 2);
         assert!(launcher.contains("_namespace_wrapper(&kiln_namespaces[0]"));
@@ -8766,7 +8795,7 @@ console.log(direct === via, via.answer);
                 )
             })
             .collect::<Vec<_>>();
-        let error = graph_launcher_source(&graph, &modules)
+        let error = graph_launcher_source(&graph, &modules, &NativeRealmPolicy::default())
             .expect_err("reserved namespace export must refuse before C emission");
         assert!(matches!(
             error,
@@ -9772,7 +9801,9 @@ int main(void) {{
                 )
             })
             .collect::<Vec<_>>();
-        let launcher = graph_launcher_source(&first_graph, &first_modules).expect("launcher emits");
+        let launcher =
+            graph_launcher_source(&first_graph, &first_modules, &NativeRealmPolicy::default())
+                .expect("launcher emits");
         let main = launcher
             .find("int main(int argc, char **argv)")
             .expect("launcher has main");

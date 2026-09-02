@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Refines ADRs 0012, 0015 and 0031 for natively compiled programs run outside the
-conformance harness. Deterministic execution is unchanged where it is measured.
+Accepted. Refines ADRs 0012 and 0028 for natively compiled programs, and completes the clock
+half of ADR 0031's host-clock policy. Deterministic execution is unchanged where it is measured.
 
 ## Context
 
@@ -13,66 +13,80 @@ prints the same thing. ADR 0028 implemented that with Tokio's paused time. That 
 interpreter under Test262, for the differential corpus that holds the native backend to
 byte-identical output, and for any run whose purpose is to be compared with another.
 
-A server is not that. Measured on 2026-09-02 with four client processes saturating a compiled
-`node:http` service, a handler that awaited `setTimeout(resolve, 0)` answered in 13 ms at the
-median while every other route answered in 0.13 ms. Paused Tokio time advances only when the
-runtime is idle, and a saturated server is never idle. A timer with a positive delay under the
-same load does not fire until load drops, which for a request timeout or a retry is the opposite of
-its purpose. `Date.now()` answers 0 in such a binary, `performance.now()` is not emitted, and
-`setTimeout(0)` fires "at the next turn" of a clock that is not moving.
+ADR 0031 added a build policy, `NativeRealmPolicy::host_clock`, under which the emitted program
+reads `Date.now()` from the host through `HostOp::ClockNow` instead of from the realm. It stopped
+there: the drive that runs the program's timers still paused Tokio time, and nothing in the
+command line ever set the policy, so every binary `kiln build` produced was deterministic.
 
-The two needs do not conflict; they are two configurations of one realm, and the question is only
-which one a given process gets by default.
+A server is not a measurement. Observed on 2026-09-02 with four client processes saturating a
+compiled `node:http` service: a handler that awaited `setTimeout(resolve, 0)` answered in 13 ms at
+the median while every other route answered in 0.13 ms, because paused time advances only when
+the runtime is idle and a saturated server never is. A timer with a positive delay under that load
+does not fire until load drops, which for a request timeout or a retry is the opposite of its
+purpose, and `Date.now()` answered 0.
 
 ## Decision
 
-### The clock is chosen per process, and the default follows the purpose
+### The build policy is the one clock switch, and `kiln build` turns it on
 
-A native binary run by the conformance harness, by `scripts/native.sh`, or by `kiln run --native`
-keeps the virtual clock: the runner passes `KILN_CLOCK=virtual` to the child. Every other native
-process, which is to say a binary a user built and started, keeps wall time. The interpreter is
-unchanged in both modes. An explicit `KILN_CLOCK=virtual` or `KILN_CLOCK=live` in the environment
-of any native process wins.
+`NativeRealmPolicy::host_clock` now means the whole realm keeps the host's wall clock, not only
+`Date.now()`. The daemon's `kiln build` entry points (`native_build_program`,
+`native_build_graph`) build with `NativeRealmPolicy::host_clock()`; `kiln run --native`, the
+shared-library builds, `scripts/native.sh` and the differential corpus keep
+`NativeRealmPolicy::default()`. A program that prints the clock therefore prints wall time as a
+shipped binary and virtual time under the harness, which is the split the two audiences need.
+The policy already participates in the program hash and the launcher identity, so the two
+builds never share an artifact.
 
-### Wall time means three things
+### The launcher switches the realm before entering it
 
-- Timers wait on the live Tokio clock. Time is not paused, so a sleep fires when its deadline
-  passes whether or not the runtime is idle. A timer that is already due runs before the drive
-  waits at all (that part holds in both modes: a due timer is not a wait case).
-- The realm's virtual `now`, which orders timers and which `Date.now()`, `Date`, `performance`
-  and Temporal's `Now` read, advances to the monotonic time elapsed since the realm started at
-  every turn boundary, and is anchored to the host's Unix time at start. `Date.now()` therefore
-  answers the wall clock, as Node does, and timer ordering by `(deadline, sequence)` is unchanged.
-- The realm's time zone stays what ADR 0015 says (UTC) until ADR 0031's successor supplies the
-  host zone as a capability. Wall time is a clock decision, not a locale decision.
+Every realm the runtime archive creates starts on the virtual clock. A launcher emitted under the
+host-clock policy calls `kiln_realm_use_wall_clock(realm)` between `kiln_realm_create` and
+`kiln_realm_enter`, so no timer is ever armed against a clock that later jumps. The archive
+refuses the call for an entered realm. In-process tests, the interpreter and every launcher built
+under the default policy never make the call, which is why an archive test can still arm an
+hour-long timer without waiting an hour.
 
-### Virtual time keeps its contract
+### What a wall-clock realm does differently
 
-With `KILN_CLOCK=virtual` nothing above applies: Tokio time is paused, `now` advances only when a
-timer runs, `Date.now()` starts at the epoch, and the differential corpus continues to compare two
-engines that agree on every printed instant. The runner sets it, so a contributor running
-`scripts/native.sh` sees no change.
+- Tokio time is never paused, so a timer's wait is a real wait and fires whether or not the realm
+  is idle. With no other work pending, the drive sleeps until the deadline instead of jumping the
+  clock to it. A timer that is already due still runs before any wait, in both modes.
+- The realm's `now`, which orders timers and which `kiln_realm_now` reads, is advanced to the
+  host's Unix time at every turn boundary: when the realm is entered, at the top of every drive
+  iteration, and before every protocol event a connection dispatches (ADR 0042). A timer armed
+  inside a callback therefore measures from the present, as Node's loop time does, and
+  `Date.now()` from generated C, `Temporal.Now` through the nanosecond accessor and the
+  `HostOp::ClockNow` path all agree on the same clock.
+- The virtual realm is untouched: `now` moves only when a timer runs, Tokio time is paused on the
+  first drive turn, and `Date.now()` starts at the epoch.
 
 ## Consequences
 
-- A compiled server's timers fire on time under load, and `Date.now()` is the wall clock. The
-  mixed benchmark's `/async` route stops being a measurement of idleness.
-- A program whose output depends on the clock prints different things under `kiln run --native`
-  and as a shipped binary. That was already true of Node versus the interpreter; the harness
-  documents which mode it is measuring, and `KILN_CLOCK` makes either reproducible on demand.
+- A compiled server's timers fire on time under load and `Date.now()` is the wall clock. The
+  mixed benchmark's `/async` route measures the runtime, not its idleness.
+- The private runtime ABI gains one export (`PROVIDER_ABI_VERSION` 27) and the launcher contract
+  one call (`PRIVATE_ASYNC_ABI_VERSION` 6).
+- `kiln build` and `kiln run --native` of the same source produce different binaries. That was
+  already implied by ADR 0031's policy being part of program identity; it is now something a
+  user can observe by printing the date.
 - The interpreter still has only the virtual clock. Giving it wall time is a separate decision
-  with its own harness consequences.
-- `performance.now()` for the native backend is unblocked by having a clock worth reading; it is
-  not implemented by this ADR.
+  with its own harness consequences, and `performance.now()` for the native backend, now that
+  there is a clock worth reading, is separate work.
 
 ## Alternatives rejected
 
-**Advance virtual time when the runtime is busy.** That keeps determinism in name only: how much
+**An environment variable read by the binary.** It would let one artifact serve both audiences,
+but the clock would then be decided after the program hash, the harness would have to remember
+to set it, and a binary's behaviour would depend on something outside the build. The policy
+already exists and already changes identity; using it is smaller and cannot be forgotten.
+
+**Advance virtual time while the runtime is busy.** That keeps determinism in name only: how much
 time passes per turn would depend on the machine, so runs would no longer compare, and timers
 would still not track wall time.
 
 **Wall time everywhere, including the harness.** The differential corpus prints clock values
-(`timers.ts` prints a 25 ms interval as exactly 25) and Test262 expects a paused clock in places.
+(`timers.ts` prints a 25 ms interval as exactly 25) and archive tests arm hour-long timers.
 Losing byte-identical comparison to fix a server is the wrong trade.
 
 **Leave it and document it.** A timer that does not fire under load is a correctness bug in the
