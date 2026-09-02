@@ -4123,3 +4123,39 @@ test "at `4ff5613a`" and saw it fail twice, the tree already contained `56454ca8
 either as dirty working-tree state or as a HEAD that had moved under me. Neither of us measured
 wrong; we measured different trees and both called them `4ff5613a`. **A commit name is not a
 description of your working tree.**
+
+## The server's clock, and the disk again (2026-09-02, Claude `perf/review`)
+
+**A due timer is not a wait case.** Under four saturating client processes the mixed benchmark's
+`/async` route (`await new Promise(r => setTimeout(r, 0))`) answered in 13 ms at the median while
+every other route answered in 0.13 ms. The drive offered the due timer to a `select` whose
+completion arm always had a permit under load, so the timer waited for a lull that never came.
+The drive now runs any timer whose deadline has passed before it waits at all: 1.6 ms.
+
+**Then the clock itself.** ADR 0028's paused Tokio time advances only when the runtime is idle, so
+a compiled server's `setTimeout(fn, 50)` did not fire until load dropped, and `Date.now()` was 0.
+ADR 0031 had already built the switch (`NativeRealmPolicy::host_clock`), but only for
+`Date.now()`, and nothing set it. ADR 0044 makes the policy govern the whole realm: `kiln build`
+turns it on, `kiln run --native` and the harness keep the virtual clock, and the launcher calls
+`kiln_realm_use_wall_clock` before entering the realm. Three things worth knowing:
+
+- A realm the archive creates in-process is virtual unless the launcher says otherwise. That is
+  deliberate: an archive test arms an hour-long timer and must not wait an hour.
+- Switching the clock, entering the realm, and dispatching a protocol event are all turn
+  boundaries that advance the realm's `now` to wall time. The first version forgot the switch
+  itself, so a timer armed during entry measured from the epoch and fired at once.
+- With only a timer left, a wall-clock realm sleeps the real interval; the virtual realm still
+  jumps. Same drive loop, one `matches!`.
+
+`kiln build` and `kiln run --native` of the same file now produce different binaries. Printing
+the date shows which one you have.
+
+**The disk hit zero bytes.** Zero, not "low": the shell could not create the file it writes a
+command's output to, so no command could run, including the one to free space. What worked was
+truncating a large tracked file with an editor and restoring it from git in the first command that
+ran. Reclaimed 9 GiB by removing two merged worktrees (`kiln-gcalloc`, `kiln-strings`). There are
+still about sixty worktrees under `/private/tmp` from other sessions; they are not mine to delete.
+
+**Measured after both (four client processes, sixteen connections each, five seconds, same
+minute):** hello kiln 138.4k rps vs bun 121.8k; mixed kiln 96.1k vs bun 89.1k; zero errors, p99
+under 2 ms. `bench/server/compare.sh` runs the interleaved version of that table.
