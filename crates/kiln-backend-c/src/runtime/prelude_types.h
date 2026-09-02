@@ -803,6 +803,11 @@ int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t 
                                const uint8_t *function, uint64_t function_len,
                                uint64_t method, uint64_t receiver_tag, int has_method);
 int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len,
+                        const uint8_t *suffix, uint64_t suffix_len, uint8_t *out,
+                        uint64_t capacity, uint64_t *out_len);
+int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to,
+                            uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);

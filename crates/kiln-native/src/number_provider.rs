@@ -436,6 +436,12 @@ fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
         "crates/kiln-native-number-ffi/src/lib.rs",
         "crates/kiln-native-number-abi/Cargo.toml",
         "crates/kiln-native-number-abi/src/lib.rs",
+        // `node:path`'s algorithms, compiled into this archive so a generated program and the
+        // interpreter answer `dirname` from one implementation. Same reasoning as the calendar
+        // adapter below: leave it out of the identity and a native run keeps linking yesterday's
+        // `basename` while the interpreter, which links the crate directly, has already moved.
+        "crates/kiln-node-path/Cargo.toml",
+        "crates/kiln-node-path/src/lib.rs",
         // The calendar engine's adapter. It is compiled *into* this archive under the `temporal`
         // feature, so a change to it changes the archive -- and leaving it out of the identity is
         // how a native run keeps linking yesterday's calendar while the interpreter, which links

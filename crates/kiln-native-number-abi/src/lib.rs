@@ -22,6 +22,8 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_diagnostic_reset, realm_diagnostic_reset);
             (realm, kiln_realm_diagnostic_note, realm_diagnostic_note);
             (realm, kiln_realm_diagnostic_render, realm_diagnostic_render);
+            (realm, kiln_node_path_part, node_path_part);
+            (realm, kiln_node_path_relative, node_path_relative);
             (realm, kiln_realm_symbol_for, realm_symbol_for);
             (realm, kiln_realm_symbol_key_for, realm_symbol_key_for);
             (realm, kiln_realm_callable_store, realm_callable_store);

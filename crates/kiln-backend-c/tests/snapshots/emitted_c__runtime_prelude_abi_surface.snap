@@ -663,6 +663,8 @@ int kiln_realm_is_active(void);
 int kiln_realm_diagnostic_reset(void);
 int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t instruction,
 int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len);
+int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len,
+int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to,
 int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
 int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
 int kiln_realm_value_slot(uint32_t key, void **out_slot);
@@ -988,6 +990,8 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
 static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
+#define KILN_C99_NODE_PATH_RELATIVE 4u
+static int kiln_c99_node_path_answer(uint32_t part, const uint8_t *first, uint64_t first_len,
 static int kiln_c99_node_path(kiln_value *result, uint64_t code,
 done:
 static kiln_value kiln_c99_undefined(void) {

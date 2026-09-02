@@ -686,6 +686,45 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
     return KILN_C99_CONTROL_ERROR;
 }
 
+/* `node:path`'s algorithms live in Rust now, in the crate the interpreter links too: `dirname`
+ * and friends are fiddlier than they look -- `dirname("a//b")` is "a/", `extname("..")` is "" but
+ * `extname("...")` is "." -- and the two hand-written copies had drifted from node in seven and
+ * five places respectively, in different places. One implementation cannot disagree with itself.
+ *
+ * The answer is a slice of the caller's own path for everything but `normalize`, so the provider
+ * allocates nothing and this copies once. The caller passes a bound it can prove, which makes this
+ * a single call rather than the usual ask-the-length-then-ask-again pair; the stack covers every
+ * ordinary path and only an absurd one reaches the heap. */
+#define KILN_C99_NODE_PATH_RELATIVE 4u
+static int kiln_c99_node_path_answer(uint32_t part, const uint8_t *first, uint64_t first_len,
+                                     const uint8_t *second, uint64_t second_len, size_t bound,
+                                     kiln_value *result, kiln_value *thrown) {
+    uint8_t inline_buffer[512];
+    uint8_t *buffer = inline_buffer;
+    uint8_t *spilled = NULL;
+    uint64_t written = 0;
+    int status;
+    if (bound > sizeof inline_buffer) {
+        spilled = (uint8_t *)malloc(bound);
+        if (spilled == NULL)
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "out of memory answering node:path");
+        buffer = spilled;
+    }
+    status = part == KILN_C99_NODE_PATH_RELATIVE
+                 ? kiln_node_path_relative(first, first_len, second, second_len, buffer,
+                                           (uint64_t)bound, &written)
+                 : kiln_node_path_part(part, first, first_len, second, second_len, buffer,
+                                       (uint64_t)bound, &written);
+    if (status == KILN_C99_OK)
+        *result = kiln_c99_copy_text((const char *)buffer, (size_t)written);
+    free(spilled);
+    if (status != KILN_C99_OK)
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_ERROR,
+                                    "node:path provider refused the request");
+    return KILN_C99_OK;
+}
+
 static int kiln_c99_node_path(kiln_value *result, uint64_t code,
                               const kiln_value *args, size_t argc, kiln_value *thrown) {
     kiln_text joined = {0};
@@ -703,165 +742,38 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         *result = kiln_c99_boolean(path.len > 0 && path.ptr[0] == '/');
         return KILN_C99_OK;
     }
-    if (code == KILN_C99_METHOD_NODE_PATH_DIRNAME) {
+    if (code == KILN_C99_METHOD_NODE_PATH_DIRNAME ||
+        code == KILN_C99_METHOD_NODE_PATH_BASENAME ||
+        code == KILN_C99_METHOD_NODE_PATH_EXTNAME) {
         kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
-        size_t end;
-        size_t last_slash;
+        const uint8_t *suffix_ptr = NULL;
+        uint64_t suffix_len = 0;
+        uint32_t part = code == KILN_C99_METHOD_NODE_PATH_DIRNAME    ? 0u
+                        : code == KILN_C99_METHOD_NODE_PATH_BASENAME ? 1u
+                                                                     : 2u;
         if (path.tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, path, "string path");
-        if (path.len == 0) {
-            *result = kiln_c99_copy_text(".", 1);
-            return KILN_C99_OK;
+        if (part == 1u && argc > 1 && args[1].tag == KILN_VALUE_STRING) {
+            suffix_ptr = (const uint8_t *)args[1].ptr;
+            suffix_len = (uint64_t)args[1].len;
         }
-        end = path.len;
-        while (end > 1 && path.ptr[end - 1] == '/') --end;
-        if (end == 1 && path.ptr[0] == '/') {
-            *result = kiln_c99_copy_text("/", 1);
-            return KILN_C99_OK;
-        }
-        last_slash = end;
-        while (last_slash > 0 && path.ptr[last_slash - 1] != '/') --last_slash;
-        if (last_slash == 0) {
-            *result = kiln_c99_copy_text(".", 1);
-            return KILN_C99_OK;
-        }
-        if (last_slash == 1) {
-            *result = kiln_c99_copy_text("/", 1);
-            return KILN_C99_OK;
-        }
-        while (last_slash > 1 && path.ptr[last_slash - 1] == '/') --last_slash;
-        *result = kiln_c99_copy_text(path.ptr, last_slash);
-        return KILN_C99_OK;
-    }
-    if (code == KILN_C99_METHOD_NODE_PATH_BASENAME) {
-        kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
-        size_t end;
-        size_t last_slash;
-        const char *base_ptr;
-        size_t base_len;
-        if (path.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, path, "string path");
-        if (path.len == 0) {
-            *result = kiln_c99_copy_text("", 0);
-            return KILN_C99_OK;
-        }
-        end = path.len;
-        while (end > 1 && path.ptr[end - 1] == '/') --end;
-        if (end == 1 && path.ptr[0] == '/') {
-            *result = kiln_c99_copy_text("", 0);
-            return KILN_C99_OK;
-        }
-        last_slash = end;
-        while (last_slash > 0 && path.ptr[last_slash - 1] != '/') --last_slash;
-        base_ptr = path.ptr + last_slash;
-        base_len = end - last_slash;
-        if (argc > 1 && args[1].tag == KILN_VALUE_STRING && args[1].len > 0 && args[1].len < base_len) {
-            kiln_value suffix = args[1];
-            if (memcmp(base_ptr + base_len - suffix.len, suffix.ptr, suffix.len) == 0) {
-                base_len -= suffix.len;
-            }
-        }
-        *result = kiln_c99_copy_text(base_ptr, base_len);
-        return KILN_C99_OK;
-    }
-    if (code == KILN_C99_METHOD_NODE_PATH_EXTNAME) {
-        kiln_value path = argc > 0 ? args[0] : kiln_c99_undefined();
-        size_t end;
-        size_t last_slash;
-        size_t dot;
-        if (path.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, path, "string path");
-        if (path.len == 0) {
-            *result = kiln_c99_copy_text("", 0);
-            return KILN_C99_OK;
-        }
-        end = path.len;
-        while (end > 1 && path.ptr[end - 1] == '/') --end;
-        last_slash = end;
-        while (last_slash > 0 && path.ptr[last_slash - 1] != '/') --last_slash;
-        dot = end;
-        while (dot > last_slash && path.ptr[dot - 1] != '.') --dot;
-        if (dot == last_slash || dot - 1 == last_slash) {
-            *result = kiln_c99_copy_text("", 0);
-            return KILN_C99_OK;
-        }
-        *result = kiln_c99_copy_text(path.ptr + dot - 1, end - (dot - 1));
-        return KILN_C99_OK;
+        /* No decomposition is longer than the path it came from; the empty path answers ".". */
+        return kiln_c99_node_path_answer(part, (const uint8_t *)path.ptr, (uint64_t)path.len,
+                                         suffix_ptr, suffix_len, path.len + 1, result, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_PATH_RELATIVE) {
-        kiln_value from_val = argc > 0 ? args[0] : kiln_c99_undefined();
-        kiln_value to_val = argc > 1 ? args[1] : kiln_c99_undefined();
-        kiln_value resolved_from = kiln_c99_undefined();
-        kiln_value resolved_to = kiln_c99_undefined();
-        const char *from_segs[128];
-        size_t from_lens[128];
-        size_t from_count = 0;
-        const char *to_segs[128];
-        size_t to_lens[128];
-        size_t to_count = 0;
-        size_t i = 0;
-        size_t shared = 0;
-        size_t up = 0;
-        size_t u, t;
-        kiln_text rel = {0};
-        int s1, s2;
-        if (from_val.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, from_val, "string path");
-        if (to_val.tag != KILN_VALUE_STRING)
-            return kiln_c99_throw_not_a(thrown, to_val, "string path");
-        s1 = kiln_c99_node_path(&resolved_from, KILN_C99_METHOD_NODE_PATH_RESOLVE, &from_val, 1, thrown);
-        if (s1 != KILN_C99_OK) return s1;
-        s2 = kiln_c99_node_path(&resolved_to, KILN_C99_METHOD_NODE_PATH_RESOLVE, &to_val, 1, thrown);
-        if (s2 != KILN_C99_OK) return s2;
-        if (resolved_from.len == resolved_to.len &&
-            memcmp(resolved_from.ptr, resolved_to.ptr, resolved_from.len) == 0) {
-            *result = kiln_c99_copy_text("", 0);
-            return KILN_C99_OK;
-        }
-        i = 0;
-        while (i < resolved_from.len) {
-            size_t start;
-            while (i < resolved_from.len && resolved_from.ptr[i] == '/') ++i;
-            if (i >= resolved_from.len) break;
-            start = i;
-            while (i < resolved_from.len && resolved_from.ptr[i] != '/') ++i;
-            if (from_count < 128) {
-                from_segs[from_count] = resolved_from.ptr + start;
-                from_lens[from_count++] = i - start;
-            }
-        }
-        i = 0;
-        while (i < resolved_to.len) {
-            size_t start;
-            while (i < resolved_to.len && resolved_to.ptr[i] == '/') ++i;
-            if (i >= resolved_to.len) break;
-            start = i;
-            while (i < resolved_to.len && resolved_to.ptr[i] != '/') ++i;
-            if (to_count < 128) {
-                to_segs[to_count] = resolved_to.ptr + start;
-                to_lens[to_count++] = i - start;
-            }
-        }
-        while (shared < from_count && shared < to_count &&
-               from_lens[shared] == to_lens[shared] &&
-               memcmp(from_segs[shared], to_segs[shared], from_lens[shared]) == 0) {
-            ++shared;
-        }
-        up = from_count - shared;
-        for (u = 0; u < up; ++u) {
-            if (rel.len > 0) status = kiln_c99_text_append_c(&rel, "/");
-            if (status == KILN_C99_OK) status = kiln_c99_text_append_c(&rel, "..");
-            if (status != KILN_C99_OK) { free(rel.bytes); return status; }
-        }
-        for (t = shared; t < to_count; ++t) {
-            if (rel.len > 0) status = kiln_c99_text_append_c(&rel, "/");
-            if (status == KILN_C99_OK) status = kiln_c99_text_append(&rel, to_segs[t], to_lens[t]);
-            if (status != KILN_C99_OK) { free(rel.bytes); return status; }
-        }
-        if (rel.len == 0) status = kiln_c99_text_append_c(&rel, "");
-        if (status == KILN_C99_OK) *result = kiln_c99_text_value(&rel);
-        else free(rel.bytes);
-        return status;
+        kiln_value from = argc > 0 ? args[0] : kiln_c99_undefined();
+        kiln_value to = argc > 1 ? args[1] : kiln_c99_undefined();
+        if (from.tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_not_a(thrown, from, "string path");
+        if (to.tag != KILN_VALUE_STRING)
+            return kiln_c99_throw_not_a(thrown, to, "string path");
+        /* Unlike the decompositions this can outgrow both inputs: every component of `from` that
+         * `to` does not share becomes "../", and a component can be a single byte. */
+        return kiln_c99_node_path_answer(KILN_C99_NODE_PATH_RELATIVE, (const uint8_t *)from.ptr,
+                                         (uint64_t)from.len, (const uint8_t *)to.ptr,
+                                         (uint64_t)to.len, from.len * 3 + to.len + 1, result,
+                                         thrown);
     }
     for (index = 0; index < argc; ++index) {
         kiln_value part;

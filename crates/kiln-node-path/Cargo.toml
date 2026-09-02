@@ -1,0 +1,11 @@
+[package]
+name = "kiln-node-path"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately empty. `node:path`'s POSIX algorithms are pure string scans over `&str`, so this
+# crate can sit beneath the interpreter and the native provider without putting either one's
+# engine on the other's rebuild path (ADR 0004, and the reason `regress` is linked by both).
+[dependencies]
