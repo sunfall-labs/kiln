@@ -8043,7 +8043,15 @@ static const kiln_symbol kiln_c99_well_known[] = {
     {"@@asyncIterator", 15, "Symbol.asyncIterator", 20},
     {"@@hasInstance", 13, "Symbol.hasInstance", 18},
     {"@@toStringTag", 13, "Symbol.toStringTag", 18},
-    {"@@toPrimitive", 13, "Symbol.toPrimitive", 18}};
+    {"@@toPrimitive", 13, "Symbol.toPrimitive", 18},
+    {"@@isConcatSpreadable", 20, "Symbol.isConcatSpreadable", 25},
+    {"@@match", 7, "Symbol.match", 12},
+    {"@@matchAll", 10, "Symbol.matchAll", 15},
+    {"@@replace", 9, "Symbol.replace", 14},
+    {"@@search", 8, "Symbol.search", 13},
+    {"@@species", 9, "Symbol.species", 14},
+    {"@@split", 7, "Symbol.split", 12},
+    {"@@unscopables", 13, "Symbol.unscopables", 18}};
 
 /* Every symbol this run has made, by the value that *is* it.
  *
@@ -11854,10 +11862,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * instead of through a call. */
         if (target.bits == KILN_C99_BUILTIN_SYMBOL) {
             size_t index;
-            static const char *const names[] = {"iterator", "asyncIterator", "hasInstance",
-                                                "toStringTag", "toPrimitive"};
-            for (index = 0; index < sizeof names / sizeof *names; ++index) {
-                if (kiln_c99_same_name(key, key_len, names[index])) {
+            /* Read out of the table itself rather than a list beside it. The two were separate
+             * lists indexed by the same integer, so a symbol added to one and not the other was
+             * silently the wrong symbol; `Symbol.isConcatSpreadable` was simply absent from both
+             * and refused every bundled `lodash`. The `+ 2` steps over the `@@` that makes the
+             * table's key a reserved store key. */
+            for (index = 0; index < sizeof kiln_c99_well_known / sizeof *kiln_c99_well_known;
+                 ++index) {
+                if (kiln_c99_same_name(key, key_len, kiln_c99_well_known[index].key + 2)) {
                     *out = kiln_c99_value(KILN_VALUE_SYMBOL,
                                           (uint64_t)(uintptr_t)&kiln_c99_well_known[index],
                                           (const char *)(uintptr_t)&kiln_c99_well_known[index], 0);
