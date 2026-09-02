@@ -3,6 +3,8 @@
 # about throughput should come from. Servers are started on PORT one at a time.
 #
 # usage: bench/server/compare.sh <kiln-hello-binary> <kiln-app-binary>
+# The kiln binaries must already listen on PORT: build them from copies of serve.mjs and app.mjs
+# with 18088 replaced, e.g. `sed s/18088/$PORT/g bench/server/app.mjs > /tmp/app.mjs`.
 # Environment: PASSES (3), PROCS (4), CONNS (16 per process), DURATION_MS (5000), PORT (18088),
 # RUNTIMES ("kiln node bun deno").
 set -euo pipefail
@@ -12,8 +14,8 @@ PASSES="${PASSES:-3}"; PROCS="${PROCS:-4}"; CONNS="${CONNS:-16}"; DURATION_MS="$
 PORT="${PORT:-18088}"; RUNTIMES="${RUNTIMES:-kiln node bun deno}"
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 work="$(mktemp -d)"
-sed "s/const port = 18088;/const port = ${PORT};/" "$HERE/serve.mjs" > "$work/serve.mjs"
-sed "s/const port = 18088;/const port = ${PORT};/" "$HERE/app.mjs" > "$work/app.mjs"
+sed "s/18088/${PORT}/g" "$HERE/serve.mjs" > "$work/serve.mjs"
+sed "s/18088/${PORT}/g" "$HERE/app.mjs" > "$work/app.mjs"
 
 start() { # runtime workload
 	local js="$work/serve.mjs" bin="$kiln_hello"
