@@ -17748,7 +17748,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     kiln_array *array;
     size_t index;
     int status;
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_EVENT)) {
+    /* `kiln_c99_method_groups` is a generated switch over every method code this backend knows,
+     * and every group test below used to run it again from scratch just to AND one bit out of
+     * its answer -- a code that reaches its group late in this chain (an ordinary node:http
+     * method, behind the event and net tests) paid for the switch three or four times over on
+     * every call. `code` cannot change underneath this function, so its groups cannot either;
+     * one call up front and a mask test everywhere below answers exactly the same questions. */
+    uint32_t groups = kiln_c99_method_groups(code);
+    if ((groups & KILN_C99_GROUP_NODE_EVENT)) {
         return kiln_c99_node_event(host, result, code, receiver, args, argc, depth, thrown);
     }
     /* `setEncoding` is the one method name three unrelated Node receivers own: a `net.Socket`,
@@ -17772,10 +17779,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
          * that state -- by name, from the handler whose prototype the method came off. */
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_NET)) {
+    if ((groups & KILN_C99_GROUP_NODE_NET)) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_HTTP)) {
+    if ((groups & KILN_C99_GROUP_NODE_HTTP)) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_HTTP_SERVER) {
@@ -17784,7 +17791,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_RESPONSE)) {
+    if ((groups & KILN_C99_GROUP_NODE_RESPONSE)) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_NET_CONNECT) {
@@ -17793,13 +17800,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_URL_SEARCH_PARAMS_GET) {
         return kiln_c99_url_search_params_get(result, receiver, args, argc, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_BUFFER)) {
+    if ((groups & KILN_C99_GROUP_BUFFER)) {
         return kiln_c99_buffer_method(result, code, receiver, args, argc, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_UTIL)) {
+    if ((groups & KILN_C99_GROUP_NODE_UTIL)) {
         return kiln_c99_node_util(host, result, code, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_DIAGNOSTICS)) {
+    if ((groups & KILN_C99_GROUP_NODE_DIAGNOSTICS)) {
         return kiln_c99_node_diagnostics(host, result, code, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER) {
@@ -17868,7 +17875,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         }
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_STREAM)) {
+    if ((groups & KILN_C99_GROUP_NODE_STREAM)) {
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_PERFORMANCE_NOW) {
@@ -17891,7 +17898,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
         return kiln_c99_node_fs(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_PATH)) {
+    if ((groups & KILN_C99_GROUP_NODE_PATH)) {
         return kiln_c99_node_path(result, code, args, argc, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_ASSERT_OK) {
@@ -18092,7 +18099,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return KILN_C99_CONTROL_ERROR;
     }
     /* Claimed here because the string range further down is open-ended at its top. */
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL)) {
+    if ((groups & KILN_C99_GROUP_TEMPORAL)) {
         return kiln_c99_temporal_method(host, result, code, receiver, args, argc, depth, thrown);
     }
     /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
@@ -18232,7 +18239,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         return KILN_C99_OK;
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_GENERIC)) {
+    if ((groups & KILN_C99_GROUP_GENERIC)) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
          * the way the function was reached. */
         double first = 0.0 / 0.0;
@@ -18247,7 +18254,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         /* `min`, `max` and `hypot` are variadic and reduce each argument themselves, so they must
          * not be reduced here as well: a `valueOf` that counts its own calls sees the difference,
          * and ToNumber is specified to happen once per argument. */
-        if (kiln_c99_method_in_group(code, KILN_C99_GROUP_MATH_NUMBER) ||
+        if ((groups & KILN_C99_GROUP_MATH_NUMBER) ||
             code == KILN_C99_METHOD_GLOBAL_IS_NAN || code == KILN_C99_METHOD_GLOBAL_IS_FINITE) {
             if (argc > 0) {
                 int reduced = kiln_c99_to_number_checked(host, args[0], &first, depth, thrown);
@@ -20381,7 +20388,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (code == KILN_C99_METHOD_DATE_TO_STRING) {
                 return kiln_c99_date_to_string(result, time);
             }
-            if (kiln_c99_method_in_group(code, KILN_C99_GROUP_DATE_SETTER)) {
+            if ((groups & KILN_C99_GROUP_DATE_SETTER)) {
                 /* A setter writes through the instant the receiver already holds, which is why
                  * a Date is a heap slot rather than a value: `d.setUTCDate(31)` has to be
                  * visible through every other name for the same date.
@@ -21429,7 +21436,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_CONTROL_ERROR;
         }
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_STRING_DISPATCH)) {
+    if ((groups & KILN_C99_GROUP_STRING_DISPATCH)) {
         if (receiver.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
         }
