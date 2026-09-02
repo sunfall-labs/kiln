@@ -11966,7 +11966,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 *out = kiln_c99_number(-1.0 / 0.0);
             } else if (kiln_c99_same_name(key, key_len, "NaN")) {
                 *out = kiln_c99_number(0.0 / 0.0);
-            } else {
+             else {
                 return KILN_C99_CONTROL_ERROR;
             }
             return KILN_C99_OK;
@@ -28969,7 +28969,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
+                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
                 argc + 1
             )
             .unwrap();
