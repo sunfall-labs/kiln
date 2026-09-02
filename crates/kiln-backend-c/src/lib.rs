@@ -4599,7 +4599,7 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_PHASE_RESET 2
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 1u
-#define KILN_GC_DEFAULT_FLOOR ((size_t)2 * 1024 * 1024)
+#define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
 
 typedef struct kiln_gc_block {
     struct kiln_gc_block *prev;
