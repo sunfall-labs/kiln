@@ -3164,10 +3164,6 @@ mod realm {
             };
             // SAFETY: this private frame remains live for the synchronous call.
             let response = unsafe { &*response };
-            let Some(headers) = (unsafe { parse_headers(response.headers, response.headers_len) })
-            else {
-                return INVALID_ARGUMENT;
-            };
             let Ok(high_water_mark) = usize::try_from(high_water_mark) else {
                 return INVALID_ARGUMENT;
             };
@@ -3175,6 +3171,13 @@ mod realm {
             // SAFETY: active_runtime is exclusively owned by the active realm callback.
             let runtime = unsafe { &mut *runtime };
             let started = if runtime.http_server().is_attached(resource) {
+                // The engine parses the flattened span itself, straight into Hyper's map.
+                // SAFETY: the adapter keeps the span live for this synchronous call.
+                let Some(headers) =
+                    (unsafe { borrowed_bytes(response.headers, response.headers_len) })
+                else {
+                    return INVALID_ARGUMENT;
+                };
                 runtime.http_server().start_response(
                     resource,
                     id,
@@ -3183,6 +3186,12 @@ mod realm {
                     high_water_mark,
                 )
             } else {
+                // SAFETY: the adapter keeps the span live for this synchronous call.
+                let Some(headers) =
+                    (unsafe { parse_headers(response.headers, response.headers_len) })
+                else {
+                    return INVALID_ARGUMENT;
+                };
                 runtime.start_http1_response(
                     resource,
                     id,
@@ -3215,13 +3224,9 @@ mod realm {
             let runtime = unsafe { &mut *runtime };
             let disposition = if runtime.http_server().is_attached(resource) {
                 if end {
-                    runtime
-                        .http_server()
-                        .end_response(resource, id, data.to_vec())
+                    runtime.http_server().end_response(resource, id, data)
                 } else {
-                    runtime
-                        .http_server()
-                        .write_response(resource, id, data.to_vec())
+                    runtime.http_server().write_response(resource, id, data)
                 }
             } else if end {
                 runtime.end_http1_response(resource, id, data.to_vec())

@@ -3,7 +3,9 @@
 //! A connection is one Hyper future over a transport the host handed over. Its service calls the
 //! realm's adapter directly, on the realm thread, inside the task's poll; the adapter answers
 //! through a [`ResponseSlot`] the service future awaits. Nothing is spawned per read, queued per
-//! event or re-sequenced per completion. Body events that would otherwise arrive inside the
+//! event or re-sequenced per completion, and nothing on the request path allocates beyond what
+//! Hyper parsed: the event borrows Hyper's method, target and header bytes, flattened into a
+//! scratch buffer the connection keeps. Body events that would otherwise arrive inside the
 //! language's own call (`finish` from within `res.end()`) are deferred to the next safe point so
 //! the language never observes a callback from inside another.
 
@@ -14,8 +16,10 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
+use bytes::Bytes;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
+use hyper::body::{Frame, Incoming};
+use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
@@ -24,11 +28,6 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::Notify;
 
 use crate::http_body::{BodyEvent, BodySink, ResponseBody, ResponseBodyDriver};
-use crate::hyper_http::{
-    ResponseCommand, declares_content_length, hyper_response, kiln_request_parts,
-    response_status_allows_body,
-};
-use crate::node_http::HttpVersion;
 use crate::node_stream::WriteDisposition;
 
 /// `KILN_HTTP_TRACE=1` prints the engine's decisions to stderr.
@@ -137,6 +136,8 @@ struct ConnectionShared {
     resource: ResourceId,
     dispatch: Rc<dyn ServerDispatch>,
     requests: RefCell<HashMap<u64, Rc<ResponseSlot>>>,
+    /// The flattened request headers of the request being dispatched, reused per request.
+    header_scratch: RefCell<Vec<u8>>,
     /// Body events (`drain`, `finish`) produced inside a language call, delivered after it.
     deferred: RefCell<Vec<(u64, BodyEvent)>>,
     deferred_wake: Notify,
@@ -191,19 +192,75 @@ impl ConnectionShared {
     }
 }
 
+/// The body Hyper sends: nothing, one frame the language handed over whole, or a stream the
+/// language is still writing.
+pub enum EngineBody {
+    Empty,
+    Complete(Option<Bytes>),
+    Streaming(ResponseBody),
+}
+
+impl hyper::body::Body for EngineBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.get_mut() {
+            Self::Empty => Poll::Ready(None),
+            Self::Complete(bytes) => Poll::Ready(bytes.take().map(|bytes| Ok(Frame::data(bytes)))),
+            Self::Streaming(body) => Pin::new(body).poll_frame(context),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Empty => true,
+            Self::Complete(bytes) => bytes.is_none(),
+            Self::Streaming(_) => false,
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        match self {
+            Self::Empty => hyper::body::SizeHint::with_exact(0),
+            Self::Complete(bytes) => {
+                hyper::body::SizeHint::with_exact(bytes.as_ref().map_or(0, |b| b.len() as u64))
+            }
+            Self::Streaming(_) => hyper::body::SizeHint::default(),
+        }
+    }
+}
+
+/// A response as the language produced it, ready for Hyper.
+struct EngineResponse {
+    status: u16,
+    headers: HeaderMap,
+    body: EngineBody,
+}
+
 /// Where a response accumulates until the service future can hand it to Hyper.
 pub struct ResponseSlot {
     inner: RefCell<SlotInner>,
 }
 
+enum SlotBody {
+    /// Nothing written yet. `end(data)` makes this a complete body; `write` makes it a stream.
+    Unstarted,
+    Complete(Bytes),
+    Streaming(ResponseBodyDriver),
+}
+
 struct SlotInner {
     head_request: bool,
     /// The head as the language gave it, parked until framing is knowable.
-    head: Option<(u16, Vec<(String, String)>)>,
-    body: Option<ResponseBodyDriver>,
+    head: Option<(u16, HeaderMap)>,
+    body: SlotBody,
     high_water_mark: usize,
     /// The head is committed: a write forced chunking, or `end` declared the length.
-    flushed: Option<(u16, Vec<(String, String)>)>,
+    committed: Option<(u16, HeaderMap)>,
     bodyless: bool,
     waker: Option<Waker>,
 }
@@ -214,18 +271,18 @@ impl ResponseSlot {
             inner: RefCell::new(SlotInner {
                 head_request,
                 head: None,
-                body: None,
+                body: SlotBody::Unstarted,
                 high_water_mark: crate::node_stream::DEFAULT_HIGH_WATER_MARK,
-                flushed: None,
+                committed: None,
                 bodyless: false,
                 waker: None,
             }),
         }
     }
 
-    fn start(&self, status: u16, headers: Vec<(String, String)>, high_water_mark: usize) -> bool {
+    fn start(&self, status: u16, headers: HeaderMap, high_water_mark: usize) -> bool {
         let mut inner = self.inner.borrow_mut();
-        if inner.head.is_some() || inner.flushed.is_some() {
+        if inner.head.is_some() || inner.committed.is_some() {
             return false;
         }
         inner.head = Some((status, headers));
@@ -235,22 +292,23 @@ impl ResponseSlot {
 
     /// Commit the parked head. A complete body declares its length unless the language framed
     /// the response itself; a HEAD answer or a bodiless status never carries a body.
-    fn flush(inner: &mut SlotInner, complete_body: Option<usize>) -> bool {
-        if inner.flushed.is_some() {
+    fn commit(inner: &mut SlotInner, complete_body: Option<usize>) -> bool {
+        if inner.committed.is_some() {
             return true;
         }
         let Some((status, mut headers)) = inner.head.take() else {
             return false;
         };
-        let carries_body = response_status_allows_body(status) && !inner.head_request;
+        let carries_body = status_allows_body(status) && !inner.head_request;
         inner.bodyless = !carries_body;
         if let Some(length) = complete_body
             && carries_body
-            && !declares_framing(&headers)
+            && !headers.contains_key(hyper::header::CONTENT_LENGTH)
+            && !headers.contains_key(hyper::header::TRANSFER_ENCODING)
         {
-            headers.push(("content-length".into(), length.to_string()));
+            headers.insert(hyper::header::CONTENT_LENGTH, HeaderValue::from(length));
         }
-        inner.flushed = Some((status, headers));
+        inner.committed = Some((status, headers));
         if let Some(waker) = inner.waker.take() {
             waker.wake();
         }
@@ -261,39 +319,55 @@ impl ResponseSlot {
         &self,
         shared: &Rc<ConnectionShared>,
         id: u64,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
-        if !Self::flush(&mut inner, None) {
+        if !Self::commit(&mut inner, None) {
             return None;
         }
         let high_water_mark = inner.high_water_mark;
-        let body = inner
-            .body
-            .get_or_insert_with(|| body_driver(shared, id, high_water_mark));
-        Some(body.write(data))
+        match &mut inner.body {
+            SlotBody::Streaming(driver) => Some(driver.write(data.to_vec())),
+            SlotBody::Unstarted => {
+                let mut driver = body_driver(shared, id, high_water_mark);
+                let disposition = driver.write(data.to_vec());
+                inner.body = SlotBody::Streaming(driver);
+                Some(disposition)
+            }
+            SlotBody::Complete(_) => None,
+        }
     }
 
-    fn end(
-        &self,
-        shared: &Rc<ConnectionShared>,
-        id: u64,
-        data: Vec<u8>,
-    ) -> Option<WriteDisposition> {
+    fn end(&self, shared: &Rc<ConnectionShared>, id: u64, data: &[u8]) -> Option<WriteDisposition> {
         let mut inner = self.inner.borrow_mut();
-        if !Self::flush(&mut inner, Some(data.len())) {
+        if !Self::commit(&mut inner, Some(data.len())) {
             return None;
         }
         let bodyless = inner.bodyless;
-        let high_water_mark = inner.high_water_mark;
-        let body = inner
-            .body
-            .get_or_insert_with(|| body_driver(shared, id, high_water_mark));
-        let disposition = body.end(data);
-        if bodyless {
-            body.finish_without_body();
+        match &mut inner.body {
+            SlotBody::Streaming(driver) => {
+                let disposition = driver.end(data.to_vec());
+                if bodyless {
+                    driver.finish_without_body();
+                }
+                Some(disposition)
+            }
+            SlotBody::Unstarted => {
+                // The whole body arrived with `end`: one frame, one copy out of the language's
+                // span, and `finish` as soon as the language's call has returned.
+                inner.body = if bodyless || data.is_empty() {
+                    SlotBody::Complete(Bytes::new())
+                } else {
+                    SlotBody::Complete(Bytes::copy_from_slice(data))
+                };
+                shared.defer(id, BodyEvent::Finish);
+                Some(WriteDisposition {
+                    ready: true,
+                    submit_now: false,
+                })
+            }
+            SlotBody::Complete(_) => None,
         }
-        Some(disposition)
     }
 }
 
@@ -310,36 +384,45 @@ fn body_driver(
     driver
 }
 
-fn declares_framing(headers: &[(String, String)]) -> bool {
-    headers.iter().any(|(name, _)| {
-        name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("transfer-encoding")
-    })
+fn status_allows_body(status: u16) -> bool {
+    !matches!(status, 204 | 304) && !(100..200).contains(&status)
+}
+
+/// Parse `name NUL value NUL` pairs into a header map, refusing anything Hyper would refuse.
+fn parse_flattened_headers(bytes: &[u8]) -> Option<HeaderMap> {
+    let mut headers = HeaderMap::new();
+    let mut fields = bytes.split(|byte| *byte == 0);
+    while let Some(name) = fields.next() {
+        if name.is_empty() {
+            // The flattening ends every value with NUL, so the split yields one empty tail.
+            break;
+        }
+        let value = fields.next()?;
+        let name = HeaderName::from_bytes(name).ok()?;
+        let value = HeaderValue::from_bytes(value).ok()?;
+        headers.append(name, value);
+    }
+    Some(headers)
 }
 
 /// Resolves once the slot's head is committed, with the response Hyper will send.
 struct SlotReady {
     slot: Rc<ResponseSlot>,
-    id: u64,
 }
 
 impl Future for SlotReady {
-    type Output = ResponseCommand;
+    type Output = EngineResponse;
 
     fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
         let mut inner = self.slot.inner.borrow_mut();
-        if let Some((status, headers)) = inner.flushed.take() {
-            let body = inner
-                .body
-                .take()
-                .unwrap_or_else(|| {
-                    let mut driver = ResponseBodyDriver::new(1);
-                    driver.finish_without_body();
-                    driver
-                })
-                .into_body();
-            return Poll::Ready(ResponseCommand {
-                id: self.id,
+        if let Some((status, headers)) = inner.committed.take() {
+            let body = match std::mem::replace(&mut inner.body, SlotBody::Unstarted) {
+                SlotBody::Unstarted => EngineBody::Empty,
+                SlotBody::Complete(bytes) if bytes.is_empty() => EngineBody::Empty,
+                SlotBody::Complete(bytes) => EngineBody::Complete(Some(bytes)),
+                SlotBody::Streaming(driver) => EngineBody::Streaming(driver.into_body()),
+            };
+            return Poll::Ready(EngineResponse {
                 status,
                 headers,
                 body,
@@ -366,6 +449,7 @@ impl HttpServerEngine {
             resource,
             dispatch,
             requests: RefCell::new(HashMap::new()),
+            header_scratch: RefCell::new(Vec::with_capacity(512)),
             deferred: RefCell::new(Vec::new()),
             deferred_wake: Notify::new(),
             shutdown: Notify::new(),
@@ -390,15 +474,20 @@ impl HttpServerEngine {
         self.connections.borrow().contains_key(&resource)
     }
 
+    /// Record the head of a response. `headers` is the private ABI's `name NUL value NUL`
+    /// flattening; an invalid name or value refuses the head.
     pub fn start_response(
         &mut self,
         resource: ResourceId,
         id: u64,
         status: u16,
-        headers: Vec<(String, String)>,
+        headers: &[u8],
         high_water_mark: usize,
     ) -> bool {
         let Some(slot) = self.slot(resource, id) else {
+            return false;
+        };
+        let Some(headers) = parse_flattened_headers(headers) else {
             return false;
         };
         slot.start(status, headers, high_water_mark)
@@ -408,7 +497,7 @@ impl HttpServerEngine {
         &mut self,
         resource: ResourceId,
         id: u64,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> Option<WriteDisposition> {
         let (shared, slot) = self.shared_and_slot(resource, id)?;
         slot.write(&shared, id, data)
@@ -418,7 +507,7 @@ impl HttpServerEngine {
         &mut self,
         resource: ResourceId,
         id: u64,
-        data: Vec<u8>,
+        data: &[u8],
     ) -> Option<WriteDisposition> {
         let (shared, slot) = self.shared_and_slot(resource, id)?;
         slot.end(&shared, id, data)
@@ -526,29 +615,66 @@ async fn serve(
     table.borrow_mut().remove(&shared.resource);
 }
 
+/// Whether the peer asked to keep the connection: implicit for HTTP/1.1 unless it says
+/// `close`, explicit for HTTP/1.0 only when it says `keep-alive`.
+fn keep_alive_requested(parts: &hyper::http::request::Parts) -> bool {
+    let connection = parts
+        .headers
+        .get(hyper::header::CONNECTION)
+        .and_then(|value| value.to_str().ok());
+    let mentions = |token: &str| {
+        connection.is_some_and(|value| {
+            value
+                .split(',')
+                .any(|candidate| candidate.trim().eq_ignore_ascii_case(token))
+        })
+    };
+    if parts.version == hyper::Version::HTTP_10 {
+        mentions("keep-alive")
+    } else {
+        !mentions("close")
+    }
+}
+
 async fn handle(
     shared: Rc<ConnectionShared>,
     id: u64,
     request: Request<Incoming>,
-) -> Response<ResponseBody> {
+) -> Response<EngineBody> {
     let (parts, mut body) = request.into_parts();
-    let parsed = kiln_request_parts(&parts);
-    let http_10 = parsed.version == HttpVersion::Http10;
-    let head_request = parsed.method.eq_ignore_ascii_case("HEAD");
-    let keep_alive = parsed.keep_alive;
+    let http_10 = parts.version == hyper::Version::HTTP_10;
+    let head_request = parts.method == hyper::Method::HEAD;
+    let keep_alive = keep_alive_requested(&parts);
     let slot = Rc::new(ResponseSlot::new(head_request));
     shared.requests.borrow_mut().insert(id, Rc::clone(&slot));
 
-    let headers = flatten_header_map(&parts.headers);
-    let head = ServerEvent {
-        keep_alive,
-        version_minor: u8::from(!http_10),
-        method: parsed.method.as_bytes(),
-        target: parsed.target.as_bytes(),
-        headers: &headers,
-        ..ServerEvent::bare(ServerEventKind::RequestHead, id)
+    // An origin-form target is the path and query Hyper already holds; anything else (an
+    // absolute-form target from a proxy client) is rendered once.
+    let rendered_target;
+    let target: &[u8] = match (parts.uri.scheme(), parts.uri.path_and_query()) {
+        (None, Some(path)) => path.as_str().as_bytes(),
+        _ => {
+            rendered_target = parts.uri.to_string();
+            rendered_target.as_bytes()
+        }
     };
-    if shared.dispatch(&head) {
+    {
+        let mut scratch = shared.header_scratch.borrow_mut();
+        flatten_header_map(&parts.headers, &mut scratch);
+    }
+    let dispatched = {
+        let scratch = shared.header_scratch.borrow();
+        let head = ServerEvent {
+            keep_alive,
+            version_minor: u8::from(!http_10),
+            method: parts.method.as_str().as_bytes(),
+            target,
+            headers: &scratch,
+            ..ServerEvent::bare(ServerEventKind::RequestHead, id)
+        };
+        shared.dispatch(&head)
+    };
+    if dispatched {
         let mut failed = false;
         while let Some(frame) = body.frame().await {
             match frame {
@@ -584,67 +710,72 @@ async fn handle(
     }
     let _ = shared.flush_deferred();
 
-    let mut response = if shared.failed.get() {
-        unavailable(id)
+    let response = if shared.failed.get() {
+        unavailable()
     } else {
         SlotReady {
             slot: Rc::clone(&slot),
-            id,
         }
         .await
     };
     shared.requests.borrow_mut().remove(&id);
     let _ = shared.flush_deferred();
 
+    let EngineResponse {
+        status,
+        mut headers,
+        body,
+    } = response;
     let close_delimited = http_10
         && !head_request
-        && response_status_allows_body(response.status)
-        && !declares_content_length(&response.headers);
-    let announces_connection = response
-        .headers
-        .iter()
-        .any(|(name, _)| name.eq_ignore_ascii_case("connection"));
-    if !announces_connection && (!keep_alive || close_delimited || shared.closing.get()) {
-        response.headers.push(("connection".into(), "close".into()));
+        && status_allows_body(status)
+        && !headers.contains_key(hyper::header::CONTENT_LENGTH);
+    if !headers.contains_key(hyper::header::CONNECTION)
+        && (!keep_alive || close_delimited || shared.closing.get())
+    {
+        headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
     }
-    hyper_response(response, close_delimited)
+    let mut hyper_response = Response::new(body);
+    *hyper_response.status_mut() =
+        hyper::StatusCode::from_u16(status).unwrap_or(hyper::StatusCode::INTERNAL_SERVER_ERROR);
+    if close_delimited {
+        // Hyper decides keep-alive against the response's version, so a close-delimited body
+        // has to say HTTP/1.0 for `connection: close` to survive.
+        *hyper_response.version_mut() = hyper::Version::HTTP_10;
+    }
+    *hyper_response.headers_mut() = headers;
+    hyper_response
 }
 
-fn unavailable(id: u64) -> ResponseCommand {
-    let mut driver = ResponseBodyDriver::new(1);
-    driver.end(Vec::new());
-    ResponseCommand {
-        id,
+fn unavailable() -> EngineResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(hyper::header::CONNECTION, HeaderValue::from_static("close"));
+    EngineResponse {
         status: 503,
-        headers: vec![("connection".into(), "close".into())],
-        body: driver.into_body(),
+        headers,
+        body: EngineBody::Empty,
     }
 }
 
-fn flatten_header_map(headers: &hyper::HeaderMap) -> Vec<u8> {
-    let capacity = headers.iter().fold(0usize, |total, (name, value)| {
-        total + name.as_str().len() + value.len() + 2
-    });
-    let mut flattened = Vec::with_capacity(capacity);
+fn flatten_header_map(headers: &HeaderMap, into: &mut Vec<u8>) {
+    into.clear();
     for (name, value) in headers {
-        flattened.extend_from_slice(name.as_str().as_bytes());
-        flattened.push(0);
-        flattened.extend_from_slice(value.as_bytes());
-        flattened.push(0);
+        into.extend_from_slice(name.as_str().as_bytes());
+        into.push(0);
+        into.extend_from_slice(value.as_bytes());
+        into.push(0);
     }
-    flattened
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::VecDeque;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     struct Recording {
         events: RefCell<Vec<(ServerEventKind, u64, Vec<u8>)>>,
         checkpoints: Cell<usize>,
-        answer: RefCell<Option<Rc<RefCell<Option<Box<dyn Fn(u64)>>>>>>,
+        answer: RefCell<Option<Box<dyn Fn(u64)>>>,
     }
 
     impl ServerDispatch for Recording {
@@ -667,7 +798,6 @@ mod tests {
                 .push((event.kind, event.id, payload));
             if event.kind == ServerEventKind::RequestEnd
                 && let Some(answer) = self.answer.borrow().as_ref()
-                && let Some(answer) = answer.borrow().as_ref()
             {
                 answer(event.id);
             }
@@ -688,11 +818,24 @@ mod tests {
         (runtime, tokio::task::LocalSet::new())
     }
 
+    async fn read_until_complete(client: &mut tokio::io::DuplexStream, ends_with: &[u8]) -> String {
+        let mut answer = Vec::new();
+        let mut buffer = [0u8; 1024];
+        for _ in 0..64 {
+            let read = client.read(&mut buffer).await.expect("response reads");
+            answer.extend_from_slice(&buffer[..read]);
+            if answer.ends_with(ends_with) || read == 0 {
+                break;
+            }
+        }
+        String::from_utf8(answer).expect("utf-8 response")
+    }
+
     #[test]
     fn a_request_is_dispatched_directly_and_answered_through_the_slot() {
         let (runtime, local) = local();
         local.block_on(&runtime, async {
-            let (client, server) = tokio::io::duplex(4096);
+            let (mut client, server) = tokio::io::duplex(4096);
             let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
             let recording = Rc::new(Recording {
                 events: RefCell::new(Vec::new()),
@@ -701,21 +844,20 @@ mod tests {
             });
             let resource = ResourceId::new(7);
             let answer_engine = Rc::clone(&engine);
-            let answer: Box<dyn Fn(u64)> = Box::new(move |id| {
+            *recording.answer.borrow_mut() = Some(Box::new(move |id| {
                 let mut engine = answer_engine.borrow_mut();
                 assert!(engine.start_response(
                     resource,
                     id,
                     200,
-                    vec![("content-type".into(), "text/plain".into())],
+                    b"content-type\0text/plain\0",
                     1024,
                 ));
                 let disposition = engine
-                    .end_response(resource, id, b"kiln".to_vec())
+                    .end_response(resource, id, b"kiln")
                     .expect("response ends");
                 assert!(disposition.ready);
-            });
-            *recording.answer.borrow_mut() = Some(Rc::new(RefCell::new(Some(answer))));
+            }));
             assert!(engine.borrow_mut().attach(
                 resource,
                 HostTransport(Box::new(server)),
@@ -723,30 +865,33 @@ mod tests {
                 recording.clone(),
             ));
 
-            let mut client = client;
             client
-                .write_all(b"GET /hello HTTP/1.1\r\nhost: x\r\nx-a: 1\r\n\r\n")
+                .write_all(b"GET /hello?x=1 HTTP/1.1\r\nhost: x\r\nx-a: 1\r\n\r\n")
                 .await
                 .expect("request writes");
-            let mut answer = Vec::new();
-            let mut buffer = [0u8; 1024];
-            let mut deadline = VecDeque::from([0u8; 0]);
-            loop {
-                let read = client.read(&mut buffer).await.expect("response reads");
-                answer.extend_from_slice(&buffer[..read]);
-                if answer.ends_with(b"kiln") {
-                    break;
-                }
-                deadline.push_back(0);
-                assert!(deadline.len() < 64, "response never completed: {answer:?}");
-            }
-            let text = String::from_utf8(answer).expect("utf-8 response");
+            let text = read_until_complete(&mut client, b"kiln").await;
             assert!(text.starts_with("HTTP/1.1 200 OK\r\n"), "{text}");
             assert!(text.contains("content-length: 4\r\n"), "{text}");
             assert!(!text.contains("transfer-encoding"), "{text}");
 
+            // A second request on the same connection reuses the scratch buffer and the slot
+            // table; a body-less answer declares length zero.
+            let answer_engine = Rc::clone(&engine);
+            *recording.answer.borrow_mut() = Some(Box::new(move |id| {
+                let mut engine = answer_engine.borrow_mut();
+                assert!(engine.start_response(resource, id, 200, b"", 1024));
+                engine
+                    .end_response(resource, id, b"")
+                    .expect("empty response ends");
+            }));
+            client
+                .write_all(b"GET /second HTTP/1.1\r\nhost: y\r\n\r\n")
+                .await
+                .expect("second request writes");
+            let text = read_until_complete(&mut client, b"\r\n\r\n").await;
+            assert!(text.contains("content-length: 0\r\n"), "{text}");
+
             drop(client);
-            tokio::task::yield_now().await;
             for _ in 0..8 {
                 tokio::task::yield_now().await;
             }
@@ -758,17 +903,65 @@ mod tests {
                     ServerEventKind::RequestHead,
                     ServerEventKind::RequestEnd,
                     ServerEventKind::Finish,
+                    ServerEventKind::RequestHead,
+                    ServerEventKind::RequestEnd,
+                    ServerEventKind::Finish,
                     ServerEventKind::Closed,
                 ],
                 "{events:?}"
             );
             assert_eq!(
                 events[0].2,
-                b"GET /hello host\0x\0x-a\x001\0".to_vec(),
+                b"GET /hello?x=1 host\0x\0x-a\x001\0".to_vec(),
                 "head carries method, target and NUL-flattened headers"
             );
+            assert_eq!(events[3].2, b"GET /second host\0y\0".to_vec());
             assert_eq!(recording.checkpoints.get(), events.len());
             assert_eq!(engine.borrow().open_connections(), 0);
+        });
+    }
+
+    #[test]
+    fn an_invalid_header_refuses_the_head_and_a_streamed_body_is_chunked() {
+        let (runtime, local) = local();
+        local.block_on(&runtime, async {
+            let (mut client, server) = tokio::io::duplex(4096);
+            let engine = Rc::new(RefCell::new(HttpServerEngine::default()));
+            let recording = Rc::new(Recording {
+                events: RefCell::new(Vec::new()),
+                checkpoints: Cell::new(0),
+                answer: RefCell::new(None),
+            });
+            let resource = ResourceId::new(9);
+            let answer_engine = Rc::clone(&engine);
+            *recording.answer.borrow_mut() = Some(Box::new(move |id| {
+                let mut engine = answer_engine.borrow_mut();
+                assert!(
+                    !engine.start_response(resource, id, 200, b"bad name\0v\0", 1024),
+                    "a header name with a space is refused"
+                );
+                assert!(engine.start_response(resource, id, 200, b"x-k\0v\0", 1024));
+                engine
+                    .write_response(resource, id, b"ab")
+                    .expect("first chunk");
+                engine
+                    .end_response(resource, id, b"cd")
+                    .expect("last chunk");
+            }));
+            assert!(engine.borrow_mut().attach(
+                resource,
+                HostTransport(Box::new(server)),
+                false,
+                recording.clone(),
+            ));
+            client
+                .write_all(b"GET / HTTP/1.1\r\nhost: x\r\n\r\n")
+                .await
+                .expect("request writes");
+            let text = read_until_complete(&mut client, b"0\r\n\r\n").await;
+            assert!(text.contains("transfer-encoding: chunked\r\n"), "{text}");
+            assert!(text.contains("x-k: v\r\n"), "{text}");
+            assert!(text.ends_with("2\r\nab\r\n2\r\ncd\r\n0\r\n\r\n"), "{text}");
         });
     }
 }
