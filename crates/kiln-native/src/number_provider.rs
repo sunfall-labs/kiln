@@ -430,6 +430,16 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
 fn source_digest(root: &Path) -> Result<Digest, NumberProviderError> {
     let paths = [
         "Cargo.lock",
+        // Leaf crates the archive links, found by asking the compiler what it read rather than
+        // by remembering: an edit to any of these changes the archive, so it has to change the
+        // identity too. The packager fails the build if this list stops covering rustc's answer.
+        "crates/kiln-artifact-cache/Cargo.toml",
+        "crates/kiln-artifact-cache/src/eviction.rs",
+        "crates/kiln-artifact-cache/src/lib.rs",
+        "crates/kiln-digest/Cargo.toml",
+        "crates/kiln-digest/src/lib.rs",
+        "crates/kiln-host-abi/Cargo.toml",
+        "crates/kiln-host-abi/src/lib.rs",
         "crates/kiln-number-core/Cargo.toml",
         "crates/kiln-number-core/src/lib.rs",
         "crates/kiln-native-number-ffi/Cargo.toml",
@@ -670,6 +680,13 @@ mod tests {
         let root = TestDirectory::new();
         for (relative, bytes) in [
             ("Cargo.lock", b"lock\n".as_slice()),
+            ("crates/kiln-artifact-cache/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-artifact-cache/src/eviction.rs", b"eviction\n"),
+            ("crates/kiln-artifact-cache/src/lib.rs", b"cache\n"),
+            ("crates/kiln-digest/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-digest/src/lib.rs", b"digest\n"),
+            ("crates/kiln-host-abi/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-host-abi/src/lib.rs", b"host\n"),
             ("crates/kiln-number-core/Cargo.toml", b"[package]\n"),
             (
                 "crates/kiln-number-core/src/lib.rs",
@@ -711,7 +728,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("6e93206b993a846b5f265a981b7af02010d353616d89d69643d66a60551f7096")
+            Digest::from_hex("56dc960212e519445cb0524af569ff7581ee759406249df78d95fcf4a6803091")
                 .expect("fixture digest")
         );
     }

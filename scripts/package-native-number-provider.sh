@@ -192,9 +192,17 @@ fi
 cp "$KILN_PROVIDER_BUILT_ARCHIVE" "$KILN_PROVIDER_ARCHIVE_TEMP"
 KILN_PROVIDER_ARCHIVE_DIGEST=$(kiln_provider_sha256_file "$KILN_PROVIDER_ARCHIVE_TEMP")
 KILN_PROVIDER_RUSTC_DIGEST=$("$KILN_PROVIDER_RUSTC" -vV | kiln_provider_sha256_stream)
+KILN_PROVIDER_LISTED="$(mktemp)"
 KILN_PROVIDER_SOURCE_DIGEST=$(
 	for KILN_PROVIDER_SOURCE in \
 		Cargo.lock \
+		crates/kiln-artifact-cache/Cargo.toml \
+		crates/kiln-artifact-cache/src/eviction.rs \
+		crates/kiln-artifact-cache/src/lib.rs \
+		crates/kiln-digest/Cargo.toml \
+		crates/kiln-digest/src/lib.rs \
+		crates/kiln-host-abi/Cargo.toml \
+		crates/kiln-host-abi/src/lib.rs \
 		crates/kiln-number-core/Cargo.toml \
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
@@ -216,10 +224,44 @@ KILN_PROVIDER_SOURCE_DIGEST=$(
 		crates/kiln-runtime/src/node_stream.rs \
 		crates/kiln-runtime/src/scripted_transport.rs; do
 		KILN_PROVIDER_SIZE=$(wc -c <"$KILN_PROVIDER_SOURCE" | tr -d '[:space:]')
+		printf '%s\n' "$KILN_PROVIDER_SOURCE" >>"$KILN_PROVIDER_LISTED"
 		printf '%s\0%s\0' "$KILN_PROVIDER_SOURCE" "$KILN_PROVIDER_SIZE"
 		dd if="$KILN_PROVIDER_SOURCE" bs=65536 2>/dev/null
 	done | kiln_provider_sha256_stream
 )
+
+# The identity above is a hand-written list, and a hand-written list of inputs has one failure
+# mode: a file that belongs in it and is not. That file's contents then cannot change the digest,
+# so a stale archive is reused and the native link fails with `undefined reference` -- or worse,
+# links something whose behaviour moved. `kiln-node-path` was exactly that on 2026-09-02.
+#
+# rustc already knows the answer and writes it down, so ask it rather than a reviewer. Everything
+# the compiler read from this workspace must be named in the list; anything else is a file whose
+# edits the digest cannot see. The three copies of the list are checked against each other by
+# `kiln-cli`'s `script_hygiene`, which is a consistency check -- three identical wrong lists pass
+# it. This is the completeness check.
+KILN_PROVIDER_DEP_INFO="$KILN_PROVIDER_TARGET_DIR/$KILN_PROVIDER_TARGET/provider/libkiln_native_number_ffi.d"
+if [[ -f $KILN_PROVIDER_DEP_INFO ]]; then
+	KILN_PROVIDER_ROOT="$(kiln_repo_root)"
+	KILN_PROVIDER_UNLISTED=$(
+		tr ' ' '\n' <"$KILN_PROVIDER_DEP_INFO" |
+			sed -n "s|^$KILN_PROVIDER_ROOT/||p" |
+			grep '\.rs$' |
+			sort -u |
+			while IFS= read -r KILN_PROVIDER_READ; do
+				grep -qxF "$KILN_PROVIDER_READ" "$KILN_PROVIDER_LISTED" ||
+					printf '  %s\n' "$KILN_PROVIDER_READ"
+			done
+	)
+	if [[ -n $KILN_PROVIDER_UNLISTED ]]; then
+		printf 'the provider archive is compiled from workspace sources the identity list does not name:\n%s\n' \
+			"$KILN_PROVIDER_UNLISTED" >&2
+		printf 'add them to source_digest in crates/kiln-native/src/number_provider.rs and to the\n' >&2
+		printf 'matching lists in scripts/package-native-number-provider.sh and\n' >&2
+		printf 'scripts/check-native-number-ffi.sh, or their edits cannot invalidate the archive.\n' >&2
+		exit 1
+	fi
+fi
 
 KILN_PROVIDER_DEPLOYMENT="${MACOSX_DEPLOYMENT_TARGET:-}"
 KILN_PROVIDER_LIBC="${KILN_LIBC_BASELINE:-}"
