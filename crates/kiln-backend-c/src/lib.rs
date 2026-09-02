@@ -13659,11 +13659,41 @@ static kiln_value kiln_c99_inspect(kiln_value value) {
  *
  * The caller owns the returned array and frees it. */
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
-    kiln_c99_utf16_iter iterator = {value.ptr, value.len, 0, 0, 0};
-    uint16_t *units = NULL;
-    size_t capacity = 0;
-    size_t length = 0;
+    kiln_c99_utf16_iter iterator;
+    uint16_t *units;
+    size_t capacity;
+    size_t length;
     uint16_t unit;
+    /* ASCII text has one code unit per byte and no surrogate pairing to do, so the whole
+     * decode state machine (kiln_c99_utf8_next by way of kiln_c99_utf16_next) is replaced with
+     * a straight widening copy -- still O(len), but branch-free per byte instead of walking a
+     * UTF-8 length table and a surrogate split for every unit. */
+    if (kiln_c99_string_is_ascii(value)) {
+        size_t index;
+        if (value.len == 0) {
+            *out = NULL;
+            *count = 0;
+            return KILN_C99_OK;
+        }
+        units = (uint16_t *)malloc(value.len * sizeof *units);
+        if (units == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (index = 0; index < value.len; ++index) {
+            units[index] = (uint16_t)(unsigned char)value.ptr[index];
+        }
+        *out = units;
+        *count = value.len;
+        return KILN_C99_OK;
+    }
+    iterator.text = value.ptr;
+    iterator.length = value.len;
+    iterator.offset = 0;
+    iterator.pending = 0;
+    iterator.has_pending = 0;
+    units = NULL;
+    capacity = 0;
+    length = 0;
     while (kiln_c99_utf16_next(&iterator, &unit)) {
         if (kiln_c99_reserve((void **)&units, &capacity, length + 1, sizeof *units) !=
             KILN_C99_OK) {
@@ -13678,12 +13708,59 @@ static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
     return KILN_C99_OK;
 }
 
+/* Every unit below 0x80, 4 at a time: a code unit is ASCII exactly when its top 9 bits (the
+ * surrogate range and the rest of the non-Latin1 unit space) are clear, so masking each 16-bit
+ * lane's high byte down to the 0x80 bit and comparing the 64-bit word to zero answers for four
+ * units at once. */
+static int kiln_c99_units_ascii(const uint16_t *units, size_t count) {
+    size_t index = 0;
+    while (index + 4 <= count) {
+        uint64_t word;
+        memcpy(&word, units + index, sizeof word);
+        if ((word & UINT64_C(0xFF80FF80FF80FF80)) != 0) return 0;
+        index += 4;
+    }
+    while (index < count) {
+        if (units[index] >= 0x80) return 0;
+        ++index;
+    }
+    return 1;
+}
+
 /* Re-encode, pairing surrogates back up.  An *unpaired* surrogate has no scalar value, so it
  * becomes U+FFFD -- a kiln string cannot hold one, which is the divergence ADR 0022 records and
- * the interpreter's `String::from_utf16_lossy` makes the same substitution. */
+ * the interpreter's `String::from_utf16_lossy` makes the same substitution.
+ *
+ * When every unit is ASCII there is no pairing, no variable width and no growable builder to
+ * drive: a unit is a byte, so this narrows straight into a fresh block and marks it known-ASCII
+ * on the way out, which is what buys the *next* read of a slice or split result a free length
+ * and a free re-decode (ADR 0041's block header is the cache; kiln_c99_string_is_ascii is the
+ * reader). */
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
     kiln_text text = {NULL, 0, 0};
     size_t index;
+    if (kiln_c99_units_ascii(units, count)) {
+        char *copy;
+        kiln_gc_heap *heap;
+        kiln_gc_block *block;
+        if (count == 0) {
+            return kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0);
+        }
+        copy = kiln_c99_gc_alloc_text(count);
+        if (copy == NULL) {
+            return kiln_c99_undefined();
+        }
+        for (index = 0; index < count; ++index) {
+            copy[index] = (char)units[index];
+        }
+        heap = kiln_c99_gc_heap();
+        block = heap != NULL ? kiln_c99_gc_lookup(heap, copy) : NULL;
+        if (block != NULL) {
+            block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
+                          KILN_GC_FLAG_ASCII;
+        }
+        return kiln_c99_value(KILN_VALUE_STRING, 0, copy, count);
+    }
     for (index = 0; index < count; ++index) {
         uint32_t point = units[index];
         char bytes[4];

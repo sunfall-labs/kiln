@@ -1270,6 +1270,7 @@ static int kiln_c99_inspect_members(kiln_text *text, kiln_value value, int depth
 static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
 static kiln_value kiln_c99_inspect(kiln_value value) {
 static int kiln_c99_to_units(kiln_value value, uint16_t **out, size_t *count) {
+static int kiln_c99_units_ascii(const uint16_t *units, size_t count) {
 static kiln_value kiln_c99_from_units(const uint16_t *units, size_t count) {
 static double kiln_c99_units_find(const uint16_t *haystack, size_t haystack_len,
 static int kiln_c99_is_trimmed(uint16_t unit) {
