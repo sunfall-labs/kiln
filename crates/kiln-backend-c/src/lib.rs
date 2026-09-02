@@ -10692,10 +10692,16 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     kiln_value l = kiln_c99_text(left);
     kiln_value r = kiln_c99_text(right);
     char *copy;
+    int ascii;
     if ((l.len != 0 && l.ptr == NULL) || (r.len != 0 && r.ptr == NULL) ||
         l.len > (size_t)-1 - r.len) {
         return kiln_c99_undefined();
     }
+    /* ASCII is closed under concatenation. Knowing both halves before the copy means the new
+     * block can be marked known-ASCII on the way out instead of leaving it to be rescanned the
+     * first time anything asks its length or slices it -- the common case for `"x" + suffix`
+     * request-path assembly (ADR 0041's header is where the answer is cached). */
+    ascii = kiln_c99_string_is_ascii(l) && kiln_c99_string_is_ascii(r);
     copy = kiln_c99_gc_alloc_text(l.len + r.len);
     if (copy == NULL) {
         return kiln_c99_undefined();
@@ -10705,6 +10711,14 @@ static kiln_value kiln_c99_concat(kiln_value left, kiln_value right) {
     }
     if (r.len != 0) {
         memcpy(copy + l.len, r.ptr, r.len);
+    }
+    if (ascii) {
+        kiln_gc_heap *heap = kiln_c99_gc_heap();
+        kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, copy) : NULL;
+        if (block != NULL) {
+            block->kind = (block->kind & KILN_GC_KIND_MASK) | KILN_GC_FLAG_ASCII_KNOWN |
+                          KILN_GC_FLAG_ASCII;
+        }
     }
     return kiln_c99_value(KILN_VALUE_STRING, 0, copy, l.len + r.len);
 }
