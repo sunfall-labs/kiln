@@ -1,6 +1,6 @@
 # Client engine: a Hyper client task over a host transport
 
-Status: ready-for-agent
+Status: done
 
 `hyper_http::client_connection` drives Hyper's HTTP/1 client over the `http_transport` bridge:
 Hyper's reads become `TcpRead` host operations, its writes become `TcpWrite`s, and the realm
@@ -26,3 +26,10 @@ server engine in `http_engine.rs`:
 `HttpDispatch` with the three response kinds, `status`, `reason` and `reusable` added, so one
 dispatch implementation serves both roles (the archive's C event view already does).
 `ServerCloseMode` folds into the existing `HttpCloseMode`.
+
+## Comments
+
+- Done in `a871b5c` ("Add the Hyper client engine over host transports and the queued
+  adapter"). `crates/kiln-runtime/src/http_client.rs`; tests cover a complete body declaring
+  its length, a streamed body chunking, sequential reuse with the `reusable` flag, an idle peer
+  close publishing only `Closed`, and an abort failing the outstanding request before `Closed`.
