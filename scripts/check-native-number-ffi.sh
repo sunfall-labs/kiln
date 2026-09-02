@@ -57,6 +57,13 @@ kiln_number_sha256_stream() {
 KILN_NUMBER_EXPECTED_SOURCE_DIGEST=$(
 	for KILN_NUMBER_SOURCE in \
 		Cargo.lock \
+		crates/kiln-artifact-cache/Cargo.toml \
+		crates/kiln-artifact-cache/src/eviction.rs \
+		crates/kiln-artifact-cache/src/lib.rs \
+		crates/kiln-digest/Cargo.toml \
+		crates/kiln-digest/src/lib.rs \
+		crates/kiln-host-abi/Cargo.toml \
+		crates/kiln-host-abi/src/lib.rs \
 		crates/kiln-number-core/Cargo.toml \
 		crates/kiln-number-core/src/lib.rs \
 		crates/kiln-native-number-ffi/Cargo.toml \
