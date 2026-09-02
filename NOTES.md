@@ -107,6 +107,17 @@ the worst possible diff to land underneath you.
 
 ## Gotchas learned the expensive way
 
+- **Do not `git stash` in this repository.** The stash list is shared by every worktree, and on
+  2026-09-01 a `stash pop` in one worktree applied another branch's stash
+  (`net-cancel-http-graceful-close`) over an agent's uncommitted collector work; the work was not
+  recoverable. Commit, or use a second worktree.
+- **`kiln test` without `--one-shot` can be answered by a stale daemon** of an older binary in the
+  same worktree, and the result reads like a regression in the code you just wrote. Kill it or
+  pass `--one-shot`.
+- **A native server that finds its port taken exits 0 silently.** A stale server on the bench port
+  answered a benchmark of a binary that had already exited. Check `lsof -iTCP:<port>` first.
+
+
 **Do not stub a global binary.** An agent testing a "cargo nextest is not installed" fallback
 overwrote `~/.cargo/bin/rustup` with a three-line script whose passthrough line resolved back
 into itself through the `cargo -> rustup` symlink. Every cargo invocation on the machine became
