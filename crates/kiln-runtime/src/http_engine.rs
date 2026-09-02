@@ -10,8 +10,8 @@
 //! the language never observes a callback from inside another.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
 use std::future::Future;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
@@ -119,6 +119,29 @@ pub enum ServerCloseMode {
     /// Drop the transport now.
     Abort,
 }
+
+/// The engine's maps are keyed by small integers (resource and request ids), so they hash by
+/// one multiplication rather than SipHash, which showed up in the request profile.
+#[derive(Default)]
+struct IntHasher(u64);
+
+impl Hasher for IntHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.write_u64(u64::from(*byte));
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+}
+
+type HashMap<K, V> = std::collections::HashMap<K, V, BuildHasherDefault<IntHasher>>;
 
 /// The table of live server connections. Lives in the realm state; tasks reach it through
 /// `Rc` so a finished connection can retire itself.
@@ -448,7 +471,7 @@ impl HttpServerEngine {
         let shared = Rc::new(ConnectionShared {
             resource,
             dispatch,
-            requests: RefCell::new(HashMap::new()),
+            requests: RefCell::new(HashMap::default()),
             header_scratch: RefCell::new(Vec::with_capacity(512)),
             deferred: RefCell::new(Vec::new()),
             deferred_wake: Notify::new(),
