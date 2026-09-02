@@ -54,7 +54,7 @@ hour-long timer without waiting an hour.
   clock to it. A timer that is already due still runs before any wait, in both modes.
 - The realm's `now`, which orders timers and which `kiln_realm_now` reads, is advanced to the
   host's Unix time at every turn boundary: when the realm is entered, at the top of every drive
-  iteration, and before every protocol event a connection dispatches (ADR 0042). A timer armed
+  iteration, and before every protocol event a connection dispatches (ADR 0046). A timer armed
   inside a callback therefore measures from the present, as Node's loop time does, and
   `Date.now()` from generated C, `Temporal.Now` through the nanosecond accessor and the
   `HostOp::ClockNow` path all agree on the same clock.
