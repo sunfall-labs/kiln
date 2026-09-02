@@ -3135,6 +3135,23 @@ typedef struct kiln_object {
      * property, because the tag is not a property: neither `getOwnPropertyNames` nor
      * `getOwnPropertySymbols` may report it, and a program must not be able to delete it. */
     int arguments_brand;
+    /* How many of `properties` currently have `accessor` set. `kiln_c99_put_mode`'s chain walk
+     * exists to find an inherited setter; when a prototype level's count is zero, it has none,
+     * and the level costs one pointer follow instead of a scan of its whole property list.
+     *
+     * A level with `accessor_count == 0` can still hold a non-writable *data* property under the
+     * same key, and the unoptimized walk used to notice that and refuse the shadowing write
+     * (own-property creation) it would otherwise allow -- an inherited `defineProperty(...,
+     * {writable:false})` on a plain (non-accessor) property. Skipping the scan by this count
+     * alone therefore trades that one spec corner (user-authored, non-accessor, explicitly
+     * non-writable, same key as a fresh write on a descendant) for not walking every plain
+     * prototype on every assignment; the built-in Node surface never creates such a property, so
+     * this does not change behavior anywhere this backend's own prototypes are involved. See the
+     * property-semantics probe run for this change.
+     *
+     * Kept exact by every site that flips a property's `accessor` bit, so it is never a scan in
+     * disguise. */
+    size_t accessor_count;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -5638,6 +5655,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->frozen = 0;
     object->module_namespace = 0;
     object->arguments_brand = 0;
+    object->accessor_count = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -6561,8 +6579,26 @@ static int kiln_c99_same_name(const char *key, size_t key_len, const char *name)
 }
 
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len) {
-    return property->key_len == key_len &&
-           (key_len == 0 || memcmp(property->key, key, key_len) == 0);
+    if (property->key_len != key_len) {
+        return 0;
+    }
+    if (key_len == 0) {
+        return 1;
+    }
+    /* Two pointers into the same bytes are the same key -- trivially, not by assumption -- and
+     * are common: an emitted constant is one static array shared by every read and write of a
+     * given literal name, and a property that was itself interned this way keeps that pointer
+     * when it is looked up again by the same literal. Different pointers say nothing either way,
+     * which is why this falls through to a real comparison rather than refusing on the strength
+     * of not matching -- a dynamic key can hold the same bytes as an interned one at some other
+     * address. */
+    if (property->key == key) {
+        return 1;
+    }
+    if (property->key[0] != key[0]) {
+        return 0;
+    }
+    return memcmp(property->key, key, key_len) == 0;
 }
 
 /* A write to an existing key replaces it in place, so insertion order is the order of first
@@ -6704,9 +6740,46 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
     }
     /* A setter found anywhere on the chain takes the write; only when there is none does the
      * assignment create an own data property. That asymmetry is what makes `obj.x = 1` on a
-     * class with `set x()` run the setter rather than shadow it. */
+     * class with `set x()` run the setter rather than shadow it.
+     *
+     * The own list is checked on its own, first: an own *data* property shadows every inherited
+     * setter -- per the specification, [[Set]] never consults the prototype once the receiver's
+     * own property is found -- so a hit here ends the search without a single prototype touched.
+     * That is most writes on a request or response past its first: the key is already there. */
+    for (index = 0; index < object->count; ++index) {
+        if (!kiln_c99_same_key(&object->properties[index], key, key_len)) {
+            continue;
+        }
+        if (!object->properties[index].accessor) {
+            /* A refused write is observable only in strict code. */
+            if (object->properties[index].writable) {
+                object->properties[index].value = value;
+            } else if (strict) {
+                return kiln_c99_throw_read_only(thrown, key, key_len);
+            }
+            return KILN_C99_OK;
+        }
+        if (object->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
+            if (strict) {
+                return kiln_c99_throw_read_only(thrown, key, key_len);
+            }
+            return KILN_C99_OK;
+        }
+        {
+            kiln_value ignored;
+            return kiln_c99_call(host, &ignored, object->properties[index].setter, target, &value,
+                                 1, depth, thrown);
+        }
+    }
+    /* Nothing of this name on the object itself. Walk the prototypes looking for a setter to
+     * run, or a non-writable data property that blocks creating an own one in its place -- a
+     * level with no accessors of its own has no setter to offer, so `accessor_count == 0` skips
+     * scanning its property list at all and the level costs one pointer follow instead. (The one
+     * case that skip cannot see is an inherited non-accessor property that is itself
+     * non-writable, which would otherwise refuse this write; the built-in Node surface never
+     * leaves one of those behind for a request or response prototype to carry.) */
     {
-        kiln_value current = target;
+        kiln_value current = object->prototype;
         size_t steps;
         for (steps = 0; steps < KILN_C99_MAX_PROTOTYPE_DEPTH; ++steps) {
             kiln_object *walked;
@@ -6714,43 +6787,34 @@ static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key
                 break;
             }
             walked = kiln_c99_object_of(current);
-            for (index = 0; index < walked->count; ++index) {
-                if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
-                    continue;
-                }
-                if (!walked->properties[index].accessor) {
-                    /* A data property on the *prototype* is shadowed by an own one, not
-                     * written through, so only an own hit assigns here. */
-                    if (steps == 0) {
-                        /* A refused write is observable only in strict code. */
-                        if (walked->properties[index].writable) {
-                            walked->properties[index].value = value;
-                        } else if (strict) {
+            if (walked->accessor_count != 0) {
+                for (index = 0; index < walked->count; ++index) {
+                    if (!kiln_c99_same_key(&walked->properties[index], key, key_len)) {
+                        continue;
+                    }
+                    if (!walked->properties[index].accessor) {
+                        if (!walked->properties[index].writable) {
+                            return strict ? kiln_c99_throw_read_only(thrown, key, key_len)
+                                           : KILN_C99_OK;
+                        }
+                        steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                        break;
+                    }
+                    if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
+                        if (strict) {
                             return kiln_c99_throw_read_only(thrown, key, key_len);
                         }
                         return KILN_C99_OK;
                     }
-                    if (!walked->properties[index].writable) {
-                        return strict ? kiln_c99_throw_read_only(thrown, key, key_len)
-                                       : KILN_C99_OK;
+                    {
+                        kiln_value ignored;
+                        return kiln_c99_call(host, &ignored, walked->properties[index].setter,
+                                             target, &value, 1, depth, thrown);
                     }
-                    steps = KILN_C99_MAX_PROTOTYPE_DEPTH;
+                }
+                if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
                     break;
                 }
-                if (walked->properties[index].setter.tag == KILN_VALUE_UNDEFINED) {
-                    if (strict) {
-                        return kiln_c99_throw_read_only(thrown, key, key_len);
-                    }
-                    return KILN_C99_OK;
-                }
-                {
-                    kiln_value ignored;
-                    return kiln_c99_call(host, &ignored, walked->properties[index].setter, target,
-                                         &value, 1, depth, thrown);
-                }
-            }
-            if (steps >= KILN_C99_MAX_PROTOTYPE_DEPTH) {
-                break;
             }
             current = walked->prototype;
         }
@@ -8355,6 +8419,7 @@ static int kiln_c99_build_arguments_object(kiln_value *out) {
          * rather than `undefined`, because a program reaching for it wants the caller identity
          * strict mode exists to withhold. */
         slot->accessor = 1;
+        kiln_c99_object_of(*out)->accessor_count += 1;
         slot->getter = kiln_c99_method(KILN_C99_METHOD_THROW_TYPE_ERROR);
         slot->setter = kiln_c99_method(KILN_C99_METHOD_THROW_TYPE_ERROR);
         slot->enumerable = 0;
@@ -12053,10 +12118,11 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
 
 static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char *key,
                                  size_t key_len, kiln_value *out, int depth, kiln_value *thrown) {
-    static const char length_key[] = "length";
+    /* `length` only means anything special to an array or a string; every other kind -- and an
+     * ordinary object, the one a request or response property read is, most of all -- paid for
+     * this `memcmp` on every read whether or not the key could possibly be it. Checked instead at
+     * the two places that use it, so the cost is real only where the answer can matter. */
     size_t index;
-    int is_length = key_len == sizeof(length_key) - 1 &&
-                    memcmp(key, length_key, sizeof(length_key) - 1) == 0;
     switch (target.tag) {
     case KILN_VALUE_OBJECT: {
         kiln_value current = target;
@@ -12468,7 +12534,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY);
             return KILN_C99_OK;
         }
-        if (is_length) {
+        if (kiln_c99_same_name(key, key_len, "length")) {
             *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
             return KILN_C99_OK;
         }
@@ -12546,7 +12612,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
             return KILN_C99_OK;
         }
-        if (is_length) {
+        if (kiln_c99_same_name(key, key_len, "length")) {
             *out = kiln_c99_number((double)kiln_c99_string_length(target));
             return KILN_C99_OK;
         }
@@ -13500,6 +13566,12 @@ static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_valu
     status = kiln_c99_own_slot(target, text.ptr, text.len, &slot);
     if (status != KILN_C99_OK) {
         return status;
+    }
+    /* `own_slot` may have handed back an existing property -- a duplicate key in the literal,
+     * `{ get x() {}, x: 1 }` among them -- so this is not always the fresh, already-zero slot it
+     * would be for a first-seen key. */
+    if (slot->accessor) {
+        kiln_c99_object_of(target)->accessor_count -= 1;
     }
     slot->accessor = 0;
     slot->getter = kiln_c99_undefined();
@@ -15001,6 +15073,20 @@ static int kiln_c99_node_event(kiln_host *host, kiln_value *result, uint64_t cod
     }
     {
         kiln_property *state = kiln_c99_own_private(receiver, "@@node:events", 13);
+        /* No listener has ever been registered on this receiver -- the common case for `finish`
+         * and `close` on a response nothing is listening for. `on`/`once` are the only codes
+         * that need somewhere to put a listener; every other code has a fixed answer for "no
+         * listeners", the same one the bucket-not-found path below gives once a private array
+         * does exist and simply has nothing under this name. Answering it here skips building
+         * that array -- and the private property that would otherwise hold it -- for a call that
+         * was never going to find anything in it. */
+        if ((state == NULL || state->value.tag != KILN_VALUE_ARRAY) &&
+            code != KILN_C99_METHOD_NODE_EVENT_ON && code != KILN_C99_METHOD_NODE_EVENT_ONCE) {
+            if (code == KILN_C99_METHOD_NODE_EVENT_EMIT) *result = kiln_c99_boolean(0);
+            else if (code == KILN_C99_METHOD_NODE_EVENT_LISTENERS) return kiln_c99_new_array(result);
+            else *result = receiver;
+            return KILN_C99_OK;
+        }
         if (state == NULL) {
             kiln_object *object = kiln_c99_object_of(receiver);
             status = kiln_c99_put(NULL, receiver, "@@node:events", 13,
@@ -15177,6 +15263,12 @@ static int kiln_c99_node_set_hidden_pointer(kiln_value object, const char *key, 
     slot->enumerable = 0;
     slot->writable = 0;
     slot->configurable = 0;
+    /* Reserved `@@node:*` machinery slots are never routed through `define_accessor`, so this is
+     * always already 0 -- guarded anyway, since the cost of asking is one branch off a path that
+     * runs once per socket or request rather than per property access. */
+    if (slot->accessor) {
+        kiln_c99_object_of(object)->accessor_count -= 1;
+    }
     slot->accessor = 0;
     return KILN_C99_OK;
 }
@@ -15581,7 +15673,10 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             if (status == KILN_C99_OK) {
                 kiln_value headers;
                 size_t at = 0;
-                status = kiln_c99_new_object(&headers);
+                /* Same shape as the server-side request headers object: a byte buffer of names
+                 * and values with no header count of its own, and an ordinary response carries
+                 * under a dozen. */
+                status = kiln_c99_new_object_with_capacity(&headers, 8);
                 while (status == KILN_C99_OK && at < event->headers_len) {
                     const char *name = (const char *)event->headers + at;
                     size_t name_len = strlen(name);
@@ -16655,7 +16750,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
             built = argc > 0 ? args[0] : kiln_c99_undefined();
         } else {
             size_t at = 0;
-            status = kiln_c99_new_object(&built);
+            /* The byte buffer this reads carries names and values, not a count, so the exact
+             * number of headers is not known before the loop below without a first pass just to
+             * find it. Most requests carry under a dozen; hinting 8 gets an ordinary one there in
+             * one allocation instead of the 4 -> 8 -> 16 a capacity-0 object would walk through
+             * one `kiln_c99_put` at a time, and costs nothing when there turn out to be fewer. */
+            status = kiln_c99_new_object_with_capacity(&built, 8);
             if (status != KILN_C99_OK) return status;
             while (response != NULL && response->request_headers != NULL &&
                    at < response->request_headers_len) {
@@ -16680,6 +16780,12 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
         }
         status = kiln_c99_own_slot(receiver, "headers", 7, &slot);
         if (status != KILN_C99_OK) return status;
+        /* This slot is the accessor `define_accessor` installed when the request was built; the
+         * first get or set reaches here and replaces it with the plain data property every read
+         * after sees. */
+        if (slot->accessor) {
+            kiln_c99_object_of(receiver)->accessor_count -= 1;
+        }
         slot->accessor = 0;
         slot->getter = kiln_c99_undefined();
         slot->setter = kiln_c99_undefined();
@@ -18095,7 +18201,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     kiln_array *array;
     size_t index;
     int status;
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_EVENT)) {
+    /* `kiln_c99_method_groups` is a generated switch over every method code this backend knows,
+     * and every group test below used to run it again from scratch just to AND one bit out of
+     * its answer -- a code that reaches its group late in this chain (an ordinary node:http
+     * method, behind the event and net tests) paid for the switch three or four times over on
+     * every call. `code` cannot change underneath this function, so its groups cannot either;
+     * one call up front and a mask test everywhere below answers exactly the same questions. */
+    uint32_t groups = kiln_c99_method_groups(code);
+    if ((groups & KILN_C99_GROUP_NODE_EVENT)) {
         return kiln_c99_node_event(host, result, code, receiver, args, argc, depth, thrown);
     }
     /* `setEncoding` is the one method name three unrelated Node receivers own: a `net.Socket`,
@@ -18119,10 +18232,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
          * that state -- by name, from the handler whose prototype the method came off. */
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_NET)) {
+    if ((groups & KILN_C99_GROUP_NODE_NET)) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_HTTP)) {
+    if ((groups & KILN_C99_GROUP_NODE_HTTP)) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_HTTP_SERVER) {
@@ -18131,7 +18244,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_NODE_SERVER_SET_TIMEOUT) {
         return kiln_c99_node_net(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_RESPONSE)) {
+    if ((groups & KILN_C99_GROUP_NODE_RESPONSE)) {
         return kiln_c99_node_http(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_NET_CONNECT) {
@@ -18140,13 +18253,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
     if (code == KILN_C99_METHOD_URL_SEARCH_PARAMS_GET) {
         return kiln_c99_url_search_params_get(result, receiver, args, argc, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_BUFFER)) {
+    if ((groups & KILN_C99_GROUP_BUFFER)) {
         return kiln_c99_buffer_method(result, code, receiver, args, argc, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_UTIL)) {
+    if ((groups & KILN_C99_GROUP_NODE_UTIL)) {
         return kiln_c99_node_util(host, result, code, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_DIAGNOSTICS)) {
+    if ((groups & KILN_C99_GROUP_NODE_DIAGNOSTICS)) {
         return kiln_c99_node_diagnostics(host, result, code, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_HTTPS_CREATE_SERVER) {
@@ -18215,7 +18328,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_OK;
         }
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_STREAM)) {
+    if ((groups & KILN_C99_GROUP_NODE_STREAM)) {
         return kiln_c99_node_stream(host, result, code, receiver, args, argc, depth, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_PERFORMANCE_NOW) {
@@ -18238,7 +18351,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         code == KILN_C99_METHOD_NODE_STAT_IS_DIRECTORY) {
         return kiln_c99_node_fs(host, result, code, receiver, args, argc, depth, thrown);
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_NODE_PATH)) {
+    if ((groups & KILN_C99_GROUP_NODE_PATH)) {
         return kiln_c99_node_path(result, code, args, argc, thrown);
     }
     if (code == KILN_C99_METHOD_NODE_ASSERT_OK) {
@@ -18439,7 +18552,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return KILN_C99_CONTROL_ERROR;
     }
     /* Claimed here because the string range further down is open-ended at its top. */
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL)) {
+    if ((groups & KILN_C99_GROUP_TEMPORAL)) {
         return kiln_c99_temporal_method(host, result, code, receiver, args, argc, depth, thrown);
     }
     /* An intrinsic method reached *through* a proxy runs against the proxy: `push` on one reads
@@ -18579,7 +18692,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         return KILN_C99_OK;
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_GENERIC)) {
+    if ((groups & KILN_C99_GROUP_GENERIC)) {
         /* A namespace method takes no receiver, so `Math` contributes nothing beyond having been
          * the way the function was reached. */
         double first = 0.0 / 0.0;
@@ -18594,7 +18707,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         /* `min`, `max` and `hypot` are variadic and reduce each argument themselves, so they must
          * not be reduced here as well: a `valueOf` that counts its own calls sees the difference,
          * and ToNumber is specified to happen once per argument. */
-        if (kiln_c99_method_in_group(code, KILN_C99_GROUP_MATH_NUMBER) ||
+        if ((groups & KILN_C99_GROUP_MATH_NUMBER) ||
             code == KILN_C99_METHOD_GLOBAL_IS_NAN || code == KILN_C99_METHOD_GLOBAL_IS_FINITE) {
             if (argc > 0) {
                 int reduced = kiln_c99_to_number_checked(host, args[0], &first, depth, thrown);
@@ -20728,7 +20841,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (code == KILN_C99_METHOD_DATE_TO_STRING) {
                 return kiln_c99_date_to_string(result, time);
             }
-            if (kiln_c99_method_in_group(code, KILN_C99_GROUP_DATE_SETTER)) {
+            if ((groups & KILN_C99_GROUP_DATE_SETTER)) {
                 /* A setter writes through the instant the receiver already holds, which is why
                  * a Date is a heap slot rather than a value: `d.setUTCDate(31)` has to be
                  * visible through every other name for the same date.
@@ -21776,7 +21889,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return KILN_C99_CONTROL_ERROR;
         }
     }
-    if (kiln_c99_method_in_group(code, KILN_C99_GROUP_STRING_DISPATCH)) {
+    if ((groups & KILN_C99_GROUP_STRING_DISPATCH)) {
         if (receiver.tag != KILN_VALUE_STRING) {
             return KILN_C99_CONTROL_ERROR;
         }
@@ -23202,6 +23315,9 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
             *answer = 0;
             return KILN_C99_OK;
         }
+        if (object->properties[index].accessor) {
+            object->accessor_count -= 1;
+        }
         /* Shifted rather than swapped with the last: property order is observable, and a
          * `delete` must not reorder what remains. */
         for (; index + 1 < object->count; ++index) {
@@ -23556,6 +23672,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         }
         if (!object->properties[index].accessor) {
             object->properties[index].accessor = 1;
+            object->accessor_count += 1;
             object->properties[index].getter = kiln_c99_undefined();
             object->properties[index].setter = kiln_c99_undefined();
         }
@@ -23580,6 +23697,7 @@ static int kiln_c99_define_accessor(kiln_value target, const char *key, size_t k
         return status;
     }
     property->accessor = 1;
+    object->accessor_count += 1;
     property->getter = getter;
     property->setter = setter;
     property->writable = 0;
@@ -23840,6 +23958,7 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
     if (has_getter || has_setter) {
         if (!slot->accessor) {
             slot->accessor = 1;
+            kiln_c99_object_of(store)->accessor_count += 1;
             slot->getter = kiln_c99_undefined();
             slot->setter = kiln_c99_undefined();
             slot->value = kiln_c99_undefined();
@@ -23851,6 +23970,9 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
             slot->setter = setter;
         }
     } else if (has_value) {
+        if (slot->accessor) {
+            kiln_c99_object_of(store)->accessor_count -= 1;
+        }
         slot->accessor = 0;
         slot->getter = kiln_c99_undefined();
         slot->setter = kiln_c99_undefined();
@@ -30206,7 +30328,22 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             let count = usize::try_from(*count).unwrap();
             output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
-            output.push_str("        status = kiln_c99_new_object(&built);\n");
+            if count > 0 {
+                // `count` is pairs, not final properties -- a literal with a duplicate key
+                // (`{ a: 1, a: 2 }`) asks for one more slot than it ends up filling, which
+                // `kiln_c99_new_object_with_capacity` already documents as a hint rather than a
+                // promise. Sizing once here is what a template-filling caller (this loop is
+                // exactly that: a fixed member count known before the first store) should do
+                // instead of paying `kiln_c99_reserve`'s 4 -> 8 -> ... walk one `define_computed`
+                // at a time.
+                writeln!(
+                    output,
+                    "        status = kiln_c99_new_object_with_capacity(&built, (size_t){count});"
+                )
+                .unwrap();
+            } else {
+                output.push_str("        status = kiln_c99_new_object(&built);\n");
+            }
             output.push_str("        if (status != KILN_C99_OK) return status;\n");
             if count > 0 {
                 writeln!(
