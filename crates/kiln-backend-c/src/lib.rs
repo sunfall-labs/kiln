@@ -1586,6 +1586,390 @@ builtin_surface! {
     (KILN_C99_BUILTIN_MATH, "Math", "@@toStringTag", text("Math")),
 }
 
+/// A member the shared surface declares and this backend does not answer, with the reason.
+///
+/// The backlog is a list rather than a count on purpose. A gate that says "twenty-three gaps"
+/// teaches people to ignore it; one that names them is a work queue, and each row is a sentence
+/// somebody can act on or argue with. `builtin_surface_drift` in `kiln-native` prints them.
+pub struct BuiltinGap {
+    /// The global, spelled as [`kiln_builtin_surface::SURFACE`] spells it.
+    pub global: &'static str,
+    /// The member this backend does not answer.
+    pub member: &'static str,
+    /// Why it is still open. Never empty: a gap without a reason cannot be told from an oversight.
+    pub why: &'static str,
+}
+
+/// Every member of the shared surface this backend does not implement.
+///
+/// Adding a member to `kiln_builtin_surface::SURFACE` is a compile error here until it appears
+/// either in [`BUILTIN_SURFACE`] or in this list -- see [`assert_surface_is_covered`]. That is the
+/// whole point: the decision to leave a member unimplemented becomes something somebody writes
+/// down, rather than something a customer's bundle discovers.
+pub const BUILTIN_SURFACE_BACKLOG: &[BuiltinGap] = &[
+    BuiltinGap {
+        global: "Object",
+        member: "groupBy",
+        why: "not implemented; needs an iterator walk keyed by a callback's result",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "preventExtensions",
+        why: "extensibility is not modelled here; only freezing is",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "isExtensible",
+        why: "extensibility is not modelled here; only freezing is",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "seal",
+        why: "sealing is weaker than freezing; answering freeze would be a silent wrong answer",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "isSealed",
+        why: "sealing is weaker than freezing; answering isFrozen would be a silent wrong answer",
+    },
+    BuiltinGap {
+        global: "Array",
+        member: "fromAsync",
+        why: "not implemented; needs the async-iterator protocol",
+    },
+    BuiltinGap {
+        global: "String",
+        member: "fromCharCode",
+        why: "not implemented; builds a string from code units",
+    },
+    BuiltinGap {
+        global: "String",
+        member: "fromCodePoint",
+        why: "not implemented; builds a string from scalar values",
+    },
+    BuiltinGap {
+        global: "Promise",
+        member: "try",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "JSON",
+        member: "rawJSON",
+        why: "not implemented; the raw-JSON marker has no representation in this value kernel",
+    },
+    BuiltinGap {
+        global: "JSON",
+        member: "isRawJSON",
+        why: "not implemented; the raw-JSON marker has no representation in this value kernel",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "defineProperty",
+        why: "answers a boolean where Object.defineProperty answers the target, so it is not the \
+              same operation under another name",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "getPrototypeOf",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "setPrototypeOf",
+        why: "answers a boolean where Object.setPrototypeOf answers the target, so it is not the \
+              same operation under another name",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "isExtensible",
+        why: "extensibility is not modelled here",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "preventExtensions",
+        why: "extensibility is not modelled here",
+    },
+    BuiltinGap {
+        global: "RegExp",
+        member: "escape",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "Error",
+        member: "isError",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "BigInt",
+        member: "asIntN",
+        why: "not implemented; needs a width-truncating call the BigInt provider does not export",
+    },
+    BuiltinGap {
+        global: "BigInt",
+        member: "asUintN",
+        why: "not implemented; needs a width-truncating call the BigInt provider does not export",
+    },
+    BuiltinGap {
+        global: "Map",
+        member: "groupBy",
+        why: "not implemented; needs an iterator walk keyed by a callback's result",
+    },
+    // `Iterator` is inside KILN_C99_BUILTIN_UNAVAILABLE_FIRST..LAST, which publishes the right
+    // `typeof` and refuses every member by name. That is a decision rather than an omission, and
+    // the rows say so one member at a time so that implementing one is a row to delete.
+    BuiltinGap {
+        global: "Iterator",
+        member: "from",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Iterator",
+        member: "concat",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Iterator",
+        member: "zip",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Iterator",
+        member: "zipKeyed",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Buffer",
+        member: "constants",
+        why: "not implemented; the constants namespace object has no representation here",
+    },
+    BuiltinGap {
+        global: "Math",
+        member: "f16round",
+        why: "not implemented; needs a half-precision round the number provider does not export",
+    },
+    // `%TypedArray%` and the view constructors are answered from the receiver's element kind
+    // rather than from a table, because which constructor was named is part of the answer:
+    // `Uint8Array.of` and `Float64Array.of` build different things. Rows here would have to carry
+    // a code that means "ask the kind", which is not what a row is for.
+    BuiltinGap {
+        global: "%TypedArray%",
+        member: "@@species",
+        why: "not implemented; the intrinsic is not a value this backend hands back",
+    },
+    BuiltinGap {
+        global: "%TypedArrayConstructor%",
+        member: "of",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "%TypedArrayConstructor%",
+        member: "from",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "%TypedArrayConstructor%",
+        member: "BYTES_PER_ELEMENT",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "of",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "from",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "BYTES_PER_ELEMENT",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "fromBase64",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "fromHex",
+        why: "not implemented",
+    },
+    // Shared memory has no representation here, so every member refuses through
+    // KILN_C99_METHOD_ATOMICS_UNAVAILABLE rather than answering one.
+    BuiltinGap {
+        global: "Atomics",
+        member: "add",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "and",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "compareExchange",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "exchange",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "isLockFree",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "load",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "notify",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "or",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "pause",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "store",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "sub",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "wait",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "waitAsync",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "xor",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "@@toStringTag",
+        why: "refused by name: shared memory has no representation here",
+    },
+];
+
+const fn surface_answers(surface: &[BuiltinMember], global: &str, member: &str) -> bool {
+    let mut index = 0;
+    while index < surface.len() {
+        if method_name_is(surface[index].owner, global)
+            && method_name_is(surface[index].name, member)
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+const fn backlog_names(backlog: &[BuiltinGap], global: &str, member: &str) -> bool {
+    let mut index = 0;
+    while index < backlog.len() {
+        if method_name_is(backlog[index].global, global)
+            && method_name_is(backlog[index].member, member)
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Every member of the shared surface is either implemented here or written down as backlog, and
+/// nothing here claims a member the shared surface does not declare.
+///
+/// THIS IS THE GATE, AND IT IS A COMPILE ERROR RATHER THAN A TEST FAILURE. A member added to
+/// `kiln_builtin_surface::SURFACE` -- which is also where the interpreter reads its own lists --
+/// does not build here until somebody decides what this backend does about it. That is the
+/// difference between drift being structurally impossible and merely untested, which is the whole
+/// of ADR 0043.
+///
+/// A `const` panic carries a literal and nothing else, so this says only *that* the two disagree.
+/// `builtin_surface_drift` in `kiln-native` reads the same three tables and says which members,
+/// with each backlog row's reason. The compiler is the gate; the test is the explanation.
+const fn assert_surface_is_covered(surface: &[BuiltinMember], backlog: &[BuiltinGap]) {
+    let shared = kiln_builtin_surface::SURFACE;
+    let mut index = 0;
+    while index < shared.len() {
+        let members = shared[index].members;
+        let mut member = 0;
+        while member < members.len() {
+            assert!(
+                surface_answers(surface, shared[index].global, members[member])
+                    || backlog_names(backlog, shared[index].global, members[member]),
+                "a member of kiln_builtin_surface::SURFACE is neither in BUILTIN_SURFACE nor in \
+                 BUILTIN_SURFACE_BACKLOG; run `mbx test -p kiln-native --test \
+                 builtin_surface_drift` to be told which one"
+            );
+            member += 1;
+        }
+        index += 1;
+    }
+
+    // The other direction. A member only one engine has is drift whichever engine has it, and
+    // this backend inventing one is the harder half to notice: nothing refuses, and the two
+    // engines simply answer differently.
+    index = 0;
+    while index < surface.len() {
+        assert!(
+            !kiln_builtin_surface::is_declared(surface[index].owner)
+                || kiln_builtin_surface::has(surface[index].owner, surface[index].name),
+            "BUILTIN_SURFACE answers a member kiln_builtin_surface::SURFACE does not declare; \
+             either declare it there so both engines have it, or drop the row"
+        );
+        index += 1;
+    }
+
+    // A backlog row that is no longer true is worse than no backlog: it describes a past that has
+    // been fixed, and the next reader believes it.
+    index = 0;
+    while index < backlog.len() {
+        assert!(
+            !backlog[index].why.is_empty(),
+            "a BUILTIN_SURFACE_BACKLOG row has no reason, which cannot be told from an oversight"
+        );
+        assert!(
+            kiln_builtin_surface::is_declared(backlog[index].global)
+                && kiln_builtin_surface::has(backlog[index].global, backlog[index].member),
+            "a BUILTIN_SURFACE_BACKLOG row names a member the shared surface does not declare"
+        );
+        assert!(
+            !surface_answers(surface, backlog[index].global, backlog[index].member),
+            "a BUILTIN_SURFACE_BACKLOG row names a member BUILTIN_SURFACE now answers; delete the \
+             backlog row"
+        );
+        index += 1;
+    }
+}
+
+const _: () = assert_surface_is_covered(BUILTIN_SURFACE, BUILTIN_SURFACE_BACKLOG);
+
 /// The globals [`BUILTIN_SURFACE`] speaks for, in declaration order and without repeats.
 pub fn builtin_surface_owners() -> Vec<&'static str> {
     let mut owners: Vec<&'static str> = Vec::new();
@@ -8778,14 +9162,23 @@ static int kiln_c99_has_surface(uint64_t builtin) {
     return 0;
 }
 
+/* The row `builtin` holds for `key`, reporting through `owned` whether the built-in is
+ * table-driven at all.
+ *
+ * The two answers come out of one pass on purpose. This sits on the read path of every property
+ * access whose receiver is a built-in -- `Math.floor` inside a loop reaches it once per iteration
+ * -- and asking `kiln_c99_has_surface` first walked the whole table a second time to learn
+ * something this walk already knows. */
 static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
-                                                          size_t key_len) {
+                                                          size_t key_len, int *owned) {
     size_t index;
+    *owned = 0;
     for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
         const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
         if (member->builtin != builtin) {
             continue;
         }
+        *owned = 1;
         if (kiln_c99_same_name(key, key_len, member->name)) {
             return member;
         }
@@ -8793,9 +9186,13 @@ static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, cons
     return NULL;
 }
 
-/* The method a table-driven built-in's member names, or 0 when the name is not a method of it. */
-static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_t key_len) {
-    const kiln_builtin_member *member = kiln_c99_builtin_member(builtin, key, key_len);
+/* The method a table-driven built-in's member names, or 0.
+ *
+ * `owned` separates "this built-in is not table-driven, ask the switch" from "it is, and it has no
+ * such method" -- which are the same 0 to a caller and must not be. */
+static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_t key_len,
+                                        int *owned) {
+    const kiln_builtin_member *member = kiln_c99_builtin_member(builtin, key, key_len, owned);
     return member != NULL && member->kind == KILN_C99_MEMBER_METHOD ? member->code : 0;
 }
 
@@ -8808,7 +9205,8 @@ static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_
  * one wrong answer this backend is not allowed to give. */
 static int kiln_c99_surface_value(uint64_t builtin, const char *key, size_t key_len,
                                   kiln_value *out) {
-    const kiln_builtin_member *member = kiln_c99_builtin_member(builtin, key, key_len);
+    int owned;
+    const kiln_builtin_member *member = kiln_c99_builtin_member(builtin, key, key_len, &owned);
     if (member == NULL) {
         return 0;
     }
@@ -8844,8 +9242,12 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
      * list a human had to remember to extend, one per built-in -- and forgetting to extend one
      * was the whole disease. What is left below are the prototype method tables, which are
      * dispatched by code range rather than by name. */
-    if (kiln_c99_has_surface(builtin)) {
-        return kiln_c99_surface_method(builtin, key, key_len);
+    {
+        int owned;
+        uint64_t code = kiln_c99_surface_method(builtin, key, key_len, &owned);
+        if (owned) {
+            return code;
+        }
     }
     switch (builtin) {
     case KILN_C99_BUILTIN_OBJECT_PROTOTYPE:

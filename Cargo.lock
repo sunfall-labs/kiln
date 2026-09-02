@@ -979,6 +979,7 @@ name = "kiln-backend-c"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "kiln-builtin-surface",
  "kiln-host-abi",
  "kiln-ir",
  "kiln-native-number",
@@ -1005,6 +1006,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "kiln-builtin-surface"
+version = "0.0.0"
 
 [[package]]
 name = "kiln-cli"
@@ -1094,6 +1099,7 @@ name = "kiln-interpreter"
 version = "0.0.0"
 dependencies = [
  "digest",
+ "kiln-builtin-surface",
  "kiln-host-abi",
  "kiln-intl",
  "kiln-ir",
@@ -1163,6 +1169,7 @@ dependencies = [
  "frontend-oxc",
  "kiln-artifact-cache",
  "kiln-backend-c",
+ "kiln-builtin-surface",
  "kiln-hir",
  "kiln-host-abi",
  "kiln-interpreter",
