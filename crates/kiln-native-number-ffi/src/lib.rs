@@ -41,9 +41,8 @@ mod realm {
         AsyncHostError, AsyncHostOp, AsyncHostValue, RequestId, ResourceId, ResourceKind,
     };
     use kiln_runtime::{
-        ActiveHttpRuntime, HttpCloseMode, HttpStreamAction, Realm, RealmRuntime,
-        RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimerId,
-        WorkItem, duration_from_milliseconds,
+        ActiveHttpRuntime, HttpCloseMode, Realm, RealmRuntime, RuntimeTurn, TimerId, WorkItem,
+        duration_from_milliseconds,
         node_http_agent::{AgentDecision, AgentRelease, HttpOrigin},
     };
     use std::cell::{Cell, RefCell};
@@ -208,7 +207,6 @@ mod realm {
     enum WorkRoots {
         Block,
         Completion,
-        HttpEvent,
     }
 
     struct WorkOwner {
@@ -265,12 +263,6 @@ mod realm {
                         marker.block(continuation.pointer);
                     }
                 }
-                WorkRoots::HttpEvent => {
-                    // SAFETY: an HttpEvent work item is always the boxed HttpEventPayload that
-                    // `queue_http_event` queued, boxed until its drop callback runs.
-                    let payload = unsafe { &*self.0.pointer.cast::<HttpEventPayload>() };
-                    marker.block(payload.owner.pointer);
-                }
             }
         }
 
@@ -311,75 +303,11 @@ mod realm {
         events: Rc<HttpEventOwner>,
     }
 
-    struct HttpEventPayload {
-        owner: Rc<HttpEventOwner>,
-        kind: u32,
-        flags: u32,
-        id: u64,
-        status: u16,
-        version_minor: u8,
-        method: Vec<u8>,
-        target: Vec<u8>,
-        reason: Vec<u8>,
-        headers: Vec<u8>,
-        data: Vec<u8>,
-    }
-
-    impl HttpEventPayload {
-        fn bytes(bytes: &[u8]) -> (*const u8, u64) {
-            (
-                bytes.as_ptr(),
-                u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-            )
-        }
-
-        fn view(&self) -> HttpEventView {
-            let (method, method_len) = Self::bytes(&self.method);
-            let (target, target_len) = Self::bytes(&self.target);
-            let (reason, reason_len) = Self::bytes(&self.reason);
-            let (headers, headers_len) = Self::bytes(&self.headers);
-            let (data, data_len) = Self::bytes(&self.data);
-            HttpEventView {
-                kind: self.kind,
-                flags: self.flags,
-                id: self.id,
-                status: self.status,
-                version_minor: self.version_minor,
-                reserved: 0,
-                method,
-                method_len,
-                target,
-                target_len,
-                reason,
-                reason_len,
-                headers,
-                headers_len,
-                data,
-                data_len,
-            }
-        }
-    }
-
-    unsafe extern "C" fn run_http_event(
-        pointer: *mut c_void,
-        host: *mut c_void,
-        thrown: *mut c_void,
-    ) -> i32 {
-        if pointer.is_null() {
-            return INVALID_ARGUMENT;
-        }
-        // SAFETY: NativeWork owns this boxed payload until the callback returns.
-        let payload = unsafe { &*pointer.cast::<HttpEventPayload>() };
-        let view = payload.view();
-        // SAFETY: all borrowed spans remain owned by payload for this synchronous callback.
-        unsafe { (payload.owner.run)(payload.owner.pointer, &raw const view, host, thrown) }
-    }
-
-    unsafe extern "C" fn drop_http_event(pointer: *mut c_void) {
-        if !pointer.is_null() {
-            // SAFETY: NativeWork invokes this exactly once for Box::into_raw below.
-            unsafe { drop(Box::from_raw(pointer.cast::<HttpEventPayload>())) };
-        }
+    fn event_bytes(bytes: &[u8]) -> (*const u8, u64) {
+        (
+            bytes.as_ptr(),
+            u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        )
     }
 
     impl Drop for AsyncContinuation {
@@ -621,7 +549,6 @@ mod realm {
         work: RefCell<Realm<NativeWork, NativeWork>>,
         continuations: RefCell<HashMap<RequestId, AsyncContinuation>>,
         http_connections: RefCell<HashMap<kiln_host_abi::ResourceId, NativeHttpConnection>>,
-        http_requests: RefCell<HashMap<RequestId, kiln_host_abi::ResourceId>>,
         next_http_client_request_id: Cell<u64>,
         cancelled: Rc<RefCell<HashSet<RequestId>>>,
         queued: Rc<RefCell<HashSet<RequestId>>>,
@@ -917,7 +844,6 @@ mod realm {
                 work: RefCell::new(Realm::new()),
                 continuations: RefCell::new(HashMap::new()),
                 http_connections: RefCell::new(HashMap::new()),
-                http_requests: RefCell::new(HashMap::new()),
                 next_http_client_request_id: Cell::new(1),
                 cancelled: Rc::new(RefCell::new(HashSet::new())),
                 queued: Rc::new(RefCell::new(HashSet::new())),
@@ -1103,23 +1029,6 @@ mod realm {
         })
     }
 
-    fn flatten_headers(headers: &[(String, String)]) -> Vec<u8> {
-        let capacity = headers.iter().fold(0usize, |total, (name, value)| {
-            total
-                .saturating_add(name.len())
-                .saturating_add(value.len())
-                .saturating_add(2)
-        });
-        let mut flattened = Vec::with_capacity(capacity);
-        for (name, value) in headers {
-            flattened.extend_from_slice(name.as_bytes());
-            flattened.push(0);
-            flattened.extend_from_slice(value.as_bytes());
-            flattened.push(0);
-        }
-        flattened
-    }
-
     unsafe fn parse_headers(pointer: *const u8, length: u64) -> Option<Vec<(String, String)>> {
         // SAFETY: callers keep this private ABI span live until the synchronous command returns.
         let bytes = unsafe { borrowed_bytes(pointer, length) }?;
@@ -1138,485 +1047,10 @@ mod realm {
         Some(headers)
     }
 
-    fn queue_http_event(realm: &NativeRealm, payload: HttpEventPayload) -> i32 {
-        let pointer = Box::into_raw(Box::new(payload)).cast::<c_void>();
-        let Some(work) = NativeWork::with_roots(
-            pointer,
-            Some(run_http_event),
-            Some(drop_http_event),
-            WorkRoots::HttpEvent,
-        ) else {
-            // SAFETY: ownership was not transferred when construction failed.
-            unsafe { drop_http_event(pointer) };
-            return RUNTIME_ERROR;
-        };
-        realm.work.borrow_mut().queue_microtask(work);
-        0
-    }
-
-    fn apply_http_actions(
-        realm: &NativeRealm,
-        resource: kiln_host_abi::ResourceId,
-        actions: Vec<HttpStreamAction>,
-        in_context: bool,
-    ) -> i32 {
-        for action in actions {
-            match action {
-                HttpStreamAction::Start(http_operation) => {
-                    // An attached HTTP connection owns its accepted socket until Node explicitly
-                    // closes or unreferences it. Reads are therefore referenced just like writes;
-                    // otherwise the native drive can declare quiescence between pipelined
-                    // requests and destroy a still-live keep-alive connection.
-                    let operation = http_operation.clone().into_host_op();
-                    let request = if in_context {
-                        let Some(runtime) = active_runtime() else {
-                            return INVALID_ARGUMENT;
-                        };
-                        // SAFETY: callbacks execute synchronously inside this realm's runtime.
-                        unsafe { &mut *runtime }.start_host_op_in_context(operation.clone(), true)
-                    } else {
-                        realm
-                            .runtime
-                            .borrow_mut()
-                            .start_host_op(operation.clone(), true)
-                    };
-                    let started = if in_context {
-                        let Some(runtime) = active_runtime() else {
-                            return INVALID_ARGUMENT;
-                        };
-                        // SAFETY: the same active runtime exclusively owns the HTTP connection.
-                        unsafe { &mut *runtime }.http_connection_started(
-                            resource,
-                            &http_operation,
-                            request,
-                        )
-                    } else {
-                        realm.runtime.borrow_mut().http_connection_started(
-                            resource,
-                            &http_operation,
-                            request,
-                        )
-                    };
-                    if !started {
-                        return RUNTIME_ERROR;
-                    }
-                    realm.http_requests.borrow_mut().insert(request, resource);
-                }
-                HttpStreamAction::Close(close_resource) => {
-                    if close_resource.resource() != resource {
-                        return RUNTIME_ERROR;
-                    }
-                    let request = if in_context {
-                        let Some(runtime) = active_runtime() else {
-                            return INVALID_ARGUMENT;
-                        };
-                        // SAFETY: callbacks execute synchronously inside this realm's runtime.
-                        unsafe { &mut *runtime }
-                            .start_http_connection_close_in_context(close_resource)
-                    } else {
-                        realm
-                            .runtime
-                            .borrow_mut()
-                            .start_http_connection_close(close_resource)
-                    };
-                    let Some(request) = request else {
-                        return RUNTIME_ERROR;
-                    };
-                    realm.http_requests.borrow_mut().insert(request, resource);
-                }
-                HttpStreamAction::Cancel(request) => {
-                    realm.runtime.borrow_mut().cancel_host_op(request);
-                    realm.http_requests.borrow_mut().remove(&request);
-                }
-                HttpStreamAction::Event(kiln_runtime::node_stream::StreamEvent::Close) => {
-                    realm.http_connections.borrow_mut().remove(&resource);
-                    // The transport has said its last word; the runtime's entry goes with the
-                    // realm's, or a server retains every connection it ever accepted.
-                    if in_context {
-                        let Some(runtime) = active_runtime() else {
-                            return INVALID_ARGUMENT;
-                        };
-                        unsafe { &mut *runtime }.retire_http_connection(resource);
-                    } else {
-                        realm.runtime.borrow_mut().retire_http_connection(resource);
-                    }
-                }
-                HttpStreamAction::Event(_) => {}
-                HttpStreamAction::Error(error) => {
-                    eprintln!(
-                        "native HTTP transport error on resource {}: {} ({} {})",
-                        resource.get(),
-                        error.message,
-                        error.code,
-                        error.syscall
-                    );
-                    return RUNTIME_ERROR;
-                }
-                HttpStreamAction::Data(_) => {
-                    return RUNTIME_ERROR;
-                }
-            }
-        }
-        0
-    }
-
-    fn checkpoint_http(realm: &NativeRealm, in_context: bool) -> Result<usize, i32> {
-        let mut event_count: usize = 0;
-        // Repeat while a round changes something, rather than draining a fixed number of
-        // scheduler turns and hoping it was enough. Each round advances the scheduler once; a
-        // round that applies no actions and drains no events is quiescence and ends the
-        // checkpoint. This is what the fixed four-turn drain was standing in for, and unlike a
-        // constant it neither stops early when a connection still has work nor keeps paying for
-        // turns after everything has gone quiet.
-        loop {
-            let mut progressed = false;
-            if !in_context {
-                // A response command can wake Hyper and make a pipelined request runnable without
-                // another HostOps completion. Advance the one Tokio scheduler before inspecting
-                // per-connection events, matching the interpreted adapter's checkpoint contract.
-                realm.runtime.borrow_mut().poll_http_tasks_once();
-            }
-            let resources = realm
-                .http_connections
-                .borrow()
-                .iter()
-                .filter(|(_, connection)| connection.role == HttpRole::Client)
-                .map(|(resource, _)| *resource)
-                .collect::<Vec<_>>();
-            for resource in resources {
-                loop {
-                    let actions = if in_context {
-                        let Some(runtime) = active_runtime() else {
-                            return Err(INVALID_ARGUMENT);
-                        };
-                        // SAFETY: this is the current realm runtime; this poll never nests block_on.
-                        unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
-                    } else {
-                        // Pump this connection's already-selected bytes without re-driving the
-                        // scheduler. `checkpoint_http` drives it once before this loop, and
-                        // `poll_http_tasks_after_wake` drives it again after every iteration that
-                        // did anything, so a drive here only repeats one of those -- once per open
-                        // connection, after every microtask. That is where the server's cost went
-                        // quadratic: idle connections each paid a full scheduler drive to report
-                        // that they had nothing to say.
-                        realm
-                            .runtime
-                            .borrow_mut()
-                            .poll_http_connection_in_context(resource)
-                    };
-                    let Some(actions) = actions else { break };
-                    let had_actions = !actions.is_empty();
-                    let status = apply_http_actions(realm, resource, actions, in_context);
-                    if status != 0 {
-                        return Err(status);
-                    }
-                    let (owner, role) = {
-                        let connections = realm.http_connections.borrow();
-                        let Some(connection) = connections.get(&resource) else {
-                            break;
-                        };
-                        (Rc::clone(&connection.events), connection.role)
-                    };
-                    let mut payloads = Vec::new();
-                    let mut close_transport = false;
-                    let mut close_mode = HttpCloseMode::Graceful;
-                    match role {
-                        HttpRole::Server => {
-                            let events = if in_context {
-                                let Some(runtime) = active_runtime() else {
-                                    return Err(INVALID_ARGUMENT);
-                                };
-                                // SAFETY: event extraction is synchronous on the active runtime.
-                                unsafe { &mut *runtime }.take_http_events(resource)
-                            } else {
-                                realm.runtime.borrow_mut().take_http_events(resource)
-                            };
-                            for event in events {
-                                let payload = match event {
-                                    RuntimeHttpEvent::RequestHead { id, request } => {
-                                        HttpEventPayload {
-                                            owner: Rc::clone(&owner),
-                                            kind: HTTP_EVENT_REQUEST_HEAD,
-                                            flags: u32::from(request.keep_alive),
-                                            id,
-                                            status: 0,
-                                            version_minor: u8::from(matches!(
-                                                request.version,
-                                                kiln_runtime::node_http::HttpVersion::Http11
-                                            )),
-                                            method: request.method.into_bytes(),
-                                            target: request.target.into_bytes(),
-                                            reason: Vec::new(),
-                                            headers: flatten_headers(&request.headers),
-                                            data: Vec::new(),
-                                        }
-                                    }
-                                    RuntimeHttpEvent::RequestData { id, data } => {
-                                        HttpEventPayload {
-                                            owner: Rc::clone(&owner),
-                                            kind: HTTP_EVENT_REQUEST_DATA,
-                                            flags: 0,
-                                            id,
-                                            status: 0,
-                                            version_minor: 0,
-                                            method: Vec::new(),
-                                            target: Vec::new(),
-                                            reason: Vec::new(),
-                                            headers: Vec::new(),
-                                            data,
-                                        }
-                                    }
-                                    RuntimeHttpEvent::RequestEnd { id } => HttpEventPayload {
-                                        owner: Rc::clone(&owner),
-                                        kind: HTTP_EVENT_REQUEST_END,
-                                        flags: 0,
-                                        id,
-                                        status: 0,
-                                        version_minor: 0,
-                                        method: Vec::new(),
-                                        target: Vec::new(),
-                                        reason: Vec::new(),
-                                        headers: Vec::new(),
-                                        data: Vec::new(),
-                                    },
-                                    RuntimeHttpEvent::Drain { id } => HttpEventPayload {
-                                        owner: Rc::clone(&owner),
-                                        kind: HTTP_EVENT_DRAIN,
-                                        flags: 0,
-                                        id,
-                                        status: 0,
-                                        version_minor: 0,
-                                        method: Vec::new(),
-                                        target: Vec::new(),
-                                        reason: Vec::new(),
-                                        headers: Vec::new(),
-                                        data: Vec::new(),
-                                    },
-                                    RuntimeHttpEvent::Finish { id } => HttpEventPayload {
-                                        owner: Rc::clone(&owner),
-                                        kind: HTTP_EVENT_FINISH,
-                                        flags: 0,
-                                        id,
-                                        status: 0,
-                                        version_minor: 0,
-                                        method: Vec::new(),
-                                        target: Vec::new(),
-                                        reason: Vec::new(),
-                                        headers: Vec::new(),
-                                        data: Vec::new(),
-                                    },
-                                    RuntimeHttpEvent::Error { id, message } => HttpEventPayload {
-                                        owner: Rc::clone(&owner),
-                                        kind: HTTP_EVENT_ERROR,
-                                        flags: 0,
-                                        id,
-                                        status: 0,
-                                        version_minor: 0,
-                                        method: Vec::new(),
-                                        target: Vec::new(),
-                                        reason: Vec::new(),
-                                        headers: Vec::new(),
-                                        data: message.into_bytes(),
-                                    },
-                                    RuntimeHttpEvent::Closed => {
-                                        // Server protocol completion can race the final response
-                                        // write. Keep the default graceful mode so that write is
-                                        // acknowledged before the portable resource is retired.
-                                        close_transport = true;
-                                        HttpEventPayload {
-                                            owner: Rc::clone(&owner),
-                                            kind: HTTP_EVENT_CLOSED,
-                                            flags: 0,
-                                            id: 0,
-                                            status: 0,
-                                            version_minor: 0,
-                                            method: Vec::new(),
-                                            target: Vec::new(),
-                                            reason: Vec::new(),
-                                            headers: Vec::new(),
-                                            data: Vec::new(),
-                                        }
-                                    }
-                                };
-                                payloads.push(payload);
-                            }
-                        }
-                        HttpRole::Client => {
-                            let events = if in_context {
-                                let Some(runtime) = active_runtime() else {
-                                    return Err(INVALID_ARGUMENT);
-                                };
-                                // SAFETY: event extraction is synchronous on the active runtime.
-                                unsafe { &mut *runtime }.take_http1_client_events(resource)
-                            } else {
-                                realm
-                                    .runtime
-                                    .borrow_mut()
-                                    .take_http1_client_events(resource)
-                            };
-                            for event in events {
-                                let (id, kind, flags, status, reason, headers, data) = match event {
-                                    RuntimeHttpClientEvent::Drain { id } => (
-                                        id,
-                                        HTTP_EVENT_DRAIN,
-                                        0,
-                                        0,
-                                        Vec::new(),
-                                        Vec::new(),
-                                        Vec::new(),
-                                    ),
-                                    RuntimeHttpClientEvent::Finish { id } => (
-                                        id,
-                                        HTTP_EVENT_FINISH,
-                                        0,
-                                        0,
-                                        Vec::new(),
-                                        Vec::new(),
-                                        Vec::new(),
-                                    ),
-                                    RuntimeHttpClientEvent::ResponseHead {
-                                        id,
-                                        status,
-                                        reason,
-                                        headers,
-                                    } => (
-                                        id,
-                                        HTTP_EVENT_RESPONSE_HEAD,
-                                        0,
-                                        status,
-                                        reason.into_bytes(),
-                                        flatten_headers(&headers),
-                                        Vec::new(),
-                                    ),
-                                    RuntimeHttpClientEvent::ResponseData { id, data } => (
-                                        id,
-                                        HTTP_EVENT_RESPONSE_DATA,
-                                        0,
-                                        0,
-                                        Vec::new(),
-                                        Vec::new(),
-                                        data,
-                                    ),
-                                    RuntimeHttpClientEvent::ResponseEnd { id, reusable } => (
-                                        id,
-                                        HTTP_EVENT_RESPONSE_END,
-                                        u32::from(reusable),
-                                        0,
-                                        Vec::new(),
-                                        Vec::new(),
-                                        Vec::new(),
-                                    ),
-                                    RuntimeHttpClientEvent::Error { id, message } => (
-                                        id,
-                                        HTTP_EVENT_ERROR,
-                                        0,
-                                        0,
-                                        Vec::new(),
-                                        Vec::new(),
-                                        message.into_bytes(),
-                                    ),
-                                    RuntimeHttpClientEvent::Closed => {
-                                        // A client connection disappearing is an abort: pending
-                                        // request/response writes must be cancelled before close.
-                                        close_transport = true;
-                                        close_mode = HttpCloseMode::Abort;
-                                        (
-                                            0,
-                                            HTTP_EVENT_CLOSED,
-                                            0,
-                                            0,
-                                            Vec::new(),
-                                            Vec::new(),
-                                            Vec::new(),
-                                        )
-                                    }
-                                };
-                                payloads.push(HttpEventPayload {
-                                    owner: Rc::clone(&owner),
-                                    kind,
-                                    flags,
-                                    id,
-                                    status,
-                                    version_minor: 0,
-                                    method: Vec::new(),
-                                    target: Vec::new(),
-                                    reason,
-                                    headers,
-                                    data,
-                                });
-                            }
-                        }
-                    }
-                    let had_events = !payloads.is_empty();
-                    event_count = event_count.saturating_add(payloads.len());
-                    for payload in payloads {
-                        let status = queue_http_event(realm, payload);
-                        if status != 0 {
-                            return Err(status);
-                        }
-                    }
-                    if close_transport {
-                        let actions = if in_context {
-                            let Some(runtime) = active_runtime() else {
-                                return Err(INVALID_ARGUMENT);
-                            };
-                            // Hyper may publish `Closed` in the same poll that queued its final
-                            // response bytes. Drain those bytes before asking the transport to close
-                            // so shutdown is ordered after the final HostOps write.
-                            unsafe { &mut *runtime }.poll_http_connection_in_context(resource)
-                        } else {
-                            realm.runtime.borrow_mut().poll_http_connection(resource)
-                        };
-                        let Some(actions) = actions else {
-                            return Err(RUNTIME_ERROR);
-                        };
-                        let status = apply_http_actions(realm, resource, actions, in_context);
-                        if status != 0 {
-                            return Err(status);
-                        }
-                        let actions = if in_context {
-                            let Some(runtime) = active_runtime() else {
-                                return Err(INVALID_ARGUMENT);
-                            };
-                            // SAFETY: this is the current realm's exclusively active runtime.
-                            unsafe { &mut *runtime }.close_http_connection(resource, close_mode)
-                        } else {
-                            realm
-                                .runtime
-                                .borrow_mut()
-                                .close_http_connection(resource, close_mode)
-                        };
-                        let Some(actions) = actions else {
-                            return Err(RUNTIME_ERROR);
-                        };
-                        let status = apply_http_actions(realm, resource, actions, in_context);
-                        if status != 0 {
-                            return Err(status);
-                        }
-                    }
-                    if !had_actions && !had_events {
-                        break;
-                    }
-                    progressed = true;
-                    if !in_context {
-                        // Applying actions and draining body events can wake the connection future
-                        // again (Finish releases the next buffered HTTP/1 request). Advance that
-                        // concrete progress before deciding the checkpoint is quiescent.
-                        realm.runtime.borrow_mut().poll_http_tasks_once();
-                    }
-                }
-            }
-            if !progressed {
-                break;
-            }
-        }
-        Ok(event_count)
-    }
-
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn kiln_realm_http_server_close_active(resource: u64, mode: i32) -> i32 {
         ffi(|| {
-            let (Some(realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
                 return INVALID_ARGUMENT;
             };
             let mode = match mode {
@@ -1624,63 +1058,16 @@ mod realm {
                 HTTP_CLOSE_ABORT => HttpCloseMode::Abort,
                 _ => return INVALID_ARGUMENT,
             };
-            let resource = kiln_host_abi::ResourceId::new(resource);
-            {
-                // SAFETY: this private ABI call runs synchronously inside the active realm.
-                let runtime = unsafe { &mut *runtime };
-                if runtime.http_server().is_attached(resource) {
-                    let engine_mode = match mode {
-                        HttpCloseMode::Graceful => kiln_runtime::HttpCloseMode::Graceful,
-                        HttpCloseMode::Abort => kiln_runtime::HttpCloseMode::Abort,
-                    };
-                    return if runtime.http_server().close(resource, engine_mode) {
-                        0
-                    } else {
-                        INVALID_ARGUMENT
-                    };
-                }
-            }
-            let abort_owner = if mode == HttpCloseMode::Abort {
-                realm
-                    .http_connections
-                    .borrow()
-                    .get(&resource)
-                    .filter(|connection| connection.role == HttpRole::Server)
-                    .map(|connection| Rc::clone(&connection.events))
+            // SAFETY: this private ABI call runs synchronously inside the active realm.
+            let runtime = unsafe { &mut *runtime };
+            // A missing registration is a failed capability lookup, never permission to treat
+            // the socket as a raw resource: only the engine that owns the transport can close
+            // it, for either role. `Closed` reaches the handler from the engine's task.
+            if runtime.http_close(kiln_host_abi::ResourceId::new(resource), mode) {
+                0
             } else {
-                None
-            };
-            // SAFETY: this private ABI call runs synchronously inside the active realm callback.
-            let Some(actions) = (unsafe { &mut *runtime }).close_http_connection(resource, mode)
-            else {
-                return INVALID_ARGUMENT;
-            };
-            let status = apply_http_actions(&realm, resource, actions, true);
-            if status != 0 {
-                return status;
+                INVALID_ARGUMENT
             }
-            // An abort closes the transport synchronously and removes its registration before
-            // Hyper can publish EngineEvent::Closed. Preserve the one Node-visible close event
-            // through the same realm microtask ingress used by ordinary protocol completion.
-            let Some(owner) = abort_owner else {
-                return 0;
-            };
-            queue_http_event(
-                &realm,
-                HttpEventPayload {
-                    owner,
-                    kind: HTTP_EVENT_CLOSED,
-                    flags: 0,
-                    id: 0,
-                    status: 0,
-                    version_minor: 0,
-                    method: Vec::new(),
-                    target: Vec::new(),
-                    reason: Vec::new(),
-                    headers: Vec::new(),
-                    data: Vec::new(),
-                },
-            )
         })
     }
 
@@ -1706,13 +1093,6 @@ mod realm {
             let status = drain_realm_queues(realm);
             if status != 0 {
                 return status;
-            }
-            // Client connections still use the bridged engine and are checkpointed here; their
-            // events enter the microtask lane, so loop when any did.
-            match checkpoint_http(realm, true) {
-                Ok(events) if events != 0 => continue,
-                Ok(_) => {}
-                Err(status) => return status,
             }
             let turn = {
                 let mut runtime = realm.runtime.borrow_mut();
@@ -1812,13 +1192,6 @@ mod realm {
             // Yield first: a task woken by the last turn (a Hyper connection with a request to
             // dispatch, a completion about to land) runs now, before anything parks.
             kiln_runtime::yield_to_tasks().await;
-            // The yield may have run a bridged client connection's Hyper task; what it produced
-            // must reach the microtask lane before anything parks.
-            match checkpoint_http(realm, true) {
-                Ok(events) if events != 0 => continue,
-                Ok(_) => {}
-                Err(status) => return status,
-            }
             let delay = deadline.map(|deadline| deadline.saturating_sub(now));
             if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer {
                 let timer = realm.work.borrow_mut().run_next_timer();
@@ -1833,24 +1206,9 @@ mod realm {
         }
     }
 
-    /// Route one host completion: an HTTP client completion to its bridged connection, any
-    /// other to its continuation, which runs as a microtask. `Some` is a failure status.
+    /// Route one host completion to its continuation, which runs as a microtask. `Some` is a
+    /// failure status.
     fn route_completion(realm: &NativeRealm, completion: kiln_host_abi::Completion) -> Option<i32> {
-        let http_resource = { realm.http_requests.borrow_mut().remove(&completion.request) };
-        if let Some(resource) = http_resource {
-            let actions = realm
-                .runtime
-                .borrow_mut()
-                .complete_http_connection(resource, completion);
-            let Some(actions) = actions else {
-                return Some(RUNTIME_ERROR);
-            };
-            let status = apply_http_actions(realm, resource, actions, true);
-            if status != 0 {
-                return Some(status);
-            }
-            return None;
-        }
         let continuation = realm.continuations.borrow_mut().remove(&completion.request);
         let Some(continuation) = continuation else {
             return None;
@@ -2743,7 +2101,7 @@ mod realm {
             if kiln_runtime::http_engine::trace_enabled() {
                 eprintln!("[kiln-host] start {operation:?} referenced={referenced}");
             }
-            let request = unsafe { &mut *runtime }.start_host_op_in_context(operation, referenced);
+            let request = unsafe { &mut *runtime }.start_host_op(operation, referenced);
             let continuation = AsyncContinuation {
                 pointer: work,
                 run,
@@ -2851,15 +2209,16 @@ mod realm {
         }
     }
 
-    /// The realm's side of a direct server connection: protocol events become the private ABI's
-    /// event view and go straight to the generated C handler; the checkpoint drains the queues.
-    struct NativeServerDispatch {
+    /// The realm's side of a direct connection, server or client: protocol events become the
+    /// private ABI's event view and go straight to the generated C handler; the checkpoint
+    /// drains the queues.
+    struct NativeHttpDispatch {
         realm: std::rc::Weak<NativeRealm>,
         resource: kiln_host_abi::ResourceId,
         owner: Rc<HttpEventOwner>,
     }
 
-    impl kiln_runtime::HttpDispatch for NativeServerDispatch {
+    impl kiln_runtime::HttpDispatch for NativeHttpDispatch {
         fn event(&self, event: &kiln_runtime::HttpEvent<'_>) -> i32 {
             use kiln_runtime::HttpEventKind;
             let Some(realm) = self.realm.upgrade() else {
@@ -2879,18 +2238,17 @@ mod realm {
                 HttpEventKind::Error => HTTP_EVENT_ERROR,
                 HttpEventKind::Closed => HTTP_EVENT_CLOSED,
             };
-            let (method, method_len) = HttpEventPayload::bytes(event.method);
-            let (target, target_len) = HttpEventPayload::bytes(event.target);
+            let (method, method_len) = event_bytes(event.method);
+            let (target, target_len) = event_bytes(event.target);
             // The view's `reason` slot carries the status text of a response head and the
             // message of an error; the generated handler reads it by kind.
-            let (reason, reason_len) =
-                HttpEventPayload::bytes(if event.kind == HttpEventKind::Error {
-                    event.message
-                } else {
-                    event.reason
-                });
-            let (headers, headers_len) = HttpEventPayload::bytes(event.headers);
-            let (data, data_len) = HttpEventPayload::bytes(if event.kind == HttpEventKind::Error {
+            let (reason, reason_len) = event_bytes(if event.kind == HttpEventKind::Error {
+                event.message
+            } else {
+                event.reason
+            });
+            let (headers, headers_len) = event_bytes(event.headers);
+            let (data, data_len) = event_bytes(if event.kind == HttpEventKind::Error {
                 event.message
             } else {
                 event.data
@@ -2974,33 +2332,21 @@ mod realm {
                 run,
                 drop,
             });
+            // ADR 0046: Hyper drives the socket; events call the C handler directly.
+            let dispatch = Rc::new(NativeHttpDispatch {
+                realm: Rc::downgrade(&realm),
+                resource,
+                owner: Rc::clone(&owner),
+            });
             // SAFETY: active_runtime points at this active realm's exclusively-entered runtime.
             let runtime = unsafe { &mut *runtime };
-            if role == HttpRole::Server {
-                // ADR 0046: Hyper drives the socket; events call the C handler directly.
-                let dispatch = Rc::new(NativeServerDispatch {
-                    realm: Rc::downgrade(&realm),
-                    resource,
-                    owner: Rc::clone(&owner),
-                });
-                if !runtime.server_attach(resource, allow_half_close, dispatch) {
-                    return INVALID_ARGUMENT;
-                }
-                realm.http_connections.borrow_mut().insert(
-                    resource,
-                    NativeHttpConnection {
-                        role,
-                        events: owner,
-                    },
-                );
-                return 0;
-            }
-            let actions = match role {
-                HttpRole::Server => {
-                    runtime.start_http1_connection_with_options(resource, allow_half_close)
-                }
-                HttpRole::Client => runtime.start_http1_client_connection(resource),
+            let attached = match role {
+                HttpRole::Server => runtime.server_attach(resource, allow_half_close, dispatch),
+                HttpRole::Client => runtime.client_attach(resource, dispatch),
             };
+            if !attached {
+                return INVALID_ARGUMENT;
+            }
             realm.http_connections.borrow_mut().insert(
                 resource,
                 NativeHttpConnection {
@@ -3008,7 +2354,7 @@ mod realm {
                     events: owner,
                 },
             );
-            apply_http_actions(&realm, resource, actions, true)
+            0
         })
     }
 
@@ -3227,20 +2573,15 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             // SAFETY: active_runtime is this active realm's exclusively-entered runtime.
-            if unsafe { &mut *runtime }.send_http1_client_request(
+            let sent = unsafe { &mut *runtime }.http_client().send_request(
                 resource,
-                RuntimeHttpClientRequest {
-                    method: method.to_owned(),
-                    target: target.to_owned(),
-                    headers,
-                },
                 id,
+                method,
+                target,
+                &headers,
                 high_water_mark,
-            ) {
-                0
-            } else {
-                RUNTIME_ERROR
-            }
+            );
+            if sent { 0 } else { RUNTIME_ERROR }
         })
     }
 
@@ -3260,18 +2601,12 @@ mod realm {
                 return INVALID_ARGUMENT;
             };
             // SAFETY: active_runtime is exclusively owned by this active realm callback.
+            let client = unsafe { &mut *runtime }.http_client();
+            let resource = kiln_host_abi::ResourceId::new(resource);
             let disposition = if end {
-                unsafe { &mut *runtime }.end_http1_client_request(
-                    kiln_host_abi::ResourceId::new(resource),
-                    id,
-                    data.to_vec(),
-                )
+                client.end_request(resource, id, data)
             } else {
-                unsafe { &mut *runtime }.write_http1_client_request(
-                    kiln_host_abi::ResourceId::new(resource),
-                    id,
-                    data.to_vec(),
-                )
+                client.write_request(resource, id, data)
             };
             match disposition {
                 Some(disposition) => i32::from(!disposition.ready),
@@ -3322,36 +2657,19 @@ mod realm {
             let resource = kiln_host_abi::ResourceId::new(resource);
             // SAFETY: active_runtime is exclusively owned by the active realm callback.
             let runtime = unsafe { &mut *runtime };
-            let started = if runtime.http_server().is_attached(resource) {
-                // The engine parses the flattened span itself, straight into Hyper's map.
-                // SAFETY: the adapter keeps the span live for this synchronous call.
-                let Some(headers) =
-                    (unsafe { borrowed_bytes(response.headers, response.headers_len) })
-                else {
-                    return INVALID_ARGUMENT;
-                };
-                runtime.http_server().start_response(
-                    resource,
-                    id,
-                    response.status,
-                    headers,
-                    high_water_mark,
-                )
-            } else {
-                // SAFETY: the adapter keeps the span live for this synchronous call.
-                let Some(headers) =
-                    (unsafe { parse_headers(response.headers, response.headers_len) })
-                else {
-                    return INVALID_ARGUMENT;
-                };
-                runtime.start_http1_response(
-                    resource,
-                    id,
-                    response.status,
-                    headers,
-                    high_water_mark,
-                )
+            // The engine parses the flattened span itself, straight into Hyper's map.
+            // SAFETY: the adapter keeps the span live for this synchronous call.
+            let Some(headers) = (unsafe { borrowed_bytes(response.headers, response.headers_len) })
+            else {
+                return INVALID_ARGUMENT;
             };
+            let started = runtime.http_server().start_response(
+                resource,
+                id,
+                response.status,
+                headers,
+                high_water_mark,
+            );
             if started { 0 } else { RUNTIME_ERROR }
         })
     }
@@ -3374,16 +2692,10 @@ mod realm {
             let resource = kiln_host_abi::ResourceId::new(resource);
             // SAFETY: active_runtime is exclusively owned by this active realm callback.
             let runtime = unsafe { &mut *runtime };
-            let disposition = if runtime.http_server().is_attached(resource) {
-                if end {
-                    runtime.http_server().end_response(resource, id, data)
-                } else {
-                    runtime.http_server().write_response(resource, id, data)
-                }
-            } else if end {
-                runtime.end_http1_response(resource, id, data.to_vec())
+            let disposition = if end {
+                runtime.http_server().end_response(resource, id, data)
             } else {
-                runtime.write_http1_response(resource, id, data.to_vec())
+                runtime.http_server().write_response(resource, id, data)
             };
             match disposition {
                 Some(disposition) => i32::from(!disposition.ready),
