@@ -961,6 +961,14 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.state.host.completion_signal()
     }
 
+    /// Wake a parked drive: something it was not waiting for has changed what it should wait
+    /// for, such as a timer armed from inside a connection callback.
+    pub fn wake_drive(&self) {
+        if let Some(signal) = self.state.host.completion_signal() {
+            signal.notify_one();
+        }
+    }
+
     /// Pause Tokio time for the deterministic clock, once.
     pub fn pause_time(&mut self) {
         if !self.state.time_paused {

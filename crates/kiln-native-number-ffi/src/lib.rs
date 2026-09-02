@@ -3291,6 +3291,13 @@ mod realm {
             } else {
                 queue.set_timeout(delay, work)
             };
+            std::mem::drop(queue);
+            // A timer armed from inside a connection's callback (ADR 0042) changes what the
+            // parked drive must wait for; tell it.
+            if let Some(runtime) = active_runtime() {
+                // SAFETY: the active runtime pointer is valid for the whole drive.
+                unsafe { &*runtime }.wake_drive();
+            }
             // SAFETY: null was rejected and the caller supplies a writable identity slot.
             unsafe { out_id.write(id.get()) };
             0
