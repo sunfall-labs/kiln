@@ -6,7 +6,7 @@
 // hides exactly the tail a server is judged on.
 import http from "node:http";
 
-const port = 18088;
+const port = Number(process.argv[4] ?? 18088);
 const durationMs = Number(process.argv[2] ?? 5000);
 const concurrency = Number(process.argv[3] ?? 16);
 
