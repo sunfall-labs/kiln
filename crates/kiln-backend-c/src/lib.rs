@@ -32129,11 +32129,16 @@ int main(void) {
     }
 
     #[test]
+    // `f16round` rather than an invented name: an absent name on a table-driven built-in is
+    // `undefined` now, exactly as the language says, so a made-up one no longer refuses and this
+    // probe would have been testing nothing. `Math.f16round` is a real member this backend has
+    // not built, so it is in the backlog and still refuses by name -- which is the provenance
+    // this test is about.
     fn nested_call_refusal_preserves_the_failing_instruction_without_blaming_the_callee() {
         let generated = emit(&Program {
             source: "".into(),
             version: BYTECODE_VERSION,
-            constants: vec![Constant::String("missing".into())],
+            constants: vec![Constant::String("f16round".into())],
             code: vec![
                 Instruction::MakeFunction(0),
                 Instruction::Call { argc: 0 },
@@ -32144,7 +32149,7 @@ int main(void) {
                 span: kiln_ir::Span::default(),
                 prologue_end: 0,
                 asynchronous: false,
-                name: Some("read_missing_math_property".into()),
+                name: Some("read_unimplemented_math_property".into()),
                 arrow: false,
                 generator: false,
                 async_generator: false,
@@ -32169,7 +32174,7 @@ int main(void) {{
     if (status != KILN_C99_CONTROL_ERROR) return 1;
     if (kiln_c99_diagnostic_site == NULL || kiln_c99_diagnostic_operation == NULL) return 2;
     if (kiln_c99_diagnostic_instruction != (size_t)1) return 3;
-    if (strcmp(kiln_c99_diagnostic_operation, "GetProperty(missing)") != 0) return 4;
+    if (strcmp(kiln_c99_diagnostic_operation, "GetProperty(f16round)") != 0) return 4;
     if (kiln_c99_diagnostic_detail == NULL ||
         strcmp(kiln_c99_diagnostic_detail, "GetProperty lookup refused") != 0) return 5;
     if (kiln_c99_diagnostic_receiver_tag != KILN_VALUE_BUILTIN) return 6;
