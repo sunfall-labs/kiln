@@ -791,60 +791,17 @@ typedef struct kiln_async_completion {
 } kiln_async_completion;
 typedef int (*kiln_realm_completion_fn)(void *work, const kiln_async_completion *completion,
                                        void *host, void *thrown);
-int kiln_realm_create(uint64_t *out_realm);
-int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
-int kiln_realm_drive(uint64_t realm, void *host, void *thrown);
-int kiln_realm_destroy(uint64_t realm);
-int kiln_realm_is_active(void);
-int kiln_realm_diagnostic_reset(void);
-int kiln_realm_diagnostic_note(const uint8_t *site, uint64_t site_len, uint64_t instruction,
-                               const uint8_t *operation, uint64_t operation_len, uint64_t depth,
-                               const uint8_t *detail, uint64_t detail_len,
-                               const uint8_t *function, uint64_t function_len,
-                               uint64_t method, uint64_t receiver_tag, int has_method);
-int kiln_realm_diagnostic_render(uint8_t *out, uint64_t capacity, uint64_t *out_len);
-int kiln_node_path_part(uint32_t part, const uint8_t *path, uint64_t path_len,
-                        const uint8_t *suffix, uint64_t suffix_len, uint8_t *out,
-                        uint64_t capacity, uint64_t *out_len);
-int kiln_node_path_relative(const uint8_t *from, uint64_t from_len, const uint8_t *to,
-                            uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);
-int kiln_realm_symbol_for(const uint8_t *key, uint64_t key_len, uint64_t *out_id);
-int kiln_realm_symbol_key_for(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);
-int kiln_realm_value_slot(uint32_t key, void **out_slot);
 /* The command line the launcher's `main` was handed, recorded on the realm before it was
  * entered. A realm nobody launched -- an embedded module, a unit test -- reports zero, which is
  * how `process.argv` stays empty instead of naming an executable that does not exist. */
-int kiln_realm_argv_count(uint64_t *out_count);
-int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
-int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
-int kiln_realm_now(double *out_milliseconds);
 /* The same virtual clock, in whole epoch nanoseconds split across two halves because C99 has no
  * portable 128-bit integer. `Temporal` measures instants in nanoseconds, and rounding the realm's
  * clock through the millisecond accessor above would make the two engines disagree below the
  * millisecond rather than refuse. */
-int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 /* ADR 0031 civil time. Deterministic realms use the virtual accessor above; host realms call
  * HostOps::ClockNow through the explicit host argument. */
 static int kiln_c99_wall_clock_milliseconds(kiln_host *host, double *out_milliseconds);
 static int kiln_c99_wall_clock_nanoseconds(kiln_host *host, int64_t *out_high, uint64_t *out_low);
-int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
-int kiln_realm_queue_next_tick(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
-int kiln_realm_set_timeout(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
-                           void *work, uint64_t *out_id);
-int kiln_realm_set_interval(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop,
-                            void *work, uint64_t *out_id);
-int kiln_realm_clear_timer(uint64_t id);
-int kiln_realm_read_file(uint64_t realm, const uint8_t *path, uint64_t path_len,
-                         kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work,
-                         uint64_t *out_request);
-int kiln_realm_start_host_op(uint64_t realm, const kiln_async_host_op *operation,
-                             kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work,
-                             uint64_t *out_request);
-int kiln_realm_start_active_host_op(const kiln_async_host_op *operation,
-                                    kiln_realm_completion_fn run, kiln_realm_drop_fn drop,
-                                    void *work, uint64_t *out_request);
-int kiln_realm_cancel_request(uint64_t realm, uint64_t request);
-int kiln_realm_cancel_active_request(uint64_t request);
 typedef struct kiln_realm_http_event {
     uint32_t kind;
     uint32_t flags;
@@ -881,8 +838,3 @@ typedef struct kiln_realm_http_response {
 } kiln_realm_http_response;
 typedef int (*kiln_realm_http_event_fn)(void *work, const kiln_realm_http_event *event,
                                        void *host, void *thrown);
-int kiln_realm_http_server_attach_active(uint64_t resource, kiln_realm_http_event_fn run,
-                                         kiln_realm_drop_fn drop, void *work);
-int kiln_realm_http_server_attach_with_options_active(
-    uint64_t resource, int allow_half_close, kiln_realm_http_event_fn run,
-    kiln_realm_drop_fn drop, void *work);

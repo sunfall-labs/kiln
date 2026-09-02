@@ -59,13 +59,109 @@ const _: () = assert!(NUMBER_PARSE_VERSION == 1);
 // spelling in the header below. The callback deliberately emits only the one provider entry that
 // needs a C declaration here; all other private provider declarations are either not used by this
 // backend's generated C or are declared in their feature-specific sections.
-macro_rules! provider_http_close_c_declaration {
+/// The C declaration for every private provider entry point the generated program calls.
+///
+/// One arm per *signature*, which is the same token `assert_provider_export!` uses to pin the Rust
+/// type. A C declaration and the implementation it describes therefore come from one registry
+/// entry, and a declaration that disagrees with its implementation has nowhere to be written.
+/// Adding an export to `provider_abi_registry!` without an arm here declares nothing, and the
+/// generated C then fails to compile naming the symbol -- but only because every site that
+/// compiles it passes `-Werror=implicit-function-declaration`. Without that flag C is happy to
+/// invent an `int f()` for an undeclared call and link something whose ABI nobody checked, which
+/// is how the hand-written declarations this replaced went unenforced for their whole life:
+/// deleting one changed nothing that any test could see.
+macro_rules! provider_c_declaration {
     ($(($group:ident, $name:ident, $signature:ident);)*) => {
-        concat!($(provider_http_close_c_declaration!($group, $name, $signature)),*)
+        concat!($(provider_c_declaration!($group, $name, $signature)),*)
     };
-    (realm, kiln_realm_http_server_close_active, realm_http_close_mode) => {
-        "int kiln_realm_http_server_close_active(uint64_t resource, int mode);"
+    ($group:ident, $name:ident, node_path_part) => {
+        concat!("int ", stringify!($name), "(uint32_t part, const uint8_t *path, uint64_t path_len, const uint8_t *suffix, uint64_t suffix_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
     };
+    ($group:ident, $name:ident, node_path_relative) => {
+        concat!("int ", stringify!($name), "(const uint8_t *from, uint64_t from_len, const uint8_t *to, uint64_t to_len, uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, realm_argv_at) => {
+        concat!("int ", stringify!($name), "(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, realm_argv_count) => {
+        concat!("int ", stringify!($name), "(uint64_t *out_count);\n")
+    };
+    ($group:ident, $name:ident, realm_cancel_active_request) => {
+        concat!("int ", stringify!($name), "(uint64_t request);\n")
+    };
+    ($group:ident, $name:ident, realm_cancel_request) => {
+        concat!("int ", stringify!($name), "(uint64_t realm, uint64_t request);\n")
+    };
+    ($group:ident, $name:ident, realm_clear_timer) => {
+        concat!("int ", stringify!($name), "(uint64_t id);\n")
+    };
+    ($group:ident, $name:ident, realm_create) => {
+        concat!("int ", stringify!($name), "(uint64_t *out_realm);\n")
+    };
+    ($group:ident, $name:ident, realm_destroy) => {
+        concat!("int ", stringify!($name), "(uint64_t realm);\n")
+    };
+    ($group:ident, $name:ident, realm_diagnostic_note) => {
+        concat!("int ", stringify!($name), "(const uint8_t *site, uint64_t site_len, uint64_t instruction, const uint8_t *operation, uint64_t operation_len, uint64_t depth, const uint8_t *detail, uint64_t detail_len, const uint8_t *function, uint64_t function_len, uint64_t method, uint64_t receiver_tag, int has_method);\n")
+    };
+    ($group:ident, $name:ident, realm_diagnostic_render) => {
+        concat!("int ", stringify!($name), "(uint8_t *out, uint64_t capacity, uint64_t *out_len);\n")
+    };
+    ($group:ident, $name:ident, realm_diagnostic_reset) => {
+        concat!("int ", stringify!($name), "(void);\n")
+    };
+    ($group:ident, $name:ident, realm_drive) => {
+        concat!("int ", stringify!($name), "(uint64_t realm, void *host, void *thrown);\n")
+    };
+    ($group:ident, $name:ident, realm_enter) => {
+        concat!("int ", stringify!($name), "(uint64_t realm, kiln_realm_entry_fn entry, void *context);\n")
+    };
+    ($group:ident, $name:ident, realm_entropy_word) => {
+        concat!("int ", stringify!($name), "(uint64_t seed, uint64_t *out_word);\n")
+    };
+    ($group:ident, $name:ident, realm_http_attach) => {
+        concat!("int ", stringify!($name), "(uint64_t resource, kiln_realm_http_event_fn run, kiln_realm_drop_fn drop, void *work);\n")
+    };
+    ($group:ident, $name:ident, realm_http_attach_options) => {
+        concat!("int ", stringify!($name), "(uint64_t resource, int allow_half_close, kiln_realm_http_event_fn run, kiln_realm_drop_fn drop, void *work);\n")
+    };
+    ($group:ident, $name:ident, realm_http_close_mode) => {
+        concat!("int ", stringify!($name), "(uint64_t resource, int mode);\n")
+    };
+    ($group:ident, $name:ident, realm_is_active) => {
+        concat!("int ", stringify!($name), "(void);\n")
+    };
+    ($group:ident, $name:ident, realm_now) => {
+        concat!("int ", stringify!($name), "(double *out_milliseconds);\n")
+    };
+    ($group:ident, $name:ident, realm_now_nanoseconds) => {
+        concat!("int ", stringify!($name), "(int64_t *out_high, uint64_t *out_low);\n")
+    };
+    ($group:ident, $name:ident, realm_queue_work) => {
+        concat!("int ", stringify!($name), "(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);\n")
+    };
+    ($group:ident, $name:ident, realm_read_file) => {
+        concat!("int ", stringify!($name), "(uint64_t realm, const uint8_t *path, uint64_t path_len, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);\n")
+    };
+    ($group:ident, $name:ident, realm_set_timer) => {
+        concat!("int ", stringify!($name), "(double delay_ms, kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_id);\n")
+    };
+    ($group:ident, $name:ident, realm_start_active_host_op) => {
+        concat!("int ", stringify!($name), "(const kiln_async_host_op *operation, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);\n")
+    };
+    ($group:ident, $name:ident, realm_start_host_op) => {
+        concat!("int ", stringify!($name), "(uint64_t realm, const kiln_async_host_op *operation, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);\n")
+    };
+    ($group:ident, $name:ident, realm_symbol_for) => {
+        concat!("int ", stringify!($name), "(const uint8_t *key, uint64_t key_len, uint64_t *out_id);\n")
+    };
+    ($group:ident, $name:ident, realm_symbol_key_for) => {
+        concat!("int ", stringify!($name), "(uint64_t id, const uint8_t **out_key, uint64_t *out_key_len);\n")
+    };
+    ($group:ident, $name:ident, realm_value_slot) => {
+        concat!("int ", stringify!($name), "(uint32_t key, void **out_slot);\n")
+    };
+    // A provider entry point the generated C never calls needs no declaration.
     ($group:ident, $name:ident, $signature:ident) => { "" };
 }
 
@@ -2783,7 +2879,7 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
 }
 "#,
     include_str!("runtime/prelude_types.h"),
-    kiln_native_number_abi::provider_abi_registry!(provider_http_close_c_declaration),
+    kiln_native_number_abi::provider_abi_registry!(provider_c_declaration),
     include_str!("runtime/prelude_runtime.c"),
     emit_method_code_list!(),
     r#"};
@@ -9284,7 +9380,16 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
             generated.symbol, generated.symbol
         );
         let mut child = Command::new("cc")
-            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .args([
+                "-std=c99",
+                "-pedantic",
+                "-Werror=implicit-function-declaration",
+                "-x",
+                "c",
+                "-",
+                "-lm",
+                "-o",
+            ])
             .arg(std::env::temp_dir().join(format!("kiln-backend-c-module-{}", std::process::id())))
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -9681,7 +9786,15 @@ int main(void) {{
         ))
         .expect("program emits");
         let mut child = Command::new("cc")
-            .args(["-std=c99", "-pedantic", "-fsyntax-only", "-x", "c", "-"])
+            .args([
+                "-std=c99",
+                "-pedantic",
+                "-Werror=implicit-function-declaration",
+                "-fsyntax-only",
+                "-x",
+                "c",
+                "-",
+            ])
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -10136,7 +10249,16 @@ int main(void) {
             generated.symbol
         );
         let mut child = Command::new("cc")
-            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .args([
+                "-std=c99",
+                "-pedantic",
+                "-Werror=implicit-function-declaration",
+                "-x",
+                "c",
+                "-",
+                "-lm",
+                "-o",
+            ])
             .arg(&executable)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -10220,7 +10342,16 @@ int main(void) {{
             symbol = generated.symbol
         );
         let mut child = Command::new("cc")
-            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .args([
+                "-std=c99",
+                "-pedantic",
+                "-Werror=implicit-function-declaration",
+                "-x",
+                "c",
+                "-",
+                "-lm",
+                "-o",
+            ])
             .arg(&executable)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -10289,7 +10420,16 @@ int main(void) {{
             generated.program_hash
         ));
         let mut child = Command::new("cc")
-            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .args([
+                "-std=c99",
+                "-pedantic",
+                "-Werror=implicit-function-declaration",
+                "-x",
+                "c",
+                "-",
+                "-lm",
+                "-o",
+            ])
             .arg(&executable)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())
@@ -10622,7 +10762,16 @@ int main(void) {{
             generated.symbol
         );
         let mut child = Command::new("cc")
-            .args(["-std=c99", "-pedantic", "-x", "c", "-", "-lm", "-o"])
+            .args([
+                "-std=c99",
+                "-pedantic",
+                "-Werror=implicit-function-declaration",
+                "-x",
+                "c",
+                "-",
+                "-lm",
+                "-o",
+            ])
             .arg(&executable)
             .stdin(Stdio::piped())
             .stderr(Stdio::piped())

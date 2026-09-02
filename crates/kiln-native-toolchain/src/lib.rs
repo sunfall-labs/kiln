@@ -841,6 +841,11 @@ impl Toolchain {
 
         let mut args = self.command_prefix.clone();
         args.push(OsString::from("-std=c11"));
+        // A provider entry point the emitted C calls without a declaration is not a warning here.
+        // C would give it an implicit `int f()` and link something whose ABI nobody checked; the
+        // declarations are generated from the provider registry precisely so the compiler can name
+        // the missing symbol, at the step where it went missing.
+        args.push(OsString::from("-Werror=implicit-function-declaration"));
         args.push(OsString::from("-c"));
         for flag in options.profile.compile_flags() {
             args.push(OsString::from(flag));
