@@ -1,4 +1,4 @@
-# ADR 0042: HTTP connections are Hyper tasks over host transports, and protocol events call the realm directly
+# ADR 0046: HTTP connections are Hyper tasks over host transports, and protocol events call the realm directly
 
 ## Status
 

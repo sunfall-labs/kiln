@@ -637,7 +637,7 @@ mod realm {
         entered: Cell<bool>,
         diagnostic: RefCell<RealmDiagnostic>,
         /// The `host` and `thrown` slots of the drive in progress, for callbacks the HTTP engine
-        /// makes from inside a Tokio task (ADR 0042). Null outside a drive.
+        /// makes from inside a Tokio task (ADR 0046). Null outside a drive.
         drive_context: Cell<(*mut c_void, *mut c_void)>,
         /// Which clock this realm keeps (ADR 0044): the deterministic virtual clock unless the
         /// launcher asked for the host's wall clock before entering the realm.
@@ -1685,7 +1685,7 @@ mod realm {
     }
 
     fn drive(realm: &NativeRealm, host: *mut c_void, thrown: *mut c_void) -> i32 {
-        // One `block_on` for the life of the drive (ADR 0040 step 4, ADR 0042). Every callback
+        // One `block_on` for the life of the drive (ADR 0040 step 4, ADR 0046). Every callback
         // the language makes back into this archive is already in context, and the HTTP engine's
         // tasks call the language while this future is parked, so no RefCell of the realm may be
         // held across an await here.
@@ -2958,7 +2958,7 @@ mod realm {
             // SAFETY: active_runtime points at this active realm's exclusively-entered runtime.
             let runtime = unsafe { &mut *runtime };
             if role == HttpRole::Server {
-                // ADR 0042: Hyper drives the socket; events call the C handler directly.
+                // ADR 0046: Hyper drives the socket; events call the C handler directly.
                 let dispatch = Rc::new(NativeServerDispatch {
                     realm: Rc::downgrade(&realm),
                     resource,
@@ -3425,7 +3425,7 @@ mod realm {
                 queue.set_timeout(delay, work)
             };
             std::mem::drop(queue);
-            // A timer armed from inside a connection's callback (ADR 0042) changes what the
+            // A timer armed from inside a connection's callback (ADR 0046) changes what the
             // parked drive must wait for; tell it.
             if let Some(runtime) = active_runtime() {
                 // SAFETY: the active runtime pointer is valid for the whole drive.

@@ -4159,3 +4159,11 @@ still about sixty worktrees under `/private/tmp` from other sessions; they are n
 **Measured after both (four client processes, sixteen connections each, five seconds, same
 minute):** hello kiln 138.4k rps vs bun 121.8k; mixed kiln 96.1k vs bun 89.1k; zero errors, p99
 under 2 ms. `bench/server/compare.sh` runs the interleaved version of that table.
+
+### ADR 0042 was issued twice (2026-09-02, Claude `perf/review`)
+
+`0042-http-connections-are-hyper-tasks-over-host-transports` and
+`0042-intl-is-refused-by-name-in-the-native-backend` landed on main within the same hour from two
+sessions. The HTTP one is now 0046 (0045 is kiln-a7's dynamic-compilation decision, itself
+renumbered from 0044 for the same reason). Third collision this week; `ls docs/adr/` immediately
+before the commit, not before the draft.

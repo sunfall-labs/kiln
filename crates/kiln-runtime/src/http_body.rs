@@ -22,7 +22,7 @@ pub(crate) struct ResponseBodyDriver {
 }
 
 /// Where a body's `drain` and `finish` go: a channel the old checkpoint drains, or a callback
-/// the direct engine defers to its next safe point (ADR 0042).
+/// the direct engine defers to its next safe point (ADR 0046).
 #[derive(Clone)]
 pub(crate) enum BodySink {
     Channel(tokio::sync::mpsc::UnboundedSender<BodyEvent>),

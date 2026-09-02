@@ -1,4 +1,4 @@
-//! HTTP server connections as Hyper tasks over host transports (ADR 0042).
+//! HTTP server connections as Hyper tasks over host transports (ADR 0046).
 //!
 //! A connection is one Hyper future over a transport the host handed over. Its service calls the
 //! realm's adapter directly, on the realm thread, inside the task's poll; the adapter answers

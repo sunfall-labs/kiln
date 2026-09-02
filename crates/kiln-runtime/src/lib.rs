@@ -439,7 +439,7 @@ pub trait RealmHostProvider: AsyncHostOps {
     }
 
     /// A signal that fires whenever a host operation completes, so a drive can wait for
-    /// completions without borrowing the host across the wait (ADR 0042: language callbacks
+    /// completions without borrowing the host across the wait (ADR 0046: language callbacks
     /// run inside I/O tasks while the drive is parked, and they borrow the realm).
     fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
         None
@@ -693,7 +693,7 @@ pub struct RealmState<H> {
     capabilities: RealmCapabilities,
     http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
     http_agent: HttpAgent,
-    /// Server connections that are Hyper tasks over host transports (ADR 0042).
+    /// Server connections that are Hyper tasks over host transports (ADR 0046).
     http_server: HttpServerEngine,
     lifecycle: RealmRuntimeLifecycle,
 }
@@ -791,7 +791,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
 
     /// The executor, detached from this runtime's borrow, so a drive can `block_on` one future
     /// for the life of a program while callbacks inside it borrow the runtime (ADR 0040 step 4,
-    /// ADR 0042).
+    /// ADR 0046).
     pub fn drive_executor(&self) -> DriveExecutor {
         DriveExecutor(Rc::clone(&self.executor))
     }
@@ -927,7 +927,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.next_turn(realm)
     }
 
-    /// Attach the HTTP engine to an accepted stream (ADR 0042): the host hands over its
+    /// Attach the HTTP engine to an accepted stream (ADR 0046): the host hands over its
     /// transport and Hyper drives it, calling `dispatch` directly for every protocol event.
     pub fn server_attach(
         &mut self,
@@ -1246,7 +1246,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     /// that needs the kernel still waits for the kernel, in the one place that was already going
     /// to park.
     pub fn poll_http_tasks_once(&mut self) {
-        // Polling the set as a future needs it exclusively. During an async drive (ADR 0042) a
+        // Polling the set as a future needs it exclusively. During an async drive (ADR 0046) a
         // DriveExecutor holds the executor and the set is already being run by that drive's
         // `block_on`, so there is nothing to do here; the drive yields instead.
         let Some(executor) = Rc::get_mut(&mut self.executor) else {
@@ -1272,7 +1272,7 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             // depends on those turns: with fewer than four, or with direct LocalSet polls in
             // their place, it parks in `next_turn` and never wakes, which the conformance
             // coordinator reproduces on every server probe. The native drive has no such
-            // dependency: its connections dispatch from their own tasks (ADR 0042) and its one
+            // dependency: its connections dispatch from their own tasks (ADR 0046) and its one
             // `block_on` runs the set, so it never calls this. Why the interpreter's loop needs
             // the reactor turns is not yet established and is worth its own measurement.
             for _ in 0..4 {
@@ -2209,7 +2209,7 @@ enum HostResource {
         info: ResourceInfo,
         referenced: bool,
     },
-    /// A stream whose transport the HTTP engine owns now (ADR 0042). Discrete reads and
+    /// A stream whose transport the HTTP engine owns now (ADR 0046). Discrete reads and
     /// writes on it fail; close and referencing still resolve.
     TcpTaken {
         info: ResourceInfo,
