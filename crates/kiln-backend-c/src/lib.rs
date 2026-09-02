@@ -10888,11 +10888,21 @@ static int kiln_c99_utf16_next(kiln_c99_utf16_iter *iterator, uint16_t *unit) {
 }
 
 /* `length` in UTF-16 code units, which is what JavaScript counts and is neither bytes nor
- * characters. */
+ * characters. For ASCII text a code unit is a byte (ADR 0022), so `value.len` -- already known,
+ * already paid for -- is the answer without walking a single byte. */
 static size_t kiln_c99_string_length(kiln_value value) {
-    kiln_c99_utf16_iter iterator = {value.ptr, value.len, 0, 0, 0};
-    size_t units = 0;
+    kiln_c99_utf16_iter iterator;
+    size_t units;
     uint16_t unit;
+    if (kiln_c99_string_is_ascii(value)) {
+        return value.len;
+    }
+    iterator.text = value.ptr;
+    iterator.length = value.len;
+    iterator.offset = 0;
+    iterator.pending = 0;
+    iterator.has_pending = 0;
+    units = 0;
     while (kiln_c99_utf16_next(&iterator, &unit)) {
         units += 1;
     }
