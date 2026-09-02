@@ -2175,6 +2175,34 @@ enum kiln_value_tag {
 #define KILN_C99_GROUP_MATH_NUMBER UINT32_C(1048576)
 
 static uint32_t kiln_c99_method_groups(uint64_t code) {
+    /* Four `Temporal` families are *ranges* rather than lists. `from`, `compare` and `Now.x` are
+     * one code per kind and the twenty-three operations are one code each, all contiguous, so the
+     * code carries which kind or which operation was asked for -- `kind = code - FROM` is how the
+     * dispatch recovers it, rather than a translation table that could drift from the provider's
+     * own order.
+     *
+     * The switch below is generated from the id list, which names only the two *endpoints* of
+     * each range. Every code between them therefore answered "no groups at all", which routed it
+     * past the `Temporal` dispatch entirely and out the refusal at the bottom. That is why
+     * `Temporal.PlainDate.from` worked and the other seven did not: 285 is named and 286 is not.
+     * The same hole took seven of the eight `compare`s, seven of the eight `Temporal.Now` reads,
+     * and twenty-one of the twenty-three operations.
+     *
+     * A range is checked as a range. The endpoints stay in the id list because the Rust
+     * assertions above measure the ranges from them. */
+    if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_FROM_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_FROM;
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_COMPARE && code <= KILN_C99_METHOD_TEMPORAL_COMPARE_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_COMPARE;
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_NOW_READ &&
+        code <= KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_NOW_READ;
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_OP && code <= KILN_C99_METHOD_TEMPORAL_OP_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_OP;
+    }
     switch (code) {
 "#,
     emit_method_group_cases!(),
@@ -3123,6 +3151,13 @@ int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t fi
                                   void **out_handle);
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
                                            void **out_handle);
+/* `new Temporal.X(...)`, which is not `from` with a bag: a constructor takes ISO components and
+ * rejects one out of range where `from` resolves it through the calendar and constrains. Both
+ * reach the same linked engine; which of its constructors runs is the kind. */
+int32_t kiln_temporal_construct(uint32_t kind, const double *fields, size_t field_count,
+                                const unsigned char *text, const int64_t *text_lengths,
+                                size_t text_count, int64_t epoch_high, uint64_t epoch_low,
+                                void **out_handle);
 /* `Temporal.Instant`'s two epoch constructors. The nanosecond count arrives in the same two
  * halves `kiln_temporal_now` takes, read out of the BigInt provider: the two providers are
  * independent features of one archive and only scalars pass between them. */
@@ -12514,6 +12549,16 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
          * there are. */
         kiln_collection *collection = kiln_c99_collection_of(value);
         size_t index;
+        /* A weak collection shows neither its size nor its contents. It cannot: an entry is
+         * reachable only through a key the console does not hold, and printing a count would
+         * make the collector's timing observable from the program. `Map(0) {}` was the wrong
+         * label twice over -- it named a type the value is not, so a log line said `Map` about
+         * something `x instanceof Map` is false of. */
+        if (collection->is_weak) {
+            return kiln_c99_text_append_c(text, collection->is_map
+                                                    ? "WeakMap { <items unknown> }"
+                                                    : "WeakSet { <items unknown> }");
+        }
         if (kiln_c99_text_append_c(text, collection->is_map ? "Map(" : "Set(") != KILN_C99_OK ||
             kiln_c99_pad_number(text, (int64_t)collection->live, 1) != KILN_C99_OK ||
             kiln_c99_text_append_c(text, collection->live == 0 ? ") {}" : ") { ") !=
@@ -15718,6 +15763,162 @@ static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
         return kiln_c99_temporal_raise(thrown, answered);
     }
     *out = kiln_c99_temporal_value(handle);
+    return KILN_C99_OK;
+}
+
+/* One positional argument of a `Temporal` constructor, coerced where the language coerces.
+ *
+ * `absent` is what an argument the caller left off becomes: 0 for a component the language
+ * defaults, and NaN for one it requires -- because NaN is the provider's "absent" and the engine
+ * rejects a required component that is missing with the RangeError the language gives, rather
+ * than quietly building a value out of a zero nobody wrote. */
+static int kiln_c99_temporal_argument(kiln_host *host, const kiln_value *args, size_t argc,
+                                      size_t at, double absent, double *out, int depth,
+                                      kiln_value *thrown) {
+    if (at >= argc || args[at].tag == KILN_VALUE_UNDEFINED) {
+        *out = absent;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_to_number_checked(host, args[at], out, depth, thrown);
+}
+
+/* One positional *string* argument, left absent when the caller omitted it. */
+static void kiln_c99_temporal_text_argument(const kiln_value *args, size_t argc, size_t at,
+                                            kiln_temporal_text *slot) {
+    kiln_value text;
+    if (at >= argc || args[at].tag == KILN_VALUE_UNDEFINED) {
+        return;
+    }
+    text = kiln_c99_text(args[at]);
+    if (text.tag != KILN_VALUE_STRING) {
+        return;
+    }
+    slot->bytes = text.ptr;
+    slot->length = (int64_t)text.len;
+}
+
+/* `new Temporal.X(...)`: the eight positional constructors.
+ *
+ * NOT `from` with a bag, and the difference is observable in both directions. `from` reads named
+ * fields, resolves them through the calendar and honours an `overflow` option that defaults to
+ * `constrain`; a constructor takes *ISO* components positionally and rejects one out of range.
+ * `new Temporal.PlainDate(2000, 300, 1)` is a RangeError where the `from` of the same numbers is
+ * 2000-12-01. So this reaches `kiln_temporal_construct` -- the engine's own constructors, the
+ * same ones the interpreter reaches under ADR 0025 -- rather than being routed through the bag
+ * path, which would have been a silent wrong answer wearing the right shape.
+ *
+ * The arguments are read left to right because a `valueOf` can count its own calls, and the
+ * specification reads them in that order. */
+static int kiln_c99_temporal_construct(kiln_host *host, kiln_value *result, int32_t kind,
+                                       const kiln_value *args, size_t argc, int depth,
+                                       kiln_value *thrown) {
+    double numbers[10];
+    kiln_temporal_text texts[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    int64_t lengths[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    char *packed;
+    int64_t high = 0;
+    uint64_t low = 0;
+    void *handle = NULL;
+    int32_t answered;
+    size_t index;
+    int status = KILN_C99_OK;
+    const double missing = 0.0 / 0.0;
+    for (index = 0; index < 10; ++index) {
+        numbers[index] = missing;
+    }
+    for (index = 0; index < KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS; ++index) {
+        texts[index].bytes = NULL;
+        texts[index].length = -1;
+    }
+    switch (kind) {
+    case 0: /* PlainDate(isoYear, isoMonth, isoDay, calendar) */
+        for (index = 0; index < 3 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, missing,
+                                                &numbers[1 + index], depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 3, &texts[4]);
+        break;
+    case 1: /* PlainTime(hour, minute, second, millisecond, microsecond, nanosecond) */
+        for (index = 0; index < 6 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, 0.0,
+                                                &numbers[4 + index], depth, thrown);
+        }
+        break;
+    case 2: /* PlainDateTime(isoYear, isoMonth, isoDay, then the six time components, calendar) */
+        for (index = 0; index < 9 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index,
+                                                index < 3 ? missing : 0.0, &numbers[1 + index],
+                                                depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 9, &texts[4]);
+        break;
+    case 3: /* PlainYearMonth(isoYear, isoMonth, calendar, referenceISODay) */
+        for (index = 0; index < 2 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, missing,
+                                                &numbers[1 + index], depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 2, &texts[4]);
+        /* The reference day rides in the `day` slot and stays NaN when it is left out, which is
+         * not the same as a day of zero: the engine then supplies the first of the month. */
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_temporal_argument(host, args, argc, 3, missing, &numbers[3], depth,
+                                                thrown);
+        }
+        break;
+    case 4: /* PlainMonthDay(isoMonth, isoDay, calendar, referenceISOYear) */
+        for (index = 0; index < 2 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, missing,
+                                                &numbers[2 + index], depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 2, &texts[4]);
+        /* The reference year rides in the `year` slot; absent means the engine's 1972, which is
+         * the first ISO leap year after the epoch and the reason the slot exists at all. */
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_temporal_argument(host, args, argc, 3, missing, &numbers[1], depth,
+                                                thrown);
+        }
+        break;
+    case 5: /* Duration(years .. nanoseconds), in the duration slot order. */
+        for (index = 0; index < 10 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, 0.0, &numbers[index],
+                                                depth, thrown);
+        }
+        break;
+    case 6: /* Instant(epochNanoseconds) */
+    case 7: /* ZonedDateTime(epochNanoseconds, timeZone, calendar) */
+        /* A BigInt and nothing else -- not a number coerced to one. Nanoseconds since the epoch
+         * pass through a double exactly only within four months of 1970, so the language refuses
+         * a number here rather than accepting one it would have to round. */
+        if (argc == 0 || args[0].tag != KILN_VALUE_BIGINT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "a Temporal constructor needs a BigInt epochNanoseconds");
+        }
+        if (kiln_bigint_to_i128((const void *)(uintptr_t)args[0].bits, &high, &low) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "epochNanoseconds is outside the representable range");
+        }
+        if (kind == 7) {
+            kiln_c99_temporal_text_argument(args, argc, 1, &texts[3]);
+            kiln_c99_temporal_text_argument(args, argc, 2, &texts[4]);
+        }
+        break;
+    default: return KILN_C99_CONTROL_ERROR;
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    packed = kiln_c99_temporal_pack(texts, KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS, lengths);
+    if (packed == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    answered = kiln_temporal_construct((uint32_t)kind, numbers, 10, (const unsigned char *)packed,
+                                       lengths, KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS, high, low,
+                                       &handle);
+    free(packed);
+    if (answered != 0) {
+        return kiln_c99_temporal_raise(thrown, answered);
+    }
+    *result = kiln_c99_temporal_value(handle);
     return KILN_C99_OK;
 }
 
@@ -24742,6 +24943,12 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_URL) {
         return kiln_c99_url_construct(result, args, argc, thrown);
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        kiln_c99_temporal_kind_of_builtin(callee.bits) >= 0) {
+        return kiln_c99_temporal_construct(host, result,
+                                           kiln_c99_temporal_kind_of_builtin(callee.bits), args,
+                                           argc, depth, thrown);
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_BUFFER) {
         return kiln_c99_buffer_from(result,

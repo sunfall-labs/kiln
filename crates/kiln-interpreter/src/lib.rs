@@ -40853,6 +40853,15 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
             .filter(|entry| !matches!(entry, Value::Native(Native::Tombstone, _)))
             .cloned()
             .collect();
+        // A weak collection shows neither its size nor its contents. It cannot: an entry is
+        // reachable only through a key the console does not hold, and printing a count would make
+        // the collector's timing observable from the program. `Map(0) {}` was the wrong label
+        // twice over -- it named a type the value is not, so a log line said `Map` about
+        // something `x instanceof Map` is false of.
+        if matches!(object.get_own("@@weak"), Some(&Value::Boolean(true))) {
+            let label = if is_map { "WeakMap" } else { "WeakSet" };
+            return format!("{label} {{ <items unknown> }}");
+        }
         let label = if is_map { "Map" } else { "Set" };
         if live.is_empty() {
             return format!("{label}(0) {{}}");

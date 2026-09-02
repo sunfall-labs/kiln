@@ -6604,6 +6604,104 @@ mod temporal {
         }
     }
 
+    /// `new Temporal.X(...)`: the *positional* constructors, which are not `from` with a bag.
+    ///
+    /// The difference is not cosmetic and is the reason this is a separate entry point rather
+    /// than a flag on [`kiln_temporal_from_fields`]. A bag goes through the calendar: `from`
+    /// resolves `monthCode`, honours an `overflow` option and defaults it to `constrain`. A
+    /// constructor takes *ISO* components and rejects anything out of range --
+    /// `new Temporal.PlainDate(2000, 300, 1)` is a RangeError where
+    /// `Temporal.PlainDate.from({ year: 2000, month: 300, day: 1 })` is 2000-12-01. Routing one
+    /// through the other would have been a silent wrong answer in both directions, so each
+    /// reaches the engine function the interpreter already reaches: `kiln_temporal::plain_date`
+    /// and its seven neighbours, the same linked engine under ADR 0025.
+    ///
+    /// `fields` carries the ten numeric slots in the [`kiln_temporal_from_fields`] layout, except
+    /// for a `Duration`, whose ten are the [`kiln_temporal_duration_from_fields`] layout -- one
+    /// array either way, because the caller already knows which of the eight it is building. NaN
+    /// is absent, which is what carries the two optional reference components: a
+    /// `PlainYearMonth`'s `referenceISODay` rides in the `day` slot and a `PlainMonthDay`'s
+    /// `referenceISOYear` in the `year` slot, and leaving either out is not the same as passing
+    /// zero. A missing *required* component stays NaN and the engine rejects it, which is the
+    /// same RangeError the language gives.
+    ///
+    /// `epoch_high` and `epoch_low` are the signed top and unsigned bottom halves of the epoch
+    /// nanosecond count the two exact types take, split because C99 has no portable 128-bit
+    /// integer. They are ignored by the other six.
+    ///
+    /// # Safety
+    ///
+    /// `fields` must be readable for `field_count` doubles, `text` and `text_lengths` must
+    /// satisfy [`unpack`], and `out_handle` must be a writable slot. The handle belongs to the
+    /// caller and is released by [`kiln_temporal_free`].
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_temporal_construct(
+        kind: u32,
+        fields: *const f64,
+        field_count: usize,
+        text: *const u8,
+        text_lengths: *const i64,
+        text_count: usize,
+        epoch_high: i64,
+        epoch_low: u64,
+        out_handle: *mut *mut TemporalValue,
+    ) -> i32 {
+        if out_handle.is_null() || fields.is_null() || field_count != FIELD_SLOTS {
+            return INVALID_ARGUMENT;
+        }
+        let Some(kind) = kind_of(kind) else {
+            return INVALID_ARGUMENT;
+        };
+        // SAFETY: the caller contract guarantees `fields` is readable for `field_count` doubles.
+        let slots = unsafe { core::slice::from_raw_parts(fields, field_count) };
+        // SAFETY: the caller contract guarantees the packed text satisfies `unpack`.
+        let Some(strings) = (unsafe { unpack::<TEXT_SLOTS>(text, text_lengths, text_count) })
+        else {
+            return INVALID_ARGUMENT;
+        };
+        let calendar = strings[4];
+        let optional = |index: usize| {
+            let value = slots[index];
+            if value.is_nan() { None } else { Some(value) }
+        };
+        let epoch_nanoseconds = (i128::from(epoch_high) << 64) | i128::from(epoch_low);
+        let built = match kind {
+            Kind::PlainDate => kiln_temporal::plain_date(slots[1], slots[2], slots[3], calendar),
+            Kind::PlainTime => kiln_temporal::plain_time(
+                slots[4], slots[5], slots[6], slots[7], slots[8], slots[9],
+            ),
+            Kind::PlainDateTime => kiln_temporal::plain_date_time(
+                slots[1], slots[2], slots[3], slots[4], slots[5], slots[6], slots[7], slots[8],
+                slots[9], calendar,
+            ),
+            Kind::PlainYearMonth => {
+                kiln_temporal::plain_year_month(slots[1], slots[2], optional(3), calendar)
+            }
+            Kind::PlainMonthDay => {
+                kiln_temporal::plain_month_day(slots[2], slots[3], optional(1), calendar)
+            }
+            Kind::Duration => kiln_temporal::duration(&duration_bag(slots)),
+            Kind::Instant => kiln_temporal::instant(epoch_nanoseconds),
+            Kind::ZonedDateTime => match strings[3] {
+                Some(zone) => kiln_temporal::zoned_date_time(epoch_nanoseconds, zone, calendar),
+                // The one argument of the eight constructors that is neither numeric nor
+                // optional. Rejected here rather than defaulted to UTC, which would build a
+                // value the program did not ask for.
+                None => {
+                    return reject_type("new Temporal.ZonedDateTime needs a time zone");
+                }
+            },
+        };
+        match built {
+            Ok(value) => {
+                // SAFETY: `out_handle` is a writable slot by the caller contract.
+                unsafe { out_handle.write(Box::into_raw(Box::new(value))) };
+                0
+            }
+            Err(error) => remember(&error),
+        }
+    }
+
     /// Build a `Temporal.Duration` from its ten components, NaN for a component left out.
     ///
     /// Separate from [`kiln_temporal_from_fields`] because the two bags are separate in the
@@ -7377,6 +7475,9 @@ mod temporal {
         };
         (temporal, kiln_temporal_from_fields, temporal_from_fields) => {
             const _: unsafe extern "C" fn(u32, *const f64, usize, *const u8, *const i64, usize, *const u8, *const i64, usize, *mut *mut TemporalValue) -> i32 = kiln_temporal_from_fields;
+        };
+        (temporal, kiln_temporal_construct, temporal_construct) => {
+            const _: unsafe extern "C" fn(u32, *const f64, usize, *const u8, *const i64, usize, i64, u64, *mut *mut TemporalValue) -> i32 = kiln_temporal_construct;
         };
         (temporal, kiln_temporal_duration_from_fields, temporal_duration_from_fields) => {
             const _: unsafe extern "C" fn(*const f64, usize, *mut *mut TemporalValue) -> i32 = kiln_temporal_duration_from_fields;
