@@ -543,8 +543,8 @@ fn method_dispatch_membership_is_generated_from_registry() {
         prelude
             .contains("case KILN_C99_METHOD_MATH_FLOOR: return UINT32_C(8) | UINT32_C(1048576);")
     );
-    assert!(prelude.contains("kiln_c99_method_in_group(code, KILN_C99_GROUP_GENERIC)"));
-    assert!(prelude.contains("kiln_c99_method_in_group(code, KILN_C99_GROUP_STRING_DISPATCH)"));
+    assert!(prelude.contains("(groups & KILN_C99_GROUP_GENERIC)"));
+    assert!(prelude.contains("(groups & KILN_C99_GROUP_STRING_DISPATCH)"));
     assert!(!prelude.contains("code < KILN_C99_METHOD_ARRAY_AT"));
     assert!(!prelude.contains("code <= KILN_C99_METHOD_ARRAY_AT"));
 }
@@ -582,7 +582,7 @@ fn set_encoding_is_routed_by_receiver_before_any_dispatch_group() {
         "KILN_C99_GROUP_NODE_STREAM",
     ] {
         let tested = dispatch
-            .find(&format!("kiln_c99_method_in_group(code, {group})"))
+            .find(&format!("(groups & {group})"))
             .unwrap_or_else(|| panic!("{group} is tested in the dispatcher"));
         assert!(
             routed < tested,
