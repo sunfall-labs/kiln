@@ -898,6 +898,11 @@ mod realm {
                 realm.entered.set(false);
                 return None;
             }
+            // Every private ABI entry asks for the active realm; a server asks dozens of times
+            // per request. Keep the handle's realm and its collector heap where a read costs a
+            // thread-local load rather than a hash lookup.
+            ACTIVE_REALM_RC.with(|slot| *slot.borrow_mut() = Some(Rc::clone(&realm)));
+            ACTIVE_HEAP.with(|slot| slot.set(realm.gc.borrow().heap));
             Some(Self { realm })
         }
     }
@@ -905,6 +910,8 @@ mod realm {
     impl Drop for ActiveRealm {
         fn drop(&mut self) {
             ACTIVE_REALM.with(|active| active.set(0));
+            ACTIVE_REALM_RC.with(|slot| slot.borrow_mut().take());
+            ACTIVE_HEAP.with(|slot| slot.set(std::ptr::null_mut()));
             self.realm.entered.set(false);
         }
     }
@@ -915,6 +922,8 @@ mod realm {
     std::thread_local! {
         static REALMS: RefCell<HashMap<u64, Rc<NativeRealm>>> = RefCell::new(HashMap::new());
         static ACTIVE_REALM: Cell<u64> = const { Cell::new(0) };
+        static ACTIVE_REALM_RC: RefCell<Option<Rc<NativeRealm>>> = const { RefCell::new(None) };
+        static ACTIVE_HEAP: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
         static ACTIVE_RUNTIME: Cell<*mut RealmRuntime> = const { Cell::new(std::ptr::null_mut()) };
     }
 
@@ -947,7 +956,7 @@ mod realm {
     }
 
     fn active_realm() -> Option<Rc<NativeRealm>> {
-        ACTIVE_REALM.with(|active| realm(active.get()))
+        ACTIVE_REALM_RC.with(|slot| slot.borrow().clone())
     }
 
     fn active_handle(handle: u64) -> Option<Rc<NativeRealm>> {
@@ -2295,11 +2304,19 @@ mod realm {
                 }
                 gc.heap = candidate;
                 gc.hooks = Some(table);
+                ACTIVE_HEAP.with(|slot| slot.set(candidate));
             }
             // SAFETY: checked non-null above.
             unsafe { out_heap.write(gc.heap) };
             0
         })
+    }
+
+    /// The active realm's collector heap, or null: one thread-local load, no lookup and no
+    /// unwind guard, because the allocator asks on every allocation.
+    #[unsafe(no_mangle)]
+    pub extern "C" fn kiln_realm_gc_current_heap() -> *mut c_void {
+        ACTIVE_HEAP.with(|slot| slot.get())
     }
 
     /// Registers a root function the collector calls on every mark, and at teardown when
@@ -5619,6 +5636,9 @@ mod realm {
         };
         (realm, kiln_realm_entropy_word, realm_entropy_word) => {
             const _: unsafe extern "C" fn(u64, *mut u64) -> i32 = kiln_realm_entropy_word;
+        };
+        (realm, kiln_realm_gc_current_heap, realm_gc_current_heap) => {
+            const _: extern "C" fn() -> *mut c_void = kiln_realm_gc_current_heap;
         };
         (realm, kiln_realm_gc_attach, realm_gc_attach) => {
             const _: unsafe extern "C" fn(*const GcHooks, *mut c_void, *mut *mut c_void) -> i32 = kiln_realm_gc_attach;

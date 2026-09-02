@@ -2970,6 +2970,7 @@ typedef struct kiln_gc_hooks {
     void (*mark_value)(void *heap, const void *value);
     void (*mark_block)(void *heap, void *pointer);
 } kiln_gc_hooks;
+extern void *kiln_realm_gc_current_heap(void);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);
 extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, uint32_t flags);
 extern int kiln_realm_gc_mark_roots(void *heap);
@@ -4677,9 +4678,11 @@ static void kiln_c99_gc_trace_count(uint64_t count) {
 }
 
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
-    void *attached = NULL;
+    void *attached = kiln_realm_gc_current_heap();
     kiln_gc_heap *candidate;
-    int status = kiln_realm_gc_attach(&kiln_c99_gc_hooks, NULL, &attached);
+    int status;
+    if (attached != NULL) return (kiln_gc_heap *)attached;
+    status = kiln_realm_gc_attach(&kiln_c99_gc_hooks, NULL, &attached);
     if (status == KILN_C99_OK && attached != NULL) return (kiln_gc_heap *)attached;
     if (status != KILN_C99_OK) {
         if (kiln_c99_gc_fallback.hooks == NULL) {
@@ -32694,6 +32697,7 @@ int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word) {
     *out_word = mixed ^ (mixed >> 31);
     return KILN_C99_OK;
 }
+void *kiln_realm_gc_current_heap(void) { return NULL; }
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
     (void)hooks;
