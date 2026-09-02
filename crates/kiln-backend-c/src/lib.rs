@@ -23990,11 +23990,31 @@ static int kiln_c99_define_method(kiln_value target, const char *key, size_t key
  *
  * Serialising can *call*: `toJSON` runs before anything else is decided about a value, and a
  * property may be an accessor. So this takes a host and a depth like every other read does. */
+/* Whether any byte in this span needs `\"`, `\\` or `\u00XX` escaping. A single predicate pass
+ * over plain comparisons, with no per-byte call into the text builder, is what lets the common
+ * case below become one bulk append instead of one append per byte -- and it is exactly as valid
+ * for a multi-byte UTF-8 string as for ASCII, since every continuation and lead byte is >= 0x80
+ * and so never equals a quote, a backslash or a C0 control. */
+static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
+    size_t index;
+    for (index = 0; index < len; ++index) {
+        unsigned char byte = (unsigned char)bytes[index];
+        if (byte == '"' || byte == '\\' || byte < 0x20) return 1;
+    }
+    return 0;
+}
+
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
     static const char digits[] = "0123456789abcdef";
     size_t index;
     if (kiln_c99_text_append(text, "\"", 1) != KILN_C99_OK) {
         return KILN_C99_OUT_OF_MEMORY;
+    }
+    if (!kiln_c99_json_needs_escape(bytes, len)) {
+        if (kiln_c99_text_append(text, bytes, len) != KILN_C99_OK) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        return kiln_c99_text_append(text, "\"", 1);
     }
     for (index = 0; index < len; ++index) {
         char byte = bytes[index];
