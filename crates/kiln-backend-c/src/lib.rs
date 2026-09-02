@@ -1204,11 +1204,18 @@ method_ids! {
     (KILN_C99_METHOD_FUNCTION_TO_STRING, 428, Generic),
     (KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW, 429, Generic),
     (KILN_C99_METHOD_THROW_TYPE_ERROR, 430, Generic),
+    /* `console.log` reached as a *value* rather than through the `console.log(x)` shape the
+     * compiler recognises. `Direct` and attached to the console object by name, exactly as the
+     * `Atomics` methods are: nothing looks these up by name through a group range, so a `log`
+     * on some other receiver cannot find them. */
+    (KILN_C99_METHOD_CONSOLE_LOG, 431, Direct),
+    (KILN_C99_METHOD_CONSOLE_UNAVAILABLE, 432, Direct),
+    (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS, 433, Generic),
     /* The two halves of `req.headers`. They are a method pair rather than a stored object so
      * that the header table is built only if a program reads it -- see the accessor installed in
      * `kiln_c99_node_http_event`. */
-    (KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET, 431, Direct, NodeHttp),
-    (KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET, 432, Direct, NodeHttp),
+    (KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET, 434, Direct, NodeHttp),
+    (KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET, 435, Direct, NodeHttp),
     (KILN_C99_METHOD_TEMPORAL_FROM, 285, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_FROM_LAST, 292, Temporal, TemporalFrom),
     (KILN_C99_METHOD_TEMPORAL_COMPARE, 293, Temporal, TemporalCompare),
@@ -1305,6 +1312,688 @@ const NATIVE_CONSTRUCTORS: &[NativeConstructor] = &[
 
 const _: () = validate_method_ids(METHOD_IDS);
 const _: () = validate_native_constructors(NATIVE_CONSTRUCTORS, METHOD_IDS);
+
+/// One member of one built-in's *static* surface: what `Number.MAX_VALUE` and `Object.keys` name.
+///
+/// ONE TABLE, TWO EMITTERS (ADR 0043). Before [`BUILTIN_SURFACE`] the surface was written down
+/// twice -- once in the interpreter's Rust, once as hand-written `kiln_c99_same_name` chains in
+/// the emitted C -- and nothing compared the two. `Number` had fifteen statics on one side and
+/// five on the other, and `Number.MAX_VALUE` is the first property a bundled `zod` reads, so its
+/// absence refused the whole module. Those were not four bugs; they were one shape of bug with an
+/// unbounded supply.
+///
+/// The rows below are now the only place the native surface is written down. The read path, the
+/// call path and `Object.getOwnPropertyNames` are all generated from them, which is what makes a
+/// member that is *implemented but unreachable* inexpressible: reachability is the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuiltinMember {
+    /// The global that owns it, spelled as a program spells it: `"Number"`, `"Math"`.
+    pub owner: &'static str,
+    /// The member's own name. A `@@` prefix means symbol-keyed, the same spelling the emitted C
+    /// uses for a reserved store key.
+    pub name: &'static str,
+}
+
+macro_rules! builtin_member_row {
+    ($builtin:ident, $name:literal, code($code:ident)) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_METHOD, ",
+            stringify!($code),
+            ", 0.0, \"",
+            $name,
+            "\", NULL},\n"
+        )
+    };
+    ($builtin:ident, $name:literal, num($value:literal)) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_NUMBER, 0, ",
+            $value,
+            ", \"",
+            $name,
+            "\", NULL},\n"
+        )
+    };
+    ($builtin:ident, $name:literal, text($value:literal)) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_TEXT, 0, 0.0, \"",
+            $name,
+            "\", \"",
+            $value,
+            "\"},\n"
+        )
+    };
+    ($builtin:ident, $name:literal, sym($key:literal)) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_SYMBOL, 0, 0.0, \"",
+            $name,
+            "\", \"",
+            $key,
+            "\"},\n"
+        )
+    };
+    ($builtin:ident, $name:literal, ctor($value:ident)) => {
+        concat!(
+            "    {",
+            stringify!($builtin),
+            ", KILN_C99_MEMBER_BUILTIN, ",
+            stringify!($value),
+            ", 0.0, \"",
+            $name,
+            "\", NULL},\n"
+        )
+    };
+}
+
+/// The single declaration of every table-driven built-in's static surface.
+///
+/// A row is `(C builtin constant, the global that names it, the member's name, what it answers)`.
+/// `code(...)` is a method the program calls, `num(...)` and `text(...)` a value it reads,
+/// `sym(...)` a well-known symbol, and `ctor(...)` a built-in handed back by name --
+/// `Array[Symbol.species]` is `Array`.
+///
+/// Rows are declared in the interpreter's own order, because that order is what
+/// `Object.getOwnPropertyNames` reports on both sides and agreeing costs nothing here.
+macro_rules! builtin_surface {
+    ($(($builtin:ident, $owner:literal, $name:literal, $kind:tt $args:tt)),* $(,)?) => {
+        /// Every member the emitted C answers for, by owner. See [`BuiltinMember`].
+        pub const BUILTIN_SURFACE: &[BuiltinMember] = &[
+            $(BuiltinMember { owner: $owner, name: $name },)*
+        ];
+
+        macro_rules! emit_builtin_surface_rows {
+            () => { concat!($(builtin_member_row!($builtin, $name, $kind $args)),*) };
+        }
+    };
+}
+
+builtin_surface! {
+    (KILN_C99_BUILTIN_OBJECT, "Object", "keys", code(KILN_C99_METHOD_OBJECT_KEYS)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "getOwnPropertyNames",
+     code(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "assign", code(KILN_C99_METHOD_OBJECT_ASSIGN)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "entries", code(KILN_C99_METHOD_OBJECT_ENTRIES)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "values", code(KILN_C99_METHOD_OBJECT_VALUES)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "freeze", code(KILN_C99_METHOD_OBJECT_FREEZE)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "isFrozen", code(KILN_C99_METHOD_OBJECT_IS_FROZEN)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "create", code(KILN_C99_METHOD_OBJECT_CREATE)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "defineProperty",
+     code(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "fromEntries", code(KILN_C99_METHOD_OBJECT_FROM_ENTRIES)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "hasOwn", code(KILN_C99_METHOD_HAS_OWN)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "is", code(KILN_C99_METHOD_OBJECT_IS)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "getOwnPropertySymbols",
+     code(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "defineProperties",
+     code(KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "getOwnPropertyDescriptor",
+     code(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "getOwnPropertyDescriptors",
+     code(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "setPrototypeOf",
+     code(KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF)),
+    (KILN_C99_BUILTIN_OBJECT, "Object", "getPrototypeOf",
+     code(KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF)),
+
+    (KILN_C99_BUILTIN_ARRAY, "Array", "isArray", code(KILN_C99_METHOD_IS_ARRAY)),
+    (KILN_C99_BUILTIN_ARRAY, "Array", "from", code(KILN_C99_METHOD_ARRAY_FROM)),
+    (KILN_C99_BUILTIN_ARRAY, "Array", "of", code(KILN_C99_METHOD_ARRAY_OF)),
+    // `Array[Symbol.species]` is `Array`. It read `undefined` natively and a function in the
+    // interpreter, with no refusal in between -- the silent half of the drift, and the exact
+    // shape `typeof X === "undefined"` feature-detection walks into.
+    (KILN_C99_BUILTIN_ARRAY, "Array", "@@species", ctor(KILN_C99_BUILTIN_ARRAY)),
+
+    (KILN_C99_BUILTIN_STRING, "String", "raw", code(KILN_C99_METHOD_STRING_RAW)),
+
+    (KILN_C99_BUILTIN_NUMBER, "Number", "isInteger", code(KILN_C99_METHOD_IS_INTEGER)),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "isSafeInteger", code(KILN_C99_METHOD_IS_SAFE_INTEGER)),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "isNaN", code(KILN_C99_METHOD_IS_NAN)),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "isFinite", code(KILN_C99_METHOD_IS_FINITE)),
+    // `Number.parseInt` and the global `parseInt` are the same function in the language, so they
+    // are the same code here.
+    (KILN_C99_BUILTIN_NUMBER, "Number", "parseInt", code(KILN_C99_METHOD_PARSE_INT)),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "parseFloat", code(KILN_C99_METHOD_PARSE_FLOAT)),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "MAX_SAFE_INTEGER", num("9007199254740991.0")),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "MIN_SAFE_INTEGER", num("-9007199254740991.0")),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "MAX_VALUE", num("1.7976931348623157e308")),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "MIN_VALUE", num("5e-324")),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "EPSILON", num("2.220446049250313e-16")),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "POSITIVE_INFINITY", num("INFINITY")),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "NEGATIVE_INFINITY", num("-INFINITY")),
+    (KILN_C99_BUILTIN_NUMBER, "Number", "NaN", num("NAN")),
+
+    (KILN_C99_BUILTIN_DATE, "Date", "now", code(KILN_C99_METHOD_DATE_NOW)),
+    (KILN_C99_BUILTIN_DATE, "Date", "UTC", code(KILN_C99_METHOD_DATE_UTC)),
+    (KILN_C99_BUILTIN_DATE, "Date", "parse", code(KILN_C99_METHOD_DATE_PARSE)),
+
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "resolve", code(KILN_C99_METHOD_PROMISE_RESOLVE)),
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "reject", code(KILN_C99_METHOD_PROMISE_REJECT)),
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "all", code(KILN_C99_METHOD_PROMISE_ALL)),
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "allSettled", code(KILN_C99_METHOD_PROMISE_ALL_SETTLED)),
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "race", code(KILN_C99_METHOD_PROMISE_RACE)),
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "any", code(KILN_C99_METHOD_PROMISE_ANY)),
+    (KILN_C99_BUILTIN_PROMISE, "Promise", "withResolvers",
+     code(KILN_C99_METHOD_PROMISE_WITH_RESOLVERS)),
+
+    (KILN_C99_BUILTIN_JSON, "JSON", "parse", code(KILN_C99_METHOD_JSON_PARSE)),
+    (KILN_C99_BUILTIN_JSON, "JSON", "stringify", code(KILN_C99_METHOD_JSON_STRINGIFY)),
+    (KILN_C99_BUILTIN_JSON, "JSON", "@@toStringTag", text("JSON")),
+
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "deleteProperty",
+     code(KILN_C99_METHOD_REFLECT_DELETE_PROPERTY)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "apply", code(KILN_C99_METHOD_REFLECT_APPLY)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "construct", code(KILN_C99_METHOD_REFLECT_CONSTRUCT)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "get", code(KILN_C99_METHOD_REFLECT_GET)),
+    // Really the same operation `Object` carries, so it is the same code; the rest differ from
+    // their `Object` namesakes in what they answer and are their own.
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "getOwnPropertyDescriptor",
+     code(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "has", code(KILN_C99_METHOD_REFLECT_HAS)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "ownKeys", code(KILN_C99_METHOD_REFLECT_OWN_KEYS)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "set", code(KILN_C99_METHOD_REFLECT_SET)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "@@toStringTag", text("Reflect")),
+
+    (KILN_C99_BUILTIN_PROXY, "Proxy", "revocable", code(KILN_C99_METHOD_PROXY_REVOCABLE)),
+
+    (KILN_C99_BUILTIN_ARRAY_BUFFER, "ArrayBuffer", "isView",
+     code(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW)),
+
+    // Every error constructor carries `captureStackTrace`, which `kiln_c99_namespace_method`
+    // answers ahead of the table rather than repeating in a row per kind. The row is here so that
+    // `Object.getOwnPropertyNames(Error)` and the drift test can both see it.
+    (KILN_C99_BUILTIN_ERROR, "Error", "captureStackTrace",
+     code(KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE)),
+
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "for", code(KILN_C99_METHOD_SYMBOL_FOR)),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "keyFor", code(KILN_C99_METHOD_SYMBOL_KEY_FOR)),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "asyncIterator", sym("@@asyncIterator")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "hasInstance", sym("@@hasInstance")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "isConcatSpreadable", sym("@@isConcatSpreadable")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "iterator", sym("@@iterator")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "match", sym("@@match")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "matchAll", sym("@@matchAll")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "replace", sym("@@replace")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "search", sym("@@search")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "species", sym("@@species")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "split", sym("@@split")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "toPrimitive", sym("@@toPrimitive")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "toStringTag", sym("@@toStringTag")),
+    (KILN_C99_BUILTIN_SYMBOL, "Symbol", "unscopables", sym("@@unscopables")),
+
+    (KILN_C99_BUILTIN_BUFFER, "Buffer", "from", code(KILN_C99_METHOD_BUFFER_FROM)),
+    (KILN_C99_BUILTIN_BUFFER, "Buffer", "alloc", code(KILN_C99_METHOD_BUFFER_ALLOC)),
+    // Three names for one operation: nothing here hands back uninitialised memory, so the
+    // "unsafe" spellings are the safe one under another name.
+    (KILN_C99_BUILTIN_BUFFER, "Buffer", "allocUnsafe", code(KILN_C99_METHOD_BUFFER_ALLOC)),
+    (KILN_C99_BUILTIN_BUFFER, "Buffer", "allocUnsafeSlow", code(KILN_C99_METHOD_BUFFER_ALLOC)),
+    (KILN_C99_BUILTIN_BUFFER, "Buffer", "isBuffer", code(KILN_C99_METHOD_BUFFER_IS_BUFFER)),
+    (KILN_C99_BUILTIN_BUFFER, "Buffer", "byteLength", code(KILN_C99_METHOD_BUFFER_BYTE_LENGTH)),
+    (KILN_C99_BUILTIN_BUFFER, "Buffer", "concat", code(KILN_C99_METHOD_BUFFER_CONCAT)),
+
+    // Not tabulated by the interpreter, so the drift test reports it as unchecked rather than
+    // passing it silently. The rows still make it self-describing.
+    (KILN_C99_BUILTIN_ABORT_SIGNAL, "AbortSignal", "abort",
+     code(KILN_C99_METHOD_ABORT_SIGNAL_ABORT)),
+    (KILN_C99_BUILTIN_ABORT_SIGNAL, "AbortSignal", "timeout",
+     code(KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT)),
+    (KILN_C99_BUILTIN_ABORT_SIGNAL, "AbortSignal", "any", code(KILN_C99_METHOD_ABORT_SIGNAL_ANY)),
+
+    (KILN_C99_BUILTIN_MATH, "Math", "abs", code(KILN_C99_METHOD_MATH_ABS)),
+    (KILN_C99_BUILTIN_MATH, "Math", "floor", code(KILN_C99_METHOD_MATH_FLOOR)),
+    (KILN_C99_BUILTIN_MATH, "Math", "ceil", code(KILN_C99_METHOD_MATH_CEIL)),
+    (KILN_C99_BUILTIN_MATH, "Math", "round", code(KILN_C99_METHOD_MATH_ROUND)),
+    (KILN_C99_BUILTIN_MATH, "Math", "trunc", code(KILN_C99_METHOD_MATH_TRUNC)),
+    (KILN_C99_BUILTIN_MATH, "Math", "sign", code(KILN_C99_METHOD_MATH_SIGN)),
+    (KILN_C99_BUILTIN_MATH, "Math", "sqrt", code(KILN_C99_METHOD_MATH_SQRT)),
+    (KILN_C99_BUILTIN_MATH, "Math", "cbrt", code(KILN_C99_METHOD_MATH_CBRT)),
+    (KILN_C99_BUILTIN_MATH, "Math", "random", code(KILN_C99_METHOD_MATH_RANDOM)),
+    (KILN_C99_BUILTIN_MATH, "Math", "sinh", code(KILN_C99_METHOD_MATH_SINH)),
+    (KILN_C99_BUILTIN_MATH, "Math", "cosh", code(KILN_C99_METHOD_MATH_COSH)),
+    (KILN_C99_BUILTIN_MATH, "Math", "tanh", code(KILN_C99_METHOD_MATH_TANH)),
+    (KILN_C99_BUILTIN_MATH, "Math", "asinh", code(KILN_C99_METHOD_MATH_ASINH)),
+    (KILN_C99_BUILTIN_MATH, "Math", "acosh", code(KILN_C99_METHOD_MATH_ACOSH)),
+    (KILN_C99_BUILTIN_MATH, "Math", "atanh", code(KILN_C99_METHOD_MATH_ATANH)),
+    (KILN_C99_BUILTIN_MATH, "Math", "log1p", code(KILN_C99_METHOD_MATH_LOG1P)),
+    (KILN_C99_BUILTIN_MATH, "Math", "expm1", code(KILN_C99_METHOD_MATH_EXPM1)),
+    (KILN_C99_BUILTIN_MATH, "Math", "fround", code(KILN_C99_METHOD_MATH_FROUND)),
+    (KILN_C99_BUILTIN_MATH, "Math", "clz32", code(KILN_C99_METHOD_MATH_CLZ32)),
+    (KILN_C99_BUILTIN_MATH, "Math", "imul", code(KILN_C99_METHOD_MATH_IMUL)),
+    (KILN_C99_BUILTIN_MATH, "Math", "hypot", code(KILN_C99_METHOD_MATH_HYPOT)),
+    (KILN_C99_BUILTIN_MATH, "Math", "atan2", code(KILN_C99_METHOD_MATH_ATAN2)),
+    (KILN_C99_BUILTIN_MATH, "Math", "sin", code(KILN_C99_METHOD_MATH_SIN)),
+    (KILN_C99_BUILTIN_MATH, "Math", "cos", code(KILN_C99_METHOD_MATH_COS)),
+    (KILN_C99_BUILTIN_MATH, "Math", "tan", code(KILN_C99_METHOD_MATH_TAN)),
+    (KILN_C99_BUILTIN_MATH, "Math", "asin", code(KILN_C99_METHOD_MATH_ASIN)),
+    (KILN_C99_BUILTIN_MATH, "Math", "acos", code(KILN_C99_METHOD_MATH_ACOS)),
+    (KILN_C99_BUILTIN_MATH, "Math", "atan", code(KILN_C99_METHOD_MATH_ATAN)),
+    (KILN_C99_BUILTIN_MATH, "Math", "pow", code(KILN_C99_METHOD_MATH_POW)),
+    (KILN_C99_BUILTIN_MATH, "Math", "min", code(KILN_C99_METHOD_MATH_MIN)),
+    (KILN_C99_BUILTIN_MATH, "Math", "max", code(KILN_C99_METHOD_MATH_MAX)),
+    (KILN_C99_BUILTIN_MATH, "Math", "log", code(KILN_C99_METHOD_MATH_LOG)),
+    (KILN_C99_BUILTIN_MATH, "Math", "log2", code(KILN_C99_METHOD_MATH_LOG2)),
+    (KILN_C99_BUILTIN_MATH, "Math", "log10", code(KILN_C99_METHOD_MATH_LOG10)),
+    (KILN_C99_BUILTIN_MATH, "Math", "exp", code(KILN_C99_METHOD_MATH_EXP)),
+    (KILN_C99_BUILTIN_MATH, "Math", "PI", num("3.14159265358979311600")),
+    (KILN_C99_BUILTIN_MATH, "Math", "E", num("2.71828182845904509080")),
+    (KILN_C99_BUILTIN_MATH, "Math", "LN2", num("0.69314718055994530942")),
+    (KILN_C99_BUILTIN_MATH, "Math", "LN10", num("2.30258509299404568402")),
+    (KILN_C99_BUILTIN_MATH, "Math", "SQRT2", num("1.41421356237309504880")),
+    (KILN_C99_BUILTIN_MATH, "Math", "SQRT1_2", num("0.70710678118654752440")),
+    (KILN_C99_BUILTIN_MATH, "Math", "LOG2E", num("1.44269504088896340736")),
+    (KILN_C99_BUILTIN_MATH, "Math", "LOG10E", num("0.43429448190325182765")),
+    (KILN_C99_BUILTIN_MATH, "Math", "@@toStringTag", text("Math")),
+}
+
+/// A member the shared surface declares and this backend does not answer, with the reason.
+///
+/// The backlog is a list rather than a count on purpose. A gate that says "twenty-three gaps"
+/// teaches people to ignore it; one that names them is a work queue, and each row is a sentence
+/// somebody can act on or argue with. `builtin_surface_drift` in `kiln-native` prints them.
+pub struct BuiltinGap {
+    /// The global, spelled as [`kiln_builtin_surface::SURFACE`] spells it.
+    pub global: &'static str,
+    /// The member this backend does not answer.
+    pub member: &'static str,
+    /// Why it is still open. Never empty: a gap without a reason cannot be told from an oversight.
+    pub why: &'static str,
+}
+
+/// Every member of the shared surface this backend does not implement.
+///
+/// Adding a member to `kiln_builtin_surface::SURFACE` is a compile error here until it appears
+/// either in [`BUILTIN_SURFACE`] or in this list -- see [`assert_surface_is_covered`]. That is the
+/// whole point: the decision to leave a member unimplemented becomes something somebody writes
+/// down, rather than something a customer's bundle discovers.
+pub const BUILTIN_SURFACE_BACKLOG: &[BuiltinGap] = &[
+    BuiltinGap {
+        global: "Object",
+        member: "groupBy",
+        why: "not implemented; needs an iterator walk keyed by a callback's result",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "preventExtensions",
+        why: "extensibility is not modelled here; only freezing is",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "isExtensible",
+        why: "extensibility is not modelled here; only freezing is",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "seal",
+        why: "sealing is weaker than freezing; answering freeze would be a silent wrong answer",
+    },
+    BuiltinGap {
+        global: "Object",
+        member: "isSealed",
+        why: "sealing is weaker than freezing; answering isFrozen would be a silent wrong answer",
+    },
+    BuiltinGap {
+        global: "Array",
+        member: "fromAsync",
+        why: "not implemented; needs the async-iterator protocol",
+    },
+    BuiltinGap {
+        global: "String",
+        member: "fromCharCode",
+        why: "not implemented; builds a string from code units",
+    },
+    BuiltinGap {
+        global: "String",
+        member: "fromCodePoint",
+        why: "not implemented; builds a string from scalar values",
+    },
+    BuiltinGap {
+        global: "Promise",
+        member: "try",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "JSON",
+        member: "rawJSON",
+        why: "not implemented; the raw-JSON marker has no representation in this value kernel",
+    },
+    BuiltinGap {
+        global: "JSON",
+        member: "isRawJSON",
+        why: "not implemented; the raw-JSON marker has no representation in this value kernel",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "defineProperty",
+        why: "answers a boolean where Object.defineProperty answers the target, so it is not the \
+              same operation under another name",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "getPrototypeOf",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "setPrototypeOf",
+        why: "answers a boolean where Object.setPrototypeOf answers the target, so it is not the \
+              same operation under another name",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "isExtensible",
+        why: "extensibility is not modelled here",
+    },
+    BuiltinGap {
+        global: "Reflect",
+        member: "preventExtensions",
+        why: "extensibility is not modelled here",
+    },
+    BuiltinGap {
+        global: "RegExp",
+        member: "escape",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "Error",
+        member: "isError",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "BigInt",
+        member: "asIntN",
+        why: "not implemented; needs a width-truncating call the BigInt provider does not export",
+    },
+    BuiltinGap {
+        global: "BigInt",
+        member: "asUintN",
+        why: "not implemented; needs a width-truncating call the BigInt provider does not export",
+    },
+    BuiltinGap {
+        global: "Map",
+        member: "groupBy",
+        why: "not implemented; needs an iterator walk keyed by a callback's result",
+    },
+    // `Iterator` is inside KILN_C99_BUILTIN_UNAVAILABLE_FIRST..LAST, which publishes the right
+    // `typeof` and refuses every member by name. That is a decision rather than an omission, and
+    // the rows say so one member at a time so that implementing one is a row to delete.
+    BuiltinGap {
+        global: "Iterator",
+        member: "from",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Iterator",
+        member: "concat",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Iterator",
+        member: "zip",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Iterator",
+        member: "zipKeyed",
+        why: "refused by name: the Iterator helpers are in the unavailable-globals range",
+    },
+    BuiltinGap {
+        global: "Buffer",
+        member: "constants",
+        why: "not implemented; the constants namespace object has no representation here",
+    },
+    BuiltinGap {
+        global: "Math",
+        member: "f16round",
+        why: "not implemented; needs a half-precision round the number provider does not export",
+    },
+    // `%TypedArray%` and the view constructors are answered from the receiver's element kind
+    // rather than from a table, because which constructor was named is part of the answer:
+    // `Uint8Array.of` and `Float64Array.of` build different things. Rows here would have to carry
+    // a code that means "ask the kind", which is not what a row is for.
+    BuiltinGap {
+        global: "%TypedArray%",
+        member: "@@species",
+        why: "not implemented; the intrinsic is not a value this backend hands back",
+    },
+    BuiltinGap {
+        global: "%TypedArrayConstructor%",
+        member: "of",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "%TypedArrayConstructor%",
+        member: "from",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "%TypedArrayConstructor%",
+        member: "BYTES_PER_ELEMENT",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "of",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "from",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "BYTES_PER_ELEMENT",
+        why: "answered from the receiver's element kind, not from a row",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "fromBase64",
+        why: "not implemented",
+    },
+    BuiltinGap {
+        global: "Uint8Array",
+        member: "fromHex",
+        why: "not implemented",
+    },
+    // Shared memory has no representation here, so every member refuses through
+    // KILN_C99_METHOD_ATOMICS_UNAVAILABLE rather than answering one.
+    BuiltinGap {
+        global: "Atomics",
+        member: "add",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "and",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "compareExchange",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "exchange",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "isLockFree",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "load",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "notify",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "or",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "pause",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "store",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "sub",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "wait",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "waitAsync",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "xor",
+        why: "refused by name: shared memory has no representation here",
+    },
+    BuiltinGap {
+        global: "Atomics",
+        member: "@@toStringTag",
+        why: "refused by name: shared memory has no representation here",
+    },
+];
+
+const fn surface_answers(surface: &[BuiltinMember], global: &str, member: &str) -> bool {
+    let mut index = 0;
+    while index < surface.len() {
+        if method_name_is(surface[index].owner, global)
+            && method_name_is(surface[index].name, member)
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+const fn backlog_names(backlog: &[BuiltinGap], global: &str, member: &str) -> bool {
+    let mut index = 0;
+    while index < backlog.len() {
+        if method_name_is(backlog[index].global, global)
+            && method_name_is(backlog[index].member, member)
+        {
+            return true;
+        }
+        index += 1;
+    }
+    false
+}
+
+/// Every member of the shared surface is either implemented here or written down as backlog, and
+/// nothing here claims a member the shared surface does not declare.
+///
+/// THIS IS THE GATE, AND IT IS A COMPILE ERROR RATHER THAN A TEST FAILURE. A member added to
+/// `kiln_builtin_surface::SURFACE` -- which is also where the interpreter reads its own lists --
+/// does not build here until somebody decides what this backend does about it. That is the
+/// difference between drift being structurally impossible and merely untested, which is the whole
+/// of ADR 0043.
+///
+/// A `const` panic carries a literal and nothing else, so this says only *that* the two disagree.
+/// `builtin_surface_drift` in `kiln-native` reads the same three tables and says which members,
+/// with each backlog row's reason. The compiler is the gate; the test is the explanation.
+const fn assert_surface_is_covered(surface: &[BuiltinMember], backlog: &[BuiltinGap]) {
+    let shared = kiln_builtin_surface::SURFACE;
+    let mut index = 0;
+    while index < shared.len() {
+        let members = shared[index].members;
+        let mut member = 0;
+        while member < members.len() {
+            assert!(
+                surface_answers(surface, shared[index].global, members[member])
+                    || backlog_names(backlog, shared[index].global, members[member]),
+                "a member of kiln_builtin_surface::SURFACE is neither in BUILTIN_SURFACE nor in \
+                 BUILTIN_SURFACE_BACKLOG; run `mbx test -p kiln-native --test \
+                 builtin_surface_drift` to be told which one"
+            );
+            member += 1;
+        }
+        index += 1;
+    }
+
+    // The other direction. A member only one engine has is drift whichever engine has it, and
+    // this backend inventing one is the harder half to notice: nothing refuses, and the two
+    // engines simply answer differently.
+    index = 0;
+    while index < surface.len() {
+        assert!(
+            !kiln_builtin_surface::is_declared(surface[index].owner)
+                || kiln_builtin_surface::has(surface[index].owner, surface[index].name),
+            "BUILTIN_SURFACE answers a member kiln_builtin_surface::SURFACE does not declare; \
+             either declare it there so both engines have it, or drop the row"
+        );
+        index += 1;
+    }
+
+    // A backlog row that is no longer true is worse than no backlog: it describes a past that has
+    // been fixed, and the next reader believes it.
+    index = 0;
+    while index < backlog.len() {
+        assert!(
+            !backlog[index].why.is_empty(),
+            "a BUILTIN_SURFACE_BACKLOG row has no reason, which cannot be told from an oversight"
+        );
+        assert!(
+            kiln_builtin_surface::is_declared(backlog[index].global)
+                && kiln_builtin_surface::has(backlog[index].global, backlog[index].member),
+            "a BUILTIN_SURFACE_BACKLOG row names a member the shared surface does not declare"
+        );
+        assert!(
+            !surface_answers(surface, backlog[index].global, backlog[index].member),
+            "a BUILTIN_SURFACE_BACKLOG row names a member BUILTIN_SURFACE now answers; delete the \
+             backlog row"
+        );
+        index += 1;
+    }
+}
+
+const _: () = assert_surface_is_covered(BUILTIN_SURFACE, BUILTIN_SURFACE_BACKLOG);
+
+/// The globals [`BUILTIN_SURFACE`] speaks for, in declaration order and without repeats.
+pub fn builtin_surface_owners() -> Vec<&'static str> {
+    let mut owners: Vec<&'static str> = Vec::new();
+    for member in BUILTIN_SURFACE {
+        if !owners.contains(&member.owner) {
+            owners.push(member.owner);
+        }
+    }
+    owners
+}
+
+/// Every member name `global` answers to natively, in declaration order.
+pub fn builtin_surface_members(global: &str) -> Vec<&'static str> {
+    BUILTIN_SURFACE
+        .iter()
+        .filter(|member| member.owner == global)
+        .map(|member| member.name)
+        .collect()
+}
 
 const HEADER: &str = concat!(
     r#"/* Kiln C99 backend: deterministic scalar unit. */
@@ -1596,6 +2285,40 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_TEXT_ENCODER 73
 #define KILN_C99_BUILTIN_AGGREGATE_ERROR_PROTOTYPE 75
 
+/* The globals this backend does not implement yet, published anyway so that `typeof` tells the
+ * truth about them.
+ *
+ * WHY A VALUE AT ALL, RATHER THAN LEAVING THE NAME ABSENT. `typeof X === "undefined"` is how real
+ * code feature-detects, so a name the interpreter answers `"function"` for and this backend
+ * answers `"undefined"` for does not make a compiled program fail -- it makes it silently take
+ * the *other* branch. That is a wrong answer, and a wrong answer is the one thing this backend is
+ * not allowed to give. A refusal is honest: the program stops and the message names the operation
+ * nobody implemented. So each of these carries the right `typeof` and the right `name`, and every
+ * other use of one reaches the refusal at the end of the builtin read, or the refusal at the end
+ * of the construct dispatch, and says so.
+ *
+ * Contiguous, and bounded by the two markers, because the only thing the rest of the file needs
+ * to ask about them is "is this one of them" -- `kiln_c99_is_unavailable_global`. */
+#define KILN_C99_BUILTIN_UNAVAILABLE_FIRST 76
+#define KILN_C99_BUILTIN_INTL 76
+#define KILN_C99_BUILTIN_DATA_VIEW 77
+#define KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER 78
+#define KILN_C99_BUILTIN_WEAK_REF 79
+#define KILN_C99_BUILTIN_FINALIZATION_REGISTRY 80
+#define KILN_C99_BUILTIN_SHADOW_REALM 81
+#define KILN_C99_BUILTIN_ITERATOR 82
+#define KILN_C99_BUILTIN_FLOAT16_ARRAY 83
+#define KILN_C99_BUILTIN_BIG_INT64_ARRAY 84
+#define KILN_C99_BUILTIN_BIG_UINT64_ARRAY 85
+#define KILN_C99_BUILTIN_DISPOSABLE_STACK 86
+#define KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK 87
+#define KILN_C99_BUILTIN_SUPPRESSED_ERROR 88
+#define KILN_C99_BUILTIN_EVAL_ERROR 89
+#define KILN_C99_BUILTIN_TEXT_DECODER 90
+#define KILN_C99_BUILTIN_EVAL 91
+#define KILN_C99_BUILTIN_PERFORMANCE 92
+#define KILN_C99_BUILTIN_UNAVAILABLE_LAST 92
+
 #define KILN_C99_BUILTIN_DATE 7
 
 /* A body that yielded rather than returned.  Not an error: the caller is the generator's `next`,
@@ -1845,6 +2568,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF),
     emit_method_define!(KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF),
     emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES),
+    emit_method_define!(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS),
     emit_method_define!(KILN_C99_METHOD_OBJECT_FROM_ENTRIES),
     emit_method_define!(KILN_C99_METHOD_ARRAY_FROM),
     emit_method_define!(KILN_C99_METHOD_IS_PROTOTYPE_OF),
@@ -2059,6 +2783,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_PROCESS_HRTIME_BIGINT),
     emit_method_define!(KILN_C99_METHOD_PROCESS_CWD),
     emit_method_define!(KILN_C99_METHOD_ATOMICS_UNAVAILABLE),
+    emit_method_define!(KILN_C99_METHOD_CONSOLE_LOG),
+    emit_method_define!(KILN_C99_METHOD_CONSOLE_UNAVAILABLE),
     emit_method_define!(KILN_C99_METHOD_SET_IMMEDIATE),
     emit_method_define!(KILN_C99_METHOD_CLEAR_IMMEDIATE),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER),
@@ -2140,6 +2866,34 @@ enum kiln_value_tag {
 #define KILN_C99_GROUP_MATH_NUMBER UINT32_C(1048576)
 
 static uint32_t kiln_c99_method_groups(uint64_t code) {
+    /* Four `Temporal` families are *ranges* rather than lists. `from`, `compare` and `Now.x` are
+     * one code per kind and the twenty-three operations are one code each, all contiguous, so the
+     * code carries which kind or which operation was asked for -- `kind = code - FROM` is how the
+     * dispatch recovers it, rather than a translation table that could drift from the provider's
+     * own order.
+     *
+     * The switch below is generated from the id list, which names only the two *endpoints* of
+     * each range. Every code between them therefore answered "no groups at all", which routed it
+     * past the `Temporal` dispatch entirely and out the refusal at the bottom. That is why
+     * `Temporal.PlainDate.from` worked and the other seven did not: 285 is named and 286 is not.
+     * The same hole took seven of the eight `compare`s, seven of the eight `Temporal.Now` reads,
+     * and twenty-one of the twenty-three operations.
+     *
+     * A range is checked as a range. The endpoints stay in the id list because the Rust
+     * assertions above measure the ranges from them. */
+    if (code >= KILN_C99_METHOD_TEMPORAL_FROM && code <= KILN_C99_METHOD_TEMPORAL_FROM_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_FROM;
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_COMPARE && code <= KILN_C99_METHOD_TEMPORAL_COMPARE_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_COMPARE;
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_NOW_READ &&
+        code <= KILN_C99_METHOD_TEMPORAL_NOW_READ_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_NOW_READ;
+    }
+    if (code >= KILN_C99_METHOD_TEMPORAL_OP && code <= KILN_C99_METHOD_TEMPORAL_OP_LAST) {
+        return KILN_C99_GROUP_TEMPORAL | KILN_C99_GROUP_TEMPORAL_OP;
+    }
     switch (code) {
 "#,
     emit_method_group_cases!(),
@@ -3094,6 +3848,13 @@ int32_t kiln_temporal_from_fields(uint32_t kind, const double *fields, size_t fi
                                   void **out_handle);
 int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_count,
                                            void **out_handle);
+/* `new Temporal.X(...)`, which is not `from` with a bag: a constructor takes ISO components and
+ * rejects one out of range where `from` resolves it through the calendar and constrains. Both
+ * reach the same linked engine; which of its constructors runs is the kind. */
+int32_t kiln_temporal_construct(uint32_t kind, const double *fields, size_t field_count,
+                                const unsigned char *text, const int64_t *text_lengths,
+                                size_t text_count, int64_t epoch_high, uint64_t epoch_low,
+                                void **out_handle);
 /* `Temporal.Instant`'s two epoch constructors. The nanosecond count arrives in the same two
  * halves `kiln_temporal_now` takes, read out of the BigInt provider: the two providers are
  * independent features of one archive and only scalars pass between them. */
@@ -3205,6 +3966,7 @@ static int kiln_c99_signbit(double value);
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right);
 static int kiln_c99_is_callable(kiln_value value);
 static int kiln_c99_is_reference(kiln_value value);
+static int kiln_c99_has_intrinsic_text(kiln_value value);
 static int kiln_c99_crosses_boundary(kiln_value value);
 static kiln_value kiln_c99_text(kiln_value value);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
@@ -6136,6 +6898,7 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF: return "getPrototypeOf";
     case KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF: return "setPrototypeOf";
     case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES: return "getOwnPropertyNames";
+    case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS: return "getOwnPropertySymbols";
     case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY: return "defineProperty";
     case KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES: return "defineProperties";
     case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR: return "getOwnPropertyDescriptor";
@@ -6955,6 +7718,25 @@ static int kiln_c99_number_in_radix(kiln_value *out, double value, int radix) {
  * `conformance/differential/builtin-names.js` is what checks the two agree with node. */
 static const char *kiln_c99_builtin_name(uint64_t builtin) {
     switch (builtin) {
+    /* The globals this backend has not implemented still have to name themselves, because the
+     * name is what the refusal reports and what `X.name` answers. */
+    case KILN_C99_BUILTIN_INTL: return "Intl";
+    case KILN_C99_BUILTIN_DATA_VIEW: return "DataView";
+    case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER: return "SharedArrayBuffer";
+    case KILN_C99_BUILTIN_WEAK_REF: return "WeakRef";
+    case KILN_C99_BUILTIN_FINALIZATION_REGISTRY: return "FinalizationRegistry";
+    case KILN_C99_BUILTIN_SHADOW_REALM: return "ShadowRealm";
+    case KILN_C99_BUILTIN_ITERATOR: return "Iterator";
+    case KILN_C99_BUILTIN_FLOAT16_ARRAY: return "Float16Array";
+    case KILN_C99_BUILTIN_BIG_INT64_ARRAY: return "BigInt64Array";
+    case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: return "BigUint64Array";
+    case KILN_C99_BUILTIN_DISPOSABLE_STACK: return "DisposableStack";
+    case KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK: return "AsyncDisposableStack";
+    case KILN_C99_BUILTIN_SUPPRESSED_ERROR: return "SuppressedError";
+    case KILN_C99_BUILTIN_EVAL_ERROR: return "EvalError";
+    case KILN_C99_BUILTIN_TEXT_DECODER: return "TextDecoder";
+    case KILN_C99_BUILTIN_EVAL: return "eval";
+    case KILN_C99_BUILTIN_PERFORMANCE: return "performance";
     case KILN_C99_BUILTIN_STRING: return "String";
     case KILN_C99_BUILTIN_MATH: return "Math";
     case KILN_C99_BUILTIN_NUMBER: return "Number";
@@ -7276,10 +8058,11 @@ static int kiln_c99_visible_arguments(kiln_value *out) {
 #define KILN_C99_REALM_SLOT_GLOBALS UINT32_C(1)
 #define KILN_C99_REALM_SLOT_PROCESS UINT32_C(2)
 #define KILN_C99_REALM_SLOT_ATOMICS UINT32_C(3)
+#define KILN_C99_REALM_SLOT_CONSOLE UINT32_C(4)
 /* The prototype every `node:http` request object links to. A realm slot rather than a static,
  * because a realm owns it and the runtime archive already enumerates these slots as GC roots
  * (ADR 0041) -- and because one identity across translation units is what a prototype is for. */
-#define KILN_C99_REALM_SLOT_INCOMING_MESSAGE UINT32_C(4)
+#define KILN_C99_REALM_SLOT_INCOMING_MESSAGE UINT32_C(5)
 
 static int kiln_c99_realm_value_slot(uint32_t key, kiln_value **out) {
     void *slot = NULL;
@@ -7311,6 +8094,45 @@ static int kiln_c99_atomics_object(kiln_value *out) {
             kiln_c99_method(KILN_C99_METHOD_ATOMICS_UNAVAILABLE));
     if (status != KILN_C99_OK) return status;
     *out = *atomics;
+    return KILN_C99_OK;
+}
+
+/* The realm's `console`, created on first use.
+ *
+ * `console.log(x)` written out in full is a compile-time shape -- the compiler turns it into a
+ * host call and no `console` value exists at all -- so this object is what the *other* spellings
+ * reach: `globalThis.console`, `const c = console`, `[1, 2].forEach(console.log)`. Without it
+ * `typeof globalThis.console` answered "undefined" here and "object" in the interpreter, which is
+ * the shape of feature-detection every bundle does before it decides whether it can log at all.
+ *
+ * `log` and `info` are the same host operation the compiled shape uses. `error` and `warn` are
+ * not: the interpreter sends those to standard *error*, and the host ABI publishes one captured
+ * output operation, so there is nothing here that could put bytes on the other stream. They
+ * refuse by name rather than quietly printing to stdout, which would be the two engines
+ * disagreeing about which stream a line went to -- invisible in a terminal and wrong in a pipe. */
+static int kiln_c99_console_object(kiln_value *out) {
+    kiln_value *console;
+    int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_CONSOLE, &console);
+    if (status != KILN_C99_OK) return status;
+    if (console->tag == KILN_VALUE_OBJECT) {
+        *out = *console;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_new_object(console);
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "log", 3,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_LOG));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "info", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_LOG));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "error", 5,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_UNAVAILABLE));
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*console, "warn", 4,
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_UNAVAILABLE));
+    if (status != KILN_C99_OK) return status;
+    *out = *console;
     return KILN_C99_OK;
 }
 
@@ -7459,7 +8281,50 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"AggregateError", KILN_C99_BUILTIN_AGGREGATE_ERROR},
                         {"AbortController", KILN_C99_BUILTIN_ABORT_CONTROLLER},
                         {"AbortSignal", KILN_C99_BUILTIN_ABORT_SIGNAL},
-                        {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER}};
+                        {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER},
+                        /* THE REST OF THE REALM'S FURNITURE. Everything below this line was
+                         * reachable by its bare name -- `new WeakMap()` compiles and runs -- and
+                         * absent from the global *object*, so `globalThis.WeakMap` answered
+                         * `undefined` while `WeakMap` answered a constructor. Two lists for one
+                         * question is how they drifted, and `globalThis.X` is the spelling a
+                         * bundle's feature detection actually uses. One list now. */
+                        {"Function", KILN_C99_BUILTIN_FUNCTION},
+                        {"ArrayBuffer", KILN_C99_BUILTIN_ARRAY_BUFFER},
+                        {"WeakMap", KILN_C99_BUILTIN_WEAK_MAP},
+                        {"WeakSet", KILN_C99_BUILTIN_WEAK_SET},
+                        {"URL", KILN_C99_BUILTIN_URL},
+                        {"Buffer", KILN_C99_BUILTIN_BUFFER},
+                        {"Int8Array", KILN_C99_BUILTIN_INT8_ARRAY},
+                        {"Uint8Array", KILN_C99_BUILTIN_UINT8_ARRAY},
+                        {"Uint8ClampedArray", KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY},
+                        {"Int16Array", KILN_C99_BUILTIN_INT16_ARRAY},
+                        {"Uint16Array", KILN_C99_BUILTIN_UINT16_ARRAY},
+                        {"Int32Array", KILN_C99_BUILTIN_INT32_ARRAY},
+                        {"Uint32Array", KILN_C99_BUILTIN_UINT32_ARRAY},
+                        {"Float32Array", KILN_C99_BUILTIN_FLOAT32_ARRAY},
+                        {"Float64Array", KILN_C99_BUILTIN_FLOAT64_ARRAY},
+                        /* AND THE ONES THIS BACKEND DOES NOT IMPLEMENT. Present so that `typeof`
+                         * answers what the interpreter answers; every use of one refuses and
+                         * names itself. `undefined` here would not stop a compiled program -- it
+                         * would send it down the branch written for a realm that never had the
+                         * feature, which is a different program from the one the author wrote. */
+                        {"Intl", KILN_C99_BUILTIN_INTL},
+                        {"DataView", KILN_C99_BUILTIN_DATA_VIEW},
+                        {"SharedArrayBuffer", KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER},
+                        {"WeakRef", KILN_C99_BUILTIN_WEAK_REF},
+                        {"FinalizationRegistry", KILN_C99_BUILTIN_FINALIZATION_REGISTRY},
+                        {"ShadowRealm", KILN_C99_BUILTIN_SHADOW_REALM},
+                        {"Iterator", KILN_C99_BUILTIN_ITERATOR},
+                        {"Float16Array", KILN_C99_BUILTIN_FLOAT16_ARRAY},
+                        {"BigInt64Array", KILN_C99_BUILTIN_BIG_INT64_ARRAY},
+                        {"BigUint64Array", KILN_C99_BUILTIN_BIG_UINT64_ARRAY},
+                        {"DisposableStack", KILN_C99_BUILTIN_DISPOSABLE_STACK},
+                        {"AsyncDisposableStack", KILN_C99_BUILTIN_ASYNC_DISPOSABLE_STACK},
+                        {"SuppressedError", KILN_C99_BUILTIN_SUPPRESSED_ERROR},
+                        {"EvalError", KILN_C99_BUILTIN_EVAL_ERROR},
+                        {"TextDecoder", KILN_C99_BUILTIN_TEXT_DECODER},
+                        {"eval", KILN_C99_BUILTIN_EVAL},
+                        {"performance", KILN_C99_BUILTIN_PERFORMANCE}};
     static const struct {
         const char *name;
         uint64_t code;
@@ -7477,7 +8342,9 @@ static int kiln_c99_global_object(kiln_value *out) {
                      {"setTimeout", KILN_C99_METHOD_SET_TIMEOUT},
                      {"setInterval", KILN_C99_METHOD_SET_INTERVAL},
                      {"clearTimeout", KILN_C99_METHOD_CLEAR_TIMEOUT},
-                     {"clearInterval", KILN_C99_METHOD_CLEAR_INTERVAL}};
+                     {"clearInterval", KILN_C99_METHOD_CLEAR_INTERVAL},
+                     {"setImmediate", KILN_C99_METHOD_SET_IMMEDIATE},
+                     {"clearImmediate", KILN_C99_METHOD_CLEAR_IMMEDIATE}};
     size_t index;
     int status = kiln_c99_realm_value_slot(KILN_C99_REALM_SLOT_GLOBALS, &globals);
     if (status != KILN_C99_OK) return status;
@@ -7500,6 +8367,22 @@ static int kiln_c99_global_object(kiln_value *out) {
         status = kiln_c99_put(NULL, *globals, functions[index].name,
                               strlen(functions[index].name),
                               kiln_c99_method(functions[index].code), 0, NULL);
+    }
+    /* The two the realm builds rather than names: each is a real object with its own slot, so
+     * `globalThis.console === console` and a second read finds the same one. */
+    if (status == KILN_C99_OK) {
+        kiln_value built;
+        status = kiln_c99_atomics_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, *globals, "Atomics", 7, built, 0, NULL);
+        }
+    }
+    if (status == KILN_C99_OK) {
+        kiln_value built;
+        status = kiln_c99_console_object(&built);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_put(NULL, *globals, "console", 7, built, 0, NULL);
+        }
     }
     /* The three value properties of the global object are the only ones the specification locks
      * on every axis: `{ writable: false, enumerable: false, configurable: false }`. An ordinary
@@ -7925,7 +8808,15 @@ static const kiln_symbol kiln_c99_well_known[] = {
     {"@@asyncIterator", 15, "Symbol.asyncIterator", 20},
     {"@@hasInstance", 13, "Symbol.hasInstance", 18},
     {"@@toStringTag", 13, "Symbol.toStringTag", 18},
-    {"@@toPrimitive", 13, "Symbol.toPrimitive", 18}};
+    {"@@toPrimitive", 13, "Symbol.toPrimitive", 18},
+    {"@@isConcatSpreadable", 20, "Symbol.isConcatSpreadable", 25},
+    {"@@match", 7, "Symbol.match", 12},
+    {"@@matchAll", 10, "Symbol.matchAll", 15},
+    {"@@replace", 9, "Symbol.replace", 14},
+    {"@@search", 8, "Symbol.search", 13},
+    {"@@species", 9, "Symbol.species", 14},
+    {"@@split", 7, "Symbol.split", 12},
+    {"@@unscopables", 13, "Symbol.unscopables", 18}};
 
 /* Every symbol this run has made, by the value that *is* it.
  *
@@ -8124,6 +9015,12 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
     if (builtin == KILN_C99_BUILTIN_TEMPORAL || builtin == KILN_C99_BUILTIN_TEMPORAL_NOW) {
         return 1;
     }
+    /* `Intl` is a namespace this backend does not carry: `typeof Intl === "object"` is what a
+     * library feature-detects on, and it has to be the same word here as in the interpreter even
+     * though every member behind it refuses. */
+    if (builtin == KILN_C99_BUILTIN_INTL) {
+        return 1;
+    }
     return builtin == KILN_C99_BUILTIN_MATH || builtin == KILN_C99_BUILTIN_JSON ||
            builtin == KILN_C99_BUILTIN_REFLECT ||
            builtin == KILN_C99_BUILTIN_OBJECT_PROTOTYPE ||
@@ -8291,136 +9188,148 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
     return kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_STRING_DISPATCH);
 }
 
+/* The static surface of every built-in this backend answers for: one row per (built-in, member).
+ *
+ * ONE TABLE, TWO EMITTERS (ADR 0043). Every row below is generated from `BUILTIN_SURFACE` in this
+ * backend's Rust, which is also what the drift test reads. Before it the same surface was written
+ * down twice -- once in the interpreter and once as `kiln_c99_same_name` chains here -- and
+ * nothing compared them, so a member the interpreter grew was discovered by whichever npm bundle
+ * happened to read it. `Number` had fifteen statics on one side and five here; `Number.MAX_VALUE`
+ * is the first property a bundled `zod` reads.
+ *
+ * A row carries what the member *is*, not merely that it exists, so the read path, the call path
+ * and `Object.getOwnPropertyNames` all answer out of it. That is what makes a member which is
+ * implemented but unreachable inexpressible: reachability is the row. A `@@` name is symbol-keyed
+ * and is reached through a Symbol rather than as a string key. */
+#define KILN_C99_MEMBER_METHOD 1
+#define KILN_C99_MEMBER_NUMBER 2
+#define KILN_C99_MEMBER_TEXT 3
+#define KILN_C99_MEMBER_SYMBOL 4
+#define KILN_C99_MEMBER_BUILTIN 5
+
+typedef struct {
+    uint16_t builtin;
+    uint16_t kind;
+    /* A method code, or the built-in a `KILN_C99_MEMBER_BUILTIN` row hands back. */
+    uint16_t code;
+    double number;
+    const char *name;
+    /* The `@@` key of a well-known symbol, or the text a tag answers with. */
+    const char *text;
+} kiln_builtin_member;
+
+static const kiln_builtin_member kiln_c99_builtin_members[] = {
+"#,
+    emit_builtin_surface_rows!(),
+    r#"};
+
+#define KILN_C99_SURFACE_MEMBER_COUNT \
+    (sizeof kiln_c99_builtin_members / sizeof *kiln_c99_builtin_members)
+
+/* Whether this built-in's surface is table-driven at all.
+ *
+ * The ones that are not -- the prototype method tables, `Temporal`'s eight types, the typed-array
+ * constructors -- keep their own lookups below, and the drift test names them as backlog rather
+ * than skipping them. A built-in that *is* table-driven has no case in the switch below at all:
+ * adding a row is the whole of adding a member to it. */
+static int kiln_c99_has_surface(uint64_t builtin) {
+    size_t index;
+    for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        if (kiln_c99_builtin_members[index].builtin == builtin) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The row `builtin` holds for `key`, reporting through `owned` whether the built-in is
+ * table-driven at all.
+ *
+ * The two answers come out of one pass on purpose. This sits on the read path of every property
+ * access whose receiver is a built-in -- `Math.floor` inside a loop reaches it once per iteration
+ * -- and asking `kiln_c99_has_surface` first walked the whole table a second time to learn
+ * something this walk already knows. */
+static const kiln_builtin_member *kiln_c99_builtin_member(uint64_t builtin, const char *key,
+                                                          size_t key_len, int *owned) {
+    size_t index;
+    *owned = 0;
+    for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
+        if (member->builtin != builtin) {
+            continue;
+        }
+        *owned = 1;
+        if (kiln_c99_same_name(key, key_len, member->name)) {
+            return member;
+        }
+    }
+    return NULL;
+}
+
+/* The method a table-driven built-in's member names, or 0.
+ *
+ * `owned` separates "this built-in is not table-driven, ask the switch" from "it is, and it has no
+ * such method" -- which are the same 0 to a caller and must not be. */
+static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_t key_len,
+                                        int *owned) {
+    const kiln_builtin_member *member = kiln_c99_builtin_member(builtin, key, key_len, owned);
+    return member != NULL && member->kind == KILN_C99_MEMBER_METHOD ? member->code : 0;
+}
+
+/* A member whose answer is a value rather than a call: `Math.PI`, `Number.MAX_VALUE`,
+ * `Symbol.iterator`, `Array[Symbol.species]`.  Returns whether there was one.
+ *
+ * Out of the same rows as the methods, because these used to be a separate list and that is
+ * exactly how `Array[Symbol.species]` came to read `undefined` here where the interpreter answers
+ * a function. No refusal, no diagnostic -- the program simply took the other branch, which is the
+ * one wrong answer this backend is not allowed to give. */
+static int kiln_c99_surface_value(uint64_t builtin, const char *key, size_t key_len,
+                                  kiln_value *out) {
+    int owned;
+    const kiln_builtin_member *member = kiln_c99_builtin_member(builtin, key, key_len, &owned);
+    if (member == NULL) {
+        return 0;
+    }
+    switch (member->kind) {
+    case KILN_C99_MEMBER_NUMBER:
+        *out = kiln_c99_number(member->number);
+        return 1;
+    case KILN_C99_MEMBER_TEXT:
+        *out = kiln_c99_copy_text(member->text, strlen(member->text));
+        return 1;
+    case KILN_C99_MEMBER_BUILTIN:
+        *out = kiln_c99_builtin(member->code);
+        return 1;
+    case KILN_C99_MEMBER_SYMBOL:
+        return kiln_c99_symbol_of_key(member->text, strlen(member->text), out);
+    default:
+        return 0;
+    }
+}
+
 /* A namespace's own methods, by which namespace it is: `Math.min` and `Number.isNaN` are
  * different functions and the ranges keep them apart. */
 static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, size_t key_len) {
-    /* Every error constructor carries it, and `Error.captureStackTrace` is the spelling
-     * libraries use, so it is answered ahead of the per-builtin tables rather than repeated in
-     * one case per kind. */
+    /* Every error constructor carries it, and `Error.captureStackTrace` is the spelling libraries
+     * use, so it is answered ahead of the tables rather than repeated in a row per kind. `Error`
+     * still has a row of its own, so enumeration and the drift test can both see the member. */
     if (kiln_c99_error_name(builtin) != NULL &&
         kiln_c99_same_name(key, key_len, "captureStackTrace")) {
         return KILN_C99_METHOD_ERROR_CAPTURE_STACK_TRACE;
     }
-    switch (builtin) {
-    case KILN_C99_BUILTIN_MATH: {
-        uint64_t code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_MATH_RANDOM,
-                                               KILN_C99_METHOD_MATH_IMUL);
-        if (code != 0) {
+    /* The single-sourced surface first, and exclusively: a table-driven built-in has no case in
+     * the switch below at all. Those cases were hand-written `kiln_c99_same_name` chains -- a
+     * list a human had to remember to extend, one per built-in -- and forgetting to extend one
+     * was the whole disease. What is left below are the prototype method tables, which are
+     * dispatched by code range rather than by name. */
+    {
+        int owned;
+        uint64_t code = kiln_c99_surface_method(builtin, key, key_len, &owned);
+        if (owned) {
             return code;
         }
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_MATH_FLOOR,
-                                      KILN_C99_METHOD_MATH_ATAN);
     }
-    case KILN_C99_BUILTIN_NUMBER:
-        /* `Number.parseInt` and the global `parseInt` are the same function in the language, so
-         * they are the same code here. Named outside the contiguous range because the range is
-         * how a namespace's methods are found, and these two belong to two namespaces. */
-        if (kiln_c99_same_name(key, key_len, "parseInt")) {
-            return KILN_C99_METHOD_PARSE_INT;
-        }
-        if (kiln_c99_same_name(key, key_len, "parseFloat")) {
-            return KILN_C99_METHOD_PARSE_FLOAT;
-        }
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_INTEGER,
-                                      KILN_C99_METHOD_IS_FINITE);
-    case KILN_C99_BUILTIN_OBJECT:
-        if (kiln_c99_same_name(key, key_len, "create")) {
-            return KILN_C99_METHOD_OBJECT_CREATE;
-        }
-        if (kiln_c99_same_name(key, key_len, "freeze")) {
-            return KILN_C99_METHOD_OBJECT_FREEZE;
-        }
-
-        if (kiln_c99_same_name(key, key_len, "isFrozen")) {
-            return KILN_C99_METHOD_OBJECT_IS_FROZEN;
-        }
-        if (kiln_c99_same_name(key, key_len, "getPrototypeOf")) {
-            return KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF;
-        }
-        if (kiln_c99_same_name(key, key_len, "setPrototypeOf")) {
-            return KILN_C99_METHOD_OBJECT_SET_PROTOTYPE_OF;
-        }
-        if (kiln_c99_same_name(key, key_len, "getOwnPropertyNames")) {
-            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES;
-        }
-        if (kiln_c99_same_name(key, key_len, "defineProperty")) {
-            return KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY;
-        }
-        if (kiln_c99_same_name(key, key_len, "defineProperties")) {
-            return KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES;
-        }
-        if (kiln_c99_same_name(key, key_len, "getOwnPropertyDescriptor")) {
-            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR;
-        }
-        if (kiln_c99_same_name(key, key_len, "getOwnPropertyDescriptors")) {
-            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTORS;
-        }
-        if (kiln_c99_same_name(key, key_len, "is")) {
-            return KILN_C99_METHOD_OBJECT_IS;
-        }
-        if (kiln_c99_same_name(key, key_len, "fromEntries")) {
-            return KILN_C99_METHOD_OBJECT_FROM_ENTRIES;
-        }
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_OBJECT_KEYS,
-                                      KILN_C99_METHOD_HAS_OWN);
-    case KILN_C99_BUILTIN_ARRAY:
-        if (kiln_c99_same_name(key, key_len, "from")) {
-            return KILN_C99_METHOD_ARRAY_FROM;
-        }
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_IS_ARRAY,
-                                      KILN_C99_METHOD_ARRAY_OF);
-    case KILN_C99_BUILTIN_BUFFER:
-        if (kiln_c99_same_name(key, key_len, "from")) return KILN_C99_METHOD_BUFFER_FROM;
-        if (kiln_c99_same_name(key, key_len, "alloc") ||
-            kiln_c99_same_name(key, key_len, "allocUnsafe") ||
-            kiln_c99_same_name(key, key_len, "allocUnsafeSlow"))
-            return KILN_C99_METHOD_BUFFER_ALLOC;
-        if (kiln_c99_same_name(key, key_len, "isBuffer"))
-            return KILN_C99_METHOD_BUFFER_IS_BUFFER;
-        if (kiln_c99_same_name(key, key_len, "byteLength"))
-            return KILN_C99_METHOD_BUFFER_BYTE_LENGTH;
-        if (kiln_c99_same_name(key, key_len, "concat")) return KILN_C99_METHOD_BUFFER_CONCAT;
-        return 0;
-    case KILN_C99_BUILTIN_STRING:
-        /* The only static `String` carries that this backend answers. */
-        if (kiln_c99_same_name(key, key_len, "raw")) {
-            return KILN_C99_METHOD_STRING_RAW;
-        }
-        return 0;
-    case KILN_C99_BUILTIN_SYMBOL:
-        if (kiln_c99_same_name(key, key_len, "for")) return KILN_C99_METHOD_SYMBOL_FOR;
-        if (kiln_c99_same_name(key, key_len, "keyFor")) return KILN_C99_METHOD_SYMBOL_KEY_FOR;
-        return 0;
-    case KILN_C99_BUILTIN_PROXY:
-        if (kiln_c99_same_name(key, key_len, "revocable")) {
-            return KILN_C99_METHOD_PROXY_REVOCABLE;
-        }
-        return 0;
-    case KILN_C99_BUILTIN_ABORT_SIGNAL:
-        if (kiln_c99_same_name(key, key_len, "abort")) {
-            return KILN_C99_METHOD_ABORT_SIGNAL_ABORT;
-        }
-        if (kiln_c99_same_name(key, key_len, "timeout")) {
-            return KILN_C99_METHOD_ABORT_SIGNAL_TIMEOUT;
-        }
-        if (kiln_c99_same_name(key, key_len, "any")) {
-            return KILN_C99_METHOD_ABORT_SIGNAL_ANY;
-        }
-        return 0;
-    case KILN_C99_BUILTIN_REFLECT:
-        /* `getOwnPropertyDescriptor` really is the same operation `Object` carries, so it is the
-         * same code; the rest differ from their `Object` namesakes and are their own. */
-        if (kiln_c99_same_name(key, key_len, "getOwnPropertyDescriptor")) {
-            return KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR;
-        }
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_REFLECT_OWN_KEYS,
-                                      KILN_C99_METHOD_REFLECT_CONSTRUCT);
-    case KILN_C99_BUILTIN_JSON:
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_JSON_STRINGIFY,
-                                      KILN_C99_METHOD_JSON_PARSE);
-    case KILN_C99_BUILTIN_DATE:
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_DATE_NOW,
-                                      KILN_C99_METHOD_DATE_PARSE);
+    switch (builtin) {
     case KILN_C99_BUILTIN_OBJECT_PROTOTYPE:
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             return 0;
@@ -8473,18 +9382,6 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
         if (kiln_c99_same_name(key, key_len, "constructor")) return 0;
         return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
                                       KILN_C99_METHOD_FINALLY);
-    case KILN_C99_BUILTIN_PROMISE:
-        if (kiln_c99_same_name(key, key_len, "withResolvers")) {
-            return KILN_C99_METHOD_PROMISE_WITH_RESOLVERS;
-        }
-        if (kiln_c99_same_name(key, key_len, "allSettled")) {
-            return KILN_C99_METHOD_PROMISE_ALL_SETTLED;
-        }
-        if (kiln_c99_same_name(key, key_len, "any")) {
-            return KILN_C99_METHOD_PROMISE_ANY;
-        }
-        return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_PROMISE_RESOLVE,
-                                      KILN_C99_METHOD_PROMISE_RACE);
     default:
         return 0;
     }
@@ -8509,13 +9406,71 @@ static int kiln_c99_is_callable(kiln_value value) {
  * do it by calling: this backend has no user `valueOf` to reach, because a property holding a
  * function is refused at the point it would be called. So reduction is conversion to text. */
 static int kiln_c99_is_reference(kiln_value value) {
-    /* What a coercing operator has to reduce to a primitive first. A Date is a reference and is
-     * deliberately *not* here: `as_number` already gives its instant, which is what `valueOf`
-     * would produce, so reducing it to text first would turn every date subtraction into NaN. */
-    return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
-           value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR ||
-           value.tag == KILN_VALUE_COLLECTION || value.tag == KILN_VALUE_ARRAY_BUFFER ||
-           value.tag == KILN_VALUE_TYPED_ARRAY || value.tag == KILN_VALUE_PROXY;
+    /* What a coercing operator has to reduce to a primitive first.
+     *
+     * Listed the other way round -- what is *not* one -- for the same reason
+     * `kiln_c99_crosses_boundary` below is: an allowlist of the object kinds silently stops being
+     * true the day a tag is added, and says nothing when it does. This one was an allowlist and
+     * had fallen three tags behind. A `Temporal` value, a promise and a regexp were all answered
+     * "already primitive", so `"x" + aPlainDate` never reduced anything: the concatenation read
+     * the unchecked `kiln_c99_text`, which had no case for the tag either, and appended the empty
+     * span its `default:` hands back. The program printed "x" and carried on, where the language
+     * throws -- `Temporal`'s `valueOf` is specified to, precisely so that `date1 < date2` cannot
+     * quietly compare two NaNs.
+     *
+     * The primitives are the closed list, and the three internal tags are on it because they are
+     * never an operand: a cell lives only in a captured slot, a hole only in an array's storage,
+     * and an uninitialized slot throws when it is read.
+     *
+     * A Date is deliberately *not* a reference: `as_number` already gives its instant, which is
+     * what `valueOf` would produce, so reducing it to text first would turn every date
+     * subtraction into NaN. That is a shortcut that happens to reproduce both halves of the
+     * language's answer, and it is the one exception here. */
+    switch (value.tag) {
+    case KILN_VALUE_UNDEFINED:
+    case KILN_VALUE_NULL:
+    case KILN_VALUE_BOOLEAN:
+    case KILN_VALUE_NUMBER:
+    case KILN_VALUE_STRING:
+    case KILN_VALUE_SYMBOL:
+    case KILN_VALUE_BIGINT:
+    case KILN_VALUE_CELL:
+    case KILN_VALUE_HOLE:
+    case KILN_VALUE_UNINITIALIZED:
+    case KILN_VALUE_DATE:
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+/* Whether this value's text form is a fact about its *tag* rather than about its property store.
+ *
+ * The companion to `kiln_c99_is_reference`, and the reason `kiln_c99_to_primitive` can fall back
+ * to `kiln_c99_text` for some references and must not for others. A function, a namespace, a
+ * promise, a generator, a collection, a regexp, a view, a buffer and a `Temporal` value each
+ * convert to one string decided entirely by what they are; a plain object and an array convert to
+ * something decided by what they hold, which only the `valueOf`/`toString` walk can ask. Answering
+ * the tagged form for those two instead is what made `Object.create(null) + 1` produce a string
+ * where the language stops the program. */
+static int kiln_c99_has_intrinsic_text(kiln_value value) {
+    switch (value.tag) {
+    case KILN_VALUE_COLLECTION:
+    case KILN_VALUE_PROMISE:
+    case KILN_VALUE_GENERATOR:
+    case KILN_VALUE_REGEXP:
+    case KILN_VALUE_ARRAY_BUFFER:
+    case KILN_VALUE_TYPED_ARRAY:
+    case KILN_VALUE_TEMPORAL:
+    /* A Date's human string is intrinsic too. `kiln_c99_is_reference` keeps one away from
+     * `kiln_c99_to_primitive` entirely -- see the note there -- so nothing reaches this through a
+     * Date today; it is here because the answer is a fact about the tag and leaving it out would
+     * make the classifier true only by accident of who calls it. */
+    case KILN_VALUE_DATE:
+        return 1;
+    default:
+        return kiln_c99_is_callable(value);
+    }
 }
 
 /* Whether a value has to be converted before it crosses the embedding boundary.
@@ -9221,6 +10176,9 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_PROMISE:
     case KILN_VALUE_ARRAY_BUFFER:
     case KILN_VALUE_TYPED_ARRAY:
+    /* Including every `Temporal` value, which fell to `default:` and was *falsy* -- so
+     * `if (date)` skipped its branch for a date the program was holding in its hand. */
+    case KILN_VALUE_TEMPORAL:
         return 1;
     case KILN_VALUE_BIGINT:
         /* Truthiness follows zero, not sign: `-1n` is truthy and `0n` is not. */
@@ -9556,7 +10514,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
         return kiln_c99_text_value(&joined);
     }
     case KILN_VALUE_ARRAY_BUFFER:
-        return kiln_c99_copy_text("[object ArrayBuffer]", 21);
+        return kiln_c99_copy_text("[object ArrayBuffer]", 20);
     case KILN_VALUE_REGEXP: {
         /* `String(/a/g)` is the literal as written, which is what `toString` returns. */
         kiln_regexp *regexp = kiln_c99_regexp_of(value);
@@ -9627,6 +10585,36 @@ static kiln_value kiln_c99_text(kiln_value value) {
         }
         return kiln_c99_copy_text(closure->source, closure->source_len);
     }
+    /* A `Temporal` value's text form is its ISO string, which is what its own `toString`
+     * answers and what `String(d)` and `${d}` have to produce. It had no case at all, so both
+     * read `undefined` -- and, through `kiln_c99_concat`'s length check, `"x" + d` appended
+     * nothing and printed "x". The handle renders itself; there is no second spelling of an ISO
+     * date anywhere here for the two to drift apart on. */
+    case KILN_VALUE_TEMPORAL: {
+        char buffer[128];
+        int32_t written = kiln_temporal_to_string(kiln_c99_temporal_of(value),
+                                                  (unsigned char *)buffer, sizeof buffer);
+        if (written < 0 || (size_t)written > sizeof buffer) {
+            return kiln_c99_undefined();
+        }
+        return kiln_c99_copy_text(buffer, (size_t)written);
+    }
+    /* The three object kinds whose text form is the tagged `[object X]` and nothing else. They
+     * inherit it from `Object.prototype.toString` in the language; this backend models that as
+     * `kiln_c99_text` rather than as a method a property walk finds, exactly as it does for a
+     * namespace. Without a case here `String(new Map())` threw "Cannot convert object to
+     * primitive value" where the language says "[object Map]". */
+    case KILN_VALUE_COLLECTION: {
+        kiln_collection *collection = kiln_c99_collection_of(value);
+        const char *shown = collection->is_weak
+                                ? (collection->is_map ? "[object WeakMap]" : "[object WeakSet]")
+                                : (collection->is_map ? "[object Map]" : "[object Set]");
+        return kiln_c99_copy_text(shown, strlen(shown));
+    }
+    case KILN_VALUE_PROMISE:
+        return kiln_c99_copy_text("[object Promise]", 16);
+    case KILN_VALUE_GENERATOR:
+        return kiln_c99_copy_text("[object Generator]", 18);
     /* The remaining callables, each of which `kiln_c99_is_callable` already answers `1` for.
      * None has source text a program wrote, so each takes the NativeFunction form the
      * specification allows for a built-in -- the same answer the interpreter gives.
@@ -10472,11 +11460,58 @@ static int kiln_c99_builtin_own_keys(uint64_t builtin, kiln_value *out) {
     kiln_value built;
     uint64_t code;
     int status;
+    if (kiln_c99_has_surface(builtin)) {
+        /* A table-driven built-in can describe itself, which is the one thing the hand-written
+         * chains could never do: the names it answers to *are* its rows. Refusing here is what
+         * kept the native side from enumerating its own surface, so the two engines could only be
+         * compared one member at a time -- by whichever bundle happened to read one. */
+        size_t index;
+        status = kiln_c99_new_array(&built);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT && status == KILN_C99_OK; ++index) {
+            const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
+            size_t len;
+            if (member->builtin != builtin) {
+                continue;
+            }
+            len = strlen(member->name);
+            if (len >= 2 && member->name[0] == '@' && member->name[1] == '@') {
+                /* Reported as the symbol it is, which is what `Reflect.ownKeys` wants;
+                 * `getOwnPropertyNames` drops it again, and the two exist to differ. */
+                kiln_value symbol;
+                if (!kiln_c99_symbol_of_key(member->name, len, &symbol)) {
+                    continue;
+                }
+                status = kiln_c99_array_push(built, symbol);
+                continue;
+            }
+            status = kiln_c99_array_push(built, kiln_c99_copy_text(member->name, len));
+        }
+        if (status == KILN_C99_OK && !kiln_c99_is_namespace(builtin)) {
+            /* A constructor is a function, and these two are answered by the read path rather
+             * than held as slots. `length` is deliberately not listed: reading it refuses, and a
+             * name in this list that a read cannot answer is the same lie in the other
+             * direction. */
+            kiln_value prototype;
+            status = kiln_c99_array_push(built, kiln_c99_copy_text("name", 4));
+            if (status == KILN_C99_OK &&
+                kiln_c99_get(NULL, kiln_c99_builtin(builtin), "prototype", 9, &prototype, 0,
+                             NULL) == KILN_C99_OK &&
+                prototype.tag == KILN_VALUE_BUILTIN) {
+                status = kiln_c99_array_push(built, kiln_c99_copy_text("prototype", 9));
+            }
+        }
+        *out = built;
+        return status;
+    }
     if (!kiln_c99_is_namespace(builtin)) {
-        /* A constructor's statics are reachable, but its own `name`, `length` and `prototype`
-         * are answered by the read path rather than held as slots -- so a list of just the
-         * statics would be short in a way a caller could not tell from complete. A namespace and
-         * a prototype table have no such properties, and their tables are the whole truth. */
+        /* A constructor whose statics are not table-driven -- the typed-array constructors and
+         * `Temporal`'s eight types -- still cannot list itself, because its members are computed
+         * from the kind rather than declared. A short list a caller could not tell from a
+         * complete one is worse than a refusal, so it stays a refusal and lands in the drift
+         * test's backlog by name. */
         return KILN_C99_CONTROL_ERROR;
     }
     status = kiln_c99_new_array(&built);
@@ -10921,6 +11956,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 *out = kiln_c99_method(operation);
                 return KILN_C99_OK;
             }
+        }
+        /* A well-known symbol the type does not carry is *absent*, not unwired, and absence is
+         * the answer the language gives. `@@toStringTag` is answered above because `Temporal`
+         * does define it; every other `@@` key is the machine probing rather than a member the
+         * program named, and `kiln_c99_to_primitive` opens by asking for `@@toPrimitive` on every
+         * reference it reduces. Refusing that probe turned `String(aPlainDate)` into a thrown
+         * "unsupported Temporal member" -- a refusal for a conversion the value plainly has, one
+         * step after the missing text case stopped it reading `undefined`. */
+        if (key_len >= 2 && key[0] == '@' && key[1] == '@') {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
         }
         /* A name that exists in the language and is not wired says which. Reading `undefined`
          * would surface three frames away as "not a function". */
@@ -11427,11 +12473,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_undefined();
             return KILN_C99_OK;
         }
-        if (target.bits == KILN_C99_BUILTIN_ARRAY_BUFFER &&
-            kiln_c99_same_name(key, key_len, "isView")) {
-            *out = kiln_c99_method(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW);
-            return KILN_C99_OK;
-        }
         if (target.bits == KILN_C99_BUILTIN_TEMPORAL_NOW) {
             /* `Temporal.Now` reads the realm's clock, which ADR 0015 makes virtual, UTC, and
              * started at the epoch. Every one of these is a function the program calls rather than
@@ -11636,21 +12677,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 }
             }
         }
-        /* A namespace's constants are values rather than methods, so they are answered here
-         * instead of through a call. */
-        if (target.bits == KILN_C99_BUILTIN_SYMBOL) {
-            size_t index;
-            static const char *const names[] = {"iterator", "asyncIterator", "hasInstance",
-                                                "toStringTag", "toPrimitive"};
-            for (index = 0; index < sizeof names / sizeof *names; ++index) {
-                if (kiln_c99_same_name(key, key_len, names[index])) {
-                    *out = kiln_c99_value(KILN_VALUE_SYMBOL,
-                                          (uint64_t)(uintptr_t)&kiln_c99_well_known[index],
-                                          (const char *)(uintptr_t)&kiln_c99_well_known[index], 0);
-                    return KILN_C99_OK;
-                }
+        /* A member whose answer is a value rather than a call -- `Math.PI`, `Number.MAX_VALUE`,
+         * `Symbol.iterator`, `Array[Symbol.species]` -- out of the same rows the methods come
+         * from. Three separate hand-written lists stood here, one per namespace, which is how
+         * `Number` came to answer five of the interpreter's fifteen statics and how
+         * `Array[Symbol.species]` came to answer nothing at all. */
+        {
+            kiln_value member;
+            if (kiln_c99_surface_value(target.bits, key, key_len, &member)) {
+                *out = member;
+                return KILN_C99_OK;
             }
-            return KILN_C99_CONTROL_ERROR;
         }
         if (kiln_c99_same_name(key, key_len, "prototype")) {
             /* Reached for its methods rather than as an object: these are not yet the objects the
@@ -11716,46 +12753,6 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OK;
                 }
             }
-        }
-        if (target.bits == KILN_C99_BUILTIN_MATH) {
-            if (kiln_c99_same_name(key, key_len, "PI")) {
-                *out = kiln_c99_number(3.14159265358979311600);
-            } else if (kiln_c99_same_name(key, key_len, "E")) {
-                *out = kiln_c99_number(2.71828182845904509080);
-            } else if (kiln_c99_same_name(key, key_len, "LN2")) {
-                *out = kiln_c99_number(0.69314718055994530942);
-            } else if (kiln_c99_same_name(key, key_len, "LN10")) {
-                *out = kiln_c99_number(2.30258509299404568402);
-            } else if (kiln_c99_same_name(key, key_len, "SQRT2")) {
-                *out = kiln_c99_number(1.41421356237309504880);
-            } else if (kiln_c99_same_name(key, key_len, "SQRT1_2")) {
-                *out = kiln_c99_number(0.70710678118654752440);
-            } else if (kiln_c99_same_name(key, key_len, "LOG2E")) {
-                *out = kiln_c99_number(1.44269504088896340736);
-            } else if (kiln_c99_same_name(key, key_len, "LOG10E")) {
-                *out = kiln_c99_number(0.43429448190325182765);
-            } else {
-                return KILN_C99_CONTROL_ERROR;
-            }
-            return KILN_C99_OK;
-        }
-        if (target.bits == KILN_C99_BUILTIN_NUMBER) {
-            if (kiln_c99_same_name(key, key_len, "MAX_SAFE_INTEGER")) {
-                *out = kiln_c99_number(9007199254740991.0);
-            } else if (kiln_c99_same_name(key, key_len, "MIN_SAFE_INTEGER")) {
-                *out = kiln_c99_number(-9007199254740991.0);
-            } else if (kiln_c99_same_name(key, key_len, "EPSILON")) {
-                *out = kiln_c99_number(2.220446049250313e-16);
-            } else if (kiln_c99_same_name(key, key_len, "POSITIVE_INFINITY")) {
-                *out = kiln_c99_number(1.0 / 0.0);
-            } else if (kiln_c99_same_name(key, key_len, "NEGATIVE_INFINITY")) {
-                *out = kiln_c99_number(-1.0 / 0.0);
-            } else if (kiln_c99_same_name(key, key_len, "NaN")) {
-                *out = kiln_c99_number(0.0 / 0.0);
-            } else {
-                return KILN_C99_CONTROL_ERROR;
-            }
-            return KILN_C99_OK;
         }
         return KILN_C99_CONTROL_ERROR;
     }
@@ -12438,6 +13435,16 @@ static int kiln_c99_inspect_into(kiln_text *text, kiln_value value, int depth) {
          * there are. */
         kiln_collection *collection = kiln_c99_collection_of(value);
         size_t index;
+        /* A weak collection shows neither its size nor its contents. It cannot: an entry is
+         * reachable only through a key the console does not hold, and printing a count would
+         * make the collector's timing observable from the program. `Map(0) {}` was the wrong
+         * label twice over -- it named a type the value is not, so a log line said `Map` about
+         * something `x instanceof Map` is false of. */
+        if (collection->is_weak) {
+            return kiln_c99_text_append_c(text, collection->is_map
+                                                    ? "WeakMap { <items unknown> }"
+                                                    : "WeakSet { <items unknown> }");
+        }
         if (kiln_c99_text_append_c(text, collection->is_map ? "Map(" : "Set(") != KILN_C99_OK ||
             kiln_c99_pad_number(text, (int64_t)collection->live, 1) != KILN_C99_OK ||
             kiln_c99_text_append_c(text, collection->live == 0 ? ") {}" : ") { ") !=
@@ -15755,6 +16762,162 @@ static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
     return KILN_C99_OK;
 }
 
+/* One positional argument of a `Temporal` constructor, coerced where the language coerces.
+ *
+ * `absent` is what an argument the caller left off becomes: 0 for a component the language
+ * defaults, and NaN for one it requires -- because NaN is the provider's "absent" and the engine
+ * rejects a required component that is missing with the RangeError the language gives, rather
+ * than quietly building a value out of a zero nobody wrote. */
+static int kiln_c99_temporal_argument(kiln_host *host, const kiln_value *args, size_t argc,
+                                      size_t at, double absent, double *out, int depth,
+                                      kiln_value *thrown) {
+    if (at >= argc || args[at].tag == KILN_VALUE_UNDEFINED) {
+        *out = absent;
+        return KILN_C99_OK;
+    }
+    return kiln_c99_to_number_checked(host, args[at], out, depth, thrown);
+}
+
+/* One positional *string* argument, left absent when the caller omitted it. */
+static void kiln_c99_temporal_text_argument(const kiln_value *args, size_t argc, size_t at,
+                                            kiln_temporal_text *slot) {
+    kiln_value text;
+    if (at >= argc || args[at].tag == KILN_VALUE_UNDEFINED) {
+        return;
+    }
+    text = kiln_c99_text(args[at]);
+    if (text.tag != KILN_VALUE_STRING) {
+        return;
+    }
+    slot->bytes = text.ptr;
+    slot->length = (int64_t)text.len;
+}
+
+/* `new Temporal.X(...)`: the eight positional constructors.
+ *
+ * NOT `from` with a bag, and the difference is observable in both directions. `from` reads named
+ * fields, resolves them through the calendar and honours an `overflow` option that defaults to
+ * `constrain`; a constructor takes *ISO* components positionally and rejects one out of range.
+ * `new Temporal.PlainDate(2000, 300, 1)` is a RangeError where the `from` of the same numbers is
+ * 2000-12-01. So this reaches `kiln_temporal_construct` -- the engine's own constructors, the
+ * same ones the interpreter reaches under ADR 0025 -- rather than being routed through the bag
+ * path, which would have been a silent wrong answer wearing the right shape.
+ *
+ * The arguments are read left to right because a `valueOf` can count its own calls, and the
+ * specification reads them in that order. */
+static int kiln_c99_temporal_construct(kiln_host *host, kiln_value *result, int32_t kind,
+                                       const kiln_value *args, size_t argc, int depth,
+                                       kiln_value *thrown) {
+    double numbers[10];
+    kiln_temporal_text texts[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    int64_t lengths[KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS];
+    char *packed;
+    int64_t high = 0;
+    uint64_t low = 0;
+    void *handle = NULL;
+    int32_t answered;
+    size_t index;
+    int status = KILN_C99_OK;
+    const double missing = 0.0 / 0.0;
+    for (index = 0; index < 10; ++index) {
+        numbers[index] = missing;
+    }
+    for (index = 0; index < KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS; ++index) {
+        texts[index].bytes = NULL;
+        texts[index].length = -1;
+    }
+    switch (kind) {
+    case 0: /* PlainDate(isoYear, isoMonth, isoDay, calendar) */
+        for (index = 0; index < 3 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, missing,
+                                                &numbers[1 + index], depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 3, &texts[4]);
+        break;
+    case 1: /* PlainTime(hour, minute, second, millisecond, microsecond, nanosecond) */
+        for (index = 0; index < 6 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, 0.0,
+                                                &numbers[4 + index], depth, thrown);
+        }
+        break;
+    case 2: /* PlainDateTime(isoYear, isoMonth, isoDay, then the six time components, calendar) */
+        for (index = 0; index < 9 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index,
+                                                index < 3 ? missing : 0.0, &numbers[1 + index],
+                                                depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 9, &texts[4]);
+        break;
+    case 3: /* PlainYearMonth(isoYear, isoMonth, calendar, referenceISODay) */
+        for (index = 0; index < 2 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, missing,
+                                                &numbers[1 + index], depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 2, &texts[4]);
+        /* The reference day rides in the `day` slot and stays NaN when it is left out, which is
+         * not the same as a day of zero: the engine then supplies the first of the month. */
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_temporal_argument(host, args, argc, 3, missing, &numbers[3], depth,
+                                                thrown);
+        }
+        break;
+    case 4: /* PlainMonthDay(isoMonth, isoDay, calendar, referenceISOYear) */
+        for (index = 0; index < 2 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, missing,
+                                                &numbers[2 + index], depth, thrown);
+        }
+        kiln_c99_temporal_text_argument(args, argc, 2, &texts[4]);
+        /* The reference year rides in the `year` slot; absent means the engine's 1972, which is
+         * the first ISO leap year after the epoch and the reason the slot exists at all. */
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_temporal_argument(host, args, argc, 3, missing, &numbers[1], depth,
+                                                thrown);
+        }
+        break;
+    case 5: /* Duration(years .. nanoseconds), in the duration slot order. */
+        for (index = 0; index < 10 && status == KILN_C99_OK; ++index) {
+            status = kiln_c99_temporal_argument(host, args, argc, index, 0.0, &numbers[index],
+                                                depth, thrown);
+        }
+        break;
+    case 6: /* Instant(epochNanoseconds) */
+    case 7: /* ZonedDateTime(epochNanoseconds, timeZone, calendar) */
+        /* A BigInt and nothing else -- not a number coerced to one. Nanoseconds since the epoch
+         * pass through a double exactly only within four months of 1970, so the language refuses
+         * a number here rather than accepting one it would have to round. */
+        if (argc == 0 || args[0].tag != KILN_VALUE_BIGINT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "a Temporal constructor needs a BigInt epochNanoseconds");
+        }
+        if (kiln_bigint_to_i128((const void *)(uintptr_t)args[0].bits, &high, &low) != 0) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                        "epochNanoseconds is outside the representable range");
+        }
+        if (kind == 7) {
+            kiln_c99_temporal_text_argument(args, argc, 1, &texts[3]);
+            kiln_c99_temporal_text_argument(args, argc, 2, &texts[4]);
+        }
+        break;
+    default: return KILN_C99_CONTROL_ERROR;
+    }
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    packed = kiln_c99_temporal_pack(texts, KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS, lengths);
+    if (packed == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    answered = kiln_temporal_construct((uint32_t)kind, numbers, 10, (const unsigned char *)packed,
+                                       lengths, KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS, high, low,
+                                       &handle);
+    free(packed);
+    if (answered != 0) {
+        return kiln_c99_temporal_raise(thrown, answered);
+    }
+    *result = kiln_c99_temporal_value(handle);
+    return KILN_C99_OK;
+}
+
 /* `Temporal.X.from(item)`: a value of the same type, ISO text, or a bag of fields.
  *
  * The options are read whichever shape `item` has, and before the value is built, because the
@@ -16254,7 +17417,7 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
         /* Specified to throw: `date1 < date2` would otherwise compare two NaNs and answer false,
          * which is exactly the silent wrong answer the language added this refusal to prevent. */
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                    "Temporal values have no primitive conversion; use compare()");
+                                    "a Temporal value cannot be converted to a primitive; use compare or equals");
     }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL_OP)) {
         return kiln_c99_temporal_operation(host, result, code, receiver, args, argc, depth, thrown);
@@ -16786,6 +17949,49 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         return kiln_c99_throw_error(
             thrown, KILN_C99_BUILTIN_ERROR,
             "Atomics requires native SharedArrayBuffer support");
+    }
+    /* `console.log` and `console.info` reached as values. The same host operation the compiled
+     * `console.log(x)` shape uses, and the same argument reduction in front of it: the embedding
+     * boundary carries only the scalar tags, so anything else is reduced to the text a console
+     * shows for it -- which is what the interpreter prints for one too. */
+    if (code == KILN_C99_METHOD_CONSOLE_LOG) {
+        kiln_value inline_args[KILN_C99_COERCED_INLINE];
+        kiln_value *reduced = NULL;
+        kiln_value host_result;
+        size_t index;
+        int called;
+        (void)receiver;
+        if (argc > 0) {
+            reduced = argc <= KILN_C99_COERCED_INLINE
+                          ? inline_args
+                          : (kiln_value *)malloc(argc * sizeof *reduced);
+            if (reduced == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (index = 0; index < argc; ++index) {
+                reduced[index] = kiln_c99_crosses_boundary(args[index])
+                                     ? kiln_c99_inspect(args[index])
+                                     : args[index];
+            }
+        }
+        called = host != NULL && host->call != NULL &&
+                 host->call(host->context, UINT16_C(1), (uint16_t)argc,
+                            argc == 0 ? NULL : reduced, &host_result) == 0;
+        if (reduced != NULL && reduced != inline_args) {
+            free(reduced);
+        }
+        if (!called) {
+            return KILN_C99_HOST_ERROR;
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    /* `console.error` and `console.warn` go to standard *error* in the interpreter, and the host
+     * ABI publishes one captured output operation. Printing them to stdout instead would be the
+     * two engines disagreeing about which stream a line went to, so this refuses by name. */
+    if (code == KILN_C99_METHOD_CONSOLE_UNAVAILABLE) {
+        kiln_c99_diagnostic_detail = "console.error and console.warn have no native stderr op";
+        return KILN_C99_CONTROL_ERROR;
     }
     /* Claimed here because the string range further down is open-ended at its top. */
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL)) {
@@ -18922,6 +20128,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                               : (collection->is_map ? "Map" : "Set");
                 }
                 break;
+            /* Each of the eight names itself: `[object Temporal.PlainDate]`, which is the
+             * `Symbol.toStringTag` the language gives them and the string every type test built
+             * on this operation reads. `[object Object]` was the answer before. */
+            case KILN_VALUE_TEMPORAL: tag = kiln_c99_temporal_tag(receiver); break;
             case KILN_VALUE_BUILTIN:
                 /* `Math` and `JSON` are the two namespaces the language gives a tag of their own,
                  * and they are not functions -- calling them `Function` was the reason
@@ -19512,6 +20722,30 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             /* The object, so a `setPrototypeOf` can be inlined into the expression that built
              * it. */
             *result = subject;
+            return status;
+        }
+        case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS: {
+            /* The other half of `getOwnPropertyNames`, off the very same walk -- `ownKeys` is
+             * both, and each of the two exists in order to be one of them. Its absence refused a
+             * bundled `lodash` at the point it asked an object for its symbol keys, a question
+             * the walk beneath it could already answer. */
+            kiln_value listed;
+            kiln_value symbols;
+            status = kiln_c99_all_own_keys(host, argc > 0 ? args[0] : kiln_c99_undefined(),
+                                           &listed, depth, thrown);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+            status = kiln_c99_new_array(&symbols);
+            for (index = 0; index < kiln_c99_array_of(listed)->count && status == KILN_C99_OK;
+                 ++index) {
+                kiln_value key = kiln_c99_array_of(listed)->elements[index];
+                if (key.tag != KILN_VALUE_SYMBOL) {
+                    continue;
+                }
+                status = kiln_c99_array_push(symbols, key);
+            }
+            *result = symbols;
             return status;
         }
         case KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_NAMES: {
@@ -22669,6 +23903,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
      * which reports an unknown name as an error rather than as absence. A Date is asked because
      * carrying one is the whole reason the step exists. */
     if (value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_DATE ||
+        value.tag == KILN_VALUE_TEMPORAL ||
         (value.tag == KILN_VALUE_PROXY &&
          kiln_c99_proxy_inner(value).tag == KILN_VALUE_OBJECT)) {
         kiln_value method;
@@ -22720,10 +23955,24 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     default:
         break;
     }
-    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY &&
-        value.tag != KILN_VALUE_TYPED_ARRAY && value.tag != KILN_VALUE_PROXY) {
+    /* A callable and a symbol are the two things `JSON.stringify` omits: a property holding one
+     * disappears from the object, and one passed directly answers `undefined`. */
+    if (kiln_c99_is_callable(value) || value.tag == KILN_VALUE_SYMBOL) {
         *serialised = 0;
         return KILN_C99_OK;
+    }
+    /* Every other remaining reference is an ordinary object to `JSON.stringify`, and one with no
+     * own enumerable string-keyed property serialises as `{}` -- which is what node answers for a
+     * Map, a Set, a promise, a generator, a regexp and a buffer alike, and what the interpreter
+     * already answered. Only the four below have a store worth walking.
+     *
+     * Listing the four and dropping the rest is the allowlist mistake this file has now made
+     * four times over: a `Map` came out as `undefined` at the top level, as a *missing key*
+     * inside an object, and as `null` inside an array -- three different wrong answers from one
+     * missing arm, none of which stopped the program. */
+    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY &&
+        value.tag != KILN_VALUE_TYPED_ARRAY && value.tag != KILN_VALUE_PROXY) {
+        return kiln_c99_text_append_c(text, "{}");
     }
 
     /* With no indent every separator is empty, which collapses the pretty form to the compact
@@ -24734,6 +25983,12 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_URL) {
         return kiln_c99_url_construct(result, args, argc, thrown);
     }
+    if (callee.tag == KILN_VALUE_BUILTIN &&
+        kiln_c99_temporal_kind_of_builtin(callee.bits) >= 0) {
+        return kiln_c99_temporal_construct(host, result,
+                                           kiln_c99_temporal_kind_of_builtin(callee.bits), args,
+                                           argc, depth, thrown);
+    }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_BUFFER) {
         return kiln_c99_buffer_from(result,
                                     argc > 0 ? args[0] : kiln_c99_number(0.0), thrown);
@@ -25638,14 +26893,19 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
             return KILN_C99_OK;
         }
     }
-    /* A callable's text form is not held in a property store, so the walk above cannot reach it:
-     * this backend models `Function.prototype.toString` -- and, for a namespace, the tagged
-     * `Object.prototype.toString` -- as `kiln_c99_text` rather than as a method a lookup finds.
-     * Failing here would report a missing conversion for values that plainly have one, which is
-     * how `String(Math)` came to throw where the language says "[object Math]". Scoped to
-     * callables on purpose: it is the fallback for the values whose conversion this file already
-     * defines, not the blanket one below it used to be. */
-    if (kiln_c99_is_callable(value)) {
+    /* Some values' text form is not held in a property store, so the walk above cannot reach it:
+     * this backend models `Function.prototype.toString` -- and, for a namespace, a promise, a
+     * generator and a collection, the tagged `Object.prototype.toString` -- as `kiln_c99_text`
+     * rather than as a method a lookup finds. Failing here would report a missing conversion for
+     * values that plainly have one, which is how `String(Math)` came to throw where the language
+     * says "[object Math]", and how `String(new Map())` still did.
+     *
+     * Still scoped, and to the same principle: these are the values whose conversion this file
+     * defines *for the tag*, not the blanket fallback this used to be. A plain object and an
+     * array are deliberately outside it -- their text depends on what they hold, the walk above
+     * is the only thing that can ask, and answering "[object Object]" here instead is what made
+     * `Object.create(null) + 1` produce a string where the language stops the program. */
+    if (kiln_c99_has_intrinsic_text(value)) {
         kiln_value shown = kiln_c99_text(value);
         if (shown.tag == KILN_VALUE_STRING) {
             *out = shown;
@@ -28626,7 +29886,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
+                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
                 argc + 1
             )
             .unwrap();
@@ -30798,6 +32058,109 @@ int main(void) {
         );
     }
 
+    /// Every tag `typeof` calls an object also converts, is truthy, and names itself.
+    ///
+    /// The sibling of `callable_text_covers_every_callable_tag`, and it exists because the same
+    /// mistake had been made four more times in four more places. `KILN_VALUE_TEMPORAL` was
+    /// absent from `kiln_c99_text`, from `kiln_c99_truthy`, from the `Object.prototype.toString`
+    /// tag switch and from `kiln_c99_is_reference`, so a `Temporal` value converted to
+    /// `undefined`, was *falsy*, named itself `[object Object]`, and was never reduced by a
+    /// coercing operator at all -- `"x" + aPlainDate` appended nothing and the program carried
+    /// on. Promises, generators and collections were missing from the text conversion too.
+    ///
+    /// Each of those is a classifier written as a list of the kinds it knows about, and a list
+    /// goes stale silently. `kiln_c99_typeof` is the one that cannot: a value the program can
+    /// hold has to answer *something* there, so its "object" arm is the closed enumeration of
+    /// the exotic object kinds and the right thing to check the others against.
+    ///
+    /// This does not check the answers -- `conformance/native/exotic-conversions.ts` drives every
+    /// kind through every implicit conversion against the interpreter for that. It checks that
+    /// the arm exists, which is what stops the next tag from being wrong in four places at once.
+    #[test]
+    fn every_object_tag_converts_and_is_truthy_and_names_itself() {
+        let runtime = include_str!("lib.rs");
+
+        fn body<'a>(runtime: &'a str, signature: &str) -> &'a str {
+            let start = runtime
+                .split(signature)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{signature} must exist"));
+            let end = start.find("\n}").expect("function must be closed");
+            &start[..end]
+        }
+
+        let typeof_body = body(
+            runtime,
+            "static kiln_value kiln_c99_typeof(kiln_value value) {",
+        );
+        // The run of `case` labels that falls through to the "object" answer.
+        let object_arm = typeof_body
+            .split("case KILN_VALUE_OBJECT:")
+            .nth(1)
+            .expect("`kiln_c99_typeof` must answer \"object\" for something");
+        let object_arm = &object_arm[..object_arm
+            .find("object_text")
+            .expect("the \"object\" arm must end at its answer")];
+        let mut tags: Vec<&str> = vec!["KILN_VALUE_OBJECT"];
+        tags.extend(
+            object_arm
+                .split("case ")
+                .skip(1)
+                .filter_map(|rest| rest.split(':').next())
+                .filter(|tag| tag.starts_with("KILN_VALUE_")),
+        );
+        // A guard that has quietly stopped reading the thing it checks is worse than none.
+        assert!(
+            tags.len() >= 8,
+            "read only {tags:?} out of `kiln_c99_typeof`; the parse has stopped working"
+        );
+        assert!(
+            tags.contains(&"KILN_VALUE_TEMPORAL"),
+            "the parse of `kiln_c99_typeof` has stopped working"
+        );
+
+        // An array and a plain object are deliberately outside `kiln_c99_has_intrinsic_text`:
+        // their text depends on what they hold, so only the `valueOf`/`toString` walk can ask.
+        let intrinsic_text = body(
+            runtime,
+            "static int kiln_c99_has_intrinsic_text(kiln_value value) {",
+        );
+        for (what, region, exempt) in [
+            (
+                "kiln_c99_text",
+                body(
+                    runtime,
+                    "static kiln_value kiln_c99_text(kiln_value value) {",
+                ),
+                &[][..],
+            ),
+            (
+                "kiln_c99_truthy",
+                body(runtime, "static int kiln_c99_truthy(kiln_value value) {"),
+                &[][..],
+            ),
+            (
+                "kiln_c99_has_intrinsic_text",
+                intrinsic_text,
+                &["KILN_VALUE_OBJECT", "KILN_VALUE_ARRAY"][..],
+            ),
+        ] {
+            let missing: Vec<&&str> = tags
+                .iter()
+                .filter(|tag| !exempt.contains(tag))
+                .filter(|tag| !region.contains(&format!("case {tag}:")))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "`kiln_c99_typeof` answers \"object\" for {missing:?}, which `{what}` has no \
+                 case for. Each would fall to its `default:`, and every one of those defaults is \
+                 a wrong answer rather than a refusal: `undefined` from the text conversion, \
+                 *falsy* from the truthiness test. A `Temporal` value was in exactly that state \
+                 and no probe converted one."
+            );
+        }
+    }
+
     #[test]
     #[ignore = "ADR 0036 migration gate: value-kernel state still ships in every module"]
     fn emitted_modules_do_not_own_realm_value_kernel_state() {
@@ -31132,6 +32495,14 @@ int32_t kiln_temporal_duration_from_fields(const double *fields, size_t field_co
     (void)fields; (void)field_count; (void)out_handle;
     return -1;
 }
+int32_t kiln_temporal_construct(uint32_t kind, const double *fields, size_t field_count,
+                                const unsigned char *text, const int64_t *text_lengths,
+                                size_t text_count, int64_t epoch_high, uint64_t epoch_low,
+                                void **out_handle) {
+    (void)kind; (void)fields; (void)field_count; (void)text; (void)text_lengths;
+    (void)text_count; (void)epoch_high; (void)epoch_low; (void)out_handle;
+    return -1;
+}
 int32_t kiln_temporal_parse(uint32_t kind, const unsigned char *bytes, size_t len,
                             const unsigned char *option_text,
                             const int64_t *option_text_lengths, size_t option_text_count,
@@ -31200,7 +32571,7 @@ static uint32_t kiln_test_callable_tags[256];
 static uint64_t kiln_test_callable_codes[256];
 static void *kiln_test_callable_stores[256];
 static size_t kiln_test_callable_store_count = 0;
-static kiln_value kiln_test_value_slots[3];
+static kiln_value kiln_test_value_slots[5];
 static uint64_t kiln_test_entropy_seed = 0;
 static uint64_t kiln_test_entropy_state = 0;
 static int kiln_test_entropy_initialized = 0;
@@ -31301,7 +32672,7 @@ int kiln_realm_callable_store(uint32_t tag, uint64_t code, void *candidate,
     return KILN_C99_OK;
 }
 int kiln_realm_value_slot(uint32_t key, void **out_slot) {
-    if (!kiln_test_realm_active || key == 0 || key > 3 || out_slot == NULL)
+    if (!kiln_test_realm_active || key == 0 || key > 5 || out_slot == NULL)
         return KILN_C99_INVALID_ARGUMENT;
     *out_slot = &kiln_test_value_slots[key - 1];
     return KILN_C99_OK;
