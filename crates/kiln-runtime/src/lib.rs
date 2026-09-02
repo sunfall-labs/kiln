@@ -126,6 +126,9 @@ pub enum HttpCloseMode {
 ///
 /// This stays separate from `HostOps`: TCP is a versioned capability boundary, while HTTP
 /// framing and body backpressure are realm-runtime policy. Only Kiln types cross this seam.
+/// Connections attach through the queued adapter (ADR 0046): the engines dispatch into a
+/// per-resource queue and the adapter drains it with `take_events` / `take_client_events` at
+/// its own checkpoint.
 pub trait ActiveHttpRuntime {
     /// Poll protocol tasks that may have become runnable without a new HostOps completion.
     fn poll_tasks(&mut self);
@@ -139,37 +142,12 @@ pub trait ActiveHttpRuntime {
     fn release_client_connection(&mut self, resource: ResourceId, reusable: bool) -> AgentRelease;
     fn client_connection_failed(&mut self, origin: &HttpOrigin) -> AgentFailure;
     fn client_connection_closed(&mut self, resource: ResourceId) -> Option<u64>;
-    fn start_connection(
-        &mut self,
-        resource: ResourceId,
-        allow_half_close: bool,
-    ) -> Vec<HttpStreamAction>;
-    fn connection_started(
-        &mut self,
-        resource: ResourceId,
-        operation: &HttpHostOp,
-        request: RequestId,
-    ) -> bool;
-    /// Consume the only raw resource-close capability authorized for an HTTP-owned connection.
-    fn start_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId>;
-    /// Consume an authorized close while already executing inside this realm runtime.
-    fn start_connection_close_in_context(
-        &mut self,
-        close: HttpCloseCapability,
-    ) -> Option<RequestId>;
-    fn complete_connection(
-        &mut self,
-        resource: ResourceId,
-        completion: Completion,
-    ) -> Option<Vec<HttpStreamAction>>;
-    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>>;
-    fn poll_connection_in_context(&mut self, resource: ResourceId)
-    -> Option<Vec<HttpStreamAction>>;
-    fn close_connection(
-        &mut self,
-        resource: ResourceId,
-        mode: HttpCloseMode,
-    ) -> Option<Vec<HttpStreamAction>>;
+    /// Attach the server engine to an accepted stream. False if the host cannot hand its
+    /// transport over or the resource is already attached.
+    fn start_connection(&mut self, resource: ResourceId, allow_half_close: bool) -> bool;
+    /// Stop a connection of either role. False once no engine owns it, which is not an error
+    /// for a caller that heard `Closed` a moment ago.
+    fn close_connection(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool;
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent>;
     fn start_response(
         &mut self,
@@ -191,7 +169,8 @@ pub trait ActiveHttpRuntime {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition>;
-    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction>;
+    /// Attach the client engine to a connected stream.
+    fn start_client_connection(&mut self, resource: ResourceId) -> bool;
     fn send_client_request(
         &mut self,
         resource: ResourceId,
@@ -1579,6 +1558,14 @@ impl<H: RealmHostProvider> RealmState<H> {
         events
     }
 
+    /// Forget queued events for every resource not in `known`, returning how many were
+    /// dropped. A loop that no longer tracks a connection cannot drain its queue, and an
+    /// undrained queue would keep that loop waiting forever; the events of a connection the
+    /// language has let go of are of no use to it.
+    pub fn discard_queued_http_events_except(&mut self, known: &[ResourceId]) -> usize {
+        self.queued_http.retain_resources(known)
+    }
+
     /// Drain the client events the queued adapter parked for `resource`.
     pub fn take_queued_client_events(
         &mut self,
@@ -2167,6 +2154,20 @@ impl QueuedHttp {
         !self.server.borrow().is_empty() || !self.client.borrow().is_empty()
     }
 
+    fn retain_resources(&self, known: &[ResourceId]) -> usize {
+        let mut dropped = 0;
+        for map in [&self.server] {
+            let mut map = map.borrow_mut();
+            let before = map.len();
+            map.retain(|resource, _| known.contains(resource));
+            dropped += before - map.len();
+        }
+        let mut client = self.client.borrow_mut();
+        let before = client.len();
+        client.retain(|resource, _| known.contains(resource));
+        dropped + before - client.len()
+    }
+
     /// Whether an event was queued since the last wait, consuming the flag. The `Notify`
     /// keeps its own permit, which the next wait drains at once; this only saves that wait.
     fn take_signalled(&self) -> bool {
@@ -2289,6 +2290,23 @@ impl HttpDispatch for QueuedDispatch {
     }
 }
 
+/// `name NUL value NUL` per header: the flattening the engines parse straight into Hyper's map.
+fn flatten_headers(headers: &[(String, String)]) -> Vec<u8> {
+    let mut flattened = Vec::with_capacity(
+        headers
+            .iter()
+            .map(|(name, value)| name.len() + value.len() + 2)
+            .sum(),
+    );
+    for (name, value) in headers {
+        flattened.extend_from_slice(name.as_bytes());
+        flattened.push(0);
+        flattened.extend_from_slice(value.as_bytes());
+        flattened.push(0);
+    }
+    flattened
+}
+
 impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     fn poll_tasks(&mut self) {
         self.poll_http_tasks();
@@ -2343,63 +2361,16 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         self.state.http_agent.closed(resource)
     }
 
-    fn start_connection(
-        &mut self,
-        resource: ResourceId,
-        allow_half_close: bool,
-    ) -> Vec<HttpStreamAction> {
-        self.start_http1_connection_with_options(resource, allow_half_close)
+    fn start_connection(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
+        self.server_attach_queued(resource, allow_half_close)
     }
 
-    fn connection_started(
-        &mut self,
-        resource: ResourceId,
-        operation: &HttpHostOp,
-        request: RequestId,
-    ) -> bool {
-        self.http_connection_started(resource, operation, request)
-    }
-
-    fn start_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId> {
-        self.start_http_connection_close(close)
-    }
-
-    fn start_connection_close_in_context(
-        &mut self,
-        close: HttpCloseCapability,
-    ) -> Option<RequestId> {
-        self.start_http_connection_close_in_context(close)
-    }
-
-    fn complete_connection(
-        &mut self,
-        resource: ResourceId,
-        completion: Completion,
-    ) -> Option<Vec<HttpStreamAction>> {
-        self.complete_http_connection(resource, completion)
-    }
-
-    fn poll_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>> {
-        self.poll_http_connection(resource)
-    }
-
-    fn poll_connection_in_context(
-        &mut self,
-        resource: ResourceId,
-    ) -> Option<Vec<HttpStreamAction>> {
-        self.poll_http_connection_in_context(resource)
-    }
-
-    fn close_connection(
-        &mut self,
-        resource: ResourceId,
-        mode: HttpCloseMode,
-    ) -> Option<Vec<HttpStreamAction>> {
-        self.close_http_connection(resource, mode)
+    fn close_connection(&mut self, resource: ResourceId, mode: HttpCloseMode) -> bool {
+        self.http_close(resource, mode)
     }
 
     fn take_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
-        self.take_http_events(resource)
+        self.state.take_queued_server_events(resource)
     }
 
     fn start_response(
@@ -2410,7 +2381,13 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         headers: Vec<(String, String)>,
         high_water_mark: usize,
     ) -> bool {
-        self.start_http1_response(resource, id, status, headers, high_water_mark)
+        self.state.http_server.start_response(
+            resource,
+            id,
+            status,
+            &flatten_headers(&headers),
+            high_water_mark,
+        )
     }
 
     fn write_response(
@@ -2419,7 +2396,7 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.write_http1_response(resource, id, data)
+        self.state.http_server.write_response(resource, id, &data)
     }
 
     fn end_response(
@@ -2428,11 +2405,11 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.end_http1_response(resource, id, data)
+        self.state.http_server.end_response(resource, id, &data)
     }
 
-    fn start_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
-        self.start_http1_client_connection(resource)
+    fn start_client_connection(&mut self, resource: ResourceId) -> bool {
+        self.client_attach_queued(resource)
     }
 
     fn send_client_request(
@@ -2442,7 +2419,14 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         high_water_mark: usize,
     ) -> bool {
-        self.send_http1_client_request(resource, request, id, high_water_mark)
+        self.state.http_client.send_request(
+            resource,
+            id,
+            &request.method,
+            &request.target,
+            &request.headers,
+            high_water_mark,
+        )
     }
 
     fn write_client_request(
@@ -2451,7 +2435,7 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.write_http1_client_request(resource, id, data)
+        self.state.http_client.write_request(resource, id, &data)
     }
 
     fn end_client_request(
@@ -2460,11 +2444,11 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
         id: u64,
         data: Vec<u8>,
     ) -> Option<node_stream::WriteDisposition> {
-        self.end_http1_client_request(resource, id, data)
+        self.state.http_client.end_request(resource, id, &data)
     }
 
     fn take_client_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpClientEvent> {
-        self.take_http1_client_events(resource)
+        self.state.take_queued_client_events(resource)
     }
 }
 

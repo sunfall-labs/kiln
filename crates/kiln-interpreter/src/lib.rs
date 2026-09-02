@@ -16,9 +16,9 @@ use kiln_ir::{
 };
 use kiln_runtime::{
     ActiveHttpRuntime, ClockCapability, DEFAULT_ENTROPY_SEED, EntropyCapability, HttpCloseMode,
-    HttpHostOp, HttpStreamAction, LocaleCapability, Realm, RealmCapabilities, RealmRuntime,
-    RuntimeHttpClientEvent, RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn,
-    TimeZoneCapability, TimerId, WorkItem, duration_from_milliseconds,
+    LocaleCapability, Realm, RealmCapabilities, RealmRuntime, RuntimeHttpClientEvent,
+    RuntimeHttpClientRequest, RuntimeHttpEvent, RuntimeTurn, TimeZoneCapability, TimerId, WorkItem,
+    duration_from_milliseconds,
     node_http::HttpResponseEvent,
     node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpOrigin},
     node_net::{ServerAction, TcpServerDriver},
@@ -9895,16 +9895,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 instruction,
                 message: "node:http requires the realm HTTP runtime".into(),
             })?;
-            let actions = unsafe {
+            // A connection the engine has already let go of (its `Closed` may still be queued)
+            // makes this the no-op that Node's `destroy` on a closed socket is.
+            let _ = unsafe {
                 ActiveHttpRuntime::close_connection(&mut *runtime, resource, HttpCloseMode::Abort)
-            }
-            .ok_or_else(|| ExecutionError::Host {
-                instruction,
-                message: "HTTP socket disappeared while destroying".into(),
-            })?;
-            for action in actions {
-                self.start_runtime_http_stream_action(&server, resource, action, instruction)?;
-            }
+            };
             return Ok(receiver.clone());
         }
         let (result, actions) = {
@@ -10615,25 +10610,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             message: "node:http requires the realm HTTP runtime".into(),
                         })?;
                         for resource in resources {
-                            let actions = unsafe {
+                            let _ = unsafe {
                                 ActiveHttpRuntime::close_connection(
                                     &mut *runtime,
                                     resource,
                                     HttpCloseMode::Graceful,
                                 )
-                            }
-                            .ok_or_else(|| ExecutionError::Host {
-                                instruction,
-                                message: "HTTP server stream disappeared while closing".into(),
-                            })?;
-                            for action in actions {
-                                self.start_runtime_http_stream_action(
-                                    &state,
-                                    resource,
-                                    action,
-                                    instruction,
-                                )?;
-                            }
+                            };
                         }
                     }
                     ServerProtocol::HttpClient => {}
@@ -10787,7 +10770,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     closed: false,
                     applying_read_completion: false,
                 };
-                let http_actions = if protocol == ServerProtocol::Http {
+                if protocol == ServerProtocol::Http {
                     let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
                         instruction,
                         message: "node:http requires the realm HTTP runtime".into(),
@@ -10799,16 +10782,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         .and_then(Weak::upgrade)
                         .and_then(|server| server.borrow().get("httpAllowHalfOpen"))
                         .is_some_and(|value| value.is_truthy());
-                    Some(unsafe {
+                    // ADR 0046: the host hands the accepted socket to the engine, whose task
+                    // queues protocol events for the checkpoint to drain.
+                    let attached = unsafe {
                         ActiveHttpRuntime::start_connection(
                             &mut *runtime,
                             accepted.resource.id,
                             allow_half_close,
                         )
-                    })
-                } else {
-                    None
-                };
+                    };
+                    if !attached {
+                        return Err(ExecutionError::Host {
+                            instruction,
+                            message:
+                                "the host could not hand the accepted socket to the HTTP engine"
+                                    .into(),
+                        });
+                    }
+                }
                 let net_actions = if protocol == ServerProtocol::Net {
                     stream.driver.start_reading()
                 } else {
@@ -10834,16 +10825,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         action,
                         instruction,
                     )?;
-                }
-                if let Some(actions) = http_actions {
-                    for action in actions {
-                        self.start_runtime_http_stream_action(
-                            state,
-                            accepted.resource.id,
-                            action,
-                            instruction,
-                        )?;
-                    }
                 }
                 Ok(())
             }
@@ -11129,103 +11110,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
     }
 
-    fn start_runtime_http_stream_action(
-        &mut self,
-        server: &Rc<RefCell<NodeServerState>>,
-        resource: kiln_host_abi::ResourceId,
-        action: HttpStreamAction,
-        instruction: usize,
-    ) -> Result<(), ExecutionError> {
-        match action {
-            HttpStreamAction::Start(operation) => {
-                let host = self.async_host.ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "node:http requires the Node execution Adapter".into(),
-                })?;
-                let referenced = !matches!(operation, HttpHostOp::TcpRead { .. });
-                let host_operation = operation.clone().into_host_op();
-                let request =
-                    unsafe { ActiveAsyncHostOps::start(&mut *host, host_operation, referenced) };
-                let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "node:http requires the realm HTTP runtime".into(),
-                })?;
-                let accepted = unsafe {
-                    ActiveHttpRuntime::connection_started(
-                        &mut *runtime,
-                        resource,
-                        &operation,
-                        request,
-                    )
-                };
-                if !accepted {
-                    return Err(ExecutionError::Host {
-                        instruction,
-                        message: "node:http transport rejected its own host operation".into(),
-                    });
-                }
-                self.push_pending_node(PendingNodeRequest::Stream {
-                    request,
-                    server: Rc::clone(server),
-                    resource,
-                });
-                Ok(())
-            }
-            HttpStreamAction::Close(close_resource) => {
-                if close_resource.resource() != resource {
-                    return Err(ExecutionError::Host {
-                        instruction,
-                        message: "node:http transport selected a close for another resource".into(),
-                    });
-                }
-                let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "node:http requires the realm HTTP runtime".into(),
-                })?;
-                let request = unsafe {
-                    ActiveHttpRuntime::start_connection_close_in_context(
-                        &mut *runtime,
-                        close_resource,
-                    )
-                }
-                .ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "node:http transport rejected its authorized close".into(),
-                })?;
-                self.push_pending_node(PendingNodeRequest::Stream {
-                    request,
-                    server: Rc::clone(server),
-                    resource,
-                });
-                Ok(())
-            }
-            HttpStreamAction::Cancel(request) => self.start_http_stream_action(
-                server,
-                resource,
-                StreamAction::Cancel(request),
-                instruction,
-            ),
-            HttpStreamAction::Data(data) => self.start_http_stream_action(
-                server,
-                resource,
-                StreamAction::Data(data),
-                instruction,
-            ),
-            HttpStreamAction::Event(event) => self.start_http_stream_action(
-                server,
-                resource,
-                StreamAction::Event(event),
-                instruction,
-            ),
-            HttpStreamAction::Error(error) => self.start_http_stream_action(
-                server,
-                resource,
-                StreamAction::Error(error),
-                instruction,
-            ),
-        }
-    }
-
     fn dispatch_runtime_http_events(
         &mut self,
         server: &Rc<RefCell<NodeServerState>>,
@@ -11317,42 +11201,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     self.emit_http_server(server, "clientError", vec![error], instruction)?;
                 }
                 RuntimeHttpEvent::Closed => {
-                    if let Some(stream) = server
-                        .borrow_mut()
+                    // The engine's last word: the transport is gone and the connection has
+                    // left its table. Nothing remains to close; the realm's record goes
+                    // unless a request or response object is still reachable from JavaScript.
+                    let mut server_state = server.borrow_mut();
+                    if let Some(stream) = server_state
                         .streams
                         .iter_mut()
                         .find(|stream| stream.resource() == resource)
                     {
                         stream.closed = true;
                     }
-                    let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-                        instruction,
-                        message: "node:http requires the realm HTTP runtime".into(),
-                    })?;
-                    let actions = unsafe {
-                        ActiveHttpRuntime::close_connection(
-                            &mut *runtime,
-                            resource,
-                            // Hyper's server task can publish Closed after selecting the final
-                            // response bytes. Treat protocol completion as graceful so the
-                            // transport drains that write; forced socket destruction remains the
-                            // explicit Abort path below (and in node:net destroy).
-                            HttpCloseMode::Graceful,
-                        )
-                    }
-                    .ok_or_else(|| ExecutionError::Host {
-                        instruction,
-                        message: "HTTP stream disappeared while closing after protocol completion"
-                            .into(),
-                    })?;
-                    for action in actions {
-                        self.start_runtime_http_stream_action(
-                            server,
-                            resource,
-                            action,
-                            instruction,
-                        )?;
-                    }
+                    server_state.streams.retain(|stream| {
+                        stream.resource() != resource
+                            || stream.request.is_some()
+                            || stream.response.is_some()
+                    });
                 }
             }
         }
@@ -11461,22 +11325,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             instruction,
                         )?;
                     } else if release == AgentRelease::Retire {
-                        let actions = unsafe {
+                        let _ = unsafe {
                             ActiveHttpRuntime::close_connection(
                                 &mut *runtime,
                                 resource,
                                 HttpCloseMode::Graceful,
                             )
-                        }
-                        .unwrap_or_default();
-                        for action in actions {
-                            self.start_runtime_http_stream_action(
-                                owner,
-                                resource,
-                                action,
-                                instruction,
-                            )?;
-                        }
+                        };
                     }
                 }
                 RuntimeHttpClientEvent::Error { id, message } => {
@@ -11505,24 +11360,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let retry = unsafe {
                         ActiveHttpRuntime::client_connection_closed(&mut *runtime, resource)
                     };
-                    let actions = {
-                        unsafe {
-                            ActiveHttpRuntime::close_connection(
-                                &mut *runtime,
-                                resource,
-                                HttpCloseMode::Abort,
-                            )
-                        }
-                        .unwrap_or_default()
-                    };
-                    for action in actions {
-                        self.start_runtime_http_stream_action(
-                            owner,
-                            resource,
-                            action,
-                            instruction,
-                        )?;
+                    // The engine has already let the transport go; the realm's record of the
+                    // connection goes with it.
+                    if let Some(stream) = owner
+                        .borrow_mut()
+                        .streams
+                        .iter_mut()
+                        .find(|stream| stream.resource() == resource)
+                    {
+                        stream.closed = true;
                     }
+                    owner
+                        .borrow_mut()
+                        .streams
+                        .retain(|stream| stream.resource() != resource);
                     if let Some(request) = retry {
                         let queued = self.http_client_request(request).ok_or_else(|| {
                             ExecutionError::Host {
@@ -11536,33 +11387,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         }
         Ok(event_count)
-    }
-
-    fn poll_runtime_http_writes(
-        &mut self,
-        resource: kiln_host_abi::ResourceId,
-        instruction: usize,
-    ) -> Result<(), ExecutionError> {
-        let server = self
-            .http_server_for_stream(resource)
-            .ok_or_else(|| ExecutionError::Host {
-                instruction,
-                message: "HTTP response lost its stream".into(),
-            })?;
-        let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-            instruction,
-            message: "node:http requires the realm HTTP runtime".into(),
-        })?;
-        let actions =
-            unsafe { ActiveHttpRuntime::poll_connection_in_context(&mut *runtime, resource) }
-                .ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "runtime HTTP connection disappeared while writing".into(),
-                })?;
-        for action in actions {
-            self.start_runtime_http_stream_action(&server, resource, action, instruction)?;
-        }
-        Ok(())
     }
 
     /// Complete a `server.close()` that arrived before this response was ended.
@@ -11598,16 +11422,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             instruction,
             message: "node:http requires the realm HTTP runtime".into(),
         })?;
-        let actions = unsafe {
+        let _ = unsafe {
             ActiveHttpRuntime::close_connection(&mut *runtime, resource, HttpCloseMode::Graceful)
-        }
-        .ok_or_else(|| ExecutionError::Host {
-            instruction,
-            message: "HTTP server stream disappeared while closing".into(),
-        })?;
-        for action in actions {
-            self.start_runtime_http_stream_action(&server, resource, action, instruction)?;
-        }
+        };
         Ok(())
     }
 
@@ -11938,21 +11755,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // another host completion, or a response that depends on that continuation can never be
         // written and the realm deadlocks on its own socket.
         self.drain_microtask_jobs()?;
-        if request_id.is_some() {
-            let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-                instruction,
-                message: "node:http requires the realm HTTP runtime".into(),
-            })?;
-            let actions =
-                unsafe { ActiveHttpRuntime::poll_connection_in_context(&mut *runtime, resource) }
-                    .ok_or_else(|| ExecutionError::Host {
-                    instruction,
-                    message: "runtime HTTP connection disappeared after request dispatch".into(),
-                })?;
-            for action in actions {
-                self.start_runtime_http_stream_action(server, resource, action, instruction)?;
-            }
-        }
         Ok(incoming)
     }
 
@@ -12133,7 +11935,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "Hyper lost the HTTP response body".into(),
                 })?;
-                self.poll_runtime_http_writes(resource, instruction)?;
                 Ok(Value::Boolean(disposition.ready))
             }
             Native::NodeResponseEnd => {
@@ -12191,7 +11992,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "Hyper lost the HTTP response body".into(),
                 })?;
-                self.poll_runtime_http_writes(resource, instruction)?;
                 self.close_http_stream_after_response_end(resource, instruction)?;
                 Ok(receiver.clone())
             }
@@ -12242,7 +12042,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         instruction,
                         message: "Hyper lost the HTTP client request body".into(),
                     })?;
-                    self.poll_runtime_http_writes(resource, instruction)?;
                     return Ok(Value::Boolean(disposition.ready));
                 }
                 if state.borrow().ended {
@@ -12366,7 +12165,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     instruction,
                     message: "Hyper lost the HTTP client request body".into(),
                 })?;
-                self.poll_runtime_http_writes(resource, instruction)?;
             }
             return Ok(());
         }
@@ -12441,7 +12239,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "Hyper lost the HTTP client request body".into(),
             })?;
         }
-        self.poll_runtime_http_writes(resource, instruction)?;
         Ok(())
     }
 
@@ -12724,70 +12521,29 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 PendingNodeRequest::Stream {
                     server, resource, ..
                 } => {
-                    let runtime_http = server
-                        .borrow()
+                    // Only raw `node:net` sockets read and write through host operations;
+                    // an HTTP connection's bytes belong to the engine (ADR 0046).
+                    let mut server_state = server.borrow_mut();
+                    let stream = server_state
                         .streams
-                        .iter()
+                        .iter_mut()
                         .find(|stream| stream.resource() == resource)
-                        .is_some_and(|stream| stream.runtime_http);
-                    if runtime_http {
-                        let runtime = self.http_runtime.ok_or_else(|| ExecutionError::Host {
-                            instruction: self.instruction,
-                            message: "node:http requires the realm HTTP runtime".into(),
-                        })?;
-                        let actions = unsafe {
-                            ActiveHttpRuntime::complete_connection(
-                                &mut *runtime,
-                                resource,
-                                completion,
-                            )
-                        }
                         .ok_or_else(|| ExecutionError::Host {
                             instruction: self.instruction,
-                            message: "completion lost its runtime HTTP connection".into(),
+                            message: "completion lost its node:net stream".into(),
                         })?;
-                        for action in actions {
-                            self.start_runtime_http_stream_action(
-                                &server,
-                                resource,
-                                action,
-                                self.instruction,
-                            )?;
+                    stream.applying_read_completion = true;
+                    let actions = stream.driver.completed(completion).ok_or_else(|| {
+                        ExecutionError::Host {
+                            instruction: self.instruction,
+                            message: "completion lost its node:net stream".into(),
                         }
-                    } else {
-                        let mut server_state = server.borrow_mut();
-                        let stream = server_state
-                            .streams
-                            .iter_mut()
-                            .find(|stream| stream.resource() == resource)
-                            .ok_or_else(|| ExecutionError::Host {
-                                instruction: self.instruction,
-                                message: "completion lost its node:http stream".into(),
-                            })?;
-                        stream.applying_read_completion = true;
-                        let actions = stream.driver.completed(completion).ok_or_else(|| {
-                            ExecutionError::Host {
-                                instruction: self.instruction,
-                                message: "completion lost its node:http stream".into(),
-                            }
-                        })?;
-                        drop(server_state);
-                        for action in actions {
-                            self.start_http_stream_action(
-                                &server,
-                                resource,
-                                action,
-                                self.instruction,
-                            )?;
-                        }
+                    })?;
+                    drop(server_state);
+                    for action in actions {
+                        self.start_http_stream_action(&server, resource, action, self.instruction)?;
                     }
-                    if !runtime_http {
-                        sync_node_socket_ready_state(&server, resource);
-                    }
-                    if runtime_http {
-                        let _ =
-                            self.dispatch_runtime_http_events(&server, resource, self.instruction)?;
-                    }
+                    sync_node_socket_ready_state(&server, resource);
                     if let Some(stream) = server
                         .borrow_mut()
                         .streams
@@ -12906,19 +12662,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 .client_requests
                                 .insert(request_id, request.clone());
                         }
-                        let http_actions = if protocol == ServerProtocol::HttpClient {
+                        if protocol == ServerProtocol::HttpClient {
                             let runtime =
                                 self.http_runtime.ok_or_else(|| ExecutionError::Host {
                                     instruction: self.instruction,
                                     message: "node:http client requires the realm HTTP runtime"
                                         .into(),
                                 })?;
-                            Some(unsafe {
+                            // ADR 0046: the connected socket goes to the client engine, whose
+                            // task queues response events for the checkpoint to drain.
+                            let attached = unsafe {
                                 ActiveHttpRuntime::start_client_connection(&mut *runtime, resource)
-                            })
-                        } else {
-                            None
-                        };
+                            };
+                            if !attached {
+                                return Err(ExecutionError::Host {
+                                    instruction: self.instruction,
+                                    message: "the host could not hand the connected socket to \
+                                              the HTTP engine"
+                                        .into(),
+                                });
+                            }
+                        }
                         let net_actions = if protocol == ServerProtocol::Net {
                             connection.driver.start_reading()
                         } else {
@@ -12957,16 +12721,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 action,
                                 self.instruction,
                             )?;
-                        }
-                        if let Some(actions) = http_actions {
-                            for action in actions {
-                                self.start_runtime_http_stream_action(
-                                    &owner,
-                                    resource,
-                                    action,
-                                    self.instruction,
-                                )?;
-                            }
                         }
                         Ok(())
                     }
@@ -13136,10 +12890,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         &mut self,
         runtime: &mut RealmRuntime,
     ) -> Result<(), ExecutionError> {
-        // Response commands and body wakeups can make Hyper runnable without another HostOps
-        // completion. Let Tokio advance those tasks before inspecting their per-connection
-        // outputs; otherwise a pipelined request already buffered by Hyper can sit behind an
-        // unrelated pending socket read forever.
+        // Response slots and body wakeups make the engine tasks runnable without another
+        // HostOps completion. Let Tokio advance them before inspecting their queues; otherwise
+        // a pipelined request already buffered by Hyper can sit behind an unrelated pending
+        // socket read forever.
         runtime.poll_http_tasks();
         let shared = self.module_realm.as_ref().map(|realm| realm.borrow());
         let servers = shared
@@ -13160,25 +12914,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             })
             .collect::<Vec<_>>();
         drop(shared);
+        // A queue nobody drains would keep the loop waiting on it forever; an event for a
+        // connection this realm no longer tracks is of no use to it.
+        let known = connections
+            .iter()
+            .map(|(_, resource)| *resource)
+            .collect::<Vec<_>>();
+        runtime.discard_queued_http_events_except(&known);
         for (server, resource) in connections {
-            for _ in 0..8 {
-                let actions =
-                    runtime
-                        .poll_http_connection(resource)
-                        .ok_or_else(|| ExecutionError::Host {
-                            instruction: self.instruction,
-                            message: "runtime HTTP connection disappeared at checkpoint".into(),
-                        })?;
-                let had_actions = !actions.is_empty();
+            loop {
                 let had_events = runtime.enter(|| {
-                    for action in actions {
-                        self.start_runtime_http_stream_action(
-                            &server,
-                            resource,
-                            action,
-                            self.instruction,
-                        )?;
-                    }
                     let event_count = if server.borrow().protocol == ServerProtocol::HttpClient {
                         self.dispatch_runtime_http_client_events(
                             &server,
@@ -13190,13 +12935,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     };
                     Ok::<_, ExecutionError>(event_count != 0)
                 })?;
-                if !had_actions && !had_events {
+                if !had_events {
                     break;
                 }
+                // A handler answered, or ended a body: the connection's task has work again
+                // (the next pipelined request, `finish`, `Closed`), and it may queue more.
+                runtime.poll_http_tasks();
             }
         }
         Ok(())
     }
+
     /// The dispatch loop reached [`Self::checkpoint`]: find out which boundary that was.
     ///
     /// Deliberately not inlined into the loop. Everything here is either the end of the program
