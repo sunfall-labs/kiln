@@ -293,6 +293,13 @@ pub const SURFACE: &[Builtin] = &[
         global: "Uint8Array",
         members: &["of", "from", "BYTES_PER_ELEMENT", "fromBase64", "fromHex"],
     },
+    Builtin {
+        // `now` is the only member either engine answers. The rest of the Performance interface
+        // wants an entry buffer and a time origin that a realm does not carry yet, so declaring
+        // just this one keeps the table a description of what is really shared.
+        global: "performance",
+        members: &["now"],
+    },
 ];
 
 const fn same(left: &str, right: &str) -> bool {
