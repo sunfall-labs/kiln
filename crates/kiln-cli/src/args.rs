@@ -60,6 +60,8 @@ pub enum Command {
         /// How long the program may run. Unmetered unless `--max-steps` says otherwise: a
         /// person running their own program is not the caller a step budget protects.
         steps: StepBudget,
+        /// Number of concurrent worker realms / threads sharing the listening socket.
+        workers: usize,
     },
     Build {
         path: PathBuf,
@@ -120,6 +122,7 @@ where
     let mut test_output: Option<PathBuf> = None;
     let mut profile: Option<NativeProfile> = None;
     let mut max_steps: Option<u64> = None;
+    let mut workers: Option<usize> = None;
     let mut shared = false;
     let mut dry_run = false;
     let mut only_positional = false;
@@ -187,6 +190,18 @@ where
                 let raw = value_for(&flag, inline, &mut args)?;
                 max_steps = Some(parse_max_steps(&raw)?);
             }
+            "--workers" => {
+                let raw = value_for(&flag, inline, &mut args)?;
+                let count: usize = raw.parse().map_err(|_| {
+                    Error::usage(format!(
+                        "invalid worker count `{raw}`: expected a positive integer"
+                    ))
+                })?;
+                if count == 0 {
+                    return Err(Error::usage("worker count must be at least 1"));
+                }
+                workers = Some(count);
+            }
             _ => {
                 return Err(Error::usage(format!("unknown option `{arg}`")));
             }
@@ -246,6 +261,9 @@ where
     if max_steps.is_some() && name != "run" {
         return Err(Error::usage("--max-steps only applies to `kiln run`"));
     }
+    if workers.is_some() && name != "run" {
+        return Err(Error::usage("--workers only applies to `kiln run`"));
+    }
     // The native backend compiles the step counter out entirely, so a budget there would be a
     // flag that silently does nothing -- which is the one thing this parser refuses to be.
     if max_steps.is_some() && native {
@@ -264,6 +282,7 @@ where
             native,
             profile: profile.unwrap_or_default(),
             steps: max_steps.map_or(StepBudget::Unmetered, StepBudget::Limited),
+            workers: workers.unwrap_or(1),
         },
         "build" => Command::Build {
             path: PathBuf::from(one_operand(&name, &mut positional)?),
@@ -559,6 +578,7 @@ mod tests {
                 native: true,
                 profile: NativeProfile::Check,
                 steps: StepBudget::Unmetered,
+                workers: 1,
             }
         );
     }
@@ -690,6 +710,27 @@ mod tests {
             usage_error(&["run", "a.mjs", "--native", "--max-steps", "10"])
                 .contains("cannot be combined")
         );
+    }
+
+    #[test]
+    fn workers_option_defaults_and_overrides() {
+        assert!(matches!(
+            run(&["run", "server.mjs"]).command,
+            Command::Run { workers: 1, .. }
+        ));
+        assert!(matches!(
+            run(&["run", "server.mjs", "--workers", "4"]).command,
+            Command::Run { workers: 4, .. }
+        ));
+        assert!(matches!(
+            run(&["run", "server.mjs", "--workers=8"]).command,
+            Command::Run { workers: 8, .. }
+        ));
+        assert!(usage_error(&["run", "server.mjs", "--workers", "0"]).contains("at least 1"));
+        assert!(
+            usage_error(&["run", "server.mjs", "--workers", "abc"]).contains("positive integer")
+        );
+        assert!(usage_error(&["check", "server.mjs", "--workers", "4"]).contains("only applies"));
     }
 
     #[test]
