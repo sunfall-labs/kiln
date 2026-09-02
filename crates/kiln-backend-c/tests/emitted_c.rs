@@ -626,7 +626,7 @@ fn runtime_prelude_size() {
     // finaliser per heap kind, and the string-builder seam: about 700 lines, to 24,704. The band
     // is again roughly +/-9% of that.
     const FLOOR_LINES: usize = 22_500;
-    const CEILING_LINES: usize = 27_000;
+    const CEILING_LINES: usize = 28_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

@@ -10401,10 +10401,19 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     args[argument].tag == KILN_VALUE_NULL) {
                     continue;
                 }
-                if (args[argument].tag != KILN_VALUE_OBJECT) {
+                kiln_value src_val = args[argument];
+                if (src_val.tag == KILN_VALUE_FUNCTION || src_val.tag == KILN_VALUE_METHOD ||
+                    src_val.tag == KILN_VALUE_BOUND || src_val.tag == KILN_VALUE_BUILTIN) {
+                    kiln_value store;
+                    int st = kiln_c99_callable_store(src_val, &store, 0);
+                    if (st != KILN_C99_OK) return st;
+                    if (store.tag != KILN_VALUE_OBJECT) continue;
+                    src_val = store;
+                }
+                if (src_val.tag != KILN_VALUE_OBJECT) {
                     return KILN_C99_CONTROL_ERROR;
                 }
-                source = kiln_c99_object_of(args[argument]);
+                source = kiln_c99_object_of(src_val);
                 for (index = 0; index < source->count; ++index) {
                     if (!source->properties[index].enumerable) {
                         continue;
@@ -12086,6 +12095,27 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
             }
             *result = kiln_c99_text_value(&built);
+            return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_STRING_FROM_CHAR_CODE: {
+            uint16_t stack_units[64];
+            uint16_t *units = stack_units;
+            size_t i;
+            if (argc > 64) {
+                units = (uint16_t *)malloc(argc * sizeof(uint16_t));
+                if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
+            }
+            for (i = 0; i < argc; ++i) {
+                double num;
+                status = kiln_c99_to_number_checked(host, args[i], &num, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    if (units != stack_units) free(units);
+                    return status;
+                }
+                units[i] = (uint16_t)(uint32_t)num;
+            }
+            *result = kiln_c99_from_units(units, argc);
+            if (units != stack_units) free(units);
             return KILN_C99_OK;
         }
         case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: {
@@ -14223,6 +14253,14 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
             }
         }
         return KILN_C99_OK;
+    }
+    if (source.tag == KILN_VALUE_FUNCTION || source.tag == KILN_VALUE_METHOD ||
+        source.tag == KILN_VALUE_BOUND || source.tag == KILN_VALUE_BUILTIN) {
+        kiln_value store;
+        int status = kiln_c99_callable_store(source, &store, 0);
+        if (status != KILN_C99_OK) return status;
+        if (store.tag != KILN_VALUE_OBJECT) return KILN_C99_OK;
+        source = store;
     }
     if (source.tag != KILN_VALUE_OBJECT) {
         return KILN_C99_CONTROL_ERROR;
