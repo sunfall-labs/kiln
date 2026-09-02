@@ -1049,6 +1049,7 @@ method_ids! {
     (KILN_C99_METHOD_IS_PROTOTYPE_OF, 153, Generic),
     (KILN_C99_METHOD_PROPERTY_IS_ENUMERABLE, 154, Generic),
     (KILN_C99_METHOD_STRING_RAW, 155, Generic),
+    (KILN_C99_METHOD_STRING_FROM_CHAR_CODE, 442, Generic),
     (KILN_C99_METHOD_OBJECT_DEFINE_PROPERTY, 156, Generic),
     (KILN_C99_METHOD_OBJECT_DEFINE_PROPERTIES, 157, Generic),
     (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR, 158, Generic),
@@ -1163,6 +1164,10 @@ method_ids! {
     (KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE, 382, NodePath),
     (KILN_C99_METHOD_NODE_PATH_JOIN, 383, NodePath),
     (KILN_C99_METHOD_NODE_PATH_RESOLVE, 384, NodePath),
+    (KILN_C99_METHOD_NODE_PATH_DIRNAME, 438, NodePath),
+    (KILN_C99_METHOD_NODE_PATH_BASENAME, 439, NodePath),
+    (KILN_C99_METHOD_NODE_PATH_EXTNAME, 440, NodePath),
+    (KILN_C99_METHOD_NODE_PATH_RELATIVE, 441, NodePath),
     (KILN_C99_METHOD_NODE_ASSERT_OK, 385, Direct),
     (KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR, 386, Direct),
     (KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE, 387, Direct),
@@ -1457,6 +1462,7 @@ builtin_surface! {
     (KILN_C99_BUILTIN_ARRAY, "Array", "@@species", ctor(KILN_C99_BUILTIN_ARRAY)),
 
     (KILN_C99_BUILTIN_STRING, "String", "raw", code(KILN_C99_METHOD_STRING_RAW)),
+    (KILN_C99_BUILTIN_STRING, "String", "fromCharCode", code(KILN_C99_METHOD_STRING_FROM_CHAR_CODE)),
 
     (KILN_C99_BUILTIN_NUMBER, "Number", "isInteger", code(KILN_C99_METHOD_IS_INTEGER)),
     (KILN_C99_BUILTIN_NUMBER, "Number", "isSafeInteger", code(KILN_C99_METHOD_IS_SAFE_INTEGER)),
@@ -1649,8 +1655,6 @@ builtin_backlog! {
      "sealing is weaker than freezing; answering isFrozen would be a silent wrong answer"),
     ("Array", "fromAsync",
      "not implemented; needs the async-iterator protocol"),
-    ("String", "fromCharCode",
-     "not implemented; builds a string from code units"),
     ("String", "fromCodePoint",
      "not implemented; builds a string from scalar values"),
     ("Promise", "try",
@@ -2446,6 +2450,7 @@ enum kiln_value_tag {
  * not as `this`. */
 "#,
     emit_method_define!(KILN_C99_METHOD_STRING_RAW),
+    emit_method_define!(KILN_C99_METHOD_STRING_FROM_CHAR_CODE),
     r#"
 /* The descriptor half of the reflective statics: the operations that talk about a property
  * rather than through it. Numbered in the receiver-less range, because every one of them takes
@@ -2634,6 +2639,10 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE),
     emit_method_define!(KILN_C99_METHOD_NODE_PATH_JOIN),
     emit_method_define!(KILN_C99_METHOD_NODE_PATH_RESOLVE),
+    emit_method_define!(KILN_C99_METHOD_NODE_PATH_DIRNAME),
+    emit_method_define!(KILN_C99_METHOD_NODE_PATH_BASENAME),
+    emit_method_define!(KILN_C99_METHOD_NODE_PATH_EXTNAME),
+    emit_method_define!(KILN_C99_METHOD_NODE_PATH_RELATIVE),
     emit_method_define!(KILN_C99_METHOD_NODE_ASSERT_OK),
     emit_method_define!(KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR),
     emit_method_define!(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),

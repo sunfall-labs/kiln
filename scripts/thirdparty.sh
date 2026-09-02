@@ -132,7 +132,7 @@ for probe in "$BUNDLES"/probes/*.mjs; do
 	# of which builtin the backend has not been given yet, which is the next thing to implement.
 	# Matching on the marker rather than on the exit status keeps a library that legitimately
 	# prints the word "refusal" from being miscounted.
-	elif [[ $actual == *"native backend refusal:"* || $actual == *"unsupported native emission:"* ]]; then
+	elif [[ $actual == *"native backend refusal"* || $actual == *"unsupported native emission:"* ]]; then
 		native_refused=$((native_refused + 1))
 		REFUSALS+=("  $(printf '%-14s %s' "$name" "$(printf '%s' "$actual" | grep -oE '(operation=[^ ]+( detail=[^=]*)?|unsupported native emission: .*)' | head -1)")")
 	else

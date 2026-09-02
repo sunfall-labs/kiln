@@ -1982,7 +1982,19 @@ fn native_builtin_supported_exports(
         NodeBuiltin::PerfHooks => &["default", "performance"],
         NodeBuiltin::FsPromises => &["readFile", "stat", "writeFile"],
         NodeBuiltin::Fs => &["default", "existsSync", "promises"],
-        NodeBuiltin::Path => &["default", "isAbsolute", "join", "resolve", "sep"],
+        NodeBuiltin::Path => &[
+            "basename",
+            "default",
+            "delimiter",
+            "dirname",
+            "extname",
+            "isAbsolute",
+            "join",
+            "posix",
+            "relative",
+            "resolve",
+            "sep",
+        ],
         NodeBuiltin::Assert => &["default", "ok", "strict"],
         NodeBuiltin::WorkerThreads => &["Worker", "default"],
         NodeBuiltin::Module => &["createRequire", "default"],
@@ -2324,31 +2336,51 @@ exports[19] = kiln_c99_undefined();"#,
             r#"kiln_value is_absolute = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE);
 kiln_value join = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_JOIN);
 kiln_value resolve = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_RESOLVE);
+kiln_value dirname = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_DIRNAME);
+kiln_value basename = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_BASENAME);
+kiln_value extname = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_EXTNAME);
+kiln_value relative = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_RELATIVE);
+kiln_value delimiter = kiln_c99_copy_text(":", 1);
+kiln_value sep = kiln_c99_copy_text("/", 1);
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "basename", 8, basename, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "default", 7, namespace, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "delimiter", 9, delimiter, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "dirname", 7, dirname, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "extname", 7, extname, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "isAbsolute", 10, is_absolute, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "join", 4, join, 0, NULL);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "posix", 5, namespace, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "relative", 8, relative, 0, NULL);
+if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "resolve", 7, resolve, 0, NULL);
 if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "sep", 3, kiln_c99_copy_text("/", 1), 0, NULL);
+status = kiln_c99_put(host, namespace, "sep", 3, sep, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
+exports[0] = basename;
 exports[1] = namespace;
-exports[2] = kiln_c99_undefined();
-exports[3] = kiln_c99_undefined();
-exports[4] = kiln_c99_undefined();
+exports[2] = delimiter;
+exports[3] = dirname;
+exports[4] = extname;
 exports[5] = kiln_c99_undefined();
 exports[6] = is_absolute;
 exports[7] = join;
 exports[8] = kiln_c99_undefined();
 exports[9] = kiln_c99_undefined();
-exports[10] = kiln_c99_undefined();
-exports[11] = kiln_c99_undefined();
+exports[10] = namespace;
+exports[11] = relative;
 exports[12] = resolve;
-exports[13] = kiln_c99_copy_text("/", 1);"#,
+exports[13] = sep;"#,
         ),
         NodeBuiltin::Assert => Some(
             r#"kiln_value assert = kiln_c99_method(KILN_C99_METHOD_NODE_ASSERT_OK);
@@ -9276,7 +9308,7 @@ int main(void) {{
                 .lines()
                 .filter_map(|line| line.split_whitespace().last())
                 .filter(|symbol| symbol.starts_with("kiln_"))
-                .map(ToOwned::to_owned)
+                .map(|symbol| symbol.split('@').next().unwrap_or(symbol).to_owned())
                 .collect::<Vec<_>>();
             exported.sort_unstable();
             let mut expected = vec![report.module_symbol, report.module_api_symbol];
@@ -11457,10 +11489,12 @@ console.log(first === Math.random());"#,
             "accessSync"
         ));
         assert!(native_builtin_supports_export(NodeBuiltin::Path, "join"));
-        assert!(!native_builtin_supports_export(
+        assert!(native_builtin_supports_export(
             NodeBuiltin::Path,
             "basename"
         ));
+        assert!(native_builtin_supports_export(NodeBuiltin::Path, "dirname"));
+        assert!(!native_builtin_supports_export(NodeBuiltin::Path, "format"));
         assert!(native_builtin_supports_export(NodeBuiltin::Os, "hostname"));
         assert!(!native_builtin_supports_export(NodeBuiltin::Os, "platform"));
         assert!(!native_builtin_supports_export(
