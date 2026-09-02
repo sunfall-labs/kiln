@@ -21,29 +21,22 @@ pub(crate) struct ResponseBodyDriver {
     shared: Rc<RefCell<Shared>>,
 }
 
-/// Where a body's `drain` and `finish` go: a channel the old checkpoint drains, or a callback
-/// the direct engine defers to its next safe point (ADR 0046).
+/// Where a body's `drain` and `finish` go: a callback the engine defers to its next safe point
+/// (ADR 0046), so the language never hears about its own write from inside the write.
 #[derive(Clone)]
 pub(crate) enum BodySink {
-    Channel(tokio::sync::mpsc::UnboundedSender<BodyEvent>),
     Direct(Rc<dyn Fn(BodyEvent)>),
 }
 
 impl std::fmt::Debug for BodySink {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Channel(_) => formatter.write_str("BodySink::Channel"),
-            Self::Direct(_) => formatter.write_str("BodySink::Direct"),
-        }
+        formatter.write_str("BodySink::Direct")
     }
 }
 
 impl BodySink {
     fn send(&self, event: BodyEvent) {
         match self {
-            Self::Channel(sender) => {
-                let _ = sender.send(event);
-            }
             Self::Direct(callback) => callback(event),
         }
     }
@@ -133,8 +126,9 @@ impl ResponseBodyDriver {
         disposition
     }
 
-    /// Whether Hyper holds the whole body. Read from the driver rather than from the event
-    /// channel so that asking does not consume the `finish` the realm still has to deliver.
+    /// Whether Hyper holds the whole body. Read from the driver rather than from the sink so
+    /// that asking does not consume the `finish` the realm still has to deliver.
+    #[cfg(test)]
     pub(crate) fn finished(&self) -> bool {
         self.shared.borrow().finish_emitted
     }
@@ -146,14 +140,6 @@ impl ResponseBodyDriver {
         let mut shared = self.shared.borrow_mut();
         shared.state.request_end();
         shared.finish();
-    }
-
-    pub(crate) fn body(
-        &self,
-        events: tokio::sync::mpsc::UnboundedSender<BodyEvent>,
-    ) -> ResponseBody {
-        self.set_sink(BodySink::Channel(events));
-        self.into_body()
     }
 
     /// Route this body's events to `sink`. A body ended before it was handed over is already
@@ -238,6 +224,30 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
 
+    /// The channel the old checkpoint drained, as a test double: a recording sink.
+    fn recording_sink() -> (BodySink, Rc<RefCell<std::collections::VecDeque<BodyEvent>>>) {
+        let events = Rc::new(RefCell::new(std::collections::VecDeque::new()));
+        let sink = Rc::clone(&events);
+        (
+            BodySink::Direct(Rc::new(move |event| sink.borrow_mut().push_back(event))),
+            events,
+        )
+    }
+
+    struct Events(Rc<RefCell<std::collections::VecDeque<BodyEvent>>>);
+
+    impl Events {
+        fn try_recv(&mut self) -> Result<BodyEvent, ()> {
+            self.0.borrow_mut().pop_front().ok_or(())
+        }
+    }
+
+    fn body_with_events(body: &ResponseBodyDriver) -> (ResponseBody, Events) {
+        let (sink, events) = recording_sink();
+        body.set_sink(sink);
+        (body.into_body(), Events(events))
+    }
+
     #[test]
     fn response_body_reuses_node_high_water_mark_and_emits_one_drain() {
         let mut body = ResponseBodyDriver::new(8);
@@ -255,8 +265,7 @@ mod tests {
                 submit_now: false,
             }
         );
-        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
-        let mut frames = body.body(sender);
+        let (mut frames, mut events) = body_with_events(&body);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime builds");
@@ -290,8 +299,7 @@ mod tests {
     fn end_finishes_only_after_every_ordered_chunk_is_accepted() {
         let mut body = ResponseBodyDriver::new(8);
         assert!(body.end(b"last".to_vec()).ready);
-        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
-        let mut frames = body.body(sender);
+        let (mut frames, mut events) = body_with_events(&body);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime builds");
@@ -314,8 +322,7 @@ mod tests {
         // A response that declares a Content-Length lets Hyper stop the moment it holds the bytes
         // it promised. The body must not wait for the extra poll a chunked encoder would make.
         let mut body = ResponseBodyDriver::new(8);
-        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
-        let mut frames = body.body(sender);
+        let (mut frames, mut events) = body_with_events(&body);
         assert!(body.end(b"kiln".to_vec()).ready);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -338,8 +345,7 @@ mod tests {
     fn a_response_that_carries_no_body_finishes_without_being_polled() {
         // HEAD requests and bodiless statuses: hyper never asks for a frame at all.
         let mut body = ResponseBodyDriver::new(8);
-        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
-        let _frames = body.body(sender);
+        let (_frames, mut events) = body_with_events(&body);
         body.end(b"discarded".to_vec());
         assert!(!body.finished(), "hyper still holds a frame it may take");
         body.finish_without_body();
@@ -351,8 +357,7 @@ mod tests {
     fn empty_end_emits_finish_before_eof() {
         let mut body = ResponseBodyDriver::new(8);
         assert!(body.end(Vec::new()).ready);
-        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
-        let mut frames = body.body(sender);
+        let (mut frames, mut events) = body_with_events(&body);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("runtime builds");

@@ -1529,7 +1529,7 @@ expected_stdout = "bundle\n"
         }
 
         for unrelated in [
-            "crates/kiln-runtime/src/http_transport.rs",
+            "crates/kiln-runtime/src/http_client.rs",
             "crates/kiln-runtime/src/node_http_agent.rs",
         ] {
             let changes = change_set_for_tests(&[unrelated.to_owned()], discovered.iter());

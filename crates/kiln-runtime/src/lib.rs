@@ -10,8 +10,6 @@ pub mod http_client;
 pub mod http_engine;
 pub use http_client::HttpClientEngine;
 pub use http_engine::{HostTransport, HttpDispatch, HttpEvent, HttpEventKind, HttpServerEngine};
-mod http_transport;
-mod hyper_http;
 pub mod node_http;
 pub mod node_http_agent;
 pub mod node_net;
@@ -38,16 +36,9 @@ use tokio::net::{
     TcpListener, TcpStream,
     tcp::{OwnedReadHalf, OwnedWriteHalf},
 };
-use tokio::sync::mpsc;
 use tokio_util::task::JoinMap;
 
-use crate::http_body::{BodyEvent, ResponseBodyDriver};
-use crate::http_transport::HttpTransportDriver;
 use crate::node_http_agent::{AgentDecision, AgentFailure, AgentRelease, HttpAgent, HttpOrigin};
-
-pub use crate::http_transport::{
-    HttpCloseCapability, HttpHostOp, HttpResourceId, HttpStreamAction,
-};
 
 /// A protocol event selected by the runtime-owned HTTP engine for the realm to publish as Node
 /// objects and stream events. No Hyper or Tokio type crosses this seam.
@@ -724,7 +715,6 @@ pub struct RealmState<H> {
     time_paused: bool,
     host: H,
     capabilities: RealmCapabilities,
-    http_connections: BTreeMap<ResourceId, RuntimeHttpConnection>,
     http_agent: HttpAgent,
     /// Server connections that are Hyper tasks over host transports (ADR 0046).
     http_server: HttpServerEngine,
@@ -804,7 +794,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
                 time_paused: false,
                 host,
                 capabilities,
-                http_connections: BTreeMap::new(),
                 http_agent: HttpAgent::default(),
                 http_server: HttpServerEngine::default(),
                 http_client: HttpClientEngine::default(),
@@ -856,22 +845,6 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
     pub fn start_host_op(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
         self.try_start_host_op(operation, referenced)
             .expect("a shut down realm cannot start host work")
-    }
-
-    /// Starts a host operation while the caller is already executing inside this realm runtime.
-    ///
-    /// Language adapters use this path from native calls. It must not re-enter `block_on`; Tokio
-    /// forbids nesting a runtime, and `spawn_local` already sees the active `LocalSet` here.
-    pub fn start_host_op_in_context(
-        &mut self,
-        operation: AsyncHostOp,
-        referenced: bool,
-    ) -> RequestId {
-        assert!(
-            !self.is_shutdown(),
-            "a shut down realm cannot start host work"
-        );
-        RealmHostProvider::start_on_realm(&mut self.state.host, operation, referenced)
     }
 
     /// Waits for the next asynchronous host completion on this realm's Tokio runtime.
@@ -1015,7 +988,8 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .run(|| engine.attach(resource, transport, dispatch))
     }
 
-    /// Attach a server connection whose events are queued for [`Self::take_http_events`]
+    /// Attach a server connection whose events are queued for
+    /// [`RealmState::take_queued_server_events`]
     /// (the queued adapter of ADR 0046, for a loop that drains events at its checkpoint).
     pub fn server_attach_queued(&mut self, resource: ResourceId, allow_half_close: bool) -> bool {
         let dispatch = Rc::new(QueuedDispatch {
@@ -1145,225 +1119,12 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
             .block_on(&self.executor.runtime, async move { operation() })
     }
 
-    /// Install one Hyper HTTP/1 connection on an existing portable TCP resource.
-    pub fn start_http1_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
-        self.start_http1_connection_with_options(resource, false)
-    }
-
-    pub fn start_http1_connection_with_options(
-        &mut self,
-        resource: ResourceId,
-        allow_half_close: bool,
-    ) -> Vec<HttpStreamAction> {
-        assert!(
-            !self.is_shutdown(),
-            "a shut down realm cannot start an HTTP connection"
-        );
-        assert!(
-            !self.state.http_connections.contains_key(&resource),
-            "an HTTP connection is already registered for resource {resource:?}"
-        );
-        // The listening server is the Node-visible resource that keeps the realm alive. Accepted
-        // HTTP keep-alive sockets are Hyper-owned implementation resources; their reads remain
-        // registered for reuse but must not outlive `server.close()` merely because they inherited
-        // the listener's referenced flag at accept time. Referenced writes and close operations
-        // still keep active work alive through their individual HostOps requests.
-        let _ = self.state.host.set_resource_referenced_now(resource, false);
-        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        let (response_sender, response_receiver) = mpsc::unbounded_channel();
-        let task = self
-            .executor
-            .local
-            .spawn_local(hyper_http::event_connection(
-                io,
-                allow_half_close,
-                event_sender,
-                response_receiver,
-            ));
-        let actions = transport.start();
-        self.state.http_connections.insert(
-            resource,
-            RuntimeHttpConnection {
-                transport,
-                task,
-                events: Some(event_receiver),
-                responses: Some(response_sender),
-                response_bodies: BTreeMap::new(),
-                body_events: BTreeMap::new(),
-                close_when_responses_finish: false,
-                protocol_closed: false,
-                close_after_response: HashSet::new(),
-                pending_heads: BTreeMap::new(),
-                head_requests: HashSet::new(),
-                bodyless_responses: HashSet::new(),
-                client_requests: None,
-                client_events: None,
-                client_bodies: BTreeMap::new(),
-                client_body_events: BTreeMap::new(),
-                completed_client_requests: HashSet::new(),
-            },
-        );
-        actions
-    }
-
-    pub fn start_http1_client_connection(&mut self, resource: ResourceId) -> Vec<HttpStreamAction> {
-        assert!(
-            !self.is_shutdown(),
-            "a shut down realm cannot start an HTTP connection"
-        );
-        assert!(
-            !self.state.http_connections.contains_key(&resource),
-            "an HTTP connection is already registered for resource {resource:?}"
-        );
-        let (io, mut transport) = HttpTransportDriver::new(HttpResourceId::new(resource));
-        let (request_sender, request_receiver) = mpsc::unbounded_channel();
-        let (event_sender, event_receiver) = mpsc::unbounded_channel();
-        let task = self
-            .executor
-            .local
-            .spawn_local(hyper_http::client_connection(
-                io,
-                request_receiver,
-                event_sender,
-            ));
-        let actions = transport.start();
-        self.state.http_connections.insert(
-            resource,
-            RuntimeHttpConnection {
-                transport,
-                task,
-                events: None,
-                responses: None,
-                response_bodies: BTreeMap::new(),
-                body_events: BTreeMap::new(),
-                close_when_responses_finish: false,
-                protocol_closed: false,
-                close_after_response: HashSet::new(),
-                pending_heads: BTreeMap::new(),
-                head_requests: HashSet::new(),
-                bodyless_responses: HashSet::new(),
-                client_requests: Some(request_sender),
-                client_events: Some(event_receiver),
-                client_bodies: BTreeMap::new(),
-                client_body_events: BTreeMap::new(),
-                completed_client_requests: HashSet::new(),
-            },
-        );
-        actions
-    }
-
-    /// Consume and register the raw close selected by an HTTP transport.
+    /// Poll every realm-owned HTTP task before the event loop blocks on HostOps.
     ///
-    /// HTTP actions cannot express `AsyncHostOp::CloseResource` directly. Keeping the conversion
-    /// here ensures adapters cannot bypass the protocol drain/abort decision accidentally.
-    #[doc(hidden)]
-    pub fn start_http_connection_close(&mut self, close: HttpCloseCapability) -> Option<RequestId> {
-        self.start_http_connection_close_with_context(close, false)
-    }
-
-    /// Consume an authorized HTTP close while already executing inside this realm runtime.
-    #[doc(hidden)]
-    pub fn start_http_connection_close_in_context(
-        &mut self,
-        close: HttpCloseCapability,
-    ) -> Option<RequestId> {
-        self.start_http_connection_close_with_context(close, true)
-    }
-
-    fn start_http_connection_close_with_context(
-        &mut self,
-        close: HttpCloseCapability,
-        in_context: bool,
-    ) -> Option<RequestId> {
-        let resource = close.into_resource();
-        let raw = resource.resource();
-        if !self.state.http_connections.contains_key(&raw) {
-            return None;
-        }
-        let operation = AsyncHostOp::CloseResource { resource: raw };
-        let request = if in_context {
-            self.start_host_op_in_context(operation, true)
-        } else {
-            self.start_host_op(operation, true)
-        };
-        let accepted = self
-            .state
-            .http_connections
-            .get_mut(&raw)
-            .is_some_and(|connection| connection.transport.close_started(request));
-        if accepted {
-            Some(request)
-        } else {
-            self.cancel_host_op(request);
-            None
-        }
-    }
-
-    /// Poll woken Hyper tasks and return bytes they selected for the existing HostOps stream.
-    #[doc(hidden)]
-    pub fn poll_http_connection(&mut self, resource: ResourceId) -> Option<Vec<HttpStreamAction>> {
-        self.poll_http_tasks();
-        self.state
-            .http_connections
-            .get_mut(&resource)
-            .map(|connection| connection.transport.pump_write())
-    }
-
-    /// Return transport writes while the caller is already executing inside this realm runtime.
-    ///
-    /// Sending a response command wakes Hyper on the same `LocalSet`; the task is polled when the
-    /// current synchronous language callback yields back to Tokio. This method must not nest
-    /// `block_on`, so it only collects bytes already selected at the current checkpoint.
-    pub fn poll_http_connection_in_context(
-        &mut self,
-        resource: ResourceId,
-    ) -> Option<Vec<HttpStreamAction>> {
-        self.state
-            .http_connections
-            .get_mut(&resource)
-            .map(|connection| connection.transport.pump_write())
-    }
-
-    /// Poll every realm-owned HTTP task once before the event loop blocks on HostOps.
-    ///
-    /// A protocol task can become runnable without another socket completion: supplying the
-    /// response head for one HTTP/1 request lets Hyper dispatch the next request already buffered
-    /// in that connection. This checkpoint keeps that work under Tokio's scheduler while making
-    /// it visible to the synchronous language adapter before it waits on an otherwise-idle read.
-    /// One cooperative turn, for a caller that repeats until the checkpoint stops progressing.
-    ///
-    /// [`Self::poll_http_tasks`] drains a fixed four turns because its caller had no way to ask
-    /// whether another was needed. A caller that loops on its own progress does, and one turn per
-    /// round is both cheaper and strictly more thorough: it stops at quiescence rather than at
-    /// four, and it keeps going past four when a connection still has work.
-    /// Advances the local tasks that are already runnable, without parking the thread.
-    ///
-    /// The checkpoint calls this several times per request, so what it costs per call matters.
-    /// `block_on` around a `yield_now` would do the same scheduling work, but it also arms and
-    /// disarms the I/O driver each time, and that is a `kevent` per call. A run of 14,175
-    /// requests parked for real 13 times: the driver was almost always being armed only to find
-    /// work already waiting.
-    ///
-    /// Polling the `LocalSet` directly runs exactly the tasks that are ready and returns. It
-    /// deliberately does not turn the reactor, so readiness that has not arrived yet will not be
-    /// discovered here. That is not a gap the checkpoint has to cover. A round that applies no
-    /// actions and drains no events ends the checkpoint, control returns to the drive, and the
-    /// drive's own await parks and turns the reactor, and the tasks it wakes run there. Progress
-    /// that needs the kernel still waits for the kernel, in the one place that was already going
-    /// to park.
-    pub fn poll_http_tasks_once(&mut self) {
-        // Polling the set as a future needs it exclusively. During an async drive (ADR 0046) a
-        // DriveExecutor holds the executor and the set is already being run by that drive's
-        // `block_on`, so there is nothing to do here; the drive yields instead.
-        let Some(executor) = Rc::get_mut(&mut self.executor) else {
-            return;
-        };
-        let _entered = executor.runtime.enter();
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        let _ = std::pin::Pin::new(&mut executor.local).poll(&mut context);
-    }
-
+    /// A protocol task can become runnable without another socket completion: committing the
+    /// response for one HTTP/1 request lets Hyper dispatch the next request already buffered
+    /// in that connection. The interpreter's checkpoint calls this between draining the queued
+    /// adapter's events; the native drive never does, because its one `block_on` runs the set.
     pub fn poll_http_tasks(&mut self) {
         if self.is_shutdown() {
             return;
@@ -1464,16 +1225,6 @@ impl<H: RealmHostProvider> RealmState<H> {
         }
         self.lifecycle = RealmRuntimeLifecycle::Closing;
 
-        let mut connections = std::mem::take(&mut self.http_connections);
-        for connection in connections.values_mut() {
-            connection.task.abort();
-            for action in connection.transport.abort() {
-                if let HttpStreamAction::Cancel(request) = action {
-                    RealmHostProvider::cancel_on_realm(&mut self.host, request);
-                }
-            }
-        }
-        drop(connections);
         self.http_server.shutdown();
         self.http_client.shutdown();
         self.queued_http.clear();
@@ -1583,379 +1334,11 @@ impl<H: RealmHostProvider> RealmState<H> {
         &mut self.host
     }
 
-    #[doc(hidden)]
-    pub fn http_connection_started(
-        &mut self,
-        resource: ResourceId,
-        operation: &HttpHostOp,
-        request: RequestId,
-    ) -> bool {
-        self.http_connections
-            .get_mut(&resource)
-            .is_some_and(|connection| connection.transport.started(operation, request))
-    }
-
-    #[doc(hidden)]
-    pub fn complete_http_connection(
-        &mut self,
-        resource: ResourceId,
-        completion: Completion,
-    ) -> Option<Vec<HttpStreamAction>> {
-        let idle_client = self
-            .http_connections
-            .get(&resource)
-            .is_some_and(|connection| connection.client_requests.is_some())
-            && !self.http_agent.has_active_request(resource);
-        let mut actions = self
-            .http_connections
-            .get_mut(&resource)?
-            .transport
-            .completed(completion)?;
-        if idle_client {
-            // A keep-alive connection may be reset after its response has completed and the Agent
-            // has made it idle. There is no language request left to reject, so expose the close
-            // transition but not the transport error. Busy connections still surface every error.
-            actions.retain(|action| !matches!(action, HttpStreamAction::Error(_)));
-        }
-        Some(actions)
-    }
-
-    /// Forget a connection whose transport has reported Close.
-    ///
-    /// The Close event is the transport's last word for the resource: Hyper's task is done and
-    /// every body driver has finished or been abandoned. A caller that has consumed that event
-    /// retires the entry so the table stays proportional to open connections rather than to
-    /// connections ever accepted, which is the difference a server measures over a long run.
-    /// Retiring is the caller's call because its own checkpoint may still want to observe the
-    /// closed connection once more before it lets go.
+    /// Give a transport back to the host once its connection has ended: the engine has
+    /// published `Closed` and forgotten the connection, and a table that kept the resource
+    /// would grow with connections ever accepted rather than connections open.
     pub fn retire_http_connection(&mut self, resource: ResourceId) -> bool {
-        let released = self.host.release_transport(resource);
-        self.http_connections.remove(&resource).is_some() || released
-    }
-
-    /// Retire an HTTP transport after Hyper has completed its connection future.
-    pub fn close_http_connection(
-        &mut self,
-        resource: ResourceId,
-        mode: HttpCloseMode,
-    ) -> Option<Vec<HttpStreamAction>> {
-        let connection = self.http_connections.get_mut(&resource)?;
-        if mode == HttpCloseMode::Abort {
-            return Some(connection.transport.abort());
-        }
-        // `server.close()` may run in the same JavaScript turn as `response.end()`. The response
-        // command has only been sent to Hyper at that point; its task has not necessarily polled
-        // yet, so the transport can have no queued write even though a body is active. Keep the
-        // close request as a marker and let the normal checkpoint drain Hyper's writes. Idle
-        // connections have no response body to drain and can be retired immediately.
-        // A body that Hyper has already finished no longer holds the connection open, whether or
-        // not the realm has drained its `finish` yet. Asking the driver rather than waiting for
-        // `take_http_events` to empty the map keeps `close` from depending on who looked last.
-        let responses_in_flight = connection
-            .response_bodies
-            .values()
-            .any(|body| !body.finished());
-        if !responses_in_flight || connection.protocol_closed {
-            Some(connection.transport.close())
-        } else {
-            connection.close_when_responses_finish = true;
-            Some(Vec::new())
-        }
-    }
-
-    /// Drain protocol events already selected at this realm checkpoint.
-    pub fn take_http_events(&mut self, resource: ResourceId) -> Vec<RuntimeHttpEvent> {
-        let Some(connection) = self.http_connections.get_mut(&resource) else {
-            return Vec::new();
-        };
-        let mut events = Vec::new();
-        // Body events are drained first. Hyper can publish Closed immediately after consuming
-        // the final response body, but Node observes finish before connection close.
-        let mut finished_bodies = Vec::new();
-        for (&id, receiver) in &mut connection.body_events {
-            while let Ok(event) = receiver.try_recv() {
-                if event == BodyEvent::Finish {
-                    finished_bodies.push(id);
-                }
-                events.push(match event {
-                    BodyEvent::Drain => RuntimeHttpEvent::Drain { id },
-                    BodyEvent::Finish => {
-                        if connection.close_after_response.remove(&id) {
-                            connection.transport.close_requested();
-                        }
-                        RuntimeHttpEvent::Finish { id }
-                    }
-                });
-            }
-        }
-        for id in finished_bodies {
-            connection.response_bodies.remove(&id);
-            connection.body_events.remove(&id);
-            connection.head_requests.remove(&id);
-            connection.bodyless_responses.remove(&id);
-        }
-        if connection.close_when_responses_finish
-            && connection
-                .response_bodies
-                .values()
-                .all(|body| body.finished())
-        {
-            connection.close_when_responses_finish = false;
-            connection.transport.close_requested();
-        }
-        let Some(receiver) = connection.events.as_mut() else {
-            return events;
-        };
-        while let Ok(event) = receiver.try_recv() {
-            if matches!(event, hyper_http::EngineEvent::Closed) {
-                connection.protocol_closed = true;
-                // Hyper has finished the HTTP/1 state machine. Retire the portable TCP resource
-                // after any bytes it already selected are acknowledged so the peer observes EOF
-                // and raw `node:net` clients can complete their natural `end`/`close` lifecycle.
-                connection.transport.close_requested();
-            }
-            events.push(match event {
-                hyper_http::EngineEvent::RequestHead { id, request } => {
-                    if !request.keep_alive {
-                        connection.close_after_response.insert(id);
-                    }
-                    if request.method.eq_ignore_ascii_case("HEAD") {
-                        connection.head_requests.insert(id);
-                    }
-                    RuntimeHttpEvent::RequestHead { id, request }
-                }
-                hyper_http::EngineEvent::RequestData { id, data } => {
-                    RuntimeHttpEvent::RequestData { id, data }
-                }
-                hyper_http::EngineEvent::RequestEnd { id } => RuntimeHttpEvent::RequestEnd { id },
-                hyper_http::EngineEvent::Error { id, message } => {
-                    RuntimeHttpEvent::Error { id, message }
-                }
-                hyper_http::EngineEvent::Closed => RuntimeHttpEvent::Closed,
-            });
-        }
-        events
-    }
-
-    /// Resume the matching Hyper service after the Node request listener finishes its turn.
-    pub fn respond_http1(
-        &mut self,
-        resource: ResourceId,
-        id: u64,
-        response: node_http::HttpResponse,
-    ) -> bool {
-        let Some(connection) = self.http_connections.get_mut(&resource) else {
-            return false;
-        };
-        let body_length = response.body.len();
-        let mut headers = response.headers;
-        if !headers
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        {
-            headers.push(("content-length".into(), body_length.to_string()));
-        }
-        let mut body = ResponseBodyDriver::default();
-        body.end(response.body);
-        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
-        let command = hyper_http::ResponseCommand {
-            id,
-            status: response.status,
-            headers,
-            body: body.body(body_event_sender),
-        };
-        if connection
-            .responses
-            .as_ref()
-            .is_none_or(|responses| responses.send(command).is_err())
-        {
-            return false;
-        }
-        connection.response_bodies.insert(id, body);
-        connection.body_events.insert(id, body_event_receiver);
-        true
-    }
-
-    pub fn start_http1_response(
-        &mut self,
-        resource: ResourceId,
-        id: u64,
-        status: u16,
-        headers: Vec<(String, String)>,
-        high_water_mark: usize,
-    ) -> bool {
-        let Some(connection) = self.http_connections.get_mut(&resource) else {
-            return false;
-        };
-        if connection.response_bodies.contains_key(&id) {
-            return false;
-        }
-        if connection.responses.is_none() {
-            return false;
-        }
-        let body = ResponseBodyDriver::new(high_water_mark);
-        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
-        // The head is parked rather than sent. Hyper decides framing from the head it is given,
-        // and the framing Node would pick is not known until the script either streams a chunk or
-        // ends the response with its whole body. `flush_response_head` sends it either way, and
-        // always within the same JavaScript turn, because a realm only starts a response from
-        // `write` or `end`.
-        connection.pending_heads.insert(
-            id,
-            hyper_http::ResponseCommand {
-                id,
-                status,
-                headers,
-                body: body.body(body_event_sender),
-            },
-        );
-        connection.response_bodies.insert(id, body);
-        connection.body_events.insert(id, body_event_receiver);
-        true
-    }
-
-    pub fn write_http1_response(
-        &mut self,
-        resource: ResourceId,
-        id: u64,
-        data: Vec<u8>,
-    ) -> Option<node_stream::WriteDisposition> {
-        let connection = self.http_connections.get_mut(&resource)?;
-        // A chunk before `end` leaves the length unknown, so the head goes to Hyper as the realm
-        // built it and Hyper chunks the body.
-        if !flush_response_head(connection, id, None) {
-            return None;
-        }
-        Some(connection.response_bodies.get_mut(&id)?.write(data))
-    }
-
-    pub fn end_http1_response(
-        &mut self,
-        resource: ResourceId,
-        id: u64,
-        data: Vec<u8>,
-    ) -> Option<node_stream::WriteDisposition> {
-        let connection = self.http_connections.get_mut(&resource)?;
-        // `end` with the head still parked means this call carries the entire body, which is the
-        // one case where Node declares a length instead of chunking.
-        if !flush_response_head(connection, id, Some(data.len())) {
-            return None;
-        }
-        let bodyless = connection.bodyless_responses.contains(&id);
-        let body = connection.response_bodies.get_mut(&id)?;
-        let disposition = body.end(data);
-        if bodyless {
-            body.finish_without_body();
-        }
-        Some(disposition)
-    }
-
-    pub fn send_http1_client_request(
-        &mut self,
-        resource: ResourceId,
-        request: RuntimeHttpClientRequest,
-        id: u64,
-        high_water_mark: usize,
-    ) -> bool {
-        let Some(connection) = self.http_connections.get_mut(&resource) else {
-            return false;
-        };
-        if connection.client_bodies.contains_key(&id) {
-            return false;
-        }
-        let body = ResponseBodyDriver::new(high_water_mark);
-        let (body_event_sender, body_event_receiver) = mpsc::unbounded_channel();
-        let command = hyper_http::ClientRequestCommand {
-            id,
-            method: request.method,
-            target: request.target,
-            headers: request.headers,
-            body: body.body(body_event_sender),
-        };
-        if connection
-            .client_requests
-            .as_ref()
-            .is_none_or(|requests| requests.send(command).is_err())
-        {
-            return false;
-        }
-        connection.client_bodies.insert(id, body);
-        connection
-            .client_body_events
-            .insert(id, body_event_receiver);
-        true
-    }
-
-    pub fn write_http1_client_request(
-        &mut self,
-        resource: ResourceId,
-        id: u64,
-        data: Vec<u8>,
-    ) -> Option<node_stream::WriteDisposition> {
-        self.http_connections
-            .get_mut(&resource)?
-            .client_bodies
-            .get_mut(&id)
-            .map(|body| body.write(data))
-    }
-
-    pub fn end_http1_client_request(
-        &mut self,
-        resource: ResourceId,
-        id: u64,
-        data: Vec<u8>,
-    ) -> Option<node_stream::WriteDisposition> {
-        self.http_connections
-            .get_mut(&resource)?
-            .client_bodies
-            .get_mut(&id)
-            .map(|body| body.end(data))
-    }
-
-    pub fn take_http1_client_events(
-        &mut self,
-        resource: ResourceId,
-    ) -> Vec<RuntimeHttpClientEvent> {
-        if self
-            .http_connections
-            .get(&resource)
-            .and_then(|connection| connection.client_events.as_ref())
-            .is_none()
-        {
-            return Vec::new();
-        }
-        let mut events = Vec::new();
-        let connection = self
-            .http_connections
-            .get_mut(&resource)
-            .expect("checked above");
-        let mut finished_bodies = Vec::new();
-        for (&id, receiver) in &mut connection.client_body_events {
-            while let Ok(event) = receiver.try_recv() {
-                if event == BodyEvent::Finish {
-                    finished_bodies.push(id);
-                }
-                events.push(match event {
-                    BodyEvent::Drain => RuntimeHttpClientEvent::Drain { id },
-                    BodyEvent::Finish => RuntimeHttpClientEvent::Finish { id },
-                });
-            }
-        }
-        for id in finished_bodies {
-            connection.client_bodies.remove(&id);
-            connection.client_body_events.remove(&id);
-        }
-        let Some(receiver) = connection.client_events.as_mut() else {
-            return events;
-        };
-        while let Ok(event) = receiver.try_recv() {
-            if let Some(event) =
-                map_http1_client_event(event, &mut connection.completed_client_requests)
-            {
-                events.push(event);
-            }
-        }
-        events
+        self.host.release_transport(resource)
     }
 }
 
@@ -1974,130 +1357,6 @@ impl<H: RealmHostProvider> std::ops::DerefMut for RealmRuntime<H> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.state
     }
-}
-
-struct RuntimeHttpConnection {
-    transport: HttpTransportDriver,
-    task: tokio::task::JoinHandle<Result<(), hyper::Error>>,
-    events: Option<mpsc::UnboundedReceiver<hyper_http::EngineEvent>>,
-    responses: Option<mpsc::UnboundedSender<hyper_http::ResponseCommand>>,
-    response_bodies: BTreeMap<u64, ResponseBodyDriver>,
-    body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
-    close_when_responses_finish: bool,
-    protocol_closed: bool,
-    close_after_response: HashSet<u64>,
-    /// Response heads Hyper has not seen yet. Node picks a framing from what the script does
-    /// after the head is built, so the runtime holds the head until `write` streams it or `end`
-    /// completes it. See `flush_response_head`.
-    pending_heads: BTreeMap<u64, hyper_http::ResponseCommand>,
-    /// Requests whose method is HEAD. Node declares no length for them.
-    head_requests: HashSet<u64>,
-    /// Responses Hyper will never ask for a body from, decided when the head was flushed.
-    bodyless_responses: HashSet<u64>,
-    client_requests: Option<mpsc::UnboundedSender<hyper_http::ClientRequestCommand>>,
-    client_events: Option<mpsc::UnboundedReceiver<hyper_http::ClientEvent>>,
-    client_bodies: BTreeMap<u64, ResponseBodyDriver>,
-    client_body_events: BTreeMap<u64, mpsc::UnboundedReceiver<BodyEvent>>,
-    completed_client_requests: HashSet<u64>,
-}
-
-/// Send a parked response head to Hyper, declaring a body length when Node would.
-///
-/// This is the one place the Content-Length rule lives, so the interpreter and the native path
-/// inherit it from the same code. `complete_body` is `Some(len)` only when the caller is `end`
-/// and no chunk was streamed first, which is exactly Node's condition for computing a length
-/// instead of chunking. A head the realm already committed carries its own framing header and is
-/// left alone, and a response that cannot have a body never gets a length: Hyper drops
-/// `Transfer-Encoding` for those itself, but it forwards a `Content-Length` that Node omits.
-///
-/// Returns false only when the connection can no longer accept a response.
-fn flush_response_head(
-    connection: &mut RuntimeHttpConnection,
-    id: u64,
-    complete_body: Option<usize>,
-) -> bool {
-    let Some(mut command) = connection.pending_heads.remove(&id) else {
-        // Already flushed by an earlier `write`; the body driver owns the rest.
-        return true;
-    };
-    let carries_body =
-        response_status_allows_body(command.status) && !connection.head_requests.contains(&id);
-    if !carries_body {
-        connection.bodyless_responses.insert(id);
-    }
-    if let Some(length) = complete_body
-        && carries_body
-        && !declares_framing(&command.headers)
-    {
-        command
-            .headers
-            .push(("content-length".into(), length.to_string()));
-    }
-    connection
-        .responses
-        .as_ref()
-        .is_some_and(|responses| responses.send(command).is_ok())
-}
-
-/// A head the realm already framed. Node leaves a script-supplied `Content-Length` or
-/// `Transfer-Encoding` untouched, and so does Kiln.
-fn declares_framing(headers: &[(String, String)]) -> bool {
-    headers.iter().any(|(name, _)| {
-        name.eq_ignore_ascii_case("content-length")
-            || name.eq_ignore_ascii_case("transfer-encoding")
-    })
-}
-
-/// Statuses that carry no body, and therefore no length. Matches Node's `_hasBody`.
-fn response_status_allows_body(status: u16) -> bool {
-    !matches!(status, 204 | 304) && !(100..200).contains(&status)
-}
-
-fn map_http1_client_event(
-    event: hyper_http::ClientEvent,
-    completed: &mut HashSet<u64>,
-) -> Option<RuntimeHttpClientEvent> {
-    let id = match &event {
-        hyper_http::ClientEvent::ResponseHead { id, .. }
-        | hyper_http::ClientEvent::ResponseData { id, .. }
-        | hyper_http::ClientEvent::ResponseEnd { id, .. }
-        | hyper_http::ClientEvent::Error { id, .. } => Some(*id),
-        hyper_http::ClientEvent::Closed => None,
-    };
-    if id.is_some_and(|id| completed.contains(&id)) {
-        return None;
-    }
-    let terminal = matches!(
-        event,
-        hyper_http::ClientEvent::ResponseEnd { .. } | hyper_http::ClientEvent::Error { .. }
-    );
-    let mapped = match event {
-        hyper_http::ClientEvent::ResponseHead {
-            id,
-            status,
-            reason,
-            headers,
-        } => RuntimeHttpClientEvent::ResponseHead {
-            id,
-            status,
-            reason,
-            headers,
-        },
-        hyper_http::ClientEvent::ResponseData { id, data } => {
-            RuntimeHttpClientEvent::ResponseData { id, data }
-        }
-        hyper_http::ClientEvent::ResponseEnd { id, reusable } => {
-            RuntimeHttpClientEvent::ResponseEnd { id, reusable }
-        }
-        hyper_http::ClientEvent::Error { id, message } => {
-            RuntimeHttpClientEvent::Error { id, message }
-        }
-        hyper_http::ClientEvent::Closed => RuntimeHttpClientEvent::Closed,
-    };
-    if terminal && let Some(id) = id {
-        completed.insert(id);
-    }
-    Some(mapped)
 }
 
 /// Protocol events parked for a loop that drains them at its own checkpoint: ADR 0046's
@@ -2452,12 +1711,6 @@ impl<H: RealmHostProvider> ActiveHttpRuntime for RealmRuntime<H> {
     }
 }
 
-impl Drop for RuntimeHttpConnection {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
 impl<H: RealmHostProvider> Drop for RealmRuntime<H> {
     fn drop(&mut self) {
         self.shutdown();
@@ -2466,7 +1719,7 @@ impl<H: RealmHostProvider> Drop for RealmRuntime<H> {
 
 impl<H: RealmHostProvider> ActiveAsyncHostOps for RealmRuntime<H> {
     fn start(&mut self, operation: AsyncHostOp, referenced: bool) -> RequestId {
-        self.start_host_op_in_context(operation, referenced)
+        self.start_host_op(operation, referenced)
     }
 
     fn cancel(&mut self, request: RequestId) -> bool {
@@ -3733,45 +2986,6 @@ mod tests {
             .expect("realm runtime remains healthy")
     }
 
-    fn start_http_test_operation<H: RealmHostProvider>(
-        runtime: &mut RealmRuntime<H>,
-        resource: ResourceId,
-        operation: &HttpHostOp,
-        referenced: bool,
-    ) -> RequestId {
-        let request = runtime.start_host_op(operation.clone().into_host_op(), referenced);
-        assert!(runtime.http_connection_started(resource, operation, request));
-        request
-    }
-
-    #[test]
-    fn terminal_request_events_are_deduplicated() {
-        let mut completed = HashSet::new();
-        assert!(matches!(
-            map_http1_client_event(
-                hyper_http::ClientEvent::ResponseEnd {
-                    id: 7,
-                    reusable: true,
-                },
-                &mut completed,
-            ),
-            Some(RuntimeHttpClientEvent::ResponseEnd {
-                id: 7,
-                reusable: true,
-            })
-        ));
-        assert!(
-            map_http1_client_event(
-                hyper_http::ClientEvent::ResponseData {
-                    id: 7,
-                    data: b"stale".to_vec(),
-                },
-                &mut completed,
-            )
-            .is_none()
-        );
-    }
-
     fn request_events(events: &[RuntimeHttpEvent]) -> (u64, &node_http::HttpRequest, Vec<u8>) {
         let [
             RuntimeHttpEvent::RequestHead { id, request },
@@ -4557,402 +3771,6 @@ mod tests {
     }
 
     #[test]
-    fn scripted_provider_drives_hyper_connection_through_the_same_stream_bridge() {
-        use crate::node_http::HttpResponse;
-        use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
-
-        let resource = ResourceId::new(43);
-        let connect = AsyncHostOp::TcpConnect {
-            host: "127.0.0.1".into(),
-            port: 8080,
-        };
-        let connected = ResourceInfo {
-            id: resource,
-            kind: ResourceKind::TcpStream,
-            address: Some("127.0.0.1".into()),
-            port: Some(8080),
-        };
-        let read = AsyncHostOp::TcpRead {
-            stream: resource,
-            max_bytes: DEFAULT_HIGH_WATER_MARK,
-        };
-        let request = b"GET /health HTTP/1.1\r\nhost: kiln\r\nconnection: close\r\n\r\n";
-        let write = AsyncHostOp::TcpWrite {
-            stream: resource,
-            data: b"HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-length: 4\r\n\r\nkiln".to_vec(),
-        };
-        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
-            ScriptedHostStep {
-                operation: connect.clone(),
-                result: Ok(AsyncHostValue::Resource(connected.clone())),
-            },
-            ScriptedHostStep {
-                operation: read.clone(),
-                result: Ok(AsyncHostValue::Bytes(request.to_vec())),
-            },
-            ScriptedHostStep {
-                operation: write.clone(),
-                result: Ok(AsyncHostValue::Undefined),
-            },
-        ]))
-        .expect("scripted runtime builds");
-        let connect_request = runtime.start_host_op(connect, false);
-        assert_eq!(
-            next_host_completion(&mut runtime)
-                .expect("connect completes")
-                .result,
-            Ok(AsyncHostValue::Resource(connected))
-        );
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
-            panic!("HTTP connection starts one scripted read: {start:?}");
-        };
-        assert_eq!(read_operation.clone().into_host_op(), read);
-        let read_request = start_http_test_operation(&mut runtime, resource, read_operation, false);
-        let request_completion =
-            next_host_completion(&mut runtime).expect("request read completes");
-        let actions = runtime
-            .complete_http_connection(resource, request_completion)
-            .expect("request read belongs to HTTP connection");
-        let [HttpStreamAction::Start(next_read)] = actions.as_slice() else {
-            panic!("HTTP bridge starts one follow-up read: {actions:?}");
-        };
-        assert_eq!(next_read.clone().into_host_op(), read);
-
-        let events = (0..8)
-            .find_map(|_| {
-                runtime.poll_http_connection(resource);
-                let events = runtime.take_http_events(resource);
-                (!events.is_empty()).then_some(events)
-            })
-            .unwrap_or_else(|| panic!("Hyper did not publish a request event"));
-        let (id, request, body) = request_events(&events);
-        assert_eq!(request.target, "/health");
-        assert!(body.is_empty());
-        assert!(runtime.respond_http1(
-            resource,
-            id,
-            HttpResponse {
-                status: 200,
-                reason: Some("OK".into()),
-                headers: vec![("connection".into(), "close".into())],
-                body: b"kiln".to_vec(),
-            }
-        ));
-        let writes = (0..8)
-            .find_map(|_| {
-                runtime
-                    .poll_http_connection(resource)
-                    .filter(|actions| !actions.is_empty())
-            })
-            .unwrap_or_else(|| panic!("Hyper did not select a response write"));
-        let [HttpStreamAction::Start(write_operation)] = writes.as_slice() else {
-            panic!("Hyper selects one scripted response write: {writes:?}");
-        };
-        assert_eq!(write_operation.clone().into_host_op(), write);
-        let _write_request =
-            start_http_test_operation(&mut runtime, resource, write_operation, false);
-        let write_completion =
-            next_host_completion(&mut runtime).expect("response write completes");
-        let mut write_actions = runtime
-            .complete_http_connection(resource, write_completion)
-            .expect("response write belongs to HTTP connection");
-        for _ in 0..8 {
-            if runtime
-                .take_http_events(resource)
-                .contains(&RuntimeHttpEvent::Closed)
-            {
-                write_actions.extend(
-                    runtime
-                        .close_http_connection(resource, HttpCloseMode::Graceful)
-                        .unwrap_or_default(),
-                );
-            }
-            write_actions.extend(runtime.poll_http_connection(resource).unwrap_or_default());
-            if write_actions
-                .iter()
-                .any(|action| matches!(action, HttpStreamAction::Close(_)))
-            {
-                break;
-            }
-        }
-        assert!(write_actions.iter().any(|action| matches!(
-            action,
-            HttpStreamAction::Close(closed) if closed.resource() == resource
-        )));
-        assert!(
-            !write_actions.iter().any(|action| matches!(
-                action,
-                HttpStreamAction::Start(HttpHostOp::TcpWrite { .. })
-            ))
-        );
-        assert_ne!(connect_request, read_request);
-        assert!(runtime.host_mut().is_exhausted());
-    }
-
-    #[test]
-    fn scripted_provider_drains_response_before_same_turn_server_close() {
-        let resource = ResourceId::new(45);
-        let read = AsyncHostOp::TcpRead {
-            stream: resource,
-            max_bytes: node_stream::DEFAULT_HIGH_WATER_MARK,
-        };
-        let request = b"GET /same-turn HTTP/1.1\r\nHost: kiln\r\nConnection: close\r\n\r\n";
-        let write = AsyncHostOp::TcpWrite {
-            stream: resource,
-            data: b"HTTP/1.1 200 OK\r\ncontent-length: 9\r\nconnection: close\r\n\r\nsame-turn"
-                .to_vec(),
-        };
-        let close = AsyncHostOp::CloseResource { resource };
-        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
-            ScriptedHostStep {
-                operation: read.clone(),
-                result: Ok(AsyncHostValue::Bytes(request.to_vec())),
-            },
-            ScriptedHostStep {
-                operation: write.clone(),
-                result: Ok(AsyncHostValue::Undefined),
-            },
-            ScriptedHostStep {
-                operation: close.clone(),
-                result: Ok(AsyncHostValue::Undefined),
-            },
-        ]))
-        .expect("scripted runtime builds");
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
-            panic!("HTTP connection starts one scripted read: {start:?}");
-        };
-        assert_eq!(read_operation.clone().into_host_op(), read);
-        let _read_request =
-            start_http_test_operation(&mut runtime, resource, read_operation, false);
-        let read_completion =
-            next_host_completion(&mut runtime).expect("scripted request read completes");
-        let actions = runtime
-            .complete_http_connection(resource, read_completion)
-            .expect("request read belongs to connection");
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            HttpStreamAction::Start(HttpHostOp::TcpRead { stream, .. })
-                if stream.resource() == resource
-        )));
-        runtime.poll_http_connection(resource);
-        let events = runtime.take_http_events(resource);
-        let (id, _, body) = request_events(&events);
-        assert!(body.is_empty());
-        assert!(runtime.respond_http1(
-            resource,
-            id,
-            node_http::HttpResponse {
-                status: 200,
-                reason: None,
-                headers: Vec::new(),
-                body: b"same-turn".to_vec(),
-            },
-        ));
-
-        // This is the native callback's ordering: response.end() queues the Hyper command, then
-        // server.close() runs before Tokio gets another poll of the connection task.
-        let close_actions = runtime
-            .close_http_connection(resource, HttpCloseMode::Graceful)
-            .expect("server close belongs to HTTP connection");
-        assert!(
-            close_actions.is_empty(),
-            "close must wait for the response body"
-        );
-
-        let writes = runtime
-            .poll_http_connection(resource)
-            .expect("connection remains while response drains");
-        let [HttpStreamAction::Start(HttpHostOp::TcpWrite { stream, data })] = writes.as_slice()
-        else {
-            panic!("response write must precede close: {writes:?}");
-        };
-        assert_eq!(stream.resource(), resource);
-        assert_eq!(
-            &AsyncHostOp::TcpWrite {
-                stream: resource,
-                data: data.clone(),
-            },
-            &write
-        );
-        let write_operation = HttpHostOp::TcpWrite {
-            stream: HttpResourceId::new(resource),
-            data: data.clone(),
-        };
-        let _write_request =
-            start_http_test_operation(&mut runtime, resource, &write_operation, false);
-        let write_completion =
-            next_host_completion(&mut runtime).expect("scripted response write completes");
-        let completion = runtime
-            .complete_http_connection(resource, write_completion)
-            .expect("response write belongs to connection");
-        assert!(
-            completion.is_empty()
-                || completion.iter().all(|action| matches!(
-                    action,
-                    HttpStreamAction::Start(HttpHostOp::TcpWrite { .. })
-                        | HttpStreamAction::Event(node_stream::StreamEvent::Close)
-                ))
-        );
-
-        let close_action = (0..8)
-            .find_map(|_| {
-                let _ = runtime.take_http_events(resource);
-                runtime.poll_http_connection(resource).and_then(|actions| {
-                    actions.into_iter().find(|action| {
-                        matches!(
-                            action,
-                            HttpStreamAction::Close(closed)
-                                if closed.resource() == resource
-                        )
-                    })
-                })
-            })
-            .unwrap_or_else(|| panic!("response write must be acknowledged before close"));
-        let HttpStreamAction::Close(close_action) = close_action else {
-            panic!("response write must select an authorized close");
-        };
-        assert_eq!(close_action.resource(), resource);
-        let close_request = runtime
-            .start_http_connection_close(close_action)
-            .expect("authorized HTTP close starts");
-        let close_completion =
-            next_host_completion(&mut runtime).expect("close follows the response write");
-        assert_eq!(close_completion.request, close_request);
-        let retired = runtime
-            .complete_http_connection(resource, close_completion)
-            .expect("the close completion belongs to the connection");
-        assert!(retired.iter().any(|action| matches!(
-            action,
-            HttpStreamAction::Event(node_stream::StreamEvent::Close)
-        )));
-        assert!(runtime.retire_http_connection(resource));
-        assert!(
-            runtime.poll_http_connection(resource).is_none(),
-            "a retired connection is gone from the table"
-        );
-        assert!(!runtime.retire_http_connection(resource));
-        assert!(runtime.host_mut().is_exhausted());
-    }
-
-    #[test]
-    fn scripted_runtime_aborts_http_connection_without_waiting_for_response_write() {
-        let resource = ResourceId::new(46);
-        let read = AsyncHostOp::TcpRead {
-            stream: resource,
-            max_bytes: node_stream::DEFAULT_HIGH_WATER_MARK,
-        };
-        let close = AsyncHostOp::CloseResource { resource };
-        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
-            ScriptedHostStep {
-                operation: read.clone(),
-                result: Ok(AsyncHostValue::Bytes(b"late".to_vec())),
-            },
-            ScriptedHostStep {
-                operation: close.clone(),
-                result: Ok(AsyncHostValue::Undefined),
-            },
-        ]))
-        .expect("scripted runtime builds");
-
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
-            panic!("HTTP connection starts one scripted read");
-        };
-        let read_request = start_http_test_operation(&mut runtime, resource, read_operation, true);
-
-        let actions = runtime
-            .close_http_connection(resource, HttpCloseMode::Abort)
-            .expect("HTTP connection is registered");
-        assert_eq!(actions.len(), 2);
-        assert!(matches!(
-            actions.first(),
-            Some(HttpStreamAction::Cancel(request)) if *request == read_request
-        ));
-        assert!(runtime.cancel_host_op(read_request));
-        let Some(HttpStreamAction::Close(close_action)) = actions.into_iter().nth(1) else {
-            panic!("abort must select a portable close operation");
-        };
-        assert_eq!(close_action.resource(), resource);
-        let close_request = runtime
-            .start_http_connection_close(close_action)
-            .expect("authorized HTTP close starts");
-        assert_eq!(
-            next_host_completion(&mut runtime)
-                .expect("aborted close completes")
-                .request,
-            close_request
-        );
-        assert!(runtime.host_mut().is_exhausted());
-    }
-
-    #[test]
-    fn realm_shutdown_aborts_http_transport_and_rejects_new_admission() {
-        let resource = ResourceId::new(47);
-        let read = AsyncHostOp::TcpRead {
-            stream: resource,
-            max_bytes: node_stream::DEFAULT_HIGH_WATER_MARK,
-        };
-        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([ScriptedHostStep {
-            operation: read,
-            result: Ok(AsyncHostValue::Bytes(b"late".to_vec())),
-        }]))
-        .expect("scripted runtime builds");
-
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
-            panic!("HTTP connection starts one scripted read");
-        };
-        start_http_test_operation(&mut runtime, resource, read_operation, true);
-        assert!(runtime.has_pending_host_work());
-        assert_eq!(runtime.http_connections.len(), 1);
-        let duplicate = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            runtime.start_http1_client_connection(resource)
-        }));
-        assert!(
-            duplicate.is_err(),
-            "duplicate resource ownership is rejected"
-        );
-        assert_eq!(runtime.http_connections.len(), 1);
-        assert_eq!(runtime.host_mut().pending.len(), 1);
-
-        assert!(runtime.shutdown());
-        assert!(runtime.is_shutdown());
-        assert!(!runtime.shutdown(), "terminal teardown is idempotent");
-        assert!(!runtime.has_pending_host_work());
-        assert!(!runtime.has_referenced_host_work());
-        assert!(runtime.http_connections.is_empty());
-        assert!(runtime.host_mut().is_exhausted());
-        assert_eq!(
-            runtime
-                .next_host_completion()
-                .expect("shutdown provider remains healthy"),
-            None
-        );
-        assert_eq!(
-            runtime.try_start_host_op(
-                AsyncHostOp::ReadFile {
-                    path: "must-not-start".into(),
-                },
-                true,
-            ),
-            None
-        );
-        let origin = HttpOrigin::http("closed.example", 80);
-        assert!(!runtime.client_connection_connected(origin.clone(), resource, 1));
-        assert_eq!(
-            runtime.release_client_connection(resource, true),
-            AgentRelease::Retire
-        );
-        assert_eq!(
-            runtime.client_connection_failed(&origin),
-            AgentFailure::Empty
-        );
-        assert_eq!(runtime.client_connection_closed(resource), None);
-    }
-
-    #[test]
     fn dropping_realm_runtime_uses_the_idempotent_shutdown_protocol() {
         let observer = Rc::new(std::cell::Cell::new(0));
         let host = ScriptedHost {
@@ -4972,273 +3790,6 @@ mod tests {
         };
         drop(RealmRuntime::with_host(host).expect("scripted runtime builds"));
         assert_eq!(observer.get(), 2, "Drop must initiate shutdown when needed");
-    }
-
-    /// Drive one scripted HTTP/1 request through the runtime and return the bytes the response
-    /// selected for the transport. The head is what these tests are about, so the write is read
-    /// off the action rather than started against the script.
-    fn response_head_for(
-        request: &[u8],
-        status: u16,
-        headers: Vec<(String, String)>,
-        chunks: &[&[u8]],
-        body: &[u8],
-    ) -> String {
-        use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
-
-        let resource = ResourceId::new(77);
-        let read = AsyncHostOp::TcpRead {
-            stream: resource,
-            max_bytes: DEFAULT_HIGH_WATER_MARK,
-        };
-        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([ScriptedHostStep {
-            operation: read.clone(),
-            result: Ok(AsyncHostValue::Bytes(request.to_vec())),
-        }]))
-        .expect("scripted runtime builds");
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
-            panic!("HTTP connection starts one read")
-        };
-        let _read_request =
-            start_http_test_operation(&mut runtime, resource, read_operation, false);
-        let completion = next_host_completion(&mut runtime).expect("request read completes");
-        runtime
-            .complete_http_connection(resource, completion)
-            .expect("read belongs to connection");
-        let events = (0..8)
-            .find_map(|_| {
-                runtime.poll_http_connection(resource);
-                let events = runtime.take_http_events(resource);
-                (!events.is_empty()).then_some(events)
-            })
-            .expect("request events");
-        let (id, _, _) = request_events(&events);
-
-        assert!(runtime.start_http1_response(
-            resource,
-            id,
-            status,
-            headers,
-            DEFAULT_HIGH_WATER_MARK,
-        ));
-        for chunk in chunks {
-            assert!(
-                runtime
-                    .write_http1_response(resource, id, chunk.to_vec())
-                    .is_some()
-            );
-        }
-        assert!(
-            runtime
-                .end_http1_response(resource, id, body.to_vec())
-                .is_some()
-        );
-        let actions = (0..8)
-            .find_map(|_| {
-                runtime
-                    .poll_http_connection(resource)
-                    .filter(|actions| !actions.is_empty())
-            })
-            .expect("the response selects a write");
-        let [HttpStreamAction::Start(write)] = actions.as_slice() else {
-            panic!("a response selects one write: {actions:?}")
-        };
-        let AsyncHostOp::TcpWrite { data, .. } = write.clone().into_host_op() else {
-            panic!("a response writes bytes")
-        };
-        String::from_utf8(data).expect("an HTTP head is ASCII")
-    }
-
-    const GET: &[u8] = b"GET /framing HTTP/1.1\r\nHost: kiln\r\n\r\n";
-    const HEAD: &[u8] = b"HEAD /framing HTTP/1.1\r\nHost: kiln\r\n\r\n";
-
-    #[test]
-    fn end_with_the_whole_body_declares_its_length_in_bytes() {
-        // Case 1: nothing flushed, no prior write, no framing header the script chose.
-        assert_eq!(
-            response_head_for(GET, 200, Vec::new(), &[], b"kiln"),
-            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
-        );
-        // A length is bytes, not characters: five characters, six UTF-8 bytes.
-        assert_eq!(
-            response_head_for(GET, 200, Vec::new(), &[], "h\u{e9}llo".as_bytes()),
-            "HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nh\u{e9}llo"
-        );
-    }
-
-    #[test]
-    fn end_with_no_body_declares_zero() {
-        // Case 2.
-        assert_eq!(
-            response_head_for(GET, 200, Vec::new(), &[], b""),
-            "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn a_framing_the_script_chose_is_left_alone() {
-        // Case 3, both directions. A declared length is not recomputed, and a script that asked
-        // for chunking still gets it even though the whole body arrived with `end`.
-        assert_eq!(
-            response_head_for(
-                GET,
-                200,
-                vec![("content-length".into(), "4".into())],
-                &[],
-                b"kiln",
-            ),
-            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
-        );
-        assert_eq!(
-            response_head_for(
-                GET,
-                200,
-                vec![("transfer-encoding".into(), "chunked".into())],
-                &[],
-                b"kiln",
-            ),
-            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n4\r\nkiln\r\n0\r\n\r\n"
-        );
-        // The header name is matched without regard to case, as HTTP requires.
-        assert_eq!(
-            response_head_for(
-                GET,
-                200,
-                vec![("Content-Length".into(), "4".into())],
-                &[],
-                b"kiln",
-            ),
-            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
-        );
-    }
-
-    #[test]
-    fn a_chunk_before_end_keeps_the_body_chunked() {
-        // Case 4: the length is not known when the head has to go out.
-        assert_eq!(
-            response_head_for(GET, 200, Vec::new(), &[b"ki"], b"ln"),
-            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nki\r\n2\r\nln\r\n0\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn a_response_that_cannot_carry_a_body_declares_no_length() {
-        // Case 5. A HEAD response and a bodiless status get neither header, which is what node
-        // sends; hyper forwards a content-length here rather than dropping it, so the rule has to
-        // decline to add one.
-        assert_eq!(
-            response_head_for(HEAD, 200, Vec::new(), &[], b"kiln"),
-            "HTTP/1.1 200 OK\r\n\r\n"
-        );
-        assert_eq!(
-            response_head_for(GET, 204, Vec::new(), &[], b""),
-            "HTTP/1.1 204 No Content\r\n\r\n"
-        );
-        assert_eq!(
-            response_head_for(GET, 304, Vec::new(), &[], b""),
-            "HTTP/1.1 304 Not Modified\r\n\r\n"
-        );
-    }
-
-    #[test]
-    fn scripted_provider_dispatches_buffered_http1_pipeline_after_first_response() {
-        use crate::node_stream::DEFAULT_HIGH_WATER_MARK;
-
-        let resource = ResourceId::new(44);
-        let read = AsyncHostOp::TcpRead {
-            stream: resource,
-            max_bytes: DEFAULT_HIGH_WATER_MARK,
-        };
-        let requests =
-            b"GET /first HTTP/1.1\r\nHost: kiln\r\n\r\nGET /second HTTP/1.1\r\nHost: kiln\r\n\r\n";
-        let first_write = AsyncHostOp::TcpWrite {
-            stream: resource,
-            // `end` carries the whole body, so the head declares a length instead of chunking.
-            data: b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\n/first".to_vec(),
-        };
-        let mut runtime = RealmRuntime::with_host(ScriptedHost::new([
-            ScriptedHostStep {
-                operation: read.clone(),
-                result: Ok(AsyncHostValue::Bytes(requests.to_vec())),
-            },
-            ScriptedHostStep {
-                operation: first_write.clone(),
-                result: Ok(AsyncHostValue::Undefined),
-            },
-        ]))
-        .expect("scripted runtime builds");
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read_operation)] = start.as_slice() else {
-            panic!("HTTP connection starts one read")
-        };
-        let _read_request =
-            start_http_test_operation(&mut runtime, resource, read_operation, false);
-        let completion = next_host_completion(&mut runtime).expect("pipeline read completes");
-        runtime
-            .complete_http_connection(resource, completion)
-            .expect("read belongs to connection");
-
-        let first_events = (0..8)
-            .find_map(|_| {
-                runtime.poll_http_connection(resource);
-                let events = runtime.take_http_events(resource);
-                (!events.is_empty()).then_some(events)
-            })
-            .expect("first request events");
-        let (first_id, first, _) = request_events(&first_events);
-        assert_eq!(first.target, "/first");
-        assert!(runtime.start_http1_response(
-            resource,
-            first_id,
-            200,
-            Vec::new(),
-            DEFAULT_HIGH_WATER_MARK,
-        ));
-        assert!(
-            runtime
-                .end_http1_response(resource, first_id, b"/first".to_vec())
-                .is_some()
-        );
-
-        let write_actions = (0..8)
-            .find_map(|_| {
-                runtime
-                    .poll_http_connection(resource)
-                    .filter(|actions| !actions.is_empty())
-            })
-            .expect("first response write");
-        let [HttpStreamAction::Start(write_operation)] = write_actions.as_slice() else {
-            panic!("first response selects one write: {write_actions:?}")
-        };
-        assert_eq!(write_operation.clone().into_host_op(), first_write);
-        let _write_request =
-            start_http_test_operation(&mut runtime, resource, write_operation, false);
-        let completion = next_host_completion(&mut runtime).expect("first write completes");
-        runtime
-            .complete_http_connection(resource, completion)
-            .expect("write belongs to connection");
-
-        let mut second_events = Vec::new();
-        for _ in 0..16 {
-            runtime.poll_http_connection(resource);
-            second_events.extend(runtime.take_http_events(resource));
-            if second_events.iter().any(|event| {
-                matches!(
-                    event,
-                    RuntimeHttpEvent::RequestHead { request, .. } if request.target == "/second"
-                )
-            }) {
-                break;
-            }
-        }
-        assert!(
-            second_events.iter().any(|event| matches!(
-                event,
-                RuntimeHttpEvent::RequestHead { request, .. } if request.target == "/second"
-            )),
-            "buffered pipeline events: {second_events:?}"
-        );
     }
 
     #[test]
@@ -6034,315 +4585,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn runtime_owned_hyper_connection_uses_live_hostops_transport() {
-        use crate::node_http::HttpResponse;
-
-        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
-        runtime.start_host_op(
-            AsyncHostOp::TcpListen {
-                host: "127.0.0.1".into(),
-                port: 0,
-            },
-            false,
-        );
-        let listener = match next_host_completion(&mut runtime)
-            .expect("listen completes")
-            .result
-            .expect("listen succeeds")
-        {
-            AsyncHostValue::Resource(resource) => resource,
-            other => panic!("expected listener, got {other:?}"),
-        };
-        let accept = runtime.start_host_op(
-            AsyncHostOp::TcpAccept {
-                listener: listener.id,
-            },
-            false,
-        );
-        let connect = runtime.start_host_op(
-            AsyncHostOp::TcpConnect {
-                host: "127.0.0.1".into(),
-                port: listener.port.expect("listener has a port"),
-            },
-            false,
-        );
-        let mut server = None;
-        let mut client = None;
-        for _ in 0..2 {
-            let completion = next_host_completion(&mut runtime).expect("connect completes");
-            if completion.request == accept {
-                server = Some(match completion.result.expect("accept succeeds") {
-                    AsyncHostValue::AcceptedTcpStream(stream) => stream.resource,
-                    other => panic!("expected accepted stream, got {other:?}"),
-                });
-            } else if completion.request == connect {
-                client = Some(match completion.result.expect("connect succeeds") {
-                    AsyncHostValue::Resource(resource) => resource,
-                    other => panic!("expected client stream, got {other:?}"),
-                });
-            }
-        }
-        let server = server.expect("accepted stream exists");
-        let client = client.expect("client stream exists");
-        let start = runtime.start_http1_connection(server.id);
-        let [HttpStreamAction::Start(read)] = start.as_slice() else {
-            panic!("HTTP connection starts one read")
-        };
-        let read_request = start_http_test_operation(&mut runtime, server.id, read, false);
-        runtime.start_host_op(
-            AsyncHostOp::TcpWrite {
-                stream: client.id,
-                data: b"POST /health HTTP/1.1\r\nhost: kiln\r\ncontent-length: 4\r\nconnection: close\r\n\r\nping".to_vec(),
-            },
-            false,
-        );
-        let mut read_completion = None;
-        for _ in 0..2 {
-            let completion = next_host_completion(&mut runtime).expect("I/O completes");
-            if completion.request == read_request {
-                read_completion = Some(completion);
-            }
-        }
-        let actions = runtime
-            .complete_http_connection(server.id, read_completion.expect("server read completes"))
-            .expect("connection owns completion");
-        for action in actions {
-            if let HttpStreamAction::Start(operation) = action {
-                start_http_test_operation(&mut runtime, server.id, &operation, false);
-            }
-        }
-        runtime.poll_http_connection(server.id);
-        let events = runtime.take_http_events(server.id);
-        let (id, request, body) = request_events(&events);
-        assert_eq!(request.method, "POST");
-        assert_eq!(request.target, "/health");
-        assert_eq!(body, b"ping");
-        assert!(runtime.respond_http1(
-            server.id,
-            id,
-            HttpResponse {
-                status: 200,
-                reason: Some("OK".into()),
-                headers: vec![("content-type".into(), "text/plain".into())],
-                body: b"kiln".to_vec(),
-            }
-        ));
-        let writes = runtime
-            .poll_http_connection(server.id)
-            .expect("connection exists");
-        let [HttpStreamAction::Start(write)] = writes.as_slice() else {
-            panic!("Hyper selected one response write: {writes:?}")
-        };
-        let write_request = start_http_test_operation(&mut runtime, server.id, write, false);
-        runtime.start_host_op(
-            AsyncHostOp::TcpRead {
-                stream: client.id,
-                max_bytes: 4096,
-            },
-            false,
-        );
-        let mut response = None;
-        for _ in 0..2 {
-            let completion = next_host_completion(&mut runtime).expect("response I/O completes");
-            if completion.request == write_request {
-                runtime
-                    .complete_http_connection(server.id, completion)
-                    .expect("write completion belongs to connection");
-            } else if let Ok(AsyncHostValue::Bytes(bytes)) = completion.result {
-                response = Some(bytes);
-            }
-        }
-        let response = String::from_utf8(response.expect("client receives response"))
-            .expect("response is ASCII");
-        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
-        assert!(response.ends_with("\r\n\r\nkiln"));
-        assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
-
-        for resource in [server.id, client.id, listener.id] {
-            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
-            next_host_completion(&mut runtime).expect("close completes");
-        }
-    }
-
-    #[test]
-    fn runtime_owned_hyper_connection_is_deterministic_over_scripted_completions() {
-        use crate::node_http::HttpResponse;
-
-        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
-        let resource = ResourceId::new(91);
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read)] = start.as_slice() else {
-            panic!("HTTP connection starts one read")
-        };
-        assert!(runtime.http_connection_started(resource, read, RequestId::new(1)));
-        let actions = runtime
-            .complete_http_connection(
-                resource,
-                Completion {
-                    request: RequestId::new(1),
-                    sequence: 0,
-                    result: Ok(AsyncHostValue::Bytes(
-                        b"POST /echo HTTP/1.1\r\nhost: kiln\r\ncontent-length: 4\r\nconnection: close\r\n\r\nping"
-                            .to_vec(),
-                    )),
-                },
-            )
-            .expect("scripted completion belongs to connection");
-        assert!(actions.iter().any(|action| matches!(
-            action,
-            HttpStreamAction::Start(HttpHostOp::TcpRead { stream, .. })
-                if stream.resource() == resource
-        )));
-        runtime.poll_http_connection(resource);
-        let events = runtime.take_http_events(resource);
-        let (id, request, body) = request_events(&events);
-        assert_eq!(request.target, "/echo");
-        assert_eq!(body, b"ping");
-        assert!(runtime.respond_http1(
-            resource,
-            id,
-            HttpResponse {
-                status: 201,
-                reason: None,
-                headers: vec![("content-type".into(), "text/plain".into())],
-                body: body.clone(),
-            }
-        ));
-        let writes = runtime
-            .poll_http_connection(resource)
-            .expect("connection exists");
-        let [HttpStreamAction::Start(HttpHostOp::TcpWrite { stream, data })] = writes.as_slice()
-        else {
-            panic!("script selects one write: {writes:?}")
-        };
-        assert_eq!(stream.resource(), resource);
-        let response = String::from_utf8(data.clone()).expect("HTTP is ASCII");
-        assert!(response.starts_with("HTTP/1.1 201 Created\r\n"));
-        assert!(response.contains("content-type: text/plain\r\n"));
-        assert!(response.ends_with("\r\n\r\nping"));
-        assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
-        assert!(runtime.http_connection_started(
-            resource,
-            &HttpHostOp::TcpWrite {
-                stream: HttpResourceId::new(resource),
-                data: data.clone(),
-            },
-            RequestId::new(2),
-        ));
-        let mut after_write = runtime
-            .complete_http_connection(
-                resource,
-                Completion {
-                    request: RequestId::new(2),
-                    sequence: 1,
-                    result: Ok(AsyncHostValue::Undefined),
-                },
-            )
-            .expect("write completion belongs to connection");
-        for _ in 0..8 {
-            if runtime
-                .take_http_events(resource)
-                .contains(&RuntimeHttpEvent::Closed)
-            {
-                after_write.extend(
-                    runtime
-                        .close_http_connection(resource, HttpCloseMode::Graceful)
-                        .unwrap_or_default(),
-                );
-            }
-            after_write.extend(runtime.poll_http_connection(resource).unwrap_or_default());
-            if after_write
-                .iter()
-                .any(|action| matches!(action, HttpStreamAction::Close(_)))
-            {
-                break;
-            }
-        }
-        assert!(after_write.iter().any(|action| matches!(
-            action,
-            HttpStreamAction::Close(closed) if closed.resource() == resource
-        )));
-        assert!(
-            !after_write.iter().any(|action| matches!(
-                action,
-                HttpStreamAction::Start(HttpHostOp::TcpWrite { .. })
-            ))
-        );
-    }
-
-    #[test]
-    fn runtime_http_response_body_preserves_node_write_and_drain_semantics() {
-        use crate::node_stream::WriteDisposition;
-
-        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
-        let resource = ResourceId::new(92);
-        let start = runtime.start_http1_connection(resource);
-        let [HttpStreamAction::Start(read)] = start.as_slice() else {
-            panic!("HTTP connection starts one read")
-        };
-        assert!(runtime.http_connection_started(resource, read, RequestId::new(1)));
-        runtime
-            .complete_http_connection(
-                resource,
-                Completion {
-                    request: RequestId::new(1),
-                    sequence: 0,
-                    result: Ok(AsyncHostValue::Bytes(
-                        b"GET /stream HTTP/1.1\r\nhost: kiln\r\nconnection: close\r\n\r\n".to_vec(),
-                    )),
-                },
-            )
-            .expect("scripted completion belongs to connection");
-        runtime.poll_http_connection(resource);
-        let events = runtime.take_http_events(resource);
-        let (id, _, body) = request_events(&events);
-        assert!(body.is_empty());
-        assert!(runtime.start_http1_response(
-            resource,
-            id,
-            200,
-            vec![("content-type".into(), "text/plain".into())],
-            8,
-        ));
-        assert_eq!(
-            runtime.write_http1_response(resource, id, vec![1; 4]),
-            Some(WriteDisposition {
-                ready: true,
-                submit_now: true,
-            })
-        );
-        assert_eq!(
-            runtime.write_http1_response(resource, id, vec![2; 4]),
-            Some(WriteDisposition {
-                ready: false,
-                submit_now: false,
-            })
-        );
-        assert_eq!(
-            runtime.end_http1_response(resource, id, Vec::new()),
-            Some(WriteDisposition {
-                ready: false,
-                submit_now: false,
-            })
-        );
-
-        let mut drain_count = 0;
-        let mut finish_count = 0;
-        for _ in 0..32 {
-            runtime.poll_http_connection(resource);
-            for event in runtime.take_http_events(resource) {
-                drain_count += usize::from(event == RuntimeHttpEvent::Drain { id });
-                finish_count += usize::from(event == RuntimeHttpEvent::Finish { id });
-            }
-            if finish_count == 1 {
-                break;
-            }
-        }
-        assert_eq!(drain_count, 1);
-        assert_eq!(finish_count, 1);
-    }
-
     fn drive(realm: &mut Realm, events: &Rc<RefCell<Vec<String>>>) {
         let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
         runtime
@@ -6768,6 +5010,628 @@ mod tests {
                  the operation non-blocking or move it onto RealmRuntime, which owns the executor \
                  and is only reachable from outside a turn. See ADR 0040."
             );
+        }
+    }
+
+    // ------------------------------------------------------------------------------------
+    // HTTP through the engines (ADR 0046): the host hands over a transport, the engine's task
+    // drives Hyper over it, and the queued adapter parks events for these tests to drain.
+    // A scripted run is "these bytes arrive, these bytes must leave".
+
+    fn scripted_http_runtime(
+        resource: ResourceId,
+        inbound: &[&[u8]],
+        peer_closes: bool,
+    ) -> (RealmRuntime<ScriptedHost>, ScriptedTransportLog) {
+        scripted_runtime_with(
+            resource,
+            ScriptedTransport::new(inbound.iter().map(|chunk| chunk.to_vec()), peer_closes),
+        )
+    }
+
+    fn scripted_runtime_with(
+        resource: ResourceId,
+        transport: ScriptedTransport,
+    ) -> (RealmRuntime<ScriptedHost>, ScriptedTransportLog) {
+        let log = transport.log();
+        let host = ScriptedHost::new([]).with_transport(resource, transport);
+        let runtime = RealmRuntime::with_host(host).expect("scripted runtime builds");
+        (runtime, log)
+    }
+
+    /// Let the engine tasks run and collect what they queued, until `done` says so or the
+    /// budget of scheduler turns runs out.
+    fn drain_server_events<H: RealmHostProvider>(
+        runtime: &mut RealmRuntime<H>,
+        resource: ResourceId,
+        done: impl Fn(&[RuntimeHttpEvent]) -> bool,
+    ) -> Vec<RuntimeHttpEvent> {
+        let mut events = Vec::new();
+        for _ in 0..32 {
+            runtime.poll_http_tasks();
+            events.extend(runtime.take_queued_server_events(resource));
+            if done(&events) {
+                break;
+            }
+        }
+        events
+    }
+
+    fn flat(headers: &[(&str, &str)]) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        for (name, value) in headers {
+            bytes.extend_from_slice(name.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(value.as_bytes());
+            bytes.push(0);
+        }
+        bytes
+    }
+
+    #[test]
+    fn scripted_provider_drains_response_before_same_turn_server_close() {
+        let resource = ResourceId::new(45);
+        let (mut runtime, log) = scripted_http_runtime(
+            resource,
+            &[b"GET /same-turn HTTP/1.1\r\nHost: kiln\r\nConnection: close\r\n\r\n"],
+            false,
+        );
+        assert!(runtime.server_attach_queued(resource, false));
+        assert!(runtime.http_owns(resource));
+        let events = drain_server_events(&mut runtime, resource, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::RequestEnd { .. }))
+        });
+        let (id, request, body) = request_events(&events);
+        assert_eq!(request.target, "/same-turn");
+        assert!(!request.keep_alive);
+        assert!(body.is_empty());
+        assert_eq!(runtime.requests_in_flight(), 1);
+
+        // This is the callback's ordering: response.end() commits the slot, then server.close()
+        // runs before Tokio gets another poll of the connection task.
+        assert!(runtime.http_server().start_response(
+            resource,
+            id,
+            200,
+            b"",
+            node_stream::DEFAULT_HIGH_WATER_MARK
+        ));
+        assert!(
+            runtime
+                .http_server()
+                .end_response(resource, id, b"same-turn")
+                .expect("the response ends")
+                .ready
+        );
+        assert!(runtime.http_close(resource, HttpCloseMode::Graceful));
+        assert!(
+            log.written().is_empty(),
+            "nothing reaches the transport inside the caller"
+        );
+
+        let events = drain_server_events(&mut runtime, resource, |events| {
+            events.contains(&RuntimeHttpEvent::Closed)
+        });
+        assert_eq!(
+            events,
+            vec![RuntimeHttpEvent::Finish { id }, RuntimeHttpEvent::Closed],
+            "the response finishes before the connection closes"
+        );
+        assert_eq!(
+            String::from_utf8(log.written()).expect("HTTP is ASCII"),
+            "HTTP/1.1 200 OK\r\ncontent-length: 9\r\nconnection: close\r\n\r\nsame-turn"
+        );
+        assert!(
+            log.is_dropped(),
+            "a closed connection lets its transport go"
+        );
+        assert!(!runtime.http_owns(resource));
+        assert_eq!(runtime.requests_in_flight(), 0);
+        assert!(!runtime.has_live_http_work());
+        assert!(runtime.retire_http_connection(resource));
+    }
+
+    #[test]
+    fn an_abort_publishes_closed_from_a_task_and_never_inside_the_caller() {
+        let resource = ResourceId::new(46);
+        let (mut runtime, log) = scripted_http_runtime(resource, &[b"GET /"], false);
+        assert!(runtime.server_attach_queued(resource, false));
+        runtime.poll_http_tasks();
+        assert!(runtime.http_close(resource, HttpCloseMode::Abort));
+        assert!(
+            runtime.take_queued_server_events(resource).is_empty(),
+            "the caller does not hear Closed from inside its own close"
+        );
+        assert!(
+            runtime.has_live_http_work(),
+            "the abort counts as work until the language has heard it"
+        );
+        let events = drain_server_events(&mut runtime, resource, |events| {
+            events.contains(&RuntimeHttpEvent::Closed)
+        });
+        assert_eq!(events, vec![RuntimeHttpEvent::Closed]);
+        assert!(log.is_dropped());
+        assert!(!runtime.http_owns(resource));
+        assert!(!runtime.has_live_http_work());
+    }
+
+    #[test]
+    fn realm_shutdown_aborts_engine_connections_and_rejects_new_admission() {
+        let resource = ResourceId::new(47);
+        let (mut runtime, log) =
+            scripted_http_runtime(resource, &[b"GET / HTTP/1.1\r\nHost: kiln\r\n\r\n"], false);
+        assert!(runtime.server_attach_queued(resource, false));
+        assert!(
+            !runtime.server_attach_queued(resource, false),
+            "duplicate resource ownership is rejected"
+        );
+        assert!(
+            !runtime.client_attach_queued(resource),
+            "nor may the other engine take an owned resource"
+        );
+        let _ = drain_server_events(&mut runtime, resource, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::RequestEnd { .. }))
+        });
+        assert!(runtime.has_live_http_work());
+
+        assert!(runtime.shutdown());
+        assert!(runtime.is_shutdown());
+        assert!(!runtime.shutdown(), "terminal teardown is idempotent");
+        assert!(!runtime.http_owns(resource));
+        assert!(!runtime.has_live_http_work());
+        assert!(runtime.take_queued_server_events(resource).is_empty());
+        assert_eq!(
+            runtime.try_start_host_op(
+                AsyncHostOp::ReadFile {
+                    path: "must-not-start".into(),
+                },
+                true,
+            ),
+            None
+        );
+        let origin = HttpOrigin::http("closed.example", 80);
+        assert!(!runtime.client_connection_connected(origin.clone(), resource, 1));
+        assert_eq!(
+            runtime.release_client_connection(resource, true),
+            AgentRelease::Retire
+        );
+        assert_eq!(
+            runtime.client_connection_failed(&origin),
+            AgentFailure::Empty
+        );
+        assert_eq!(runtime.client_connection_closed(resource), None);
+        // An aborted task is dropped when its executor next runs, or goes away with it.
+        drop(runtime);
+        assert!(log.is_dropped(), "shutdown drops the transports it took");
+    }
+
+    /// Drive one scripted HTTP/1 request through the engine and return the bytes the
+    /// response put on the transport. The head is what these tests are about.
+    fn response_head_for(
+        request: &[u8],
+        status: u16,
+        headers: &[(&str, &str)],
+        chunks: &[&[u8]],
+        body: &[u8],
+    ) -> String {
+        let resource = ResourceId::new(77);
+        let (mut runtime, log) = scripted_http_runtime(resource, &[request], false);
+        assert!(runtime.server_attach_queued(resource, false));
+        let events = drain_server_events(&mut runtime, resource, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::RequestEnd { .. }))
+        });
+        let (id, _, _) = request_events(&events);
+        assert!(runtime.http_server().start_response(
+            resource,
+            id,
+            status,
+            &flat(headers),
+            node_stream::DEFAULT_HIGH_WATER_MARK,
+        ));
+        for chunk in chunks {
+            assert!(
+                runtime
+                    .http_server()
+                    .write_response(resource, id, chunk)
+                    .is_some()
+            );
+        }
+        assert!(
+            runtime
+                .http_server()
+                .end_response(resource, id, body)
+                .is_some()
+        );
+        let _ = drain_server_events(&mut runtime, resource, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::Finish { .. }))
+        });
+        String::from_utf8(log.written()).expect("an HTTP head is ASCII")
+    }
+
+    const GET: &[u8] = b"GET /framing HTTP/1.1\r\nHost: kiln\r\n\r\n";
+    const HEAD: &[u8] = b"HEAD /framing HTTP/1.1\r\nHost: kiln\r\n\r\n";
+
+    #[test]
+    fn end_with_the_whole_body_declares_its_length_in_bytes() {
+        // Case 1: nothing flushed, no prior write, no framing header the script chose.
+        assert_eq!(
+            response_head_for(GET, 200, &[], &[], b"kiln"),
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
+        );
+        // A length is bytes, not characters: five characters, six UTF-8 bytes.
+        assert_eq!(
+            response_head_for(GET, 200, &[], &[], "h\u{e9}llo".as_bytes()),
+            "HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\nh\u{e9}llo"
+        );
+    }
+
+    #[test]
+    fn end_with_no_body_declares_zero() {
+        // Case 2.
+        assert_eq!(
+            response_head_for(GET, 200, &[], &[], b""),
+            "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_framing_the_script_chose_is_left_alone() {
+        // Case 3, both directions. A declared length is not recomputed, and a script that asked
+        // for chunking still gets it even though the whole body arrived with `end`.
+        assert_eq!(
+            response_head_for(GET, 200, &[("content-length", "4")], &[], b"kiln"),
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
+        );
+        assert_eq!(
+            response_head_for(GET, 200, &[("transfer-encoding", "chunked")], &[], b"kiln"),
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n4\r\nkiln\r\n0\r\n\r\n"
+        );
+        // The header name is matched without regard to case, as HTTP requires.
+        assert_eq!(
+            response_head_for(GET, 200, &[("Content-Length", "4")], &[], b"kiln"),
+            "HTTP/1.1 200 OK\r\ncontent-length: 4\r\n\r\nkiln"
+        );
+    }
+
+    #[test]
+    fn a_chunk_before_end_keeps_the_body_chunked() {
+        // Case 4: the length is not known when the head has to go out.
+        assert_eq!(
+            response_head_for(GET, 200, &[], &[b"ki"], b"ln"),
+            "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n2\r\nki\r\n2\r\nln\r\n0\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn a_response_that_cannot_carry_a_body_declares_no_length() {
+        // Case 5. A HEAD response and a bodiless status get neither header, which is what node
+        // sends; hyper forwards a content-length here rather than dropping it, so the rule has to
+        // decline to add one.
+        assert_eq!(
+            response_head_for(HEAD, 200, &[], &[], b"kiln"),
+            "HTTP/1.1 200 OK\r\n\r\n"
+        );
+        assert_eq!(
+            response_head_for(GET, 204, &[], &[], b""),
+            "HTTP/1.1 204 No Content\r\n\r\n"
+        );
+        assert_eq!(
+            response_head_for(GET, 304, &[], &[], b""),
+            "HTTP/1.1 304 Not Modified\r\n\r\n"
+        );
+    }
+
+    #[test]
+    fn scripted_provider_dispatches_buffered_http1_pipeline_after_first_response() {
+        let resource = ResourceId::new(44);
+        let (mut runtime, log) = scripted_http_runtime(
+            resource,
+            &[b"GET /first HTTP/1.1\r\nHost: kiln\r\n\r\nGET /second HTTP/1.1\r\nHost: kiln\r\n\r\n"],
+            false,
+        );
+        assert!(runtime.server_attach_queued(resource, false));
+        let first_events = drain_server_events(&mut runtime, resource, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::RequestEnd { .. }))
+        });
+        let (first_id, first, _) = request_events(&first_events);
+        assert_eq!(first.target, "/first");
+        assert!(
+            !first_events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::RequestHead { request, .. } if request.target == "/second")),
+            "the second request waits for the first response"
+        );
+        assert!(runtime.http_server().start_response(
+            resource,
+            first_id,
+            200,
+            b"",
+            node_stream::DEFAULT_HIGH_WATER_MARK,
+        ));
+        assert!(
+            runtime
+                .http_server()
+                .end_response(resource, first_id, b"/first")
+                .is_some()
+        );
+        let second_events = drain_server_events(&mut runtime, resource, |events| {
+            events.iter().any(|event| {
+                matches!(
+                    event,
+                    RuntimeHttpEvent::RequestHead { request, .. } if request.target == "/second"
+                )
+            })
+        });
+        assert!(
+            second_events.iter().any(|event| matches!(
+                event,
+                RuntimeHttpEvent::RequestHead { request, .. } if request.target == "/second"
+            )),
+            "buffered pipeline events: {second_events:?}"
+        );
+        assert!(
+            log.written()
+                .starts_with(b"HTTP/1.1 200 OK\r\ncontent-length: 6\r\n\r\n/first"),
+            "the first response went out before the second request was dispatched"
+        );
+    }
+
+    #[test]
+    fn runtime_http_response_body_preserves_node_write_and_drain_semantics() {
+        use crate::node_stream::WriteDisposition;
+
+        let resource = ResourceId::new(92);
+        let (mut runtime, _log) = scripted_http_runtime(
+            resource,
+            &[b"GET /stream HTTP/1.1\r\nhost: kiln\r\nconnection: close\r\n\r\n"],
+            false,
+        );
+        assert!(runtime.server_attach_queued(resource, false));
+        let events = drain_server_events(&mut runtime, resource, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::RequestEnd { .. }))
+        });
+        let (id, _, body) = request_events(&events);
+        assert!(body.is_empty());
+        assert!(runtime.http_server().start_response(
+            resource,
+            id,
+            200,
+            &flat(&[("content-type", "text/plain")]),
+            8,
+        ));
+        assert_eq!(
+            runtime.http_server().write_response(resource, id, &[1; 4]),
+            Some(WriteDisposition {
+                ready: true,
+                submit_now: true,
+            })
+        );
+        assert_eq!(
+            runtime.http_server().write_response(resource, id, &[2; 4]),
+            Some(WriteDisposition {
+                ready: false,
+                submit_now: false,
+            })
+        );
+        assert_eq!(
+            runtime.http_server().end_response(resource, id, &[]),
+            Some(WriteDisposition {
+                ready: false,
+                submit_now: false,
+            })
+        );
+        let events = drain_server_events(&mut runtime, resource, |events| {
+            events.contains(&RuntimeHttpEvent::Closed)
+        });
+        let drain_count = events
+            .iter()
+            .filter(|event| **event == RuntimeHttpEvent::Drain { id })
+            .count();
+        let finish_count = events
+            .iter()
+            .filter(|event| **event == RuntimeHttpEvent::Finish { id })
+            .count();
+        assert_eq!(drain_count, 1, "{events:?}");
+        assert_eq!(finish_count, 1, "{events:?}");
+    }
+
+    #[test]
+    fn a_scripted_client_connection_round_trips_through_the_queued_adapter() {
+        let resource = ResourceId::new(51);
+        // The reply is scripted, so it arrives once the request has left.
+        let (mut runtime, log) = scripted_runtime_with(
+            resource,
+            ScriptedTransport::replying(
+                [b"HTTP/1.1 201 Created\r\ncontent-type: text/plain\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok".to_vec()],
+                true,
+            ),
+        );
+        assert!(runtime.client_attach_queued(resource));
+        assert!(runtime.http_client().send_request(
+            resource,
+            1,
+            "POST",
+            "/upload",
+            &[("host".into(), "kiln".into())],
+            node_stream::DEFAULT_HIGH_WATER_MARK,
+        ));
+        assert!(
+            runtime
+                .http_client()
+                .end_request(resource, 1, b"kiln")
+                .expect("the request ends")
+                .ready
+        );
+        assert!(runtime.has_live_http_work());
+        let mut events = Vec::new();
+        for _ in 0..32 {
+            runtime.poll_http_tasks();
+            events.extend(runtime.take_queued_client_events(resource));
+            if events.contains(&RuntimeHttpClientEvent::Closed) {
+                break;
+            }
+        }
+        let request = String::from_utf8(log.written()).expect("HTTP is ASCII");
+        assert!(
+            request.starts_with("POST /upload HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("content-length: 4\r\n"), "{request}");
+        assert!(request.ends_with("\r\n\r\nkiln"), "{request}");
+        assert_eq!(
+            events,
+            vec![
+                RuntimeHttpClientEvent::Finish { id: 1 },
+                RuntimeHttpClientEvent::ResponseHead {
+                    id: 1,
+                    status: 201,
+                    reason: "Created".into(),
+                    headers: vec![
+                        ("content-type".into(), "text/plain".into()),
+                        ("content-length".into(), "2".into()),
+                        ("connection".into(), "close".into()),
+                    ],
+                },
+                RuntimeHttpClientEvent::ResponseData {
+                    id: 1,
+                    data: b"ok".to_vec(),
+                },
+                RuntimeHttpClientEvent::ResponseEnd {
+                    id: 1,
+                    reusable: false,
+                },
+                RuntimeHttpClientEvent::Closed,
+            ]
+        );
+        assert!(!runtime.has_live_http_work());
+        assert!(!runtime.http_owns(resource));
+    }
+
+    #[test]
+    fn a_live_tokio_stream_is_handed_to_the_engine_and_served() {
+        let mut runtime = RealmRuntime::new().expect("Tokio runtime builds");
+        runtime.start_host_op(
+            AsyncHostOp::TcpListen {
+                host: "127.0.0.1".into(),
+                port: 0,
+            },
+            false,
+        );
+        let listener = match next_host_completion(&mut runtime)
+            .expect("listen completes")
+            .result
+            .expect("listen succeeds")
+        {
+            AsyncHostValue::Resource(resource) => resource,
+            other => panic!("expected listener, got {other:?}"),
+        };
+        let accept = runtime.start_host_op(
+            AsyncHostOp::TcpAccept {
+                listener: listener.id,
+            },
+            false,
+        );
+        let connect = runtime.start_host_op(
+            AsyncHostOp::TcpConnect {
+                host: "127.0.0.1".into(),
+                port: listener.port.expect("listener has a port"),
+            },
+            false,
+        );
+        let mut server = None;
+        let mut client = None;
+        for _ in 0..2 {
+            let completion = next_host_completion(&mut runtime).expect("connect completes");
+            if completion.request == accept {
+                server = Some(match completion.result.expect("accept succeeds") {
+                    AsyncHostValue::AcceptedTcpStream(stream) => stream.resource,
+                    other => panic!("expected accepted stream, got {other:?}"),
+                });
+            } else if completion.request == connect {
+                client = Some(match completion.result.expect("connect succeeds") {
+                    AsyncHostValue::Resource(resource) => resource,
+                    other => panic!("expected client stream, got {other:?}"),
+                });
+            }
+        }
+        let server = server.expect("accepted stream exists");
+        let client = client.expect("client stream exists");
+        assert!(runtime.server_attach_queued(server.id, false));
+        assert!(
+            !runtime.has_referenced_host_work(),
+            "a taken transport does not keep the realm alive by itself"
+        );
+        runtime.start_host_op(
+            AsyncHostOp::TcpWrite {
+                stream: client.id,
+                data: b"POST /health HTTP/1.1\r\nhost: kiln\r\ncontent-length: 4\r\nconnection: close\r\n\r\nping".to_vec(),
+            },
+            false,
+        );
+        next_host_completion(&mut runtime).expect("the client write completes");
+        let events = drain_server_events(&mut runtime, server.id, |events| {
+            events
+                .iter()
+                .any(|event| matches!(event, RuntimeHttpEvent::RequestEnd { .. }))
+        });
+        let (id, request, body) = request_events(&events);
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.target, "/health");
+        assert_eq!(body, b"ping");
+        assert!(runtime.http_server().start_response(
+            server.id,
+            id,
+            200,
+            &flat(&[("content-type", "text/plain")]),
+            node_stream::DEFAULT_HIGH_WATER_MARK,
+        ));
+        assert!(
+            runtime
+                .http_server()
+                .end_response(server.id, id, b"kiln")
+                .is_some()
+        );
+        runtime.start_host_op(
+            AsyncHostOp::TcpRead {
+                stream: client.id,
+                max_bytes: 4096,
+            },
+            false,
+        );
+        let response = match next_host_completion(&mut runtime)
+            .expect("the client read completes")
+            .result
+            .expect("the read succeeds")
+        {
+            AsyncHostValue::Bytes(bytes) => String::from_utf8(bytes).expect("ASCII"),
+            other => panic!("expected bytes, got {other:?}"),
+        };
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"), "{response}");
+        assert!(response.ends_with("\r\n\r\nkiln"), "{response}");
+        assert!(!response.to_ascii_lowercase().contains("\r\ndate:"));
+        let events = drain_server_events(&mut runtime, server.id, |events| {
+            events.contains(&RuntimeHttpEvent::Closed)
+        });
+        assert!(
+            events.contains(&RuntimeHttpEvent::Finish { id }),
+            "{events:?}"
+        );
+        assert!(events.contains(&RuntimeHttpEvent::Closed), "{events:?}");
+        for resource in [client.id, listener.id] {
+            runtime.start_host_op(AsyncHostOp::CloseResource { resource }, false);
+            next_host_completion(&mut runtime).expect("close completes");
         }
     }
 }
