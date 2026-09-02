@@ -87,6 +87,7 @@ fn read_pool() -> Option<&'static rayon::ThreadPool> {
 /// The reads run on [`read_threads`] threads, and `FileId` assignment must not come to depend on
 /// which read finishes first. `par_iter` is indexed: every text is placed at its own position,
 /// so the result is in the walk's sorted order however the threads interleave.
+#[cfg(test)]
 pub(crate) fn read_all(
     root: &Path,
     files: &[PathBuf],

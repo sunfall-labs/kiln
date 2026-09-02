@@ -3021,8 +3021,8 @@ mod realm {
         fn deterministic_entropy_is_one_realm_stream_and_rejects_policy_drift() {
             let mut first_realm = 0;
             let mut second_realm = 0;
-            let mut first = [0; 2];
-            let mut second = [0; 2];
+            let mut first: [u64; 2] = [0; 2];
+            let mut second: [u64; 2] = [0; 2];
             assert_eq!(unsafe { kiln_realm_create(&raw mut first_realm) }, 0);
             assert_eq!(unsafe { kiln_realm_create(&raw mut second_realm) }, 0);
             assert_eq!(
