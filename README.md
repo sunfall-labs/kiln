@@ -4,9 +4,9 @@ kiln compiles JavaScript and TypeScript to native executables. It is written in 
 and links the result against a small Rust runtime built on Tokio and Hyper. There is no
 JavaScript engine inside the binary.
 
-A ten-line `node:http` server compiles to a 3.8 MB executable that starts in 8 ms, holds
-about 30 MB resident under load, and serves requests at the same rate as Node, Bun and Deno on
-the same machine. The interpreter that ships alongside the compiler runs the same program
+A ten-line `node:http` server compiles to a 4 MB executable that starts in 8 ms, holds under
+10 MB resident under load, and serves more requests per second than Node, Bun and Deno on the
+same machine. The interpreter that ships alongside the compiler runs the same program
 immediately, so the edit-run loop never waits for a native build.
 
 ## Status
@@ -24,29 +24,32 @@ the interpreter on every probe in `conformance/native`, and the interpreter is h
 
 ## Measured
 
-`bench/server`, 2026-09-01, one machine, keep-alive, median of three interleaved passes.
+`bench/server/compare.sh`, 2026-09-02, one machine, keep-alive, four client processes with
+sixteen connections each, median of three interleaved passes. A single client process saturates
+before these servers do, which is why there are four.
 
 A hello-world server:
 
-| runtime | 1 connection | 16 connections | 64 connections | resident |
+| runtime | requests/s | p50 | p99 | resident |
 |---|---|---|---|---|
-| kiln native | 25.5k rps | 71.2k rps | 67.3k rps | 27 MB |
-| node 25.9 | 27.2k rps | 78.2k rps | 70.7k rps | 83 MB |
-| bun 1.4 | 23.7k rps | 64.8k rps | 67.9k rps | 67 MB |
-| deno 2.9 | 25.9k rps | 80.8k rps | 74.3k rps | 108 MB |
+| kiln native | 163.7k | 0.32 ms | 1.02 ms | 8 MB |
+| bun 1.4 | 142.5k | 0.36 ms | 1.21 ms | 76 MB |
+| node 25.9 | 115.0k | 0.48 ms | 1.39 ms | 84 MB |
+| deno 2.9 | 104.1k | 0.54 ms | 1.37 ms | 121 MB |
 
 A small service (URL routing, query parsing, JSON in and out, a POST body, an 8 KB response,
-header echo, an async handler), every answer checked by the client:
+header echo, an async handler that awaits a timer), every answer checked by the client:
 
-| runtime | 16 connections | 64 connections | resident |
-|---|---|---|---|
-| kiln native | 68.6k rps | 62.2k rps | 35 MB |
-| node 25.9 | 70.8k rps | 41.9k rps | 96 MB |
-| bun 1.4 | 52.7k rps | 58.2k rps | 85 MB |
-| deno 2.9 | 46.7k rps | 59.9k rps | 120 MB |
+| runtime | requests/s | p50 | p99 | resident |
+|---|---|---|---|---|
+| kiln native | 111.4k | 0.44 ms | 1.68 ms | 10 MB |
+| bun 1.4 | 107.6k | 0.42 ms | 2.04 ms | 94 MB |
+| node 25.9 | 89.0k | 0.57 ms | 2.00 ms | 101 MB |
+| deno 2.9 | 78.8k | 0.62 ms | 2.89 ms | 126 MB |
 
-The machine was shared while these ran; the ranges are in
-`.scratch/server-throughput/measurements-2026-09-01.md`. `bench/server/run.sh` reproduces a row.
+The machine was shared while these ran; the per-pass ranges and raw log are in
+`.scratch/server-throughput/measurements-2026-09-02.md`. `bench/server/compare.sh` reproduces the
+table, `bench/server/run.sh` one row.
 
 ## Using it
 
@@ -86,6 +89,9 @@ follows from it.
 - **The native heap is collected at the turn boundary.** A precise mark-sweep collector runs
   between callbacks; every allocation a value can point at is a tagged block, and marking never
   trusts a pointer it cannot look up.
+- **A shipped realm keeps wall time; a measured one keeps virtual time.** `kiln build` gives the
+  program the host's clock, so timers fire on schedule under load; `kiln run --native` and the
+  conformance harness keep the deterministic clock that makes two engines comparable.
 
 Every decision of that kind is an ADR under `docs/adr/`, numbered and never edited in place;
 `docs/design.md` is the founding document, kept as written.
