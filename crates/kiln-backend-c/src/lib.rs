@@ -3269,6 +3269,7 @@ static int kiln_c99_signbit(double value);
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right);
 static int kiln_c99_is_callable(kiln_value value);
 static int kiln_c99_is_reference(kiln_value value);
+static int kiln_c99_has_intrinsic_text(kiln_value value);
 static int kiln_c99_crosses_boundary(kiln_value value);
 static kiln_value kiln_c99_text(kiln_value value);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
@@ -8632,13 +8633,71 @@ static int kiln_c99_is_callable(kiln_value value) {
  * do it by calling: this backend has no user `valueOf` to reach, because a property holding a
  * function is refused at the point it would be called. So reduction is conversion to text. */
 static int kiln_c99_is_reference(kiln_value value) {
-    /* What a coercing operator has to reduce to a primitive first. A Date is a reference and is
-     * deliberately *not* here: `as_number` already gives its instant, which is what `valueOf`
-     * would produce, so reducing it to text first would turn every date subtraction into NaN. */
-    return kiln_c99_is_callable(value) || value.tag == KILN_VALUE_OBJECT ||
-           value.tag == KILN_VALUE_ARRAY || value.tag == KILN_VALUE_GENERATOR ||
-           value.tag == KILN_VALUE_COLLECTION || value.tag == KILN_VALUE_ARRAY_BUFFER ||
-           value.tag == KILN_VALUE_TYPED_ARRAY || value.tag == KILN_VALUE_PROXY;
+    /* What a coercing operator has to reduce to a primitive first.
+     *
+     * Listed the other way round -- what is *not* one -- for the same reason
+     * `kiln_c99_crosses_boundary` below is: an allowlist of the object kinds silently stops being
+     * true the day a tag is added, and says nothing when it does. This one was an allowlist and
+     * had fallen three tags behind. A `Temporal` value, a promise and a regexp were all answered
+     * "already primitive", so `"x" + aPlainDate` never reduced anything: the concatenation read
+     * the unchecked `kiln_c99_text`, which had no case for the tag either, and appended the empty
+     * span its `default:` hands back. The program printed "x" and carried on, where the language
+     * throws -- `Temporal`'s `valueOf` is specified to, precisely so that `date1 < date2` cannot
+     * quietly compare two NaNs.
+     *
+     * The primitives are the closed list, and the three internal tags are on it because they are
+     * never an operand: a cell lives only in a captured slot, a hole only in an array's storage,
+     * and an uninitialized slot throws when it is read.
+     *
+     * A Date is deliberately *not* a reference: `as_number` already gives its instant, which is
+     * what `valueOf` would produce, so reducing it to text first would turn every date
+     * subtraction into NaN. That is a shortcut that happens to reproduce both halves of the
+     * language's answer, and it is the one exception here. */
+    switch (value.tag) {
+    case KILN_VALUE_UNDEFINED:
+    case KILN_VALUE_NULL:
+    case KILN_VALUE_BOOLEAN:
+    case KILN_VALUE_NUMBER:
+    case KILN_VALUE_STRING:
+    case KILN_VALUE_SYMBOL:
+    case KILN_VALUE_BIGINT:
+    case KILN_VALUE_CELL:
+    case KILN_VALUE_HOLE:
+    case KILN_VALUE_UNINITIALIZED:
+    case KILN_VALUE_DATE:
+        return 0;
+    default:
+        return 1;
+    }
+}
+
+/* Whether this value's text form is a fact about its *tag* rather than about its property store.
+ *
+ * The companion to `kiln_c99_is_reference`, and the reason `kiln_c99_to_primitive` can fall back
+ * to `kiln_c99_text` for some references and must not for others. A function, a namespace, a
+ * promise, a generator, a collection, a regexp, a view, a buffer and a `Temporal` value each
+ * convert to one string decided entirely by what they are; a plain object and an array convert to
+ * something decided by what they hold, which only the `valueOf`/`toString` walk can ask. Answering
+ * the tagged form for those two instead is what made `Object.create(null) + 1` produce a string
+ * where the language stops the program. */
+static int kiln_c99_has_intrinsic_text(kiln_value value) {
+    switch (value.tag) {
+    case KILN_VALUE_COLLECTION:
+    case KILN_VALUE_PROMISE:
+    case KILN_VALUE_GENERATOR:
+    case KILN_VALUE_REGEXP:
+    case KILN_VALUE_ARRAY_BUFFER:
+    case KILN_VALUE_TYPED_ARRAY:
+    case KILN_VALUE_TEMPORAL:
+    /* A Date's human string is intrinsic too. `kiln_c99_is_reference` keeps one away from
+     * `kiln_c99_to_primitive` entirely -- see the note there -- so nothing reaches this through a
+     * Date today; it is here because the answer is a fact about the tag and leaving it out would
+     * make the classifier true only by accident of who calls it. */
+    case KILN_VALUE_DATE:
+        return 1;
+    default:
+        return kiln_c99_is_callable(value);
+    }
 }
 
 /* Whether a value has to be converted before it crosses the embedding boundary.
@@ -9344,6 +9403,9 @@ static int kiln_c99_truthy(kiln_value value) {
     case KILN_VALUE_PROMISE:
     case KILN_VALUE_ARRAY_BUFFER:
     case KILN_VALUE_TYPED_ARRAY:
+    /* Including every `Temporal` value, which fell to `default:` and was *falsy* -- so
+     * `if (date)` skipped its branch for a date the program was holding in its hand. */
+    case KILN_VALUE_TEMPORAL:
         return 1;
     case KILN_VALUE_BIGINT:
         /* Truthiness follows zero, not sign: `-1n` is truthy and `0n` is not. */
@@ -9667,7 +9729,7 @@ static kiln_value kiln_c99_text(kiln_value value) {
         return kiln_c99_text_value(&joined);
     }
     case KILN_VALUE_ARRAY_BUFFER:
-        return kiln_c99_copy_text("[object ArrayBuffer]", 21);
+        return kiln_c99_copy_text("[object ArrayBuffer]", 20);
     case KILN_VALUE_REGEXP: {
         /* `String(/a/g)` is the literal as written, which is what `toString` returns. */
         kiln_regexp *regexp = kiln_c99_regexp_of(value);
@@ -9738,6 +9800,36 @@ static kiln_value kiln_c99_text(kiln_value value) {
         }
         return kiln_c99_copy_text(closure->source, closure->source_len);
     }
+    /* A `Temporal` value's text form is its ISO string, which is what its own `toString`
+     * answers and what `String(d)` and `${d}` have to produce. It had no case at all, so both
+     * read `undefined` -- and, through `kiln_c99_concat`'s length check, `"x" + d` appended
+     * nothing and printed "x". The handle renders itself; there is no second spelling of an ISO
+     * date anywhere here for the two to drift apart on. */
+    case KILN_VALUE_TEMPORAL: {
+        char buffer[128];
+        int32_t written = kiln_temporal_to_string(kiln_c99_temporal_of(value),
+                                                  (unsigned char *)buffer, sizeof buffer);
+        if (written < 0 || (size_t)written > sizeof buffer) {
+            return kiln_c99_undefined();
+        }
+        return kiln_c99_copy_text(buffer, (size_t)written);
+    }
+    /* The three object kinds whose text form is the tagged `[object X]` and nothing else. They
+     * inherit it from `Object.prototype.toString` in the language; this backend models that as
+     * `kiln_c99_text` rather than as a method a property walk finds, exactly as it does for a
+     * namespace. Without a case here `String(new Map())` threw "Cannot convert object to
+     * primitive value" where the language says "[object Map]". */
+    case KILN_VALUE_COLLECTION: {
+        kiln_collection *collection = kiln_c99_collection_of(value);
+        const char *shown = collection->is_weak
+                                ? (collection->is_map ? "[object WeakMap]" : "[object WeakSet]")
+                                : (collection->is_map ? "[object Map]" : "[object Set]");
+        return kiln_c99_copy_text(shown, strlen(shown));
+    }
+    case KILN_VALUE_PROMISE:
+        return kiln_c99_copy_text("[object Promise]", 16);
+    case KILN_VALUE_GENERATOR:
+        return kiln_c99_copy_text("[object Generator]", 18);
     /* The remaining callables, each of which `kiln_c99_is_callable` already answers `1` for.
      * None has source text a program wrote, so each takes the NativeFunction form the
      * specification allows for a built-in -- the same answer the interpreter gives.
@@ -11032,6 +11124,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 *out = kiln_c99_method(operation);
                 return KILN_C99_OK;
             }
+        }
+        /* A well-known symbol the type does not carry is *absent*, not unwired, and absence is
+         * the answer the language gives. `@@toStringTag` is answered above because `Temporal`
+         * does define it; every other `@@` key is the machine probing rather than a member the
+         * program named, and `kiln_c99_to_primitive` opens by asking for `@@toPrimitive` on every
+         * reference it reduces. Refusing that probe turned `String(aPlainDate)` into a thrown
+         * "unsupported Temporal member" -- a refusal for a conversion the value plainly has, one
+         * step after the missing text case stopped it reading `undefined`. */
+        if (key_len >= 2 && key[0] == '@' && key[1] == '@') {
+            *out = kiln_c99_undefined();
+            return KILN_C99_OK;
         }
         /* A name that exists in the language and is not wired says which. Reading `undefined`
          * would surface three frames away as "not a function". */
@@ -16421,7 +16524,7 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
         /* Specified to throw: `date1 < date2` would otherwise compare two NaNs and answer false,
          * which is exactly the silent wrong answer the language added this refusal to prevent. */
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
-                                    "Temporal values have no primitive conversion; use compare()");
+                                    "a Temporal value cannot be converted to a primitive; use compare or equals");
     }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL_OP)) {
         return kiln_c99_temporal_operation(host, result, code, receiver, args, argc, depth, thrown);
@@ -19132,6 +19235,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                               : (collection->is_map ? "Map" : "Set");
                 }
                 break;
+            /* Each of the eight names itself: `[object Temporal.PlainDate]`, which is the
+             * `Symbol.toStringTag` the language gives them and the string every type test built
+             * on this operation reads. `[object Object]` was the answer before. */
+            case KILN_VALUE_TEMPORAL: tag = kiln_c99_temporal_tag(receiver); break;
             case KILN_VALUE_BUILTIN:
                 /* `Math` and `JSON` are the two namespaces the language gives a tag of their own,
                  * and they are not functions -- calling them `Function` was the reason
@@ -22879,6 +22986,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
      * which reports an unknown name as an error rather than as absence. A Date is asked because
      * carrying one is the whole reason the step exists. */
     if (value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_DATE ||
+        value.tag == KILN_VALUE_TEMPORAL ||
         (value.tag == KILN_VALUE_PROXY &&
          kiln_c99_proxy_inner(value).tag == KILN_VALUE_OBJECT)) {
         kiln_value method;
@@ -22930,10 +23038,24 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     default:
         break;
     }
-    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY &&
-        value.tag != KILN_VALUE_TYPED_ARRAY && value.tag != KILN_VALUE_PROXY) {
+    /* A callable and a symbol are the two things `JSON.stringify` omits: a property holding one
+     * disappears from the object, and one passed directly answers `undefined`. */
+    if (kiln_c99_is_callable(value) || value.tag == KILN_VALUE_SYMBOL) {
         *serialised = 0;
         return KILN_C99_OK;
+    }
+    /* Every other remaining reference is an ordinary object to `JSON.stringify`, and one with no
+     * own enumerable string-keyed property serialises as `{}` -- which is what node answers for a
+     * Map, a Set, a promise, a generator, a regexp and a buffer alike, and what the interpreter
+     * already answered. Only the four below have a store worth walking.
+     *
+     * Listing the four and dropping the rest is the allowlist mistake this file has now made
+     * four times over: a `Map` came out as `undefined` at the top level, as a *missing key*
+     * inside an object, and as `null` inside an array -- three different wrong answers from one
+     * missing arm, none of which stopped the program. */
+    if (value.tag != KILN_VALUE_OBJECT && value.tag != KILN_VALUE_ARRAY &&
+        value.tag != KILN_VALUE_TYPED_ARRAY && value.tag != KILN_VALUE_PROXY) {
+        return kiln_c99_text_append_c(text, "{}");
     }
 
     /* With no indent every separator is empty, which collapses the pretty form to the compact
@@ -25854,14 +25976,19 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
             return KILN_C99_OK;
         }
     }
-    /* A callable's text form is not held in a property store, so the walk above cannot reach it:
-     * this backend models `Function.prototype.toString` -- and, for a namespace, the tagged
-     * `Object.prototype.toString` -- as `kiln_c99_text` rather than as a method a lookup finds.
-     * Failing here would report a missing conversion for values that plainly have one, which is
-     * how `String(Math)` came to throw where the language says "[object Math]". Scoped to
-     * callables on purpose: it is the fallback for the values whose conversion this file already
-     * defines, not the blanket one below it used to be. */
-    if (kiln_c99_is_callable(value)) {
+    /* Some values' text form is not held in a property store, so the walk above cannot reach it:
+     * this backend models `Function.prototype.toString` -- and, for a namespace, a promise, a
+     * generator and a collection, the tagged `Object.prototype.toString` -- as `kiln_c99_text`
+     * rather than as a method a lookup finds. Failing here would report a missing conversion for
+     * values that plainly have one, which is how `String(Math)` came to throw where the language
+     * says "[object Math]", and how `String(new Map())` still did.
+     *
+     * Still scoped, and to the same principle: these are the values whose conversion this file
+     * defines *for the tag*, not the blanket fallback this used to be. A plain object and an
+     * array are deliberately outside it -- their text depends on what they hold, the walk above
+     * is the only thing that can ask, and answering "[object Object]" here instead is what made
+     * `Object.create(null) + 1` produce a string where the language stops the program. */
+    if (kiln_c99_has_intrinsic_text(value)) {
         kiln_value shown = kiln_c99_text(value);
         if (shown.tag == KILN_VALUE_STRING) {
             *out = shown;
@@ -31012,6 +31139,109 @@ int main(void) {
              callable with no source text of its own takes the NativeFunction form, which is what \
              the interpreter answers and what the specification allows for a built-in."
         );
+    }
+
+    /// Every tag `typeof` calls an object also converts, is truthy, and names itself.
+    ///
+    /// The sibling of `callable_text_covers_every_callable_tag`, and it exists because the same
+    /// mistake had been made four more times in four more places. `KILN_VALUE_TEMPORAL` was
+    /// absent from `kiln_c99_text`, from `kiln_c99_truthy`, from the `Object.prototype.toString`
+    /// tag switch and from `kiln_c99_is_reference`, so a `Temporal` value converted to
+    /// `undefined`, was *falsy*, named itself `[object Object]`, and was never reduced by a
+    /// coercing operator at all -- `"x" + aPlainDate` appended nothing and the program carried
+    /// on. Promises, generators and collections were missing from the text conversion too.
+    ///
+    /// Each of those is a classifier written as a list of the kinds it knows about, and a list
+    /// goes stale silently. `kiln_c99_typeof` is the one that cannot: a value the program can
+    /// hold has to answer *something* there, so its "object" arm is the closed enumeration of
+    /// the exotic object kinds and the right thing to check the others against.
+    ///
+    /// This does not check the answers -- `conformance/native/exotic-conversions.ts` drives every
+    /// kind through every implicit conversion against the interpreter for that. It checks that
+    /// the arm exists, which is what stops the next tag from being wrong in four places at once.
+    #[test]
+    fn every_object_tag_converts_and_is_truthy_and_names_itself() {
+        let runtime = include_str!("lib.rs");
+
+        fn body<'a>(runtime: &'a str, signature: &str) -> &'a str {
+            let start = runtime
+                .split(signature)
+                .nth(1)
+                .unwrap_or_else(|| panic!("{signature} must exist"));
+            let end = start.find("\n}").expect("function must be closed");
+            &start[..end]
+        }
+
+        let typeof_body = body(
+            runtime,
+            "static kiln_value kiln_c99_typeof(kiln_value value) {",
+        );
+        // The run of `case` labels that falls through to the "object" answer.
+        let object_arm = typeof_body
+            .split("case KILN_VALUE_OBJECT:")
+            .nth(1)
+            .expect("`kiln_c99_typeof` must answer \"object\" for something");
+        let object_arm = &object_arm[..object_arm
+            .find("object_text")
+            .expect("the \"object\" arm must end at its answer")];
+        let mut tags: Vec<&str> = vec!["KILN_VALUE_OBJECT"];
+        tags.extend(
+            object_arm
+                .split("case ")
+                .skip(1)
+                .filter_map(|rest| rest.split(':').next())
+                .filter(|tag| tag.starts_with("KILN_VALUE_")),
+        );
+        // A guard that has quietly stopped reading the thing it checks is worse than none.
+        assert!(
+            tags.len() >= 8,
+            "read only {tags:?} out of `kiln_c99_typeof`; the parse has stopped working"
+        );
+        assert!(
+            tags.contains(&"KILN_VALUE_TEMPORAL"),
+            "the parse of `kiln_c99_typeof` has stopped working"
+        );
+
+        // An array and a plain object are deliberately outside `kiln_c99_has_intrinsic_text`:
+        // their text depends on what they hold, so only the `valueOf`/`toString` walk can ask.
+        let intrinsic_text = body(
+            runtime,
+            "static int kiln_c99_has_intrinsic_text(kiln_value value) {",
+        );
+        for (what, region, exempt) in [
+            (
+                "kiln_c99_text",
+                body(
+                    runtime,
+                    "static kiln_value kiln_c99_text(kiln_value value) {",
+                ),
+                &[][..],
+            ),
+            (
+                "kiln_c99_truthy",
+                body(runtime, "static int kiln_c99_truthy(kiln_value value) {"),
+                &[][..],
+            ),
+            (
+                "kiln_c99_has_intrinsic_text",
+                intrinsic_text,
+                &["KILN_VALUE_OBJECT", "KILN_VALUE_ARRAY"][..],
+            ),
+        ] {
+            let missing: Vec<&&str> = tags
+                .iter()
+                .filter(|tag| !exempt.contains(tag))
+                .filter(|tag| !region.contains(&format!("case {tag}:")))
+                .collect();
+            assert!(
+                missing.is_empty(),
+                "`kiln_c99_typeof` answers \"object\" for {missing:?}, which `{what}` has no \
+                 case for. Each would fall to its `default:`, and every one of those defaults is \
+                 a wrong answer rather than a refusal: `undefined` from the text conversion, \
+                 *falsy* from the truthiness test. A `Temporal` value was in exactly that state \
+                 and no probe converted one."
+            );
+        }
     }
 
     #[test]
