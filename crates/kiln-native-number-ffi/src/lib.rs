@@ -1685,11 +1685,13 @@ mod realm {
                 }
                 None => {}
             }
-            let (referenced, deadline, now, signal) = {
+            let (referenced, pending, in_flight, deadline, now, signal) = {
                 let runtime = realm.runtime.borrow();
                 let mut work = realm.work.borrow_mut();
                 (
                     runtime.has_referenced_host_work(),
+                    runtime.has_pending_host_work(),
+                    runtime.requests_in_flight(),
                     work.next_timer_deadline(),
                     work.now(),
                     runtime.completion_signal(),
@@ -1697,16 +1699,18 @@ mod realm {
             };
             if kiln_runtime::http_engine::trace_enabled() {
                 eprintln!(
-                    "[kiln-drive] referenced={referenced} deadline={deadline:?} host={} open_server={}",
+                    "[kiln-drive] referenced={referenced} pending={pending} in_flight={in_flight} deadline={deadline:?} host={}",
                     realm.runtime.borrow().describe_host_work(),
-                    realm.runtime.borrow().has_open_server_connections()
                 );
             }
-            if !referenced && deadline.is_none() {
-                return 0;
-            }
-            if !referenced {
-                // Only virtual timers remain: advance to the next one without touching the clock.
+            // A completion can arrive only while an operation is pending, and it matters only
+            // while something referenced keeps the realm alive; a direct connection with a
+            // response outstanding is alive on its own. Otherwise only virtual timers remain.
+            let completions_possible = referenced && pending;
+            if !completions_possible && in_flight == 0 {
+                if deadline.is_none() {
+                    return 0;
+                }
                 let timer = realm.work.borrow_mut().run_next_timer();
                 if let Some(WorkItem::Timer { work, .. }) = timer {
                     let (host, thrown) = realm.drive_context.get();
@@ -2778,6 +2782,16 @@ mod realm {
             // owner's adapter allocation lives until the connection is removed below.
             let status =
                 unsafe { (self.owner.run)(self.owner.pointer, &raw const view, host, thrown) };
+            if matches!(
+                event.kind,
+                ServerEventKind::Finish | ServerEventKind::Closed | ServerEventKind::Error
+            ) {
+                // The drive may be waiting for exactly this request to finish.
+                let runtime = realm.runtime.borrow();
+                if !runtime.has_pending_host_work() {
+                    runtime.wake_drive();
+                }
+            }
             if event.kind == ServerEventKind::Closed {
                 realm.http_connections.borrow_mut().remove(&self.resource);
                 let _ = realm

@@ -568,6 +568,16 @@ impl HttpServerEngine {
         self.connections.borrow().len()
     }
 
+    /// Requests whose response the language has not finished: what keeps a drive waiting
+    /// when no host operation is pending.
+    pub fn requests_in_flight(&self) -> usize {
+        self.connections
+            .borrow()
+            .values()
+            .map(|connection| connection.shared.requests.borrow().len())
+            .sum()
+    }
+
     fn slot(&self, resource: ResourceId, id: u64) -> Option<Rc<ResponseSlot>> {
         let table = self.connections.borrow();
         let connection = table.get(&resource)?;
