@@ -2623,6 +2623,9 @@ mod realm {
             // `flags & 1` is the generic request-liveness bit; zero leaves incidental inspection
             // requests unreferenced while resource creation still records its own resource state.
             let referenced = operation_view.flags & 1 != 0;
+            if kiln_runtime::http_engine::trace_enabled() {
+                eprintln!("[kiln-host] start {operation:?} referenced={referenced}");
+            }
             let request = unsafe { &mut *runtime }.start_host_op_in_context(operation, referenced);
             let continuation = AsyncContinuation {
                 pointer: work,
