@@ -685,6 +685,8 @@ mod tests {
                 "crates/kiln-native-number-abi/src/lib.rs",
                 b"abi\n".as_slice(),
             ),
+            ("crates/kiln-node-path/Cargo.toml", b"[package]\n"),
+            ("crates/kiln-node-path/src/lib.rs", b"node-path\n"),
             ("crates/kiln-temporal/Cargo.toml", b"[package]\n"),
             ("crates/kiln-temporal/src/lib.rs", b"temporal\n"),
             ("crates/kiln-runtime/Cargo.toml", b"[package]\n"),
@@ -709,7 +711,7 @@ mod tests {
 
         assert_eq!(
             source_digest(&root.0).expect("hash source identity fixture"),
-            Digest::from_hex("b69378155ab3da243892d4a3d273f24d6c1e7d6faecf38c2da364897bb42a320")
+            Digest::from_hex("6e93206b993a846b5f265a981b7af02010d353616d89d69643d66a60551f7096")
                 .expect("fixture digest")
         );
     }
