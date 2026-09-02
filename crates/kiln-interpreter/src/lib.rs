@@ -17569,9 +17569,18 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     None => {
                         // Only a reference value can carry one, and asking a primitive would
                         // reach the string and number method tables for nothing.
+                        // A `Temporal` value carries a `toJSON` and it is the whole reason the
+                        // step exists: without it here the ISO string was never asked for and
+                        // `JSON.stringify(plainDate)` answered `{}` -- an object with no own
+                        // enumerable properties, which is what the value looks like from the
+                        // outside and not what the language says to write.
                         if !matches!(
                             receiver,
-                            Value::Object(_) | Value::Array(_) | Value::Date(_) | Value::Proxy(_)
+                            Value::Object(_)
+                                | Value::Array(_)
+                                | Value::Date(_)
+                                | Value::Temporal(_)
+                                | Value::Proxy(_)
                         ) {
                             return Ok(receiver.clone());
                         }

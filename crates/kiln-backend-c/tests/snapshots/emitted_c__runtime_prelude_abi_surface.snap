@@ -767,6 +767,7 @@ static int kiln_c99_signbit(double value);
 static int kiln_c99_strict_equal(kiln_value left, kiln_value right);
 static int kiln_c99_is_callable(kiln_value value);
 static int kiln_c99_is_reference(kiln_value value);
+static int kiln_c99_has_intrinsic_text(kiln_value value);
 static int kiln_c99_crosses_boundary(kiln_value value);
 static kiln_value kiln_c99_text(kiln_value value);
 static kiln_value kiln_c99_copy_text(const char *text, size_t len);
@@ -1144,6 +1145,7 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
 static kiln_value kiln_c99_builtin(uint64_t code) {
 static int kiln_c99_is_callable(kiln_value value) {
 static int kiln_c99_is_reference(kiln_value value) {
+static int kiln_c99_has_intrinsic_text(kiln_value value) {
 static int kiln_c99_crosses_boundary(kiln_value value) {
 static int kiln_c99_signbit(double value) {
 static kiln_value kiln_c99_hole(void) {
