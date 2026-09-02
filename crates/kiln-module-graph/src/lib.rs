@@ -29,7 +29,7 @@ use kiln_module_resolver::{
     ModuleResolver, NodeBuiltin, NodeModuleFormat, NodeRequestKind, PathRole, ResolutionKind,
     ResolutionPolicy, ResolvedModule, SUPPORTED_EXTENSIONS,
 };
-use kiln_runtime::RealmRuntime;
+use kiln_runtime::{ClockCapability, RealmCapabilities, RealmRuntime};
 
 const COMMONJS_WRAPPER_SOURCE: &str = "*commonjs-wrapper*";
 
@@ -1161,12 +1161,22 @@ impl ModuleGraph {
             .collect();
         let mut total_steps = 0_u64;
         let mut entry_result = None;
-        let mut runtime = RealmRuntime::new().map_err(|error| ModuleGraphError::Execution {
-            module: self.entry.clone(),
-            error: ExecutionError::Host {
-                instruction: 0,
-                message: error.to_string(),
-            },
+        let realm_capabilities = if node {
+            RealmCapabilities {
+                clock: ClockCapability::Host,
+                ..RealmCapabilities::default()
+            }
+        } else {
+            RealmCapabilities::default()
+        };
+        let mut runtime = RealmRuntime::with_capabilities(realm_capabilities).map_err(|error| {
+            ModuleGraphError::Execution {
+                module: self.entry.clone(),
+                error: ExecutionError::Host {
+                    instruction: 0,
+                    message: error.to_string(),
+                },
+            }
         })?;
         let mut node_session = node.then(ModuleRealmSession::default);
         let cache_targets = commonjs_cache
