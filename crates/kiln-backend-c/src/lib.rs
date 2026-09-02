@@ -3216,6 +3216,7 @@ static kiln_value kiln_c99_text_value(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
+static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_array(kiln_value *out);
 static int kiln_c99_new_abort_signal(kiln_value *out);
 static int kiln_c99_new_abort_controller(kiln_value *out);
@@ -4532,6 +4533,27 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->arguments_brand = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
+}
+
+/* An object whose property array is sized once, for a caller that already knows how many members
+ * it is about to add.
+ *
+ * `kiln_c99_reserve` doubles from four, which is the right policy for a program building an
+ * object a member at a time and the wrong one for the runtime filling a fixed template: a
+ * `node:http` request with twelve own properties walked 4 -> 8 -> 16, paying a `realloc` and a
+ * copy at each step to arrive at the capacity it could have asked for. The capacity is a hint,
+ * not a limit -- passing a number too small only restores the doubling. */
+static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
+    kiln_object *object;
+    int status = kiln_c99_new_object(out);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    object = kiln_c99_object_of(*out);
+    /* The object is already on the heap, so a failure here leaves it to the collector rather
+     * than to a partially built caller. */
+    return kiln_c99_reserve((void **)&object->properties, &object->capacity, capacity,
+                            sizeof *object->properties);
 }
 
 /* Cancellation is ordinary object state, not a new value kind. That keeps the hot value layout
@@ -13911,7 +13933,10 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         response->socket = socket;
         response->request_id = event->id;
         response->status = 200;
-        status = kiln_c99_new_object(&request);
+        /* Twelve own properties follow: the hidden response pointer, ten data members and the
+         * lazy `headers` accessor. Sizing the array for them once is one allocation instead of
+         * three. */
+        status = kiln_c99_new_object_with_capacity(&request, 12);
         if (status == KILN_C99_OK) {
             kiln_value prototype;
             status = kiln_c99_node_incoming_message_prototype(&prototype);
@@ -13970,7 +13995,9 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
                 request, "headers", 7,
                 kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET),
                 kiln_c99_method(KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET), 1);
-        if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->object);
+        /* Eight on the response: the hidden pointer and seven data members. */
+        if (status == KILN_C99_OK)
+            status = kiln_c99_new_object_with_capacity(&response->object, 8);
         if (status == KILN_C99_OK) status = kiln_c99_new_object(&response->headers);
         /* The registered native constructor graph already builds exactly this surface --
          * EventEmitter, Writable, then the eight response methods -- once per realm.  Linking

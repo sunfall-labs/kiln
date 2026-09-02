@@ -758,6 +758,7 @@ static kiln_value kiln_c99_text_value(kiln_text *text);
 static int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 static int kiln_c99_same_key(const kiln_property *property, const char *key, size_t key_len);
 static int kiln_c99_new_object(kiln_value *out);
+static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity);
 static int kiln_c99_new_array(kiln_value *out);
 static int kiln_c99_new_abort_signal(kiln_value *out);
 static int kiln_c99_new_abort_controller(kiln_value *out);
@@ -997,6 +998,7 @@ static const kiln_gc_hooks kiln_c99_gc_hooks = {
 static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 static char *kiln_c99_gc_alloc_text(size_t len) {
 static int kiln_c99_new_object(kiln_value *out) {
+static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
 static int kiln_c99_new_abort_signal(kiln_value *out) {
 static int kiln_c99_new_abort_controller(kiln_value *out) {
 static int kiln_c99_new_text_encoder(kiln_value *out) {
