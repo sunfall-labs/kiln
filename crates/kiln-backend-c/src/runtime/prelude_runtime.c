@@ -2064,12 +2064,17 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
             kiln_c99_gc_mark_values(heap, frame->locals, closure->local_count);
             kiln_c99_gc_mark_values(heap, frame->stack, closure->stack_size);
         }
+        if (frame->queue_promises != NULL) {
+            kiln_c99_gc_mark_values(heap, frame->queue_promises, frame->queue_count);
+            kiln_c99_gc_mark_values(heap, frame->queue_sent, frame->queue_count);
+        }
         break;
     }
     case KILN_GC_PROMISE: {
         kiln_promise *promise = (kiln_promise *)payload;
         size_t index;
         kiln_c99_gc_mark_value(heap, &promise->value);
+        kiln_c99_gc_mark_value(heap, &promise->properties);
         for (index = 0; index < promise->count; ++index) {
             kiln_c99_gc_mark_value(heap, &promise->reactions[index].on_fulfilled);
             kiln_c99_gc_mark_value(heap, &promise->reactions[index].on_rejected);
@@ -2223,6 +2228,8 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         free(frame->stack);
         free(frame->handlers);
         free(frame->handler_stack);
+        free(frame->queue_promises);
+        free(frame->queue_sent);
         break;
     }
     case KILN_GC_PROMISE:
@@ -3709,17 +3716,34 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
         return kiln_c99_put_mode(host, array->properties, key, key_len, value, strict, depth,
                                  thrown);
     }
+    if (target.tag == KILN_VALUE_COLLECTION) {
+        kiln_collection *collection = kiln_c99_collection_of(target);
+        if (collection->properties.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&collection->properties);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return kiln_c99_put_mode(host, collection->properties, key, key_len, value, strict, depth,
+                                 thrown);
+    }
+    if (target.tag == KILN_VALUE_PROMISE) {
+        kiln_promise *promise = kiln_c99_promise_of(target);
+        if (promise->properties.tag != KILN_VALUE_OBJECT) {
+            status = kiln_c99_new_object(&promise->properties);
+            if (status != KILN_C99_OK) {
+                return status;
+            }
+        }
+        return kiln_c99_put_mode(host, promise->properties, key, key_len, value, strict, depth,
+                                 thrown);
+    }
     if (target.tag != KILN_VALUE_OBJECT) {
         /* A primitive has nowhere to put a property, and every module is strict, so the language
          * ends the statement with a catchable TypeError rather than dropping the write. The
-         * object-like tags that also land here -- a Date, a collection, a promise, a bound
-         * function -- are a different thing: those *are* objects a program may write to, and
-         * this backend simply has no store for them yet, so they keep saying so.
-         *
-         * A collection has a store, but only for the prototype a subclass gave it: nothing that
-         * enumerates -- `Object.keys`, `JSON.stringify`, a console -- looks in it, so a write
-         * accepted here would read back correctly and be invisible everywhere else. Refusing is
-         * the honest answer until those paths know about it. */
+         * object-like tags that also land here -- a Date, a bound function -- are a different
+         * thing: those *are* objects a program may write to, and this backend simply has no store
+         * for them yet, so they keep saying so. */
         if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL ||
             target.tag == KILN_VALUE_BOOLEAN || target.tag == KILN_VALUE_NUMBER ||
             target.tag == KILN_VALUE_STRING || target.tag == KILN_VALUE_BIGINT ||
@@ -4065,6 +4089,11 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     frame->started = 0;
     frame->done = 0;
     frame->running = 0;
+    frame->queue_promises = NULL;
+    frame->queue_sent = NULL;
+    frame->queue_count = 0;
+    frame->queue_capacity = 0;
+    frame->queue_executing = 0;
     *out = kiln_c99_value(KILN_VALUE_GENERATOR, (uint64_t)(uintptr_t)frame, NULL, 0);
     return KILN_C99_OK;
 }
@@ -4471,6 +4500,8 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_REFLECT_DELETE_PROPERTY: return "deleteProperty";
     case KILN_C99_METHOD_REFLECT_APPLY: return "apply";
     case KILN_C99_METHOD_REFLECT_CONSTRUCT: return "construct";
+    case KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF: return "getPrototypeOf";
+    case KILN_C99_METHOD_GENERATOR_THROW: return "throw";
     case KILN_C99_METHOD_PROXY_REVOCABLE: return "revocable";
     case KILN_C99_METHOD_PROXY_REVOKE: return "revoke";
     case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: return "fromEntries";
@@ -5350,6 +5381,7 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_ITERATOR: return "Iterator";
     case KILN_C99_BUILTIN_ITERATOR_PROTOTYPE: return "Iterator";
     case KILN_C99_BUILTIN_SYMBOL: return "Symbol";
+    case KILN_C99_BUILTIN_SYMBOL_PROTOTYPE: return "Symbol";
     case KILN_C99_BUILTIN_REGEXP: return "RegExp";
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE: return "RegExp";
     case KILN_C99_BUILTIN_DATE_PROTOTYPE: return "Date";
@@ -6655,6 +6687,7 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            /* `DataView.prototype` is a table, and therefore a namespace here; `DataView` itself
             * is a constructor and is not, so `typeof DataView === "function"` stays true. */
            builtin == KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_SYMBOL_PROTOTYPE ||
            (builtin >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
             builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
 }
