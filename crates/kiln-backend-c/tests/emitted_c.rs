@@ -661,6 +661,102 @@ fn every_global_reports_the_name_it_is_published_under() {
     );
 }
 
+/// The shared surface is the only place a table-driven method's name is written down.
+///
+/// `kiln_c99_surface_method_name` reads the name out of the surface row, and
+/// `kiln_c99_method_name` asks it first, so a member that is reachable has a name by
+/// construction. That is the fix for fifteen rows that had a key here and no `case` there and
+/// reported the empty string.
+///
+/// What construction cannot rule out is a *stale* `case` that survives with a different string:
+/// the table would win silently and the switch would keep asserting something else, which is the
+/// two-copies problem the change was meant to end. So this pins three things:
+///
+///   * the delegation is actually there -- without it every surface name falls back to the switch
+///     and the fifteen come straight back;
+///   * no hand-written `case` disagrees with the row for the same code;
+///   * a code serving several members is declared canonical-first, because the scan returns the
+///     first row it matches and that is the name all of them will report.
+#[test]
+fn a_table_driven_methods_name_comes_from_its_surface_row() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+
+    assert!(
+        prelude.contains("kiln_c99_surface_method_name(code)"),
+        "kiln_c99_method_name no longer asks the surface table for a name, so every member whose \
+         name lives only in its row reports the empty string again"
+    );
+
+    let method_names = parse_name_switch(
+        prelude,
+        "static const char *kiln_c99_method_name(uint64_t code)",
+    );
+    assert!(
+        method_names.len() > 200,
+        "parsed only {} cases out of kiln_c99_method_name, so this guard has stopped reading it",
+        method_names.len()
+    );
+
+    let mut disagree = Vec::new();
+    let mut canonical: BTreeMap<String, &'static str> = BTreeMap::new();
+    let mut aliases: Vec<(&'static str, &'static str)> = Vec::new();
+    for member in kiln_backend_c::BUILTIN_SURFACE {
+        if member.kind != "code" {
+            continue;
+        }
+        let code = member
+            .answers
+            .trim_matches(|c| c == '(' || c == ')')
+            .to_owned();
+        if let Some(hand) = method_names.get(&code)
+            && hand != member.name
+        {
+            disagree.push(format!(
+                "  {}.{} is {code}: its row names it \"{}\", its case names it \"{hand}\"",
+                member.owner, member.name, member.name
+            ));
+        }
+        match canonical.get(&code) {
+            // The first row wins the scan, so a later row with a different name is an alias and
+            // reports the first one's name.
+            Some(first) if *first != member.name => aliases.push((member.owner, member.name)),
+            Some(_) => {}
+            None => {
+                canonical.insert(code, member.name);
+            }
+        }
+    }
+    assert!(
+        disagree.is_empty(),
+        "a hand-written case in kiln_c99_method_name disagrees with the surface row for the same \
+         method code. The row wins, so the case is dead text asserting something untrue:\n{}\n\n\
+         Delete the case; the row is the name.",
+        disagree.join("\n")
+    );
+
+    // Every alias the table creates must be declared, and every declared alias must be a real one.
+    // A stale entry in `NAME_IS_SHARED` would excuse a member whose name had genuinely drifted.
+    let declared: BTreeSet<(&str, &str)> = kiln_builtin_surface::NAME_IS_SHARED
+        .iter()
+        .copied()
+        .collect();
+    let found: BTreeSet<(&str, &str)> = aliases.into_iter().collect();
+    let undeclared: Vec<_> = found.difference(&declared).collect();
+    let stale: Vec<_> = declared.difference(&found).collect();
+    assert!(
+        undeclared.is_empty(),
+        "these members share another member's method code, so they report that member's name \
+         rather than their own: {undeclared:?}. Either give them a code of their own, or declare \
+         them in kiln_builtin_surface::NAME_IS_SHARED, which is what says the debt is known."
+    );
+    assert!(
+        stale.is_empty(),
+        "kiln_builtin_surface::NAME_IS_SHARED excuses {stale:?}, which no longer shares a method \
+         code with anything. A stale entry there silences a real drift; delete it."
+    );
+}
+
 #[test]
 fn runtime_prelude_abi_surface() {
     let unit = emit(&minimal_program()).expect("minimal program emits");

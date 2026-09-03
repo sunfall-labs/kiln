@@ -408,6 +408,8 @@ static int kiln_c99_is_hole(kiln_value value);
 static kiln_collection *kiln_c99_collection_of(kiln_value value);
 static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak);
 static const char *kiln_c99_error_name(uint64_t builtin);
+/* Defined beside the surface table it reads, which the assembled prelude places after this file. */
+static const char *kiln_c99_surface_method_name(uint64_t code);
 static uint64_t kiln_c99_error_kind(kiln_value value);
 static int kiln_c99_error_to_string(kiln_host *host, kiln_value *result, kiln_value receiver,
                                     int depth, kiln_value *thrown);
@@ -4152,6 +4154,14 @@ static int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_requir
 /* The name a console shows, which is the JavaScript name rather than the implementation's --
  * `[Function: push]`, the same text the interpreter produces. */
 static const char *kiln_c99_method_name(uint64_t code) {
+    /* A member of the shared surface is named by its own key, which is the one place that name is
+     * written down. Asked first so that adding a row is the whole of adding a member: the switch
+     * below cannot be missing a case for something the table already names, which is the state
+     * fifteen of these rows were in. */
+    const char *surface = kiln_c99_surface_method_name(code);
+    if (surface != NULL) {
+        return surface;
+    }
     if (kiln_c99_method_in_group(code, KILN_C99_GROUP_TEMPORAL_OP)) {
         return kiln_c99_temporal_op_name(code);
     }

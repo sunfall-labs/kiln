@@ -45056,6 +45056,45 @@ fn native_js_name(native: &Native) -> String {
         // `SetTimeout` starts with a type name that is not its type: the derivation strips `Set`
         // -- the collection -- and answers `timeout`. A prefix that is a word in its own right is
         // the one thing a name derived from a variant cannot get right on its own.
+        // THE SHARED SURFACE'S OWN NAMES.
+        //
+        // `kiln_builtin_surface::SURFACE` says which members each built-in has, and the key it
+        // says it under *is* the name that member reports -- node makes that true for every
+        // static on every built-in, measured. The native backend now reads the name out of the
+        // row; this derivation cannot, because the table is keyed by `(global, member)` and
+        // nothing here maps a `Native` back to one without inverting the crate dependency.
+        //
+        // So these are spelled out, and `every_surface_member_is_named_for_its_key` holds them to
+        // the table by reading each member through the real property path. Thirteen of them were
+        // wrong when that guard was written: the derivation strips a known type prefix and
+        // lowercases what is left, and it has no prefix for `NodeBuffer`, `AbortSignal`,
+        // `Performance` or `Error` -- so `Buffer.concat.name` was `"nodeBufferConcat"`, which is
+        // this file's spelling of a variant handed to a program that asked what a function is
+        // called. `ObjectOwnNames` is the other shape: a variant named for neither its type nor
+        // its member, which no prefix rule could have recovered.
+        //
+        // Adding a prefix to the derivation's table would have fixed some of these and is the
+        // wrong move: a longest-prefix strip over a growing list is what produced them, and
+        // "Error" as a prefix would rename every error variant that follows it.
+        Native::ObjectOwnNames => "getOwnPropertyNames".to_owned(),
+        Native::ErrorCaptureStackTrace => "captureStackTrace".to_owned(),
+        Native::ErrorIsError => "isError".to_owned(),
+        // The derivation lowercases only the first character, so a name whose own spelling is
+        // lower-case past a digit comes back with a capital in it: `f16Round` for `f16round`.
+        Native::MathF16Round => "f16round".to_owned(),
+        Native::PerformanceNow => "now".to_owned(),
+        Native::NodeBufferFrom => "from".to_owned(),
+        // One variant for `alloc`, `allocUnsafe` and `allocUnsafeSlow`, which node makes three
+        // functions with three names. It reports the name of the function it actually is;
+        // `kiln_builtin_surface::NAME_IS_SHARED` is where the other two are written down, and is
+        // what stops the guard reading them as drift.
+        Native::NodeBufferAlloc => "alloc".to_owned(),
+        Native::NodeBufferIsBuffer => "isBuffer".to_owned(),
+        Native::NodeBufferByteLength => "byteLength".to_owned(),
+        Native::NodeBufferConcat => "concat".to_owned(),
+        Native::AbortSignalAbort => "abort".to_owned(),
+        Native::AbortSignalTimeout => "timeout".to_owned(),
+        Native::AbortSignalAny => "any".to_owned(),
         // FOUR NAMES THE DERIVATION SPELLED OUT OF THE RUST VARIANT.
         //
         // These are not near-misses of capitalisation: each one handed a program the identifier
@@ -45845,6 +45884,102 @@ mod tests {
             ExecutionCapabilities::default(),
         )
         .map(|result| result.value)
+    }
+
+    /// Every member of the shared surface reports the key it is declared under.
+    ///
+    /// WHY THIS IS THE GUARD AND NOT A TABLE. `kiln_builtin_surface::SURFACE` is the one place
+    /// either engine says what `Object` or `Buffer` *has*, and the key it says it under is also
+    /// the name that member must report: node answers the key for every static on every built-in,
+    /// which was measured across all seventeen rows the two engines disagreed on.
+    ///
+    /// The native backend reads that name straight out of the row, so it cannot drift there. This
+    /// engine derives it from the Rust variant instead, because the table is keyed by
+    /// `(global, member)` strings and mapping one back to a `Native` would mean this leaf crate
+    /// depending on the interpreter. So the derivation stays and this holds it to the table.
+    ///
+    /// It reads through `read_property` twice -- the global, then the member, then `name` off
+    /// that -- because that is the path a program takes, and a guard that consulted
+    /// `native_js_name` directly would agree with itself no matter what the read path answered.
+    ///
+    /// Thirteen rows failed when this was written: `Buffer.concat.name` was `"nodeBufferConcat"`,
+    /// `performance.now.name` was `"performanceNow"`, `Object.getOwnPropertyNames.name` was
+    /// `"ownNames"`. None of them refused anything, which is why nothing had noticed.
+    #[test]
+    fn every_surface_member_is_named_for_its_key() {
+        let program = program(Vec::new(), vec![Instruction::Return]);
+        let mut host = TestHost {
+            calls: Vec::new(),
+            clock_now: None,
+            entropy: std::collections::VecDeque::new(),
+            timezone: None,
+            locale: None,
+        };
+        let mut vm = test_vm(&program, &mut host);
+        let globals = vm.global_object();
+
+        let mut wrong = Vec::new();
+        let mut checked = 0usize;
+        for builtin in kiln_builtin_surface::SURFACE {
+            // Two rows are intrinsics rather than globals a program can name; they are spelled the
+            // way the specification spells one and nothing on the global object reaches them.
+            if builtin.global.starts_with('%') {
+                continue;
+            }
+            let owner = vm
+                .read_property(&globals, builtin.global, 0)
+                .unwrap_or_else(|error| {
+                    panic!("{} is on the global object: {error:?}", builtin.global)
+                });
+            assert!(
+                !matches!(owner, Value::Undefined),
+                "SURFACE names `{}`, which this realm does not publish",
+                builtin.global
+            );
+            for member in builtin.members {
+                // A symbol-keyed member is not reached by a string key, and none of them is a
+                // function with a name of its own.
+                if member.starts_with("@@") {
+                    continue;
+                }
+                if kiln_builtin_surface::NAME_IS_SHARED.contains(&(builtin.global, member)) {
+                    continue;
+                }
+                let Ok(value) = vm.read_property(&owner, member, 0) else {
+                    continue;
+                };
+                // Only a callable has a name to be wrong about: `Number.MAX_VALUE` is a number.
+                if !matches!(
+                    value,
+                    Value::Native(..) | Value::Function(_) | Value::Callback(..)
+                ) {
+                    continue;
+                }
+                checked += 1;
+                let reported = vm.read_property(&value, "name", 0);
+                match reported {
+                    Ok(Value::String(name)) if name == **member => {}
+                    other => wrong.push(format!(
+                        "  {}.{member} reports {other:?}, not \"{member}\"",
+                        builtin.global
+                    )),
+                }
+            }
+        }
+        assert!(
+            checked > 90,
+            "only {checked} callable members were reached, so this guard has stopped walking the \
+             surface it exists to cover"
+        );
+        assert!(
+            wrong.is_empty(),
+            "these members do not report the key `kiln_builtin_surface::SURFACE` declares them \
+             under, so `.name` hands a program a string nobody could have asked for:\n{}\n\nName \
+             the variant outright in `native_js_name`; the derivation from the Rust spelling is \
+             what put an implementation identifier there. If the member really is served by \
+             another member's function, say so in `NAME_IS_SHARED` instead.",
+            wrong.join("\n")
+        );
     }
 
     fn test_vm<'a>(program: &'a Program, host: &'a mut TestHost) -> Vm<'a, TestHost> {
