@@ -306,12 +306,32 @@ fn assert_numeric_id_invariants(prelude: &str) {
         }
     }
 
+    // A builtin ID that was in use and is deliberately not reused. Dense numbering is the rule
+    // -- a hole is nearly always a merge that dropped a define -- but a code that has *moved out*
+    // of a range whose members are defined by being in it cannot be filled by the next arrival
+    // without making that range's promise false for one member.
+    //
+    // 77 was `DataView`, back when `DataView` was one of the unimplemented globals published so
+    // that `typeof` would tell the truth about them. It became a real constructor with a code
+    // outside that range, and 77 now sits inside `UNAVAILABLE_FIRST..=UNAVAILABLE_LAST`, where
+    // every code means "this backend does not implement this global". Handing it to the next
+    // global to be implemented would put an implemented one inside the unimplemented range.
+    const RETIRED_BUILTINS: &[u64] = &[77];
+
     let builtin_values: Vec<_> = builtins.keys().copied().collect();
     let builtin_max = *builtin_values
         .last()
         .expect("prelude declares at least one builtin ID");
+    for retired in RETIRED_BUILTINS {
+        assert!(
+            !builtins.contains_key(retired),
+            "builtin ID {retired} is listed as retired but the prelude declares it; either the \
+             declaration is a reuse of a retired number or the retirement is over and the row \
+             above should go"
+        );
+    }
     let missing_builtins: Vec<_> = (1..=builtin_max)
-        .filter(|value| !builtins.contains_key(value))
+        .filter(|value| !builtins.contains_key(value) && !RETIRED_BUILTINS.contains(value))
         .collect();
     assert!(
         missing_builtins.is_empty(),
@@ -321,6 +341,10 @@ fn assert_numeric_id_invariants(prelude: &str) {
     // 336 is the first ID appended after the historical receiver/range layout. New runtime
     // facade methods must append at max+1, never fill an old gap or reuse an old value.
     const APPEND_ONLY_METHOD_BASE: u64 = 336;
+    // The same reservation `validate_method_ids` records, for the same reason: several branches
+    // are open at once, so the numbers are handed out in advance and the branch holding the
+    // lower range lands into a hole. Keep the two lists in step.
+    const RESERVED_METHOD_IDS: &[u64] = &[442, 443, 444, 445, 446, 447, 448, 449];
     let custom_values: Vec<_> = methods
         .keys()
         .copied()
@@ -330,7 +354,7 @@ fn assert_numeric_id_invariants(prelude: &str) {
         .last()
         .expect("prelude declares the append-only method tail");
     let missing_custom: Vec<_> = (APPEND_ONLY_METHOD_BASE..=custom_max)
-        .filter(|value| !methods.contains_key(value))
+        .filter(|value| !methods.contains_key(value) && !RESERVED_METHOD_IDS.contains(value))
         .collect();
     assert!(
         missing_custom.is_empty(),
@@ -631,8 +655,12 @@ fn runtime_prelude_size() {
     // `extname` and `relative` call the Rust provider rather than carrying a second hand-written
     // copy of node's algorithms. A ceiling of 27,000 is the one this change would have needed
     // without that; it is worth knowing which of the two numbers is the honest one.
+    //
+    // Widened once more when the builtin-surface branch landed on top: `DataView`'s twenty
+    // accessors and their handler, the iterator helpers, and the change-by-copy array methods
+    // are about 2,500 lines between them. Measured, not derived.
     const FLOOR_LINES: usize = 22_500;
-    const CEILING_LINES: usize = 28_000;
+    const CEILING_LINES: usize = 33_000;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

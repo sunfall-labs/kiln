@@ -1,6 +1,6 @@
 # `new Function` blocks `zod` and `ajv`, and always will
 
-Status: decided in principle; implementation blocked
+Status: done -- ADR 0045
 
 Both bundles refuse on the same thing, and the refusal now names it:
 
@@ -72,23 +72,18 @@ The right error is `EvalError` with the message Node gives under
 context". A browser under a Content-Security-Policy answers the same way. That is the error real
 libraries already feature-detect on, so it is not an invention.
 
-## Why it is not implemented yet
+## Resolved
 
-Adding that branch to `kiln_c99_construct` does not take effect, and I could not find out why
-within a reasonable budget. What was ruled out, each checked rather than assumed:
+Implemented as ADR 0045. `zod` compiles and runs natively and matches node byte for byte; `ajv`
+gets past this wall to a much smaller one (`console.error`).
 
-- The branch is inside `kiln_c99_construct` (confirmed by scanning back to the enclosing
-  definition), and inside `HEADER`, the prelude constant that spans the emitted C.
-- The callee really is that built-in: instrumenting the `New` emitter to record
-  `stack[...].bits` printed `method=27`, and `KILN_C99_BUILTIN_FUNCTION` is 27.
-- It is not shadowed by an earlier guard: moving the branch to the very first statement of
-  `kiln_c99_construct` changed nothing.
-- It is not a stale binary: the new message appears in `strings target/release/kiln`, and the
-  binary's mtime is newer than the edit.
-- It is not the unit cache: the probe was a fresh file with fresh content each time.
-- The same function's `new Promise` executor check, added in the same session and sitting a few
-  lines *below* the new branch, does take effect. So the function is live and reached.
+The earlier note here said the change "does not take effect" and listed six eliminations. That was
+wrong, and the way it was wrong is worth keeping. The branch raising the error was correct from the
+first attempt. `kiln_c99_throw_error` could not *build* an `EvalError`, because
+`kiln_c99_error_name` -- the function that decides whether a built-in is an error -- listed six of
+the language's seven and omitted it. A throw that cannot be built returns a plain error status, so
+the caller reported what it was doing at the time, which read exactly like the branch never running.
 
-Those facts are contradictory as stated, which means one of the assumptions behind them is wrong
-and worth finding: most likely `new Function` reaches a different construct path than the emitted
-`New` instruction appears to use. Start there rather than re-checking the list above.
+Every one of the six eliminations was individually true and the conclusion drawn from them was
+false: they all asked "does my code run?" and none asked "does the thing my code calls work?".
+Swapping the error kind for `TypeError` answered it in one build.

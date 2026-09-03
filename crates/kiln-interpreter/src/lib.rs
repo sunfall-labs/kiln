@@ -13876,20 +13876,34 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // Spreading `null` or `undefined` contributes nothing rather than throwing,
                     // which is the one place object spread is more forgiving than array spread.
                     let object = Rc::clone(object);
+                    // A proxy answers "what do you hold" with traps, not with a store, so it
+                    // takes the same three-trap walk `Object.assign` uses. Falling through to
+                    // the store walk below found nothing and produced `{}` in silence.
+                    if matches!(source, Value::Proxy(_)) {
+                        for (key, value) in self.proxy_own_enumerable(&source, current)? {
+                            object.borrow_mut().set(&key, value);
+                        }
+                        self.stack.push(target);
+                        continue;
+                    }
                     for (key, property) in own_properties(&self.intrinsics, &source) {
                         // A spread copies *values*: it reads each property, which for an
                         // accessor means calling its getter, and the result is a plain data
                         // property on the target.
                         let value = match property {
                             Property::Value(value) => value,
-                            Property::Accessor { get, .. } => {
-                                // Setter-only: there is nothing to read, and a spread copies
-                                // what a read produces.
-                                let Some(getter) = get else {
-                                    continue;
-                                };
-                                self.call_value(&getter, source.clone(), Vec::new(), current)?
-                            }
+                            Property::Accessor { get, .. } => match get {
+                                Some(getter) => {
+                                    self.call_value(&getter, source.clone(), Vec::new(), current)?
+                                }
+                                // Setter-only: reading it answers `undefined`, and `undefined`
+                                // is what a spread copies. Skipping the key instead left the
+                                // property *absent* -- `"gone" in { ...source }` said false
+                                // where node says true, because `CopyDataProperties` creates a
+                                // property for every enumerable own key it was given, whatever
+                                // the read produced.
+                                None => Value::Undefined,
+                            },
                         };
                         object.borrow_mut().set(&key, value);
                     }
@@ -15871,8 +15885,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     .cloned()
                     .map(HostValue::from)
                     .collect::<Vec<_>>();
+                /* `console.error` and `console.warn` go to standard error, which is where every
+                 * engine a program is written against puts them. They shared the stdout operation
+                 * until the ABI had a second one, and the note at the console's own construction
+                 * said so; this is that note coming due. The stream is observable -- a caller that
+                 * redirects one and not the other sees it -- so sharing was a wrong answer that
+                 * only looked right under `2>&1`. */
+                let operation = if native == Native::ConsoleError {
+                    HostOp::WriteStderr
+                } else {
+                    HostOp::WriteStdout
+                };
                 self.host
-                    .call(HostOp::WriteStdout, &arguments)
+                    .call(operation, &arguments)
                     .map_err(|error| ExecutionError::Host {
                         instruction,
                         message: error.to_string(),
@@ -17389,7 +17414,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                     Vec::new(),
                                     instruction,
                                 )?,
-                                None => continue,
+                                // Reading a setter-only property answers `undefined`, and
+                                // `Object.assign` writes what the read answered -- the same
+                                // rule object spread follows, because the two copy the same set.
+                                None => Value::Undefined,
                             },
                         };
                         self.set_computed(&target, &Value::String(key), value, instruction)?;
@@ -26051,9 +26079,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         );
         let mut console = ObjectData::default();
         console.set_non_enumerable("log", Value::Native(Native::ConsoleLog, realm));
-        // Host ABI v2 exposes one captured standard-output operation. Keep error delivery on the
-        // same explicit boundary until stderr receives its own versioned op; this preserves the
-        // realm's no-ambient-I/O guarantee while making console an ordinary cross-module value.
+        // Host ABI v3 exposes a captured standard-*error* operation beside the standard-output
+        // one, so error delivery is no longer folded onto stdout. Both still cross the same
+        // explicit boundary, which is what preserves the realm's no-ambient-I/O guarantee while
+        // making console an ordinary cross-module value.
         console.set_non_enumerable("error", Value::Native(Native::ConsoleError, realm));
         console.set_non_enumerable("warn", Value::Native(Native::ConsoleError, realm));
         console.set_non_enumerable("info", Value::Native(Native::ConsoleLog, realm));
@@ -29111,6 +29140,42 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(Value::Boolean(true))
     }
 
+    /// The own enumerable keys of a proxy paired with what reading each one answers.
+    ///
+    /// A proxy has no property store to walk, so the only way to ask what it holds is the three
+    /// traps the specification uses: `ownKeys` for the names, `getOwnPropertyDescriptor` for
+    /// which of them are enumerable, and `get` for the value. Every one of those is observable,
+    /// and a handler that counts its calls can tell the difference -- so this asks the proxy
+    /// rather than reaching past it to the target, even where the handler has no trap of its own.
+    ///
+    /// Shared by `Object.assign` and object spread because the two copy the same set: the
+    /// spread was reading the store directly, found none, and produced `{}` from a proxy that
+    /// `Object.assign` beside it copied correctly.
+    fn proxy_own_enumerable(
+        &mut self,
+        source: &Value,
+        instruction: usize,
+    ) -> Result<Vec<(String, Value)>, ExecutionError> {
+        let mut copied = Vec::new();
+        for key in self.own_keys(source, instruction)? {
+            let descriptor =
+                self.proxy_descriptor(source, &Value::String(key.clone()), instruction)?;
+            if matches!(descriptor, Value::Undefined)
+                || !self
+                    .read_property(&descriptor, "enumerable", instruction)?
+                    .is_truthy()
+            {
+                continue;
+            }
+            // The read is the `get` trap, not the descriptor's `value`: a proxy is free to
+            // answer a read with something its descriptor did not mention, and a spread copies
+            // what a read produces.
+            let value = self.read_property(source, &key, instruction)?;
+            copied.push((key, value));
+        }
+        Ok(copied)
+    }
+
     /// `Object.assign` with a proxy source or target.  A proxy source is enumerated by
     /// `ownKeys`, filtered through its descriptors, and read through its `get` trap; a proxy
     /// target receives every write through `set`.
@@ -29130,17 +29195,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 continue;
             }
             if matches!(source, Value::Proxy(_)) {
-                for key in self.own_keys(source, instruction)? {
-                    let descriptor =
-                        self.proxy_descriptor(source, &Value::String(key.clone()), instruction)?;
-                    if matches!(descriptor, Value::Undefined)
-                        || !self
-                            .read_property(&descriptor, "enumerable", instruction)?
-                            .is_truthy()
-                    {
-                        continue;
-                    }
-                    let value = self.read_property(source, &key, instruction)?;
+                for (key, value) in self.proxy_own_enumerable(source, instruction)? {
                     self.set_computed(&target, &Value::String(key), value, instruction)?;
                 }
             } else {
@@ -29151,7 +29206,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                             Some(getter) => {
                                 self.call_value(&getter, source.clone(), Vec::new(), instruction)?
                             }
-                            None => continue,
+                            // As above: a read of a setter-only property answers `undefined`.
+                            None => Value::Undefined,
                         },
                     };
                     self.set_computed(&target, &Value::String(key), value, instruction)?;
@@ -39699,6 +39755,27 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             entries
         }
         Value::Callback(_, _) => intrinsics.enumerable_entries(value),
+        // A function is an object, and a static a program hung on one is an own enumerable
+        // property like any other -- which is the whole reason `{ ...postcss }` copies anything
+        // at all when `postcss` is a function carrying its plugins. `length` and `name` are
+        // stored non-enumerable and `prototype` is not in this store, so the pair that decides
+        // what a spread sees is already the pair the specification marks: `{ ...f }` is what the
+        // program put on `f` and nothing of the function itself.
+        Value::Function(closure) => closure
+            .properties
+            .borrow()
+            .entries()
+            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .collect(),
+        // A bound function keeps its own store, and `length` and `name` are not in it -- the
+        // own-key walk supplies those two literally -- so what is here is exactly what a holder
+        // added.
+        Value::Bound(bound) => bound
+            .properties
+            .borrow()
+            .entries()
+            .map(|(key, property)| (key.to_owned(), property.clone()))
+            .collect(),
         Value::Object(object) => string_wrapper_entries(value)
             .into_iter()
             .chain(
@@ -39708,6 +39785,11 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
                     .map(|(key, property)| (key.to_owned(), property.clone())),
             )
             .collect(),
+        // The indices first and then whatever the program hung on the array by name, which is
+        // the order `OrdinaryOwnPropertyKeys` gives and the order `Object.keys` already used
+        // here. Stopping at the indices made this function disagree with the own-key walk beside
+        // it about the same array: `Object.keys(a)` listed `a.total` and `{ ...a }` dropped it.
+        // `length` is absent from both, because it is not enumerable.
         Value::Array(items) => items
             .borrow()
             .iter()
@@ -39715,6 +39797,14 @@ fn own_properties(intrinsics: &Intrinsics, value: &Value) -> Vec<(String, Proper
             // A hole has no key, so it is absent from `Object.keys`, `for-in` and a spread.
             .filter(|(_, item)| !matches!(item, Value::Native(Native::Hole, _)))
             .map(|(index, item)| (index.to_string(), Property::Value(item.clone())))
+            .chain(
+                items
+                    .properties
+                    .borrow()
+                    .entries()
+                    .map(|(key, property)| (key.to_owned(), property.clone()))
+                    .collect::<Vec<_>>(),
+            )
             .collect(),
         // The elements, and then whatever the program hung on the view: a spread copies both,
         // in the order the own-key walk lists them.

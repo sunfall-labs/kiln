@@ -1929,6 +1929,38 @@ fn native_builtin_supports_export(
     native_builtin_supported_exports(builtin).contains(&export_name)
 }
 
+/// Whether an unbuilt member of `builtin` is a *function* in the interpreter.
+///
+/// This decides how a member with nothing behind it is published, and the two answers are
+/// genuinely different rather than two spellings of one thing.
+///
+/// A function is published as a callable that refuses when it is called. That keeps
+/// `typeof fs.readFileSync === "function"` agreeing with the interpreter -- which is what a
+/// library feature-detects on -- and, more to the point, keeps
+/// `const { readFileSync } = require("fs")` working. Destructuring reads every name it mentions
+/// whether or not the program calls any of them, so a refusal on the *read* stops a program at
+/// its first import over a function it was never going to use. `postcss` is exactly that program.
+///
+/// Anything else has no such value to hand back, and a callable would be a lie about `typeof`.
+/// Those refuse on the read instead. There is one today: `node:path`'s `posix`, an object in the
+/// interpreter and the module itself, whose identity a substitute cannot have.
+///
+/// The default is "function", because almost every member of every node builtin is one and a
+/// wrong answer in that direction is a `typeof` this backend already agrees with.
+fn native_builtin_export_is_callable(
+    builtin: kiln_module_resolver::NodeBuiltin,
+    export_name: &str,
+) -> bool {
+    use kiln_module_resolver::NodeBuiltin;
+
+    // Only unbuilt members reach here, and every other non-function on the surface -- `path.sep`,
+    // `path.delimiter`, `os.EOL`, `os.devNull`, `fs.promises`, `buffer.constants`,
+    // `perf_hooks.performance` -- is answered, so the question does not arise for them. A member
+    // dropped from a support list later would default to "function", which is right for a
+    // function and wants a row here if it is not.
+    !matches!((builtin, export_name), (NodeBuiltin::Path, "posix"))
+}
+
 /// Names whose native materializer carries an implementation rather than an alignment slot.
 ///
 /// `kiln-node-abi` describes the Node-visible module surface shared by every execution mode. A
@@ -1970,7 +2002,12 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Https => &["createServer", "default"],
         NodeBuiltin::Http2 => &["createSecureServer", "createServer", "default"],
         NodeBuiltin::Dns => &["default", "lookup"],
-        NodeBuiltin::Os => &["default", "hostname", "networkInterfaces"],
+        // `EOL` and `devNull` are constants rather than readings of the machine, so answering them
+        // costs nothing and reads nothing -- and they are the two members of `node:os` that are
+        // not functions, which makes them the two that a refusal would serve worst. `os.EOL` is
+        // read far more often than it is called, `text.split(os.EOL)` being the whole of why, and
+        // it had been answering `undefined` here against the interpreter's "\n".
+        NodeBuiltin::Os => &["EOL", "default", "devNull", "hostname", "networkInterfaces"],
         NodeBuiltin::Tty => &["default", "isatty"],
         NodeBuiltin::Stream => &[
             "Readable",
@@ -2219,12 +2256,16 @@ status = kiln_c99_put(host, namespace, "hostname", 8, hostname, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "networkInterfaces", 17, network_interfaces, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
+status = kiln_c99_put(host, namespace, "EOL", 3, kiln_c99_copy_text("\n", 1), 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "devNull", 7, kiln_c99_copy_text("/dev/null", 9), 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = kiln_c99_copy_text("\n", 1);
 exports[1] = kiln_c99_undefined();
 exports[2] = kiln_c99_undefined();
 exports[3] = kiln_c99_undefined();
 exports[4] = namespace;
-exports[5] = kiln_c99_undefined();
+exports[5] = kiln_c99_copy_text("/dev/null", 9);
 exports[6] = kiln_c99_undefined();
 exports[7] = kiln_c99_undefined();
 exports[8] = kiln_c99_undefined();
@@ -2275,7 +2316,7 @@ exports[4] = finished;"#,
             r#"kiln_value performance;
 int status = kiln_c99_new_object(&performance);
 if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, performance, "now", 3, kiln_c99_method(KILN_C99_METHOD_NODE_PERFORMANCE_NOW), 0, NULL);
+status = kiln_c99_put(host, performance, "now", 3, kiln_c99_method(KILN_C99_METHOD_PERFORMANCE_NOW), 0, NULL);
 if (status != KILN_C99_OK) return status;
 kiln_value namespace;
 status = kiln_c99_new_object(&namespace);
@@ -2333,8 +2374,12 @@ exports[18] = kiln_c99_undefined();
 exports[19] = kiln_c99_undefined();"#,
         ),
         NodeBuiltin::Path => Some(
-            r#"kiln_value is_absolute = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE);
+            r#"kiln_value basename = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_BASENAME);
+kiln_value dirname = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_DIRNAME);
+kiln_value extname = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_EXTNAME);
+kiln_value is_absolute = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_IS_ABSOLUTE);
 kiln_value join = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_JOIN);
+kiln_value relative = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_RELATIVE);
 kiln_value resolve = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_RESOLVE);
 kiln_value dirname = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_DIRNAME);
 kiln_value basename = kiln_c99_method(KILN_C99_METHOD_NODE_PATH_BASENAME);
@@ -3226,13 +3271,37 @@ fn native_builtin_runtime_module(
                 "if (commonjs_status != KILN_C99_OK) return commonjs_status;"
             )
             .unwrap();
+            // A name the materializer fills is published with its value; a name it does not is
+            // published as a *refusal*, so that reading it stops the program and the instruction
+            // says which member was asked for.
+            //
+            // This loop used to publish every ABI name unconditionally, and the slots the
+            // materializer had left as `kiln_c99_undefined()` went out with it. That is where the
+            // two halves of the loader stopped agreeing: a static `import { dirname }` was
+            // refused ahead of time by `validate_native_node_builtins`, while
+            // `require("path").dirname` -- which is what an esbuild bundle emits -- handed back
+            // `undefined` and let the program run on. `postcss` walked past its own
+            // `resolve && isAbsolute` guard on the strength of it and died three frames later on
+            // "a undefined is not a function", with nothing anywhere naming `dirname`.
             for export in abi.exports {
                 let index =
                     export_index(export).ok_or(NativeError::UnsupportedNodeBuiltinExport {
                         specifier: builtin.specifier(),
                         export_name: (*export).to_owned(),
                     })?;
-                writeln!(body, "commonjs_status = kiln_c99_put(host, commonjs_namespace, {}, {}, exports[{index}], 0, NULL);", native_c_string(export), export.len()).unwrap();
+                if native_builtin_supports_export(builtin, export) {
+                    writeln!(body, "commonjs_status = kiln_c99_put(host, commonjs_namespace, {}, {}, exports[{index}], 0, NULL);", native_c_string(export), export.len()).unwrap();
+                } else if native_builtin_export_is_callable(builtin, export) {
+                    writeln!(body, "commonjs_status = kiln_c99_put(host, commonjs_namespace, {}, {}, kiln_c99_method(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED), 0, NULL);", native_c_string(export), export.len()).unwrap();
+                } else {
+                    writeln!(
+                        body,
+                        "commonjs_status = kiln_c99_put_refused(commonjs_namespace, {}, {});",
+                        native_c_string(export),
+                        export.len()
+                    )
+                    .unwrap();
+                }
                 writeln!(
                     body,
                     "if (commonjs_status != KILN_C99_OK) return commonjs_status;"
@@ -3514,7 +3583,7 @@ typedef int (*kiln_realm_entry_fn)(void *context);
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
-extern void kiln_cli_report_failure(int status, kiln_value value);
+extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
 extern int kiln_realm_set_argv(uint64_t realm, uint64_t argc, const char *const *argv);
@@ -3848,6 +3917,9 @@ static int kiln_graph_enter(void *opaque) {
 static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
     kiln_graph_context graph = {0};
     uint64_t realm = 0;
+    /* A refusal that reaches here has no diagnostic of its own -- the realm stopped before it
+     * could leave one -- so the launcher says which of the three phases was running. */
+    const char *phase = "realm creation";
     int status;
     int destroy_status;
     graph.result.tag = KILN_VALUE_UNDEFINED;
@@ -3865,9 +3937,9 @@ static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
         output.push_str("    if (status == 0) status = kiln_realm_use_wall_clock(realm);\n");
     }
     output.push_str(
-        r##"    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);
-    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);
-    if (status != 0) kiln_cli_report_failure(status, graph.result);
+        r##"    if (status == 0) { phase = "module body"; status = kiln_realm_enter(realm, kiln_graph_enter, &graph); }
+    if (status == 0) { phase = "the turn loop"; status = kiln_realm_drive(realm, &graph.host, &graph.result); }
+    if (status != 0) kiln_cli_report_failure_in(status, graph.result, phase);
     if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;
     destroy_status = kiln_realm_destroy(realm);
     if (status == 0) status = destroy_status;
@@ -5916,7 +5988,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
 
         let performance =
             native_builtin_body(NodeBuiltin::PerfHooks).expect("perf_hooks materializes");
-        assert!(performance.contains("KILN_C99_METHOD_NODE_PERFORMANCE_NOW"));
+        assert!(performance.contains("KILN_C99_METHOD_PERFORMANCE_NOW"));
         assert!(native_builtin_supports_export(
             NodeBuiltin::PerfHooks,
             "performance"

@@ -2644,13 +2644,21 @@ fn bind_tcp_listener(host: &str, port: u16) -> std::io::Result<TcpListener> {
     };
 
     let fd = unsafe {
-        let fd = libc::socket(
-            domain,
-            libc::SOCK_STREAM | libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            0,
-        );
+        // `SOCK_NONBLOCK` and `SOCK_CLOEXEC` are Linux extensions to `socket(2)`; the BSDs and
+        // macOS have neither, so the two flags are set afterwards with `fcntl`. Doing it in two
+        // steps races only with a `fork` in another thread, and the only fork this process makes
+        // is the shipped launcher's, which happens before any realm exists and so before any
+        // listener does.
+        let fd = libc::socket(domain, libc::SOCK_STREAM, 0);
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
+        }
+        if libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) < 0
+            || libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) < 0
+        {
+            let err = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(err);
         }
         let optval: libc::c_int = 1;
         libc::setsockopt(
@@ -3002,6 +3010,10 @@ where
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct CaptureHost {
     stdout: String,
+    /* Separate from `stdout`, because which stream a line went to is observable: a caller that
+     * redirects one and not the other sees the difference, and node puts `console.error` on this
+     * one. Kept as its own buffer rather than interleaved so a test can assert either alone. */
+    stderr: String,
 }
 
 impl CaptureHost {
@@ -3017,27 +3029,41 @@ impl CaptureHost {
         self.stdout
     }
 
+    pub fn stderr(&self) -> &str {
+        &self.stderr
+    }
+
+    pub fn into_stderr(self) -> String {
+        self.stderr
+    }
+
     pub fn clear(&mut self) {
         self.stdout.clear();
+        self.stderr.clear();
     }
 }
 
 impl HostOps for CaptureHost {
     fn call(&mut self, operation: HostOp, arguments: &[HostValue]) -> Result<HostValue, HostError> {
         match operation {
-            HostOp::WriteStdout => {
+            HostOp::WriteStdout | HostOp::WriteStderr => {
+                let sink = if operation == HostOp::WriteStdout {
+                    &mut self.stdout
+                } else {
+                    &mut self.stderr
+                };
                 if !arguments.is_empty() {
-                    if !self.stdout.is_empty() && !self.stdout.ends_with('\n') {
-                        self.stdout.push('\n');
+                    if !sink.is_empty() && !sink.ends_with('\n') {
+                        sink.push('\n');
                     }
                     for (index, argument) in arguments.iter().enumerate() {
                         if index > 0 {
-                            self.stdout.push(' ');
+                            sink.push(' ');
                         }
-                        self.stdout.push_str(&argument.to_console_string());
+                        sink.push_str(&argument.to_console_string());
                     }
                 }
-                self.stdout.push('\n');
+                sink.push('\n');
                 Ok(HostValue::Undefined)
             }
             HostOp::ClockNow | HostOp::EntropyU64 | HostOp::TimeZone | HostOp::Locale => Err(

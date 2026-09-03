@@ -35,6 +35,21 @@ typedef struct kiln_typed_array {
     int is_buffer;
 } kiln_typed_array;
 
+/* A `DataView`: a window onto a byte buffer that has no element kind of its own.
+ *
+ * The buffer is *borrowed*, exactly as a typed array borrows one -- `new DataView(b).buffer === b`
+ * and a write through this view is visible through every other view of the same bytes, which is
+ * the whole reason a program reaches for one. Copying here would answer plausibly and wrongly.
+ *
+ * `byte_length` is bytes and not elements, because there is no element to count: the width comes
+ * from which accessor was called, and so does the byte order. Resolved once at construction --
+ * this backend has no resizable buffer, so there is no length to track. */
+typedef struct kiln_data_view {
+    kiln_typed_buffer *buffer;
+    size_t byte_offset;
+    size_t byte_length;
+} kiln_data_view;
+
 
 /* A nonzero callback return is propagated as KILN_C99_HOST_ERROR.  The callback owns any
  * interpretation of operation numbers and may replace *result. */
@@ -202,6 +217,19 @@ typedef struct kiln_property {
     int writable;
     int configurable;
     int accessor;
+    /* A name this realm publishes and cannot answer: reading it refuses rather than handing back
+     * `undefined`. Only the node builtin namespaces install one, and only for a member the
+     * shared ABI declares while the native materializer has no implementation behind it.
+     *
+     * The point is that the two are not the same absence. A member the language never had is
+     * `undefined` and that is the right answer; a member this backend has not built is a *gap*,
+     * and answering `undefined` for it silently fails the feature test a library wrote to find
+     * out -- which is how a missing `path.dirname` became "a undefined is not a function" three
+     * frames away in `postcss`. The refusal names the member without being told it, because the
+     * instruction that read it already carries the name: `GetProperty(dirname)`.
+     *
+     * The same idea as `kiln_c99_builtin_backlog` one level down, and for the same reason. */
+    int refused;
     kiln_value value;
     kiln_value getter;
     kiln_value setter;

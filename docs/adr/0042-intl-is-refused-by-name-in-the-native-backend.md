@@ -98,3 +98,8 @@ Until one of those, `Intl` is a name that tells the truth about itself.
   the three wide typed arrays, the disposable stacks, `SuppressedError`, `EvalError`,
   `TextDecoder`, `eval` and `performance`. None of those is a size question — they are simply not
   written yet — but all of them are now names that refuse rather than names that read `undefined`.
+- `DataView` left that list on 2026-09-02: it is a native constructor now, with a builtin code
+  outside the published-and-refused range, and the code it vacated is retired rather than reused
+  so that every code inside that range still means what this ADR says it means. The reasoning is
+  unchanged for the rest of the list — and it is what `DataView.prototype.getFloat16` and
+  `setFloat16` now do, being the two members of an implemented built-in that are still missing.

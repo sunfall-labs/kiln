@@ -171,7 +171,7 @@ pub const EMBEDDING_C_ABI_VERSION: u32 = 1;
 pub const EMBEDDING_MODULE_API_VERSION: u32 = 2;
 
 /// Host callback ABI version declared by [`embedding_header`].
-pub const EMBEDDING_HOST_ABI_VERSION: u32 = 2;
+pub const EMBEDDING_HOST_ABI_VERSION: u32 = 3;
 
 /// The operation implemented by [`runtime_source`].
 pub const WRITE_STDOUT_OPERATION: u16 = 1;
@@ -320,7 +320,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 
 #define KILN_NATIVE_RUNTIME_VERSION 8
 #define KILN_C_ABI_VERSION 1
-#define KILN_HOST_ABI_VERSION 2
+#define KILN_HOST_ABI_VERSION 3
 #define KILN_MODULE_API_VERSION 2
 
 #define KILN_C99_OK 0
@@ -338,6 +338,7 @@ const EMBEDDING_HEADER: &str = r#"/* Kiln native embedding ABI. */
 #define KILN_HOST_OP_WRITE_STDOUT 1
 #define KILN_HOST_OP_CLOCK_NOW 2
 #define KILN_HOST_OP_ENTROPY_U64 3
+#define KILN_HOST_OP_WRITE_STDERR 6
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
@@ -481,11 +482,13 @@ const RUNTIME_BODY: &str = r#"
 extern int kiln_number_to_js_string(double value, char *buffer, size_t capacity);
 extern double kiln_string_to_number(const char *bytes, size_t length);
 
-static int kiln_cli_write_bytes(const char *bytes, size_t length) {
+/* The sink is a parameter because `console.error` and `console.warn` go to standard error, and
+ * which stream a line went to is observable to anyone redirecting one and not the other. */
+static int kiln_cli_write_bytes(FILE *sink, const char *bytes, size_t length) {
     if (length != 0 && bytes == NULL) {
         return KILN_C99_HOST_ERROR;
     }
-    if (length != 0 && fwrite(bytes, 1, length, stdout) != length) {
+    if (length != 0 && fwrite(bytes, 1, length, sink) != length) {
         return KILN_C99_HOST_ERROR;
     }
     return KILN_C99_OK;
@@ -586,8 +589,15 @@ int kiln_cli_write_result(kiln_value value) {
  *
  * Without this a native run that threw exited 1 in silence, which is the failure mode the whole
  * corpus is built to avoid: a refusal you can see beats a wrong answer you cannot, and an exit
- * code with no words is neither. */
-void kiln_cli_report_failure(int status, kiln_value value) {
+ * code with no words is neither.
+ *
+ * Every line here is prefixed `kiln: `, because this stream now carries the program's own
+ * `console.error` output as well. The prefix is the only thing separating the engine's words
+ * about the program from the program's words, and it belongs where the words are written: the
+ * caller used to add it by prefixing the whole stream, which made a program's own error output
+ * read as a compiler diagnostic. */
+void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase) {
+    fputs("kiln: ", stderr);
     if (status == KILN_C99_THROWN) {
         fputs("uncaught ", stderr);
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
@@ -609,6 +619,11 @@ void kiln_cli_report_failure(int status, kiln_value value) {
         if (value.tag == KILN_VALUE_STRING && value.len != 0 && value.ptr != NULL) {
             fputs(": ", stderr);
             fwrite(value.ptr, 1, value.len, stderr);
+        } else if (phase != NULL) {
+            /* The module body carries its own diagnostic; everything else has none to carry, so
+             * the phase is the only thing that can be said -- and saying it beats a bare line. */
+            fputs(" in ", stderr);
+            fputs(phase, stderr);
         }
         fputc('\n', stderr);
         return;
@@ -633,46 +648,46 @@ void kiln_cli_report_failure(int status, kiln_value value) {
     }
 }
 
-static int kiln_cli_write_value(kiln_value value) {
+static int kiln_cli_write_value_to(FILE *sink, kiln_value value) {
     static const char undefined_text[] = "undefined";
     static const char null_text[] = "null";
     static const char true_text[] = "true";
     static const char false_text[] = "false";
     switch (value.tag) {
     case KILN_VALUE_UNDEFINED:
-        return kiln_cli_write_bytes(undefined_text, sizeof(undefined_text) - 1);
+        return kiln_cli_write_bytes(sink, undefined_text, sizeof(undefined_text) - 1);
     case KILN_VALUE_NULL:
-        return kiln_cli_write_bytes(null_text, sizeof(null_text) - 1);
+        return kiln_cli_write_bytes(sink, null_text, sizeof(null_text) - 1);
     case KILN_VALUE_BOOLEAN:
         return value.bits != 0
-            ? kiln_cli_write_bytes(true_text, sizeof(true_text) - 1)
-            : kiln_cli_write_bytes(false_text, sizeof(false_text) - 1);
+            ? kiln_cli_write_bytes(sink, true_text, sizeof(true_text) - 1)
+            : kiln_cli_write_bytes(sink, false_text, sizeof(false_text) - 1);
     case KILN_VALUE_STRING:
-        return kiln_cli_write_bytes(value.ptr, value.len);
+        return kiln_cli_write_bytes(sink, value.ptr, value.len);
     case KILN_VALUE_NUMBER: {
         double number;
         char buffer[64];
         int length;
         memcpy(&number, &value.bits, sizeof(number));
         if (isnan(number)) {
-            return kiln_cli_write_bytes("NaN", 3);
+            return kiln_cli_write_bytes(sink, "NaN", 3);
         }
         if (isinf(number)) {
             return number < 0.0
-                ? kiln_cli_write_bytes("-Infinity", 9)
-                : kiln_cli_write_bytes("Infinity", 8);
+                ? kiln_cli_write_bytes(sink, "-Infinity", 9)
+                : kiln_cli_write_bytes(sink, "Infinity", 8);
         }
         /* Console display preserves negative zero; String(-0) is the separate `0` conversion. */
         if (number == 0.0) {
             return signbit(number)
-                ? kiln_cli_write_bytes("-0", 2)
-                : kiln_cli_write_bytes("0", 1);
+                ? kiln_cli_write_bytes(sink, "-0", 2)
+                : kiln_cli_write_bytes(sink, "0", 1);
         }
         length = kiln_number_to_js_string(number, buffer, sizeof(buffer));
         if (length < 0 || (size_t)length >= sizeof(buffer)) {
             return KILN_C99_HOST_ERROR;
         }
-        return kiln_cli_write_bytes(buffer, (size_t)length);
+        return kiln_cli_write_bytes(sink, buffer, (size_t)length);
     }
     default:
         return KILN_C99_HOST_ERROR;
@@ -733,6 +748,7 @@ static int kiln_cli_entropy_u64(kiln_value *result) {
 int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                        const kiln_value *arguments, kiln_value *result) {
     uint16_t index;
+    FILE *sink;
     (void)context;
     if (result == NULL || (argc != 0 && arguments == NULL)) {
         return KILN_C99_HOST_ERROR;
@@ -743,16 +759,22 @@ int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
     if (operation == KILN_HOST_OP_ENTROPY_U64) {
         return argc == 0 ? kiln_cli_entropy_u64(result) : KILN_C99_HOST_ERROR;
     }
-    if (operation != KILN_HOST_OP_WRITE_STDOUT) return KILN_C99_HOST_ERROR;
+    if (operation != KILN_HOST_OP_WRITE_STDOUT && operation != KILN_HOST_OP_WRITE_STDERR) {
+        return KILN_C99_HOST_ERROR;
+    }
+    /* Which stream a line went to is observable -- a caller that redirects one and not the other
+     * sees the difference -- so `console.error` and `console.warn` reach the same place here that
+     * they reach in node. */
+    sink = operation == KILN_HOST_OP_WRITE_STDERR ? stderr : stdout;
     for (index = 0; index < argc; ++index) {
-        if (index != 0 && fputc(' ', stdout) == EOF) {
+        if (index != 0 && fputc(' ', sink) == EOF) {
             return KILN_C99_HOST_ERROR;
         }
-        if (kiln_cli_write_value(arguments[index]) != KILN_C99_OK) {
+        if (kiln_cli_write_value_to(sink, arguments[index]) != KILN_C99_OK) {
             return KILN_C99_HOST_ERROR;
         }
     }
-    if (fputc('\n', stdout) == EOF || fflush(stdout) != 0) {
+    if (fputc('\n', sink) == EOF || fflush(sink) != 0) {
         return KILN_C99_HOST_ERROR;
     }
     *result = kiln_cli_undefined();
@@ -769,7 +791,7 @@ const LAUNCHER_DECL_PREFIX: &str = r#"
 extern int kiln_cli_host_call(void *context, uint16_t operation, uint16_t argc,
                               const kiln_value *arguments, kiln_value *result);
 extern int kiln_cli_write_result(kiln_value value);
-extern void kiln_cli_report_failure(int status, kiln_value value);
+extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
 typedef int (*kiln_realm_entry_fn)(void *context);
 extern int kiln_realm_create(uint64_t *out_realm);
 extern int kiln_realm_enter(uint64_t realm, kiln_realm_entry_fn entry, void *context);
@@ -802,6 +824,7 @@ int main(int argc, char **argv) {
     kiln_value result;
     kiln_cli_entry_context context;
     uint64_t realm = 0;
+    const char *phase;
     int status;
     int destroy_status;
     if (setlocale(LC_NUMERIC, "C") == NULL) {
@@ -812,22 +835,36 @@ int main(int argc, char **argv) {
     result = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
     context.host = &host;
     context.result = &result;
+    /* Which call failed, so a failure outside the module body still names something.
+     *
+     * `result` carries the diagnostic only when the module body is what refused. A refusal from
+     * the realm's own machinery -- entering it, driving its turns, tearing it down -- left it
+     * untouched, so the report printed `native backend refusal` and stopped: a refusal that names
+     * nothing, which is the one thing a refusal is supposed never to be. A bundled `rxjs` fails
+     * exactly here and said precisely that. */
+    phase = "realm creation";
     status = kiln_realm_create(&realm);
     if (status == KILN_C99_OK && argc > 0) {
+        phase = "argv installation";
         status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);
     }
     if (status == KILN_C99_OK) {
+        phase = "module body";
         status = kiln_realm_enter(realm, kiln_cli_enter_module, &context);
     }
     if (status == KILN_C99_OK) {
+        phase = "the turn loop";
         status = kiln_realm_drive(realm, &host, &result);
     }
     if (realm != 0) {
         destroy_status = kiln_realm_destroy(realm);
-        if (status == KILN_C99_OK) status = destroy_status;
+        if (status == KILN_C99_OK) {
+            phase = "realm teardown";
+            status = destroy_status;
+        }
     }
     if (status != 0) {
-        kiln_cli_report_failure(status, result);
+        kiln_cli_report_failure_in(status, result, phase);
         return 1;
     }
     return kiln_cli_write_result(result) == KILN_C99_OK ? 0 : 1;
@@ -1552,21 +1589,21 @@ int main(int argc, char **argv) {
     const FAILURE_REPORTER_SOURCE: &str = r#"
 #include "kiln_host.h"
 
-extern void kiln_cli_report_failure(int status, kiln_value value);
+extern void kiln_cli_report_failure_in(int status, kiln_value value, const char *phase);
 
 int main(void) {
     kiln_value value = { KILN_VALUE_UNDEFINED, 0, {0} };
-    kiln_cli_report_failure(KILN_C99_CONTROL_ERROR, value);
+    kiln_cli_report_failure_in(KILN_C99_CONTROL_ERROR, value, NULL);
     value.tag = KILN_VALUE_STRING;
     value.ptr = "module=node:http instruction=7 method=240 receiver_tag=18";
     value.len = sizeof("module=node:http instruction=7 method=240 receiver_tag=18") - 1;
-    kiln_cli_report_failure(KILN_C99_CONTROL_ERROR, value);
+    kiln_cli_report_failure_in(KILN_C99_CONTROL_ERROR, value, NULL);
     value = (kiln_value){ KILN_VALUE_UNDEFINED, 0, {0} };
-    kiln_cli_report_failure(KILN_C99_OUT_OF_MEMORY, value);
-    kiln_cli_report_failure(KILN_C99_CALL_DEPTH_ERROR, value);
-    kiln_cli_report_failure(KILN_C99_UNINITIALIZED_ERROR, value);
-    kiln_cli_report_failure(KILN_C99_HOST_ERROR, value);
-    kiln_cli_report_failure(KILN_C99_INVALID_ARGUMENT, value);
+    kiln_cli_report_failure_in(KILN_C99_OUT_OF_MEMORY, value, NULL);
+    kiln_cli_report_failure_in(KILN_C99_CALL_DEPTH_ERROR, value, NULL);
+    kiln_cli_report_failure_in(KILN_C99_UNINITIALIZED_ERROR, value, NULL);
+    kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
+    kiln_cli_report_failure_in(KILN_C99_INVALID_ARGUMENT, value, NULL);
     kiln_cli_report_failure(-99, value);
     return 0;
 }

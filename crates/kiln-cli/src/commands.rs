@@ -20,10 +20,17 @@ use kiln_proto::{
 };
 use serde_json::json;
 
-/// What a command produced: `text` is the answer, `notes` are diagnostics for stderr.
+/// What a command produced: `text` is the answer, `error_text` is the program's own standard
+/// error, and `notes` are the engine's diagnostics.
+///
+/// `error_text` and `notes` both reach the caller's standard error and are still separate, because
+/// they have different authors. A note is Kiln speaking and is prefixed `kiln:`; `error_text` is
+/// the program speaking and goes out verbatim, exactly as `text` does. Folding `console.error`
+/// into notes made a program's own output look like a compiler diagnostic.
 #[derive(Debug)]
 pub struct Output {
     pub text: String,
+    pub error_text: String,
     pub notes: Vec<String>,
     pub exit_code: i32,
     pub revision: Option<u64>,
@@ -37,6 +44,7 @@ impl Output {
     pub fn new(text: String) -> Output {
         Output {
             text,
+            error_text: String::new(),
             notes: Vec::new(),
             exit_code: 0,
             revision: None,
@@ -273,6 +281,7 @@ fn finish_run_summary(
         .collect();
     Output {
         text: summary.stdout,
+        error_text: summary.stderr,
         notes,
         exit_code: if summary.succeeded { 0 } else { 1 },
         revision: Some(summary.revision),
@@ -355,6 +364,7 @@ pub fn build(
         };
         return Ok(Output {
             text: render::native_shared_build(&display, &summary),
+            error_text: String::new(),
             notes: project_notes,
             exit_code: 0,
             revision: None,
@@ -393,6 +403,7 @@ pub fn build(
     };
     Ok(Output {
         text: render::native_build(&display, &summary),
+        error_text: String::new(),
         notes: project_notes,
         exit_code: 0,
         revision: None,
@@ -449,14 +460,12 @@ pub fn native_run(
             }
         }
     };
-    let mut notes = project_notes;
-    if !summary.stderr.trim_end().is_empty() {
-        // Trimmed because the note is rendered as a line: a program's own trailing newline would
-        // otherwise print as a blank one.
-        notes.push(summary.stderr.trim_end().to_owned());
-    }
+    let notes = project_notes;
     Ok(Output {
         text: summary.stdout,
+        // Verbatim, and not trimmed into a note: this is the program's standard error, so a
+        // caller redirecting the two streams separately gets exactly what the program wrote.
+        error_text: summary.stderr,
         notes,
         exit_code: summary.exit_code.unwrap_or(1),
         revision: None,
@@ -551,6 +560,7 @@ pub fn check(backend: &mut dyn Backend, path: &Path, root: &Path) -> Result<Outp
     }));
     Ok(Output {
         text: render::check(&display, &summary, &work, after.revision, elapsed),
+        error_text: String::new(),
         notes,
         exit_code: if summary.diagnostics.is_empty() { 0 } else { 1 },
         revision: None,
@@ -602,6 +612,7 @@ pub fn check_source(
         .collect();
     Ok(Output {
         text: render::check(display, &summary, &work, after.revision, elapsed),
+        error_text: String::new(),
         notes,
         exit_code: if summary.diagnostics.is_empty() { 0 } else { 1 },
         revision: None,
@@ -645,6 +656,7 @@ pub fn project(backend: &mut dyn Backend, root: &Path) -> Result<Output> {
     let work = Work::between(&before, &after);
     Ok(Output {
         text: render::project(&summary, &work, after.revision, elapsed),
+        error_text: String::new(),
         notes,
         exit_code: 0,
         revision: None,
@@ -871,6 +883,7 @@ pub fn test(
 
     Ok(Output {
         text: render_test(&corpus, &summary),
+        error_text: String::new(),
         notes: Vec::new(),
         exit_code: test_exit_code(&summary),
         revision: None,
@@ -1292,6 +1305,7 @@ mod tests {
                     file: FileId(1),
                     succeeded: self.diagnostics.is_empty(),
                     stdout: "hello from kiln\n".to_string(),
+                    stderr: String::new(),
                     value: Some("undefined".to_string()),
                     scalar_value: self
                         .diagnostics
@@ -2107,6 +2121,7 @@ mod tests {
                 file: FileId(1),
                 succeeded: false,
                 stdout: String::new(),
+                stderr: String::new(),
                 value: None,
                 scalar_value: None,
                 instructions: 0,
