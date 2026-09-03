@@ -6403,6 +6403,10 @@ static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t sourc
     regexp->global = 0;
     regexp->sticky = 0;
     regexp->last_index = 0.0;
+    regexp->cache_ptr = NULL;
+    regexp->cache_len = 0;
+    regexp->cache_matched = 0;
+    regexp->cache_groups = 0;
     for (index = 0; index < flags_len; ++index) {
         if (flags[index] == 'g') {
             regexp->global = 1;

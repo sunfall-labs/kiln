@@ -10965,6 +10965,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             size_t groups = 0;
             int matched = 0;
             int64_t ranges[64];
+            int units_allocated = 0;
             /* `RegExp.prototype.test.call({})` has no pattern to match with. Note that
              * `toString` on a foreign receiver is *not* this: it answers rather than throwing,
              * so that guard stays a refusal. */
@@ -10976,31 +10977,45 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (subject.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            uint16_t stack_units[256];
-            int units_allocated = 0;
-            if (kiln_c99_string_is_ascii(subject) && subject.len <= 256) {
-                size_t idx;
-                for (idx = 0; idx < subject.len; ++idx) {
-                    stack_units[idx] = (uint16_t)(unsigned char)subject.ptr[idx];
-                }
-                units = stack_units;
-                count = subject.len;
+            if (!regexp->global && !regexp->sticky && regexp->cache_ptr == subject.ptr && regexp->cache_len == subject.len) {
+                matched = regexp->cache_matched;
+                groups = regexp->cache_groups;
+                if (groups > sizeof ranges / sizeof *ranges) groups = sizeof ranges / sizeof *ranges;
+                memcpy(ranges, regexp->cache_ranges, groups * 2 * sizeof(int64_t));
             } else {
-                if (kiln_c99_to_units(subject, &units, &count) != KILN_C99_OK) {
-                    return KILN_C99_OUT_OF_MEMORY;
+                uint16_t stack_units[256];
+                if (kiln_c99_string_is_ascii(subject) && subject.len <= 256) {
+                    size_t idx;
+                    for (idx = 0; idx < subject.len; ++idx) {
+                        stack_units[idx] = (uint16_t)(unsigned char)subject.ptr[idx];
+                    }
+                    units = stack_units;
+                    count = subject.len;
+                } else {
+                    if (kiln_c99_to_units(subject, &units, &count) != KILN_C99_OK) {
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    units_allocated = 1;
                 }
-                units_allocated = 1;
-            }
-            /* Only a `g` or `y` pattern has a cursor; everything else searches from the start
-             * however many times it is asked. */
-            start = regexp->global || regexp->sticky
-                        ? (regexp->last_index < 0.0 ? 0 : (size_t)regexp->last_index)
-                        : 0;
-            status = kiln_c99_regexp_find(regexp, units, count, start, ranges,
-                                          sizeof ranges / sizeof *ranges, &groups, &matched);
-            if (status != KILN_C99_OK) {
+                /* Only a `g` or `y` pattern has a cursor; everything else searches from the start
+                 * however many times it is asked. */
+                start = regexp->global || regexp->sticky
+                            ? (regexp->last_index < 0.0 ? 0 : (size_t)regexp->last_index)
+                            : 0;
+                status = kiln_c99_regexp_find(regexp, units, count, start, ranges,
+                                              sizeof ranges / sizeof *ranges, &groups, &matched);
                 if (units_allocated) free(units);
-                return status;
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (!regexp->global && !regexp->sticky) {
+                    regexp->cache_ptr = subject.ptr;
+                    regexp->cache_len = subject.len;
+                    regexp->cache_matched = matched;
+                    regexp->cache_groups = groups;
+                    size_t to_copy = groups > 32 ? 32 : groups;
+                    memcpy(regexp->cache_ranges, ranges, to_copy * 2 * sizeof(int64_t));
+                }
             }
             if (regexp->global || regexp->sticky) {
                 /* A miss resets the cursor, which is what makes a `while (re.exec(s))` loop
@@ -11008,7 +11023,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 regexp->last_index = matched ? (double)ranges[1] : 0.0;
             }
             if (!matched) {
-                if (units_allocated) free(units);
                 *result = code == KILN_C99_METHOD_REGEXP_TEST ? kiln_c99_boolean(0)
                                                               : kiln_c99_null();
                 return KILN_C99_OK;
