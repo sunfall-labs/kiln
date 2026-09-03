@@ -11255,6 +11255,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     items.borrow_mut().extend(collected);
                     self.stack.push(target);
                 }
+                Instruction::ToPropertyKey => {
+                    let key = self.pop(current)?;
+                    // A nullish object throws before the key converts, so leave the key alone and
+                    // let the read below produce the error rather than duplicating it here.
+                    if self.stack.last().is_some_and(Value::is_nullish) {
+                        self.stack.push(key);
+                        continue;
+                    }
+                    // The conversion is the program's own `toString`, so it can throw, and the
+                    // throw belongs to whatever `try` encloses the member expression.
+                    let coerced = self.computed_key(&key, current);
+                    let Some(key) = self.catchable(coerced, current)? else {
+                        continue;
+                    };
+                    self.stack.push(key);
+                }
                 Instruction::GetComputed => {
                     let key = self.pop(current)?;
                     let target = self.pop(current)?;
@@ -14470,6 +14486,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // the way the proxy case above does keeps the machine out of `call_native`'s thirty-five
         // numeric call sites. The recursion terminates because a reduced argument is a primitive,
         // so the second pass finds nothing left to reduce.
+        // A symbol has neither a number nor a string, and every built-in in that list asks for
+        // one or the other -- so a symbol argument is a `TypeError` before any of them runs. The
+        // reduction below only fires for objects, so a symbol reached the pure `argument_number`
+        // and answered NaN: `Math.abs(sym)` was NaN and `parseInt(sym)` was NaN where the
+        // language promises a throw. `String(sym)` is the one conversion that is legal, and
+        // `StringConstructor` is deliberately not in the list.
+        if native.primitive_argument_hint().is_some()
+            && arguments
+                .iter()
+                .any(|argument| matches!(argument, Value::Symbol(_)))
+        {
+            return Err(ExecutionError::SymbolIsNotANumber);
+        }
         if let Some(prefer_string) = native.primitive_argument_hint()
             && arguments.iter().any(|argument| {
                 matches!(
@@ -16392,6 +16421,71 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // `TypedArraySpeciesCreate` like `slice` and `map` -- so a subclass gets its own type
             // back and `@@species` is read. The machine-free implementation stamped out an
             // intrinsic of the receiver's kind and read neither.
+            // `ArrayBuffer.prototype.slice` builds its result with `SpeciesConstructor`, which
+            // is why it is here and not in the machine-free table: reading `constructor` and
+            // `@@species` runs the program's own getters, and validating what they answered is
+            // most of the work. Without it a subclass sliced to a plain `ArrayBuffer` and a
+            // species that was not a constructor was accepted in silence.
+            Native::ArrayBufferSlice => {
+                let Value::ArrayBuffer(buffer) = receiver else {
+                    return Err(ExecutionError::NotABuffer);
+                };
+                let buffer = Rc::clone(buffer);
+                if buffer.detached() {
+                    return Err(ExecutionError::BufferDetached);
+                }
+                let (start, end) = slice_bounds(arguments, buffer.bytes.borrow().len());
+                let length = end.saturating_sub(start);
+                let Some(species) = self.typed_array_species(receiver, instruction)? else {
+                    let bytes = buffer.bytes.borrow();
+                    return Ok(Value::ArrayBuffer(Rc::new(BufferData {
+                        bytes: Bytes::new(buffer.shared, bytes[start..end].to_vec()),
+                        max_byte_length: None,
+                        shared: buffer.shared,
+                        detached: std::cell::Cell::new(false),
+                        immutable: false,
+                        properties: RefCell::new(ObjectData::default()),
+                    })));
+                };
+                let out = self.construct_value(
+                    species.clone(),
+                    vec![Value::Number(length as f64)],
+                    species,
+                    instruction,
+                )?;
+                let Value::ArrayBuffer(target) = &out else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "an ArrayBuffer species must answer an ArrayBuffer".to_owned(),
+                    });
+                };
+                // The species ran the program's code, and that code may have detached either
+                // buffer or handed back the very buffer being sliced -- in which case the copy
+                // below would read and write the same bytes.
+                if target.detached() {
+                    return Err(ExecutionError::BufferDetached);
+                }
+                if Rc::ptr_eq(target, &buffer) {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "an ArrayBuffer species answered the buffer it was slicing"
+                            .to_owned(),
+                    });
+                }
+                if target.bytes.borrow().len() < length {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "an ArrayBuffer species answered a buffer that is too short"
+                            .to_owned(),
+                    });
+                }
+                if buffer.detached() {
+                    return Err(ExecutionError::BufferDetached);
+                }
+                {
+                    let source = buffer.bytes.borrow();
+                    let mut destination = target.bytes.borrow_mut();
+                    destination[..length].copy_from_slice(&source[start..end]);
+                }
+                return Ok(out);
+            }
             Native::TypedArraySubarray => {
                 let Value::TypedArray(view) = receiver else {
                     return Ok(Value::Undefined);
@@ -16545,12 +16639,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let length = bounded_buffer(to_index(arguments.first())?, 1)?;
+        // `as_number_argument`, not the pure `to_index`: a length that is an object is reduced
+        // by *calling* its `valueOf`, and a symbol or a BigInt is a `TypeError`. The pure form
+        // answered `NaN` for an object, which `to_index` then read as zero -- so
+        // `new ArrayBuffer({valueOf: () => 12})` was a *nought-byte* buffer, silently, and the
+        // program found out somewhere else entirely.
+        let requested = self.as_number_argument(arguments.first(), instruction)?;
+        let length = bounded_buffer(to_index_number(requested)?, 1)?;
         let max = match arguments.get(1) {
             Some(options @ (Value::Object(_) | Value::Array(_) | Value::Function(_))) => {
                 match self.read_property(options, "maxByteLength", instruction)? {
                     Value::Undefined => None,
-                    requested => Some(to_index(Some(&requested))?),
+                    requested => {
+                        let number = self.as_number_argument(Some(&requested), instruction)?;
+                        Some(to_index_number(number)?)
+                    }
                 }
             }
             _ => None,
@@ -16609,6 +16712,44 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let index = to_index_number(number)?;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         Ok(index as usize)
+    }
+
+    /// The arguments of a typed-array constructor, with the numeric ones reduced.
+    ///
+    /// Which arguments are numeric depends on the first: over a buffer they are `byteOffset` and
+    /// `length`, and over anything that is not an object it is the length alone -- an object
+    /// source is a list or an iterable, and is not converted at all. Reducing one *calls* the
+    /// program's `valueOf`, which is why this takes the machine and why the pure conversion
+    /// inside `construct_typed_array` could not do it: it answered `NaN` for an object, and
+    /// `to_index` read that as zero, so `new Uint8Array(buffer, {valueOf: () => 4})` silently
+    /// viewed from offset *nought* rather than four.
+    fn typed_array_arguments(
+        &mut self,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Vec<Value>, ExecutionError> {
+        let mut coerced = arguments.to_vec();
+        match arguments.first() {
+            Some(Value::ArrayBuffer(_)) => {
+                for slot in [1usize, 2usize] {
+                    let Some(value) = coerced.get(slot).cloned() else {
+                        continue;
+                    };
+                    if matches!(value, Value::Undefined) {
+                        continue;
+                    }
+                    let number = self.as_number_argument(Some(&value), instruction)?;
+                    coerced[slot] = Value::Number(number);
+                }
+            }
+            Some(first) if !is_an_object(first) && !is_callable(first) => {
+                let first = first.clone();
+                let number = self.as_number_argument(Some(&first), instruction)?;
+                coerced[0] = Value::Number(number);
+            }
+            _ => {}
+        }
+        Ok(coerced)
     }
 
     /// `ToNumber` on an argument, with the coercion only the machine can perform and the two
@@ -24773,8 +24914,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // it does through `new`. They were reachable one way and not the other, which is not
             // a distinction the language draws: `class MyF64 extends Float64Array {}` is how
             // half of Test262's resizable-buffer corpus builds the view it then tests.
+            // Same reduction as a direct `new`: a subclass's `super(buffer, offset)` converts
+            // its arguments the way the base constructor does.
             Native::TypedArrayConstructor(_) => {
-                call_native(&self.intrinsics, parent, &Value::Undefined, arguments)?
+                let arguments = self.typed_array_arguments(arguments, current)?;
+                call_native(&self.intrinsics, parent, &Value::Undefined, &arguments)?
             }
             Native::ArrayBufferConstructor => {
                 self.construct_array_buffer(false, arguments, current)?
@@ -25034,7 +25178,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 };
                 self.stack.push(built);
             }
+            // Through the machine, not `call_native`: the numeric arguments are reduced by
+            // calling the program's `valueOf`, which the machine-free table cannot do. It
+            // answered `NaN` for an object and `to_index` read that as zero, so
+            // `new Uint8Array(buffer, {valueOf: () => 4})` silently viewed from offset *nought*.
             Value::Native(native @ Native::TypedArrayConstructor(_), _) => {
+                let arguments = self.typed_array_arguments(&arguments, current)?;
                 let built = call_native(&self.intrinsics, native, &Value::Undefined, &arguments)?;
                 self.stack.push(built);
             }

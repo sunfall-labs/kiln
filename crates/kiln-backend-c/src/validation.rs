@@ -385,6 +385,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::SetProperty(_)
         | Instruction::SetPropertyStrict { .. }
         | Instruction::NewArray { .. }
+        | Instruction::ToPropertyKey
         | Instruction::GetComputed
         | Instruction::SetComputed
         | Instruction::SetComputedStrict { .. }
@@ -537,6 +538,15 @@ fn stack_effect(
         Instruction::GetProperty(_) => {
             if height < 1 {
                 Err(underflow(1))
+            } else {
+                Ok((height, false))
+            }
+        }
+        // Height-neutral: the key is replaced by its converted self. It needs the object beneath
+        // it as well, which it reads without consuming.
+        Instruction::ToPropertyKey => {
+            if height < 2 {
+                Err(underflow(2))
             } else {
                 Ok((height, false))
             }

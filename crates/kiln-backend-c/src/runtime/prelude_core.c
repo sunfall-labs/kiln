@@ -4254,9 +4254,37 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
     }
 }
 
+/* `ToPropertyKey` of a computed key that arrived from the program.
+ *
+ * Only an object does any work. `kiln_c99_property_key` cannot do it: it answers
+ * "[object Object]" for every object, so `o[{toString(){return "hello"}}] = 42` wrote under
+ * that name and `o.hello` read back `undefined` -- a silent wrong answer of exactly the kind
+ * the native backend must not produce. A symbol is already a key and must not be stringified,
+ * and a number stays a number so the array fast path still recognises it.
+ *
+ * A nullish target passes through unreduced: the read or write that follows throws for it, and
+ * the specification performs that check before the key converts. */
+static int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key,
+                               kiln_value *out, int depth, kiln_value *thrown) {
+    *out = key;
+    if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL) {
+        return KILN_C99_OK;
+    }
+    if (!kiln_c99_is_reference(key)) {
+        return KILN_C99_OK;
+    }
+    return kiln_c99_to_primitive(host, key, 1, out, depth, thrown);
+}
+
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value *out, int depth, kiln_value *thrown) {
     double index;
+    {
+        int reduced = kiln_c99_reduce_key(host, target, key, &key, depth, thrown);
+        if (reduced != KILN_C99_OK) {
+            return reduced;
+        }
+    }
     /* Before the key is reduced to a name: a Symbol reaches the trap as itself. */
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_get(host, target, key, target, out, depth, thrown);
@@ -4369,6 +4397,12 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
                                       kiln_value value, int strict, int depth,
                                       kiln_value *thrown) {
     double index;
+    {
+        int reduced = kiln_c99_reduce_key(host, target, key, &key, depth, thrown);
+        if (reduced != KILN_C99_OK) {
+            return reduced;
+        }
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_set(host, target, key, value, strict, depth, thrown);
     }
@@ -23053,6 +23087,26 @@ static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *
     }
     if (status != KILN_C99_OK) return status;
     stack[*sp - 1] = read;
+    return KILN_C99_OK;
+}
+
+/* `ToPropertyKey` of the top of the stack, in place.
+ *
+ * Only a reference does anything: a primitive is already a key, and leaving it alone keeps the
+ * numeric fast path in the property instructions. That also makes this idempotent, so the
+ * conversion `kiln_c99_get_computed` still performs is a no-op rather than a second call into
+ * the program's own `toString`.
+ *
+ * A nullish target also passes through: the order is fixed, and the read that follows throws
+ * for it before the key would have converted. */
+static int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp,
+                                       int depth, kiln_value *thrown) {
+    kiln_value reduced;
+    int status = kiln_c99_reduce_key(host, stack[*sp - 2], stack[*sp - 1], &reduced, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    stack[*sp - 1] = reduced;
     return KILN_C99_OK;
 }
 

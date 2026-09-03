@@ -149,6 +149,22 @@ pub enum Instruction {
     /// contributes is not known until it runs: `[...xs, y]` has one static element and however
     /// many `xs` yields.
     SpreadInto,
+    /// `ToPropertyKey` of the key on top of the stack, replacing it. Stack is object, then key.
+    ///
+    /// This is the memoisation the specification performs on a Reference Record: a compound
+    /// assignment reads and writes through *one* reference, and `GetValue` stores the converted
+    /// key back into it so `PutValue` does not convert again. Without it a key object's
+    /// `toString` runs twice, which the program can see.
+    ///
+    /// It reads the object beneath the key without consuming it, because the order is fixed:
+    /// a nullish object throws *before* the key converts, so `null[k] += 1` never runs `k`'s
+    /// `toString`. Rather than duplicate that error here, a nullish object leaves the key alone
+    /// and the read that follows throws it.
+    ///
+    /// Only an object does any work; every primitive is already a key and passes through, which
+    /// keeps `a[0]` on the array fast path. Plain assignment does not use this -- there the
+    /// specification converts in `PutValue`, after the right-hand side has run.
+    ToPropertyKey,
     /// Read `object[key]`. Stack is object, then key.
     GetComputed,
     /// Call `object.name(...)` with the object as receiver. Stack is object, then arguments.
