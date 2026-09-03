@@ -356,10 +356,23 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         source,
     })?;
 
-    let archive_path = build_root
+    // Where cargo writes, and where a *finished* archive is published.
+    //
+    // These have to be different paths. The readiness check below used to look at cargo's own
+    // output, and `is_file` is true from the moment cargo starts writing it -- so a second process
+    // arriving mid-build skipped the build and linked a half-written archive. Its program then
+    // printed something else, which the native corpus reported as a divergence: sixteen of them on
+    // a cold cache, none on a warm one, because warm means somebody already finished.
+    //
+    // Publishing through a rename fixes it without a lock. A reader sees the complete archive or
+    // no archive, never a partial one, because rename is atomic within a filesystem -- the same
+    // reasoning `ArtifactCache::write_atomic` gives for installing a record by hard link. Two
+    // finishers racing to publish overwrite identical bytes, so the loser costs nothing.
+    let built_path = build_root
         .join(&rust_target)
         .join(PROVIDER_PROFILE)
         .join("libkiln_native_number_ffi.a");
+    let archive_path = build_root.join("libkiln_native_number_ffi.a");
 
     if !archive_path.is_file() {
         let arguments = [
@@ -410,6 +423,26 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
                 program: cargo,
                 status: output.status.code(),
                 stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+
+        // Named for this process, so two publishers cannot share a staging file, and created in
+        // the destination's own directory so the rename stays within one filesystem.
+        let staging = build_root.join(format!(
+            ".libkiln_native_number_ffi.a.{}",
+            std::process::id()
+        ));
+        fs::copy(&built_path, &staging).map_err(|source| NumberProviderError::Read {
+            operation: "stage source-built number-provider archive",
+            path: built_path.clone(),
+            source,
+        })?;
+        if let Err(source) = fs::rename(&staging, &archive_path) {
+            let _ = fs::remove_file(&staging);
+            return Err(NumberProviderError::Read {
+                operation: "publish source-built number-provider archive",
+                path: archive_path.clone(),
+                source,
             });
         }
     }
