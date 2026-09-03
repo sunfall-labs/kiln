@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 572,
+ "native_runs": 575,
  "receivers": {
   "AbortController": {
    "expr": "globalThis.AbortController",
@@ -10,11 +10,11 @@
    },
    "kind": "static",
    "native": {
-    "name": "string \"anonymous\""
+    "name": "string \"AbortController\""
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=anonymous receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AbortController receiver_tag=8"
    },
    "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
@@ -27,7 +27,7 @@
    },
    "kind": "static",
    "native": {
-    "name": "string \"anonymous\""
+    "name": "string \"AbortSignal\""
    },
    "native_names": [
     "abort",
@@ -36,7 +36,7 @@
     "timeout"
    ],
    "refused": {
-    "length": "refusal: instruction=68 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=anonymous receiver_tag=8"
+    "length": "refusal: instruction=68 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AbortSignal receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -684,7 +684,7 @@
     "from": "function",
     "isBuffer": "function",
     "length": "number 1",
-    "name": "string \"nodeBufferGlobal\""
+    "name": "string \"Buffer\""
    },
    "kind": "static",
    "native": {
@@ -2806,11 +2806,11 @@
    },
    "kind": "static",
    "native": {
-    "name": "string \"anonymous\""
+    "name": "string \"TextEncoder\""
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=anonymous receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=TextEncoder receiver_tag=8"
    },
    "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
@@ -2901,7 +2901,7 @@
    "expr": "globalThis.URL",
    "interpreted": {
     "length": "number 1",
-    "name": "string \"Url\""
+    "name": "string \"URL\""
    },
    "kind": "static",
    "native": {
@@ -3241,7 +3241,7 @@
    },
    "kind": "static",
    "native": {
-    "name": "string \"\""
+    "name": "string \"clearImmediate\""
    },
    "native_names": [],
    "refused": {
@@ -3500,7 +3500,7 @@
     "isNaN": "function",
     "parseFloat": "function",
     "parseInt": "function",
-    "performance": "function",
+    "performance": "object",
     "queueMicrotask": "function",
     "setImmediate": "function",
     "setInterval": "function",
@@ -3585,7 +3585,7 @@
     "isNaN": "function",
     "parseFloat": "function",
     "parseInt": "function",
-    "performance": "function",
+    "performance": "object",
     "queueMicrotask": "function",
     "setImmediate": "function",
     "setInterval": "function",
@@ -3732,11 +3732,11 @@
    "expr": "require(\"node:assert\")",
    "interpreted": {
     "length": "number 1",
-    "name": "string \"nodeAssertOk\""
+    "name": "string \"assert\""
    },
    "kind": "namespace",
    "native": {
-    "name": "string \"\""
+    "name": "string \"assert\""
    },
    "native_names": [],
    "refused": {
@@ -3872,12 +3872,12 @@
    "expr": "require(\"node:events\")",
    "interpreted": {
     "length": "number 1",
-    "name": "string \"nodeEventEmitter\"",
+    "name": "string \"EventEmitter\"",
     "prototype": "object"
    },
    "kind": "namespace",
    "native": {
-    "name": "string \"\"",
+    "name": "string \"EventEmitter\"",
     "prototype": "object"
    },
    "native_names": [],
@@ -3994,7 +3994,7 @@
    "kind": "namespace",
    "native": {
     "IncomingMessage": "function",
-    "METHODS": "function",
+    "METHODS": "object",
     "Server": "function",
     "ServerResponse": "function",
     "createServer": "function",
@@ -4222,7 +4222,7 @@
   "node:perf_hooks": {
    "expr": "require(\"node:perf_hooks\")",
    "interpreted": {
-    "performance": "function"
+    "performance": "object"
    },
    "kind": "namespace",
    "native": {
@@ -4472,7 +4472,7 @@
    },
    "kind": "static",
    "native": {
-    "name": "string \"\""
+    "name": "string \"setImmediate\""
    },
    "native_names": [],
    "refused": {
