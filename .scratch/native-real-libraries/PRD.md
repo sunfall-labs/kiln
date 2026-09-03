@@ -35,3 +35,19 @@ the emitted C, with nothing checking that the two agree. A sweep on 2026-09-01 m
 at **55 of 80 builtins**. That is being fixed separately as one table with two emitters; these
 issues record what real libraries hit, so the fix can be checked against actual demand rather than
 against a list someone wrote from memory.
+
+## The backlog is no longer discovered one bundle at a time
+
+ADR 0043 landed the one-table fix, and it covers the fifteen table-driven builtins. Everything
+else --- the prototype method tables, the `node:` namespaces, the globals that are not
+table-driven --- had no inventory until `scripts/native-surface-inventory.py`, which asks both
+engines about every member of every receiver and writes `native-surface-inventory.md` beside this
+file. At `1f1ea59f` that is **57 diverged, 305 refused, 638 implemented** out of 1000 members,
+plus 51 names published natively that the interpreter does not have.
+
+Read the report before opening an issue here, and read issue 08 before reading the report. The
+next gap a bundle finds is almost certainly already a row in it, with the class it belongs to and
+how many others share its cause --- and two of its columns need the caveat issue 08 gives them:
+a `node:` member counted *implemented* may only agree on `typeof` and still refuse when called,
+and 124 of the 362 missing members are `length`, `name`, `constructor` and `prototype`, which is
+function-object metadata rather than backlog a real program will hit.
