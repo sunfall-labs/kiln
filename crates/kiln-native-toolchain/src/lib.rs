@@ -1042,19 +1042,13 @@ impl Toolchain {
         // declarations are generated from the provider registry precisely so the compiler can name
         // the missing symbol, at the step where it went missing.
         args.push(OsString::from("-Werror=implicit-function-declaration"));
-        // Compile as though the source sat in `.`, whatever directory it really occupies.
+        // Report the source as though it sat in `.`, whatever directory it really occupies.
         //
         // Emitted C is written to a workspace named for the process that made it --
-        // `kiln-native-<pid>-<n>-<nanos>` -- and an object records the path it was compiled from.
-        // Identical source therefore produced different object bytes in every process, while the
-        // artifact cache keys that object on the *source* digest. Two cold builds of the same
-        // translation unit then presented one key with two payloads, and the cache refused the
-        // second: "same cache key already contains a different payload". On a parallel cold run
-        // that was sixteen probes failing to build, which the corpus reported as divergences.
-        //
-        // Reproducibility is the cache's premise, so it belongs here rather than in a key: a
-        // compiler that answers differently for the same input has nothing a content address can
-        // describe.
+        // `kiln-native-<pid>-<n>-<nanos>` -- so every path the compiler *emits* would otherwise
+        // carry that pid: `__FILE__`, the line table, and `DW_AT_comp_dir`. This covers those.
+        // It does not cover paths the compiler composes into type names; the working directory
+        // set further down is what covers those.
         if let Some(directory) = source
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
@@ -1067,16 +1061,11 @@ impl Toolchain {
         // Seed the compiler's internal name generation from the translation unit, not from where
         // it happens to be written.
         //
-        // Absent `-frandom-seed`, gcc derives one from the *output* path, and objects are built in
-        // a workspace named for the process that made them -- so the same source produced
-        // different bytes on every run. The artifact cache keys an object on its source digest, so
-        // two builds presented one key with two payloads and the cache refused the second: "same
-        // cache key already contains a different payload". A parallel cold corpus run turned that
-        // into sixteen probes that could not build.
-        //
-        // The file name is stable across runs and distinct between the units linked together,
-        // which is exactly what this seed has to be: it separates one unit's local symbols from
-        // another's, and nothing about it should depend on the directory.
+        // Absent `-frandom-seed`, gcc derives one from the *output* path, which is inside that
+        // per-process workspace. The file name is stable across runs and distinct between the
+        // units linked together, which is exactly what this seed has to be: it separates one
+        // unit's local symbols from another's, and nothing about it should depend on the
+        // directory.
         if let Some(name) = source.file_name() {
             let mut seed = OsString::from("-frandom-seed=");
             seed.push(name);
@@ -1094,15 +1083,39 @@ impl Toolchain {
             args.push(directory.as_os_str().to_owned());
         }
         args.extend(options.extra_args.iter().cloned());
-        args.push(source.as_os_str().to_owned());
+        // Name the source by its file name and compile from its directory, rather than spelling
+        // the absolute path on the command line.
+        //
+        // `-ffile-prefix-map` rewrites the paths a compiler *emits* -- `__FILE__`, the line table,
+        // the compilation directory -- but not the ones it composes into type names. Clang names
+        // an anonymous type after the file it was declared in, so an object compiled from
+        // `/tmp/kiln-native-<pid>-<n>-<nanos>/prelude.c` carries
+        // `union kiln_value::(anonymous at /tmp/kiln-native-1479071-.../prelude.c:1502:5)` in
+        // `.debug_str`, and the pid in that string differs between processes. Two concurrent cold
+        // builds of identical source therefore produced objects that differed in about twenty-two
+        // thousand bytes of debug info, and the artifact cache -- which keys an object on its
+        // source digest, and holds that one key means one payload -- refused the second with "same
+        // cache key already contains a different payload".
+        //
+        // What the compiler cannot see, it cannot record: with the working directory set here,
+        // the only path it is given is `prelude.c`.
+        let (source_argument, working_directory) = match (source.file_name(), source.parent()) {
+            (Some(name), Some(directory))
+                if options.current_dir.is_none() && !directory.as_os_str().is_empty() =>
+            {
+                (name.to_owned(), Some(directory.to_path_buf()))
+            }
+            _ => (source.as_os_str().to_owned(), options.current_dir.clone()),
+        };
+        args.push(source_argument);
         args.push(OsString::from("-o"));
         args.push(object.as_os_str().to_owned());
-        let command = self.command(args, options.current_dir.clone());
+        let command = self.command(args, working_directory.clone());
         self.run_artifact(
             BuildStage::Compile,
             command,
             object,
-            options.current_dir.as_deref(),
+            working_directory.as_deref(),
         )
     }
 
