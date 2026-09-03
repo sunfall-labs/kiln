@@ -15268,18 +15268,53 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let indent = json_indent(arguments.get(2));
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let mut seen = Vec::new();
-                let mut resolve = |getter: Option<&Value>, receiver: &Value| match getter {
-                    Some(getter) => {
+                // `SerializeJSONProperty` applies the replacer to every property, including the
+                // root, which it reaches through a wrapper holder keyed by the empty string.
+                // Two forms: a function, called as `(holder, key, value)`, and an array, which
+                // is a list of the keys to keep.
+                let replacer = arguments.get(1).cloned().unwrap_or(Value::Undefined);
+                let allowed: Option<Vec<String>> = match &replacer {
+                    Value::Array(items) => Some(
+                        items
+                            .borrow()
+                            .iter()
+                            .filter_map(|entry| match entry {
+                                Value::String(text) => Some(text.clone()),
+                                Value::Number(number) => Some(number_string(*number)),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                };
+                let function = is_callable(&replacer).then_some(replacer);
+                let mut replace = |holder: &Value, key: &str, property: Value| match &function {
+                    Some(replacer) => self.call_value(
+                        replacer,
+                        holder.clone(),
+                        Vec::from([Value::String(key.to_owned()), property]),
+                        instruction,
+                    ),
+                    None => Ok(property),
+                };
+                let mut resolve = |call: JsonCall<'_>| match call {
+                    JsonCall::Getter(getter, receiver) => {
                         self.call_value(getter, receiver.clone(), Vec::new(), instruction)
                     }
-                    None => {
+                    JsonCall::Replace(holder, key, property) => match &function {
+                        Some(replacer) => self.call_value(
+                            replacer,
+                            holder.clone(),
+                            Vec::from([Value::String(key.to_owned()), property]),
+                            instruction,
+                        ),
+                        None => Ok(property),
+                    },
+                    JsonCall::ToJson(receiver, key) => {
                         // Only a reference value can carry one, and asking a primitive would
-                        // reach the string and number method tables for nothing.
-                        // A `Temporal` value carries a `toJSON` and it is the whole reason the
-                        // step exists: without it here the ISO string was never asked for and
-                        // `JSON.stringify(plainDate)` answered `{}` -- an object with no own
-                        // enumerable properties, which is what the value looks like from the
-                        // outside and not what the language says to write.
+                        // reach the string and number method tables for nothing. A `Temporal`
+                        // value carries a `toJSON` and it is the whole reason the step exists:
+                        // without it `JSON.stringify(plainDate)` answered `{}`.
                         if !matches!(
                             receiver,
                             Value::Object(_)
@@ -15294,11 +15329,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         if !is_callable(&method) {
                             return Ok(receiver.clone());
                         }
-                        self.call_value(&method, receiver.clone(), Vec::new(), instruction)
+                        self.call_value(
+                            &method,
+                            receiver.clone(),
+                            Vec::from([Value::String(key.to_owned())]),
+                            instruction,
+                        )
                     }
                 };
                 Ok(
-                    match json_stringify(&value, &indent, "", &mut seen, &mut resolve)? {
+                    match json_stringify(
+                        &value,
+                        &indent,
+                        "",
+                        &mut seen,
+                        &mut resolve,
+                        allowed.as_deref(),
+                        "",
+                    )? {
                         Some(text) => Value::String(text),
                         // `JSON.stringify(undefined)` is `undefined`, not the string.
                         None => Value::Undefined,
@@ -33129,6 +33177,11 @@ fn build_error(kind: ErrorKind, arguments: &[Value]) -> Value {
 /// is what the specification says and what keeps a hostile argument from blowing up the output.
 fn json_indent(space: Option<&Value>) -> String {
     const MAX: usize = 10;
+    // `JSON.stringify(v, null, new Number(2))` indents by two: the specification unwraps a
+    // Number or String object before looking at it, and reading the object itself found neither
+    // arm below and silently produced no indent at all.
+    let unwrapped = space.and_then(wrapped_primitive);
+    let space = unwrapped.as_ref().or(space);
     match space {
         Some(Value::Number(count)) if *count >= 1.0 => " ".repeat((*count as usize).min(MAX)),
         Some(Value::String(text)) => text.chars().take(MAX).collect(),
@@ -33155,7 +33208,22 @@ fn json_indent(space: Option<&Value>) -> String {
 /// up on the value, call it if it is callable, and hand back what it produced, or the value
 /// unchanged when there is none. One closure rather than two because both borrow the interpreter
 /// mutably and only one of them can.
-type JsonResolver<'a> = &'a mut dyn FnMut(Option<&Value>, &Value) -> Result<Value, ExecutionError>;
+/// The three points at which serialising JSON calls back into the program.
+///
+/// One callback rather than three, because each needs the machine and two closures cannot hold
+/// `&mut self` at once -- the compiler says so, and the alternative of passing the interpreter
+/// itself would make the serialiser a method on it.
+enum JsonCall<'a> {
+    /// An accessor property: reading it is a call.
+    Getter(&'a Value, &'a Value),
+    /// `toJSON`, which runs before anything else is decided about a value, and which the
+    /// specification hands the key the value is being serialised under.
+    ToJson(&'a Value, &'a str),
+    /// The `replacer` function, as `(holder, key, value)`.
+    Replace(&'a Value, &'a str, Value),
+}
+
+type JsonResolver<'a> = &'a mut dyn FnMut(JsonCall<'_>) -> Result<Value, ExecutionError>;
 
 /// Serialise one value, calling back into the interpreter where the specification says to.
 ///
@@ -33165,11 +33233,13 @@ fn json_stringify(
     current: &str,
     seen: &mut Vec<usize>,
     resolve: JsonResolver<'_>,
+    allowed: Option<&[String]>,
+    key: &str,
 ) -> Result<Option<String>, ExecutionError> {
     // `toJSON` runs before anything else is decided about the value, which is how a `Date`
     // serialises as its ISO string and how a library controls its own JSON form. It is looked
     // up on the value, prototype chain included, so a class method counts.
-    let replaced = resolve(None, value)?;
+    let replaced = resolve(JsonCall::ToJson(value, key))?;
     let value = &replaced;
     let nested = format!("{current}{indent}");
     // With no indent every separator is empty, which collapses the pretty form to the compact
@@ -33224,7 +33294,7 @@ fn json_stringify(
                             property: Property::Accessor { get, .. },
                             ..
                         }) => match &get {
-                            Some(getter) => resolve(Some(getter), value)?,
+                            Some(getter) => resolve(JsonCall::Getter(getter, value))?,
                             None => Value::Undefined,
                         },
                         _ => items
@@ -33239,10 +33309,12 @@ fn json_stringify(
             };
             let parts = items
                 .iter()
-                .map(|item| {
+                .enumerate()
+                .map(|(index, item)| {
                     // An element that is not representable becomes null rather than vanishing,
                     // because dropping it would renumber every element after it.
-                    json_stringify(item, indent, &nested, guard.seen, resolve)
+                    let at = index.to_string();
+                    json_stringify(item, indent, &nested, guard.seen, resolve, allowed, &at)
                         .map(|part| part.unwrap_or_else(|| "null".to_owned()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -33255,6 +33327,20 @@ fn json_stringify(
         // Emitted exactly as it was given, which is the entire point: the text went through
         // `JSON.rawJSON`'s validation once, and re-encoding it here is the round trip the raw
         // form exists to avoid.
+        // `new Number(1)` serialises as `1`, not as an object with no enumerable properties.
+        // `SerializeJSONProperty` unwraps a Number, String, Boolean or BigInt wrapper before it
+        // decides anything else; without it `[new Number(1)]` answered `[{}]`, and a
+        // `new String("s")` answered its own indices.
+        Value::Object(object)
+            if object.borrow().primitive().is_some()
+                && object.borrow().get_own(RAW_JSON_MARK).is_none() =>
+        {
+            let inner = object.borrow().primitive().cloned();
+            return match inner {
+                Some(inner) => json_stringify(&inner, indent, current, seen, resolve, allowed, key),
+                None => Ok(None),
+            };
+        }
         Value::Object(object) if object.borrow().get_own(RAW_JSON_MARK).is_some() => {
             Some(match object.borrow().get_own(RAW_JSON_TEXT) {
                 Some(Value::String(text)) => text.clone(),
@@ -33270,6 +33356,12 @@ fn json_stringify(
             for (key, property) in entries {
                 // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
                 // own enumerable string property, so it is not part of the object's JSON.
+                // A replacer given as an array is a list of the keys to keep, in its order of
+                // interest rather than the object's -- the filter is here, and the value is
+                // replaced below once it has been read.
+                if allowed.is_some_and(|keys| !keys.iter().any(|name| *name == key)) {
+                    continue;
+                }
                 if symbol::is_reserved(&key) {
                     continue;
                 }
@@ -33278,12 +33370,20 @@ fn json_stringify(
                     // The specification reads the property, which for an accessor is a call.
                     // Serialising the getter itself would be a different object entirely.
                     Property::Accessor { get, .. } => match get {
-                        Some(getter) => resolve(Some(&getter), value)?,
+                        Some(getter) => resolve(JsonCall::Getter(&getter, value))?,
                         None => continue,
                     },
                 };
-                if let Some(part) = json_stringify(&property, indent, &nested, guard.seen, resolve)?
-                {
+                // The replacer sees `(holder, key, value)` and may answer anything, including
+                // `undefined` to drop the property.
+                let property = resolve(JsonCall::Replace(value, &key, property))?;
+                let property = match Some(property) {
+                    Some(replaced) => replaced,
+                    None => continue,
+                };
+                if let Some(part) = json_stringify(
+                    &property, indent, &nested, guard.seen, resolve, allowed, &key,
+                )? {
                     parts.push(format!("{}{colon}{part}", json_quote(&key)));
                 }
             }
@@ -33336,6 +33436,8 @@ fn json_stringify(
                 current,
                 seen,
                 resolve,
+                allowed,
+                key,
             );
         }
         Value::ArrayBuffer(_) | Value::DataView(_) => Some("{}".to_owned()),

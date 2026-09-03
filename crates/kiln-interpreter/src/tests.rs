@@ -2671,12 +2671,21 @@ fn module_execution_initializes_import_slots_and_publishes_exports() {
 
 /// `json_stringify` for a fixture with no accessors, so it needs no interpreter to read one.
 fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionError> {
-    let mut unreachable_getter = |getter: Option<&Value>, receiver: &Value| match getter {
-        // No fixture here defines an accessor, and none carries `toJSON`.
-        Some(_) => unreachable!("no fixture here defines an accessor"),
-        None => Ok(receiver.clone()),
+    let mut unreachable_getter = |call: crate::JsonCall<'_>| match call {
+        // No fixture here defines an accessor, carries `toJSON`, or passes a replacer.
+        crate::JsonCall::Getter(..) => unreachable!("no fixture here defines an accessor"),
+        crate::JsonCall::ToJson(receiver, _) => Ok(receiver.clone()),
+        crate::JsonCall::Replace(_, _, property) => Ok(property),
     };
-    json_stringify(value, indent, "", &mut Vec::new(), &mut unreachable_getter)
+    json_stringify(
+        value,
+        indent,
+        "",
+        &mut Vec::new(),
+        &mut unreachable_getter,
+        None,
+        "",
+    )
 }
 
 fn json(value: &Value) -> Option<String> {
