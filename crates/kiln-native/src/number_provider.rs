@@ -356,60 +356,63 @@ fn build_from_source(identity: &ToolIdentity) -> Result<NumberProvider, NumberPr
         source,
     })?;
 
-    let arguments = [
-        OsString::from("rustc"),
-        OsString::from("--locked"),
-        OsString::from("-p"),
-        OsString::from(PROVIDER_NAME),
-        // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
-        // runtime that now owns native entry as well as interpreted entry.
-        OsString::from("--features"),
-        OsString::from("regexp,bigint,temporal"),
-        OsString::from("--profile"),
-        OsString::from(PROVIDER_PROFILE),
-        OsString::from("--target"),
-        OsString::from(&rust_target),
-        OsString::from("--crate-type"),
-        OsString::from("staticlib"),
-    ];
-    let mut command = Command::new(&cargo);
-    command
-        .args(arguments)
-        .current_dir(&source_root)
-        .env("CARGO_TARGET_DIR", &build_root)
-        // The manifest promises a portable generic CPU. Setting RUSTFLAGS also outranks Cargo
-        // config rustflags; removing its higher-precedence encoded form prevents the caller from
-        // silently injecting host-only instructions into an artifact advertised as generic.
-        // Empty wrapper variables explicitly override wrappers from either the environment or
-        // Cargo config, so the rustc identity names the compiler that actually builds the archive.
-        .env_remove("CARGO_ENCODED_RUSTFLAGS")
-        .env_remove("CARGO_BUILD_RUSTFLAGS")
-        .env("RUSTC_WRAPPER", "")
-        .env("RUSTC_WORKSPACE_WRAPPER", "")
-        .env("CARGO_BUILD_RUSTC_WRAPPER", "")
-        .env("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "")
-        .env("RUSTC", &rustc)
-        .env("CARGO_BUILD_RUSTC", &rustc)
-        .env("RUSTFLAGS", PROVIDER_RUSTFLAGS);
-    let output = command
-        .output()
-        .map_err(|source| NumberProviderError::Read {
-            operation: "launch number-provider source build",
-            path: cargo.clone(),
-            source,
-        })?;
-    if !output.status.success() {
-        return Err(NumberProviderError::CommandFailed {
-            stage: "source build",
-            program: cargo,
-            status: output.status.code(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        });
-    }
     let archive_path = build_root
         .join(&rust_target)
         .join(PROVIDER_PROFILE)
         .join("libkiln_native_number_ffi.a");
+
+    if !archive_path.is_file() {
+        let arguments = [
+            OsString::from("rustc"),
+            OsString::from("--locked"),
+            OsString::from("-p"),
+            OsString::from(PROVIDER_NAME),
+            // The semantic cores remain feature-gated; the default `realm` feature adds the Tokio
+            // runtime that now owns native entry as well as interpreted entry.
+            OsString::from("--features"),
+            OsString::from("regexp,bigint,temporal"),
+            OsString::from("--profile"),
+            OsString::from(PROVIDER_PROFILE),
+            OsString::from("--target"),
+            OsString::from(&rust_target),
+            OsString::from("--crate-type"),
+            OsString::from("staticlib"),
+        ];
+        let mut command = Command::new(&cargo);
+        command
+            .args(arguments)
+            .current_dir(&source_root)
+            .env("CARGO_TARGET_DIR", &build_root)
+            // The manifest promises a portable generic CPU. Setting RUSTFLAGS also outranks Cargo
+            // config rustflags; removing its higher-precedence encoded form prevents the caller from
+            // silently injecting host-only instructions into an artifact advertised as generic.
+            // Empty wrapper variables explicitly override wrappers from either the environment or
+            // Cargo config, so the rustc identity names the compiler that actually builds the archive.
+            .env_remove("CARGO_ENCODED_RUSTFLAGS")
+            .env_remove("CARGO_BUILD_RUSTFLAGS")
+            .env("RUSTC_WRAPPER", "")
+            .env("RUSTC_WORKSPACE_WRAPPER", "")
+            .env("CARGO_BUILD_RUSTC_WRAPPER", "")
+            .env("CARGO_BUILD_RUSTC_WORKSPACE_WRAPPER", "")
+            .env("RUSTC", &rustc)
+            .env("CARGO_BUILD_RUSTC", &rustc)
+            .env("RUSTFLAGS", PROVIDER_RUSTFLAGS);
+        let output = command
+            .output()
+            .map_err(|source| NumberProviderError::Read {
+                operation: "launch number-provider source build",
+                path: cargo.clone(),
+                source,
+            })?;
+        if !output.status.success() {
+            return Err(NumberProviderError::CommandFailed {
+                stage: "source build",
+                program: cargo,
+                status: output.status.code(),
+                stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            });
+        }
+    }
     let archive = read(&archive_path, "read source-built number-provider archive")?;
     let archive_digest = Digest::hash(&archive);
     let identity = format!(
