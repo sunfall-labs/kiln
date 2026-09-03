@@ -13884,8 +13884,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             return status;
         }
         tail = array->count - start - removing;
-        memmove(array->elements + start + inserting, array->elements + start + removing,
-                tail * sizeof *array->elements);
+        /* An array that has never grown has `elements == NULL`, and then `start`, `removing` and
+         * `tail` are all zero -- so this moved nothing, from `NULL + 0` to `NULL + 0`. Computing
+         * that offset is undefined even though nothing is read, and `memmove` declares both
+         * pointers non-null however small the count. gcc emits code that happens to work, which
+         * is why the corpus passed; `zig cc` traps, and UBSan calls it "applying zero offset to
+         * null pointer". Guarding on the count says what the code already meant. */
+        if (tail != 0) {
+            memmove(array->elements + start + inserting, array->elements + start + removing,
+                    tail * sizeof *array->elements);
+        }
         for (index = 0; index < inserting; ++index) {
             array->elements[start + index] = args[index + 2];
         }
