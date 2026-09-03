@@ -498,6 +498,169 @@ fn every_method_a_name_lookup_walks_over_has_a_name() {
     );
 }
 
+/// A `case KILN_C99_...: return "text";` switch, read out of the prelude as a map.
+///
+/// The C lives in a Rust string literal, so nothing but a reader like this one can tell whether a
+/// switch covers the codes something else hands it. The parser is deliberately literal: it takes
+/// only the one-line `case X: return "y";` form, which is the form every one of these switches is
+/// written in, so a case it cannot read is a case it does not claim to have checked.
+fn parse_name_switch(prelude: &str, signature: &str) -> BTreeMap<String, String> {
+    let opening = format!("{signature} {{");
+    let start = prelude
+        .find(&opening)
+        .unwrap_or_else(|| panic!("{signature} must be defined in the prelude"));
+    let definition = &prelude[start..];
+    let end = definition
+        .find("default:")
+        .expect("a name switch ends in a default arm");
+    let mut named = BTreeMap::new();
+    for line in definition[..end].lines() {
+        let Some(rest) = line.trim().strip_prefix("case ") else {
+            continue;
+        };
+        let Some((constant, tail)) = rest.split_once(':') else {
+            continue;
+        };
+        let Some(tail) = tail.trim().strip_prefix("return \"") else {
+            continue;
+        };
+        let Some((text, _)) = tail.split_once('"') else {
+            continue;
+        };
+        named.insert(constant.trim().to_owned(), text.to_owned());
+    }
+    named
+}
+
+/// A `{"name", CONSTANT}` initialiser table, read out of the prelude as pairs.
+///
+/// `kiln_c99_global_object` builds the global object from two of these -- one of built-in codes
+/// and one of method codes -- and they are the realm's own statement of what it publishes and
+/// under which name.
+fn parse_global_table(prelude: &str, marker: &str) -> Vec<(String, String)> {
+    let start = prelude
+        .find(marker)
+        .unwrap_or_else(|| panic!("the prelude must contain the global table after `{marker}`"));
+    let table = &prelude[start..];
+    let end = table
+        .find("};")
+        .expect("a global table initialiser ends with `};`");
+    let mut rows = Vec::new();
+    let flattened: String = table[..end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for entry in flattened.split('{').skip(1) {
+        let Some((body, _)) = entry.split_once('}') else {
+            continue;
+        };
+        let Some((name, constant)) = body.split_once(',') else {
+            continue;
+        };
+        let name = name.trim();
+        let Some(name) = name.strip_prefix('"').and_then(|n| n.strip_suffix('"')) else {
+            continue;
+        };
+        rows.push((name.to_owned(), constant.trim().to_owned()));
+    }
+    rows
+}
+
+/// Every name the realm publishes on its global object must report that same name.
+///
+/// WHY THIS EXISTS. `X.name` is read by real code -- a decorator preserves it, a stack trace
+/// prints it, `fn.name === "Buffer"` tests it -- so it is a program-visible answer and not
+/// decoration. The realm publishes its globals from two tables in `kiln_c99_global_object`, and it
+/// answers `X.name` from two entirely different switches: `kiln_c99_builtin_name` for a built-in
+/// and `kiln_c99_method_name` for a method. Nothing connected the two, so a global added to the
+/// publishing table and forgotten in the naming switch answered whatever the fall-through gave it.
+///
+/// It gave two different wrong answers, and both shipped: `AbortController`, `AbortSignal` and
+/// `TextEncoder` fell past `kiln_c99_builtin_name` into the error-name lookup and reported
+/// "anonymous", while `setImmediate` and `clearImmediate` had no case in `kiln_c99_method_name`
+/// at all and reported the empty string. Five wrong answers from one missing connection --- which
+/// is what makes this a guard rather than five fixes.
+///
+/// `every_method_a_name_lookup_walks_over_has_a_name` is the neighbouring guard and does not
+/// cover this: it reads the codes inside a `kiln_c99_lookup_method` range, and these globals are
+/// resolved by name off the global object instead, so they are in no range.
+#[test]
+fn every_global_reports_the_name_it_is_published_under() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+
+    let builtin_names = parse_name_switch(
+        prelude,
+        "static const char *kiln_c99_builtin_name(uint64_t builtin)",
+    );
+    // The error constructors are named by the function that also decides whether a built-in *is*
+    // an error, and `kiln_c99_builtin_name` delegates to it rather than repeating the seven.
+    let error_names = parse_name_switch(
+        prelude,
+        "static const char *kiln_c99_error_name(uint64_t builtin)",
+    );
+    let method_names = parse_name_switch(
+        prelude,
+        "static const char *kiln_c99_method_name(uint64_t code)",
+    );
+    assert!(
+        builtin_names.len() > 40 && error_names.len() > 5 && method_names.len() > 200,
+        "parsed {} builtin, {} error and {} method name cases, so this guard has stopped reading \
+         the real switch bodies",
+        builtin_names.len(),
+        error_names.len(),
+        method_names.len(),
+    );
+
+    let constructors = parse_global_table(prelude, "} constructors[] =");
+    let functions = parse_global_table(prelude, "} functions[] =");
+    assert!(
+        constructors.len() > 50 && functions.len() > 10,
+        "parsed {} constructor rows and {} function rows out of kiln_c99_global_object, so this \
+         guard has stopped reading the tables it exists to cover",
+        constructors.len(),
+        functions.len(),
+    );
+
+    let mut wrong = Vec::new();
+    for (published, constant) in &constructors {
+        let reported = builtin_names
+            .get(constant)
+            .or_else(|| error_names.get(constant));
+        match reported {
+            Some(reported) if reported == published => {}
+            Some(reported) => wrong.push(format!(
+                "  globalThis.{published} is {constant}, which kiln_c99_builtin_name calls \
+                 \"{reported}\""
+            )),
+            None => wrong.push(format!(
+                "  globalThis.{published} is {constant}, which has no case in \
+                 kiln_c99_builtin_name -- it will report \"anonymous\""
+            )),
+        }
+    }
+    for (published, constant) in &functions {
+        match method_names.get(constant) {
+            Some(reported) if reported == published => {}
+            Some(reported) => wrong.push(format!(
+                "  globalThis.{published} is {constant}, which kiln_c99_method_name calls \
+                 \"{reported}\""
+            )),
+            None => wrong.push(format!(
+                "  globalThis.{published} is {constant}, which has no case in \
+                 kiln_c99_method_name -- it will report \"\""
+            )),
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "these globals do not report the name they are published under, so `X.name` hands a \
+         program a string nobody could have asked for:\n{}\n\nAdd or correct the `case` in the \
+         naming switch named above; the name must be spelled exactly as the global is.",
+        wrong.join("\n")
+    );
+}
+
 #[test]
 fn runtime_prelude_abi_surface() {
     let unit = emit(&minimal_program()).expect("minimal program emits");

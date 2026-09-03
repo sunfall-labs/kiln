@@ -4402,3 +4402,88 @@ int main(void) {
         String::from_utf8_lossy(&run.stderr)
     );
 }
+
+/// The explanation for the `KILN_C99_ABSENT` half of the `const` gate above, which can only
+/// say *that* the count moved.
+///
+/// This says which file, which line and which enclosing function, and it checks the half the
+/// gate cannot see: that the sites are in the functions `ABSENT_ANSWER_SITES` claims and in
+/// the numbers it claims. A row is a promise that a membership predicate decides that site,
+/// and a site in a function no row names is a place a read answers `undefined` with nobody
+/// having said why.
+#[test]
+fn absent_answers_are_where_they_say() {
+    const SOURCES: [(&str, &str); 2] = [
+        (
+            "runtime/prelude_core.c",
+            include_str!("runtime/prelude_core.c"),
+        ),
+        (
+            "runtime/prelude_runtime.c",
+            include_str!("runtime/prelude_runtime.c"),
+        ),
+    ];
+
+    let mut by_function: Vec<(String, usize)> = Vec::new();
+    let mut by_hand = Vec::new();
+    for (path, source) in SOURCES {
+        let lines: Vec<&str> = source.lines().collect();
+        // A top-level definition starts in column zero; everything inside one is indented.
+        let mut function = String::from("<file scope>");
+        for (index, line) in lines.iter().enumerate() {
+            if line.starts_with(|first: char| first.is_ascii_alphabetic())
+                && let Some((head, _)) = line.split_once('(')
+                && let Some(name) = head
+                    .split(|byte: char| !(byte.is_alphanumeric() || byte == '_'))
+                    .next_back()
+            {
+                function = name.to_owned();
+            }
+            if line.trim() == "*out = kiln_c99_undefined();"
+                && lines
+                    .get(index + 1)
+                    .is_some_and(|next| next.trim() == "return KILN_C99_OK;")
+            {
+                by_hand.push(format!("{path}:{} in {function}", index + 1));
+            }
+            if line.contains("KILN_C99_ABSENT(") {
+                match by_function.iter_mut().find(|(name, _)| *name == function) {
+                    Some((_, count)) => *count += 1,
+                    None => by_function.push((function.clone(), 1)),
+                }
+            }
+        }
+    }
+
+    assert!(
+        by_hand.is_empty(),
+        "these prelude sites answer a read with `undefined` by hand, so nothing there says \
+         why the name is absent rather than unimplemented -- which is the difference between \
+         what the language answers and a silent wrong answer a feature test walks past. Use \
+         KILN_C99_ABSENT with the predicate that proves absence:\n  {}",
+        by_hand.join("\n  ")
+    );
+
+    for row in ABSENT_ANSWER_SITES {
+        let found = by_function
+            .iter()
+            .find(|(name, _)| name == row.function)
+            .map(|(_, count)| *count)
+            .unwrap_or(0);
+        assert_eq!(
+            found, row.sites,
+            "ABSENT_ANSWER_SITES says {} answers `undefined` at {} sites, proved absent by {}, \
+             and the prelude holds {}",
+            row.function, row.sites, row.proved_by, found
+        );
+    }
+    for (function, count) in &by_function {
+        assert!(
+            ABSENT_ANSWER_SITES
+                .iter()
+                .any(|row| row.function == function.as_str()),
+            "{function} answers `undefined` at {count} sites and no ABSENT_ANSWER_SITES row \
+             says what proves those names absent"
+        );
+    }
+}

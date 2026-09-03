@@ -35,12 +35,22 @@ Three classes come out, and the order they are reported in is the point:
   refused      native stopped and named the member. Honest backlog; a program dies at the cause.
   implemented  the two engines agree.
 
+AND ONE OF THE THREE IS A GATE. `--gate` exits non-zero when a member reads `undefined` natively
+where the interpreter has a value. That class is not one gap among many: a refusal stops a program
+at the member it lacked, and an `undefined` walks past `typeof x.member === "function"` and dies
+three frames later with nothing naming the cause. A bundled `postcss` died on `path.dirname` that
+way for weeks. Everything else this tool measures is a report somebody reads; this is the part
+that fails, because a report nobody diffs is how thirty of these survived.
+
+`SILENT_UNDEFINED_ACCEPTED` is the only way past it, and a row there is a sentence somebody wrote.
+
 Usage:
 
     scripts/native-surface-inventory.py                    # full run, writes the report
+    scripts/native-surface-inventory.py --gate             # ...and fail on a silent undefined
+    scripts/native-surface-inventory.py --stage report --gate   # gate the saved measurement
     scripts/native-surface-inventory.py --only node:       # one slice of the surface
     scripts/native-surface-inventory.py --stage enumerate  # what the interpreter has, no compiles
-    scripts/native-surface-inventory.py --stage report     # re-render from the saved JSON
 
 It needs a release build (`mbx build --release -p kiln-cli`) and it costs several hundred native
 compiles, which is several gigabytes of `.kiln/cache`. `--disk-floor-gib` is the pressure valve:
@@ -665,6 +675,64 @@ def classify(rec: Receiver) -> dict[str, list[tuple[str, str, str]]]:
     return out
 
 
+# The silent-undefined rows this repository has looked at and decided to keep, with the reason.
+#
+# A row is an exemption from the one class of gap that fails a run, so it costs a sentence. Two
+# things make a row legitimate: the native answer is right *for the object it actually hands back*,
+# or the divergence is a shape the two engines disagree about at a level below the member. Anything
+# else is a bug, and the fix is the backend rather than a row here.
+SILENT_UNDEFINED_ACCEPTED: dict[tuple[str, str], str] = {
+    ("BigInt64Array^", "@@species"): (
+        "the receiver is not the same object in the two engines. `Object.getPrototypeOf("
+        "BigInt64Array)` is the %TypedArray% constructor intrinsic in the interpreter and "
+        "`Function.prototype` natively, and `Function.prototype[Symbol.species]` really is "
+        "undefined. The gap is the missing intrinsic in the prototype graph, not this member"
+    ),
+}
+
+
+def gate_rows(receivers: dict[str, Receiver], order: list[str]) -> list[tuple[str, str, str, str]]:
+    """Every member that reads `undefined` natively where the interpreter has a value.
+
+    A receiver that is itself `undefined` natively counts too, and counts once per member it
+    swallows: each of those reads would throw `undefined is not an object` at run time, which is
+    the wrong-answer cascade rather than the honest stop.
+    """
+    found = []
+    for key in order:
+        for name, want, got in classify(receivers[key])["diverged"]:
+            if got == "undefined" or got.startswith("unreachable, receiver is undefined"):
+                if want == "undefined":
+                    continue
+                found.append((key, name, want, got))
+    return found
+
+
+def report_gate(receivers: dict[str, Receiver], order: list[str]) -> int:
+    rows = gate_rows(receivers, order)
+    unexplained = [row for row in rows if (row[0], row[1]) not in SILENT_UNDEFINED_ACCEPTED]
+    for key, name, want, _ in rows:
+        if (key, name) in SILENT_UNDEFINED_ACCEPTED:
+            print(f"accepted: {key}.{name} ({SILENT_UNDEFINED_ACCEPTED[(key, name)]})", file=sys.stderr)
+    if not unexplained:
+        print(f"gate: no silent undefined ({len(rows)} accepted)", file=sys.stderr)
+        return 0
+    print(
+        f"GATE FAILED: {len(unexplained)} member(s) read `undefined` in the native backend where "
+        f"the interpreter has a value. That is not a gap a program stops at -- it is the branch "
+        f"`typeof x.member === \"function\"` takes when the answer is nothing:",
+        file=sys.stderr,
+    )
+    for key, name, want, got in unexplained:
+        print(f"  {key}.{name}: interpreter {want}, native {got}", file=sys.stderr)
+    print(
+        "Answer it, refuse it by name, or add a SILENT_UNDEFINED_ACCEPTED row saying why the "
+        "native answer is right for the object it hands back.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kiln", default="target/release/kiln")
@@ -678,6 +746,12 @@ def main() -> int:
     # cut of the same numbers, must never cost another hundred native compiles.
     parser.add_argument("--stage", choices=["enumerate", "report", "all"], default="all")
     parser.add_argument("--only", default=None, help="probe only receivers matching this substring")
+    parser.add_argument(
+        "--gate",
+        action="store_true",
+        help="exit non-zero when a member reads `undefined` natively and has a value in the "
+        "interpreter",
+    )
     args = parser.parse_args()
 
     # A slice must never overwrite the whole inventory. `--only WeakRef` once replaced a
@@ -711,7 +785,7 @@ def main() -> int:
             render(receivers, sorted(receivers), runner)
         )
         print(f"re-rendered {outdir / (stem + '.md')}", file=sys.stderr)
-        return 0
+        return report_gate(receivers, sorted(receivers)) if args.gate else 0
 
     with tempfile.TemporaryDirectory(dir=str(root / ".scratch"), prefix="surface-") as tmp:
         runner = Runner(kiln, root, Path(tmp), args.timeout)
@@ -774,7 +848,7 @@ def main() -> int:
         f"wrote {outdir / (stem + '.md')} ({runner.native_runs} native runs)",
         file=sys.stderr,
     )
-    return 0
+    return report_gate(receivers, order) if args.gate else 0
 
 
 def describe_tree() -> str:
@@ -878,6 +952,16 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         "These are the ones that cost money. The backend answers, so nothing stops; a member that "
         "reads `undefined` where the interpreter has a function is exactly what `typeof x === "
         '"undefined"` feature-detection walks past.'
+    )
+    add("")
+    silent = gate_rows(receivers, order)
+    unexplained = [row for row in silent if (row[0], row[1]) not in SILENT_UNDEFINED_ACCEPTED]
+    add(
+        f"**{len(silent)} of these read `undefined`**, which is the class "
+        "`scripts/native-surface-inventory.py --gate` fails on: "
+        f"{len(unexplained)} unexplained, {len(silent) - len(unexplained)} with a "
+        "`SILENT_UNDEFINED_ACCEPTED` row saying why the native answer is right for the object it "
+        "hands back. The rest of this report is read; that line is enforced."
     )
     add("")
     add("| Receiver | Member | Interpreter | Native |")

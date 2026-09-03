@@ -85,6 +85,25 @@ the response-before-close ordering that `server.close()` depends on. The contrac
 compile-fail authority checks and all four executable seams in order, and is intentionally much
 smaller than the workspace suite.
 
+## An `undefined` from the native backend is the expensive answer, not the cheap one
+
+The compiled backend refuses what it has not built, and a refusal names the member and stops the
+program at the cause. The failure that costs money is the other one: a member read that answers
+`undefined` where the interpreter has a value. Nothing stops, `typeof x.member === "function"`
+takes the other branch, and the program dies three frames later naming nothing. A bundled `postcss`
+died on `path.dirname` that way for weeks.
+
+So the prelude C may not hand back `undefined` from a read by writing it. Use `KILN_C99_ABSENT`,
+whose reason names the membership predicate that proves the name is really absent in the language,
+and add the row to `ABSENT_ANSWER_SITES` in `crates/kiln-backend-c/src/lib.rs`. Both are `const`
+assertions: writing it by hand does not compile, and neither does a new site without a row.
+
+That gate cannot check whether a predicate is *complete*, because completeness is a question about
+the other engine. `bash scripts/check-silent-undefined.sh` asks it by running both, and exits
+non-zero on this class alone. It costs several hundred native compiles, so it is not per-commit;
+`scripts/native.sh` is, and `conformance/native/*-refuses.ts` is where a decision to keep refusing
+gets written down so that the next person does not "fix" it into an `undefined`.
+
 ## The native number provider is a staticlib, and `cargo build` does not build it
 
 `crates/kiln-native-number-ffi` declares `crate-type = ["rlib"]`, which is what workspace tests

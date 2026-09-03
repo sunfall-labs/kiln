@@ -56,8 +56,27 @@ const BUILTINS: &[BuiltinAbi] = &[
         },
     },
     BuiltinAbi {
+        // `require("node:buffer")` is *both* the module and the `Buffer` constructor here: the
+        // interpreter answers it with a value whose members are `Buffer`'s own statics, so
+        // `require("node:buffer").from` is a function there. Declaring only `Buffer`, `constants`
+        // and `default` is what let the native projection publish three names and answer
+        // `undefined` for the other seven -- a silent wrong answer of exactly the shape a
+        // `typeof buffer.from === "function"` feature test walks past. The statics are named here
+        // so that one list drives the ESM bindings, the CommonJS namespace and the native slot
+        // contract, and neither engine can grow a name the other does not see.
         specifier: "node:buffer",
-        exports: &["Buffer", "constants", "default"],
+        exports: &[
+            "Buffer",
+            "alloc",
+            "allocUnsafe",
+            "allocUnsafeSlow",
+            "byteLength",
+            "concat",
+            "constants",
+            "default",
+            "from",
+            "isBuffer",
+        ],
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {
@@ -283,6 +302,50 @@ pub const SPECIFIERS: &[&str] = &[
     "node:util",
 ];
 
+/// Node's public HTTP method catalogue, which `require("node:http").METHODS` answers with.
+///
+/// Semantic data rather than anything sourced from a parser: Hyper parses method tokens, while
+/// this list is a JavaScript compatibility contract. It lives here rather than in either engine
+/// because both have to answer it and they have to answer it identically -- the native backend
+/// published a placeholder callable for this name while the interpreter published the array, so
+/// `typeof http.METHODS` differed between two runs of the same bytecode.
+pub const HTTP_METHODS: &[&str] = &[
+    "ACL",
+    "BIND",
+    "CHECKOUT",
+    "CONNECT",
+    "COPY",
+    "DELETE",
+    "GET",
+    "HEAD",
+    "LINK",
+    "LOCK",
+    "M-SEARCH",
+    "MERGE",
+    "MKACTIVITY",
+    "MKCALENDAR",
+    "MKCOL",
+    "MOVE",
+    "NOTIFY",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PROPFIND",
+    "PROPPATCH",
+    "PURGE",
+    "PUT",
+    "REBIND",
+    "REPORT",
+    "SEARCH",
+    "SOURCE",
+    "SUBSCRIBE",
+    "TRACE",
+    "UNBIND",
+    "UNLINK",
+    "UNLOCK",
+    "UNSUBSCRIBE",
+];
+
 /// Look up a builtin with or without the canonical `node:` prefix.
 #[must_use]
 pub fn builtin_abi(specifier: &str) -> Option<&'static BuiltinAbi> {
@@ -326,10 +389,32 @@ mod tests {
         );
     }
 
+    /// `node:buffer` declares the constructor's statics, not only the constructor.
+    ///
+    /// It used to declare three names, and this test pinned them. That was the hole: this realm
+    /// answers `require("node:buffer").from` with a function -- the module and the constructor are
+    /// the same thing here -- so a three-name list meant the native projection published three
+    /// names and read `undefined` for the other seven. A silent `undefined` is what
+    /// `typeof buffer.from === "function"` walks past, which is the one wrong answer the compiled
+    /// backend is not allowed to give.
     #[test]
     fn buffer_commonjs_receives_the_namespace() {
         let buffer = builtin_abi("buffer").expect("buffer ABI");
-        assert_eq!(buffer.exports, ["Buffer", "constants", "default"]);
+        assert_eq!(
+            buffer.exports,
+            [
+                "Buffer",
+                "alloc",
+                "allocUnsafe",
+                "allocUnsafeSlow",
+                "byteLength",
+                "concat",
+                "constants",
+                "default",
+                "from",
+                "isBuffer",
+            ]
+        );
         assert_eq!(buffer.commonjs, CommonJsProjection::Namespace);
     }
 

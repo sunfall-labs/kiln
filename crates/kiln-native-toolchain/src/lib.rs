@@ -1042,6 +1042,35 @@ impl Toolchain {
         // declarations are generated from the provider registry precisely so the compiler can name
         // the missing symbol, at the step where it went missing.
         args.push(OsString::from("-Werror=implicit-function-declaration"));
+        // Report the source as though it sat in `.`, whatever directory it really occupies.
+        //
+        // Emitted C is written to a workspace named for the process that made it --
+        // `kiln-native-<pid>-<n>-<nanos>` -- so every path the compiler *emits* would otherwise
+        // carry that pid: `__FILE__`, the line table, and `DW_AT_comp_dir`. This covers those.
+        // It does not cover paths the compiler composes into type names; the working directory
+        // set further down is what covers those.
+        if let Some(directory) = source
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            let mut map = OsString::from("-ffile-prefix-map=");
+            map.push(directory.as_os_str());
+            map.push("=.");
+            args.push(map);
+        }
+        // Seed the compiler's internal name generation from the translation unit, not from where
+        // it happens to be written.
+        //
+        // Absent `-frandom-seed`, gcc derives one from the *output* path, which is inside that
+        // per-process workspace. The file name is stable across runs and distinct between the
+        // units linked together, which is exactly what this seed has to be: it separates one
+        // unit's local symbols from another's, and nothing about it should depend on the
+        // directory.
+        if let Some(name) = source.file_name() {
+            let mut seed = OsString::from("-frandom-seed=");
+            seed.push(name);
+            args.push(seed);
+        }
         args.push(OsString::from("-c"));
         for flag in options.profile.compile_flags() {
             args.push(OsString::from(flag));
@@ -1054,15 +1083,39 @@ impl Toolchain {
             args.push(directory.as_os_str().to_owned());
         }
         args.extend(options.extra_args.iter().cloned());
-        args.push(source.as_os_str().to_owned());
+        // Name the source by its file name and compile from its directory, rather than spelling
+        // the absolute path on the command line.
+        //
+        // `-ffile-prefix-map` rewrites the paths a compiler *emits* -- `__FILE__`, the line table,
+        // the compilation directory -- but not the ones it composes into type names. Clang names
+        // an anonymous type after the file it was declared in, so an object compiled from
+        // `/tmp/kiln-native-<pid>-<n>-<nanos>/prelude.c` carries
+        // `union kiln_value::(anonymous at /tmp/kiln-native-1479071-.../prelude.c:1502:5)` in
+        // `.debug_str`, and the pid in that string differs between processes. Two concurrent cold
+        // builds of identical source therefore produced objects that differed in about twenty-two
+        // thousand bytes of debug info, and the artifact cache -- which keys an object on its
+        // source digest, and holds that one key means one payload -- refused the second with "same
+        // cache key already contains a different payload".
+        //
+        // What the compiler cannot see, it cannot record: with the working directory set here,
+        // the only path it is given is `prelude.c`.
+        let (source_argument, working_directory) = match (source.file_name(), source.parent()) {
+            (Some(name), Some(directory))
+                if options.current_dir.is_none() && !directory.as_os_str().is_empty() =>
+            {
+                (name.to_owned(), Some(directory.to_path_buf()))
+            }
+            _ => (source.as_os_str().to_owned(), options.current_dir.clone()),
+        };
+        args.push(source_argument);
         args.push(OsString::from("-o"));
         args.push(object.as_os_str().to_owned());
-        let command = self.command(args, options.current_dir.clone());
+        let command = self.command(args, working_directory.clone());
         self.run_artifact(
             BuildStage::Compile,
             command,
             object,
-            options.current_dir.as_deref(),
+            working_directory.as_deref(),
         )
     }
 
