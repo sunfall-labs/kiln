@@ -1086,6 +1086,9 @@ typedef struct kiln_gc_heap {
      * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
      * because a canonical pointer from one realm means nothing in another. */
     const char *hot_keys[KILN_C99_HOT_KEY_COUNT];
+    const char *mru_key_canonical[8];
+    size_t mru_key_len[8];
+    uint8_t mru_key_index;
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -1869,24 +1872,40 @@ static const char *kiln_c99_intern(const char *bytes, size_t len) {
     if (len == 0) return kiln_c99_key_empty;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return NULL;
+    for (int i = 0; i < 8; ++i) {
+        if (heap->mru_key_len[i] == len && heap->mru_key_canonical[i] != NULL &&
+            memcmp(heap->mru_key_canonical[i], bytes, len) == 0) {
+            return heap->mru_key_canonical[i];
+        }
+    }
     hash = kiln_c99_key_hash(bytes, len);
     entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
-    if (entry != NULL) return entry->bytes;
-    /* A string block of exactly this size is adopted as the canonical bytes: the properties
-     * that hold the key keep it marked, and nothing is copied. Anything else -- a constant this
-     * unit did not register, a slice, foreign memory borrowed for a callback -- is copied into a
-     * block of its own, because a weak entry has to name something the collector can see die. */
-    block = kiln_c99_gc_lookup(heap, bytes);
-    if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING &&
-        block->size == len) {
-        canonical = bytes;
+    if (entry != NULL) {
+        canonical = entry->bytes;
     } else {
-        char *copy = (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len);
-        if (copy == NULL) return NULL;
-        memcpy(copy, bytes, len);
-        canonical = copy;
+        /* A string block of exactly this size is adopted as the canonical bytes: the properties
+         * that hold the key keep it marked, and nothing is copied. Anything else -- a constant this
+         * unit did not register, a slice, foreign memory borrowed for a callback -- is copied into a
+         * block of its own, because a weak entry has to name something the collector can see die. */
+        block = kiln_c99_gc_lookup(heap, bytes);
+        if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING &&
+            block->size == len) {
+            canonical = bytes;
+        } else {
+            char *copy = (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len);
+            if (copy == NULL) return NULL;
+            memcpy(copy, bytes, len);
+            canonical = copy;
+        }
+        canonical = kiln_c99_key_insert(&heap->keys, canonical, len, hash, 0);
     }
-    return kiln_c99_key_insert(&heap->keys, canonical, len, hash, 0);
+    if (canonical != NULL) {
+        uint8_t slot = heap->mru_key_index;
+        heap->mru_key_canonical[slot] = canonical;
+        heap->mru_key_len[slot] = len;
+        heap->mru_key_index = (slot + 1) & 7;
+    }
+    return canonical;
 }
 
 /* For bytes that outlive the heap. NULL only when the table cannot grow; a unit that gets NULL
@@ -1953,6 +1972,7 @@ static void kiln_c99_key_purge(kiln_gc_heap *heap) {
         }
         ++index;
     }
+    memset((void *)heap->mru_key_canonical, 0, sizeof(heap->mru_key_canonical));
 }
 
 static void kiln_c99_gc_unlink(kiln_gc_heap *heap, kiln_gc_block *block) {

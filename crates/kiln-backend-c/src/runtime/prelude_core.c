@@ -12694,6 +12694,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_JSON_STRINGIFY: {
             kiln_text text = {NULL, 0, 0};
+            text.bytes = (char *)malloc(256);
+            if (text.bytes != NULL) {
+                text.capacity = 256;
+            }
             kiln_text indent = {NULL, 0, 0};
             int wrote;
             /* A replacer is a function or an array of keys, and honouring half of it would give
@@ -16771,6 +16775,16 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             return kiln_c99_text_append_c(text, "null");
         }
         char buffer[64];
+        int64_t i64 = (int64_t)number;
+        if (i64 >= 0 && i64 <= 999999999LL && (double)i64 == number && !signbit(number)) {
+            char *p = buffer + sizeof(buffer) - 1;
+            *p = '\0';
+            do {
+                *--p = (char)('0' + (i64 % 10));
+                i64 /= 10;
+            } while (i64 > 0);
+            return kiln_c99_text_append(text, p, (size_t)(buffer + sizeof(buffer) - 1 - p));
+        }
         int len = kiln_number_to_js_string(number, buffer, sizeof(buffer));
         if (len < 0 || (size_t)len >= sizeof(buffer)) {
             KILN_C99_REFUSE("a number with no text form to serialise");
