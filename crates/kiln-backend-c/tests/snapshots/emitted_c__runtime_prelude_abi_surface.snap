@@ -26,6 +26,13 @@ expression: abi_surface(prelude)
 #define KILN_C99_CALL_DEPTH_ERROR (-5)
 #define KILN_C99_UNINITIALIZED_ERROR (-6)
 #define KILN_C99_THROWN (-7)
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
+#define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define KILN_LIKELY(x) (x)
+#define KILN_UNLIKELY(x) (x)
+#endif
 static const char *kiln_c99_diagnostic_site = NULL;
 static const char *kiln_c99_diagnostic_operation = NULL;
 static size_t kiln_c99_diagnostic_instruction = 0;
@@ -648,7 +655,8 @@ extern int kiln_realm_gc_register_roots(kiln_gc_roots_fn roots, void *context, u
 extern int kiln_realm_gc_mark_roots(void *heap);
 struct kiln_closure;
 struct kiln_generator;
-typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+typedef struct kiln_call_context {
+typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
 typedef struct kiln_closure {
 typedef struct kiln_method_store {
 typedef enum kiln_native_prototype_surface {
@@ -1728,7 +1736,7 @@ static void kiln_dyn_token_free(kiln_dyn_token *tok) {
 static int kiln_dyn_is_ident_name(kiln_dyn_token_kind kind) {
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
-static int kiln_c99_dynamic_body_trampoline(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -1743,7 +1751,7 @@ static int kiln_dyn_eval_ternary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
 static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
-static int kiln_c99_dynamic_body_trampoline(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
 static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
 static int kiln_c99_super_call(kiln_host *host, kiln_value *produced, kiln_value parent,

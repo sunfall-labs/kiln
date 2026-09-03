@@ -2077,6 +2077,14 @@ macro_rules! header_prefix {
  * so": a `catch` takes this and must not take the others. */
 #define KILN_C99_THROWN (-7)
 
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
+#define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define KILN_LIKELY(x) (x)
+#define KILN_UNLIKELY(x) (x)
+#endif
+
 "#
     };
 }
