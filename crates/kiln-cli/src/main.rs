@@ -21,7 +21,7 @@ mod watch;
 
 use std::ffi::OsString;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use args::{CacheAction, Command, DaemonAction, Invocation, Parsed};
 use backend::Backend;
@@ -92,13 +92,79 @@ fn version() -> String {
     )
 }
 
-fn dispatch(invocation: Invocation) -> Result<i32> {
-    // The working directory is the project: it decides which daemon answers and what
-    // `kiln project` covers. A configured project root is a later change.
-    let root = std::env::current_dir()
+fn target_for_command(command: &Command) -> Option<&Path> {
+    match command {
+        Command::Run { path, .. }
+        | Command::Build { path, .. }
+        | Command::Check { path }
+        | Command::Watch { path, .. } => Some(path.as_path()),
+        _ => None,
+    }
+}
+
+fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
+    let current_dir = std::env::current_dir()
         .map_err(|source| Error::io("cannot read the working directory", source))?;
+
+    let Some(target) = target else {
+        return Ok(current_dir);
+    };
+
+    let target_abs = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        current_dir.join(target)
+    };
+
+    let start_dir = match target_abs.canonicalize() {
+        Ok(path) => {
+            if path.is_dir() {
+                path
+            } else {
+                path.parent().map(Path::to_path_buf).unwrap_or(path)
+            }
+        }
+        Err(_) => {
+            if target_abs.is_dir() {
+                target_abs
+            } else {
+                target_abs
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or(target_abs)
+            }
+        }
+    };
+
+    let mut current = Some(start_dir.as_path());
+    let mut git_root = None;
+
+    while let Some(dir) = current {
+        if dir.join("package.json").is_file() || dir.join("node_modules").is_dir() {
+            return Ok(dir.to_path_buf());
+        }
+        if git_root.is_none() && dir.join(".git").exists() {
+            git_root = Some(dir.to_path_buf());
+        }
+        current = dir.parent();
+    }
+
+    if let Some(git) = git_root {
+        return Ok(git);
+    }
+
+    Ok(start_dir)
+}
+
+fn dispatch(invocation: Invocation) -> Result<i32> {
+    let target = target_for_command(&invocation.command);
+    let root = find_project_root(target)?;
     let socket = client::socket_path(invocation.socket, &root)?;
     let one_shot = invocation.one_shot;
+
+    let auto_node = |explicit: bool| -> bool {
+        explicit || root.join("package.json").is_file() || root.join("node_modules").is_dir()
+    };
 
     match invocation.command {
         Command::Run {
@@ -109,6 +175,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             workers,
             ..
         } => {
+            let node = auto_node(node);
             if workers > 1 {
                 let mut handles = Vec::with_capacity(workers);
                 for _ in 0..workers {
@@ -148,6 +215,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             steps: _,
             workers,
         } => {
+            let node = auto_node(node);
             if workers > 1 {
                 let mut handles = Vec::with_capacity(workers);
                 for _ in 0..workers {
@@ -191,6 +259,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             shared,
             node,
         } => {
+            let node = if shared { false } else { auto_node(node) };
             let mut backend = open(one_shot, &socket)?;
             report(commands::build(
                 backend.as_mut(),
@@ -237,6 +306,7 @@ fn dispatch(invocation: Invocation) -> Result<i32> {
             interval,
             node,
         } => {
+            let node = auto_node(node);
             let mut backend = open(one_shot, &socket)?;
             let mut out = std::io::stdout().lock();
             let mut notes = std::io::stderr().lock();
@@ -389,5 +459,41 @@ mod tests {
             text.contains(&format!("protocol {}", kiln_proto::PROTOCOL_VERSION)),
             "{text}"
         );
+    }
+
+    #[test]
+    fn find_project_root_locates_ancestor_package_json() {
+        let fixture =
+            std::env::temp_dir().join(format!("kiln-test-project-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        let pkg_dir = fixture.join("my-package");
+        let sub_dir = pkg_dir.join("src/nested");
+        std::fs::create_dir_all(&sub_dir).expect("create test directories");
+        std::fs::write(pkg_dir.join("package.json"), "{}").expect("write package.json");
+        let target_file = sub_dir.join("index.js");
+        std::fs::write(&target_file, "console.log(1);").expect("write file");
+
+        let found = find_project_root(Some(&target_file)).expect("discover root");
+        assert_eq!(found, pkg_dir.canonicalize().expect("canonical pkg_dir"));
+
+        let _ = std::fs::remove_dir_all(&fixture);
+    }
+
+    #[test]
+    fn find_project_root_locates_ancestor_git_dir() {
+        let fixture =
+            std::env::temp_dir().join(format!("kiln-test-git-root-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fixture);
+        let repo_dir = fixture.join("repo");
+        let sub_dir = repo_dir.join("scripts");
+        std::fs::create_dir_all(&sub_dir).expect("create test directories");
+        std::fs::create_dir_all(repo_dir.join(".git")).expect("create .git");
+        let target_file = sub_dir.join("tool.js");
+        std::fs::write(&target_file, "console.log(1);").expect("write file");
+
+        let found = find_project_root(Some(&target_file)).expect("discover root");
+        assert_eq!(found, repo_dir.canonicalize().expect("canonical repo_dir"));
+
+        let _ = std::fs::remove_dir_all(&fixture);
     }
 }
