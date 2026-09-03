@@ -1141,6 +1141,7 @@ fn a_direct_eval_writes_through_to_the_callers_binding() {
                 home: None,
                 new_target: kiln_ir::EvalNewTarget::Forbidden,
                 private_scopes: Vec::new(),
+                blocked_var_names: Vec::new(),
             })),
             // The eval's completion value is discarded; the caller's binding is the answer.
             Instruction::Pop,

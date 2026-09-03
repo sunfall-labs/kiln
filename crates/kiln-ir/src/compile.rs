@@ -122,6 +122,8 @@ pub struct EvalOptions {
     pub home: Option<String>,
     /// The private names the call site can see, outermost class first.
     pub private_scopes: Vec<PrivateScope>,
+    /// Names a `var` in this source may not take over, from [`EvalSite::blocked_var_names`].
+    pub blocked_var_names: Vec<String>,
 }
 
 ///
@@ -157,6 +159,11 @@ pub fn compile_eval_with_strictness(
     // eval that is the caller's module, holding entirely unrelated slots. Boxing every top-level
     // binding means every such read is a capture instead, and `LoadGlobal` is never emitted.
     compiler.cell_everything = true;
+    // Strict eval code gets a variable environment of its own, so nothing it declares can
+    // collide with an environment it is nested in and the whole rule is silent there.
+    if !compiler.strict {
+        compiler.blocked_var_names = options.blocked_var_names.clone();
+    }
     for outer in &options.outer {
         let slot = compiler.local_count;
         compiler.local_count += 1;
@@ -680,6 +687,19 @@ struct Compiler {
     /// is what tells a dead-zone read here apart from one in a body, where the same runtime check
     /// must remain reachable so a surrounding `try` can catch it.
     parameter_dead_zone: bool,
+    /// The names the parameter environment currently being evaluated holds, when there is one.
+    ///
+    /// `Some` only while a parameter list with defaults is being compiled, and cleared before
+    /// the body -- because a body's variable environment *is* the one an eval written there
+    /// declares into, and only a parameter list's is a separate record between them. Saved and
+    /// restored per function, so an `eval` in a function nested inside a default sees its own
+    /// context rather than the enclosing list's.
+    parameter_scope: Option<Vec<String>>,
+    /// Names a top-level `var` in *this* eval program may not create, from its call site.
+    ///
+    /// Only ever non-empty for sloppy eval code, and the reason is the whole rule: strict eval
+    /// gets a variable environment of its own, so it has nothing to collide with.
+    blocked_var_names: Vec<String>,
     /// Names of the calling frame's bindings borrowed into scope 0 of an eval program.
     ///
     /// Tracked apart from the scope itself because a declaration in the eval'd source has to
@@ -913,6 +933,8 @@ impl Compiler {
             eval_program: false,
             module_body: false,
             parameter_dead_zone: false,
+            parameter_scope: None,
+            blocked_var_names: Vec::new(),
             outer_names: HashSet::new(),
             annexb_var_functions: HashSet::new(),
             global_bindings: HashSet::new(),
@@ -2480,6 +2502,23 @@ impl Compiler {
         // function declaration belongs to the caller's variable environment and so becomes that
         // binding, while a `let`, a `const`, a class, and every declaration in strict code belong
         // to the eval's own scope and get a slot of their own.
+        // `EvalDeclarationInstantiation` refuses a `var` that names a binding in any record
+        // between this eval's lexical environment and its variable one. A block's `let` arrives
+        // as an outer binding and is caught by the redeclaration rule below; a parameter
+        // environment does not, because a function's parameters and its body share one scope
+        // here -- so its names travelled from the call site instead.
+        if kind == VariableKind::Var
+            && scope_index == 0
+            && self.blocked_var_names.iter().any(|blocked| blocked == name)
+        {
+            self.error(
+                None,
+                format!(
+                    "a direct `eval` may not declare `var {name}` where the enclosing parameter                      list already binds that name"
+                ),
+            );
+            return;
+        }
         if scope_index == 0 && self.outer_names.remove(name) {
             if initialized && !self.strict {
                 // `var x;` over an existing binding keeps its value -- which is why this returns
@@ -5507,6 +5546,21 @@ impl Compiler {
         // wherever they are written.
         let outer_dead_zone =
             std::mem::replace(&mut self.parameter_dead_zone, parameters_have_defaults);
+        // A direct `eval` written in one of these defaults declares into the *body's* variable
+        // environment, with this parameter record sitting between the two -- so a `var` naming
+        // anything the record holds is an early error. Only a list with defaults has a record of
+        // its own; without one there is nowhere for an `eval` to be written anyway.
+        //
+        // `parameter_names` is the set the record holds: the formals, the rest pattern's names,
+        // and `arguments` for anything but an arrow. Sorted, because the bytecode is a cache key.
+        let outer_parameter_scope = std::mem::replace(
+            &mut self.parameter_scope,
+            parameters_have_defaults.then(|| {
+                let mut names: Vec<String> = parameter_names.iter().cloned().collect();
+                names.sort();
+                names
+            }),
+        );
         for step in binding_steps {
             match step {
                 ParameterStep::Destructure(slot, pattern, span) => {
@@ -5528,6 +5582,9 @@ impl Compiler {
             }
         }
         self.parameter_dead_zone = outer_dead_zone;
+        // The body's variable environment is the one an `eval` written there declares into, so
+        // there is nothing between the two and nothing to block. Restored on the way out.
+        self.parameter_scope = None;
 
         // `...rest` is the arguments beyond the declared parameters. Taken from the call rather
         // than from slots, because its length is decided by the caller.
@@ -5626,6 +5683,7 @@ impl Compiler {
         self.upvalue_names = restored.upvalue_names;
         self.captured = restored.captured;
         self.cell_everything = restored.cell_everything;
+        self.parameter_scope = outer_parameter_scope;
 
         let index = self.functions.len() as u32;
         self.functions.push(proto);
@@ -6388,6 +6446,7 @@ impl Compiler {
                 home,
                 new_target,
                 private_scopes,
+                blocked_var_names: self.parameter_scope.clone().unwrap_or_default(),
             })));
             return;
         }

@@ -960,6 +960,20 @@ pub struct EvalSite {
     pub new_target: EvalNewTarget,
     /// The private names in scope, outermost class first.
     pub private_scopes: Vec<PrivateScope>,
+    /// Names a `var` in the eval'd source may not take over, sorted.
+    ///
+    /// `EvalDeclarationInstantiation` walks from the call's lexical environment out to its
+    /// *variable* environment and refuses a `var` that collides with a binding in any record
+    /// between them -- because hoisting one there would put it where a like-named lexical
+    /// binding already shadows it. A block's `let` reaches the eval'd source as an outer binding
+    /// and is caught by the ordinary redeclaration rule; a *parameter* environment does not,
+    /// because this compiler gives a function's parameters and its body one scope. So the names
+    /// that environment holds travel separately: the formals, and `arguments` for anything but
+    /// an arrow.
+    ///
+    /// Empty unless the call is written inside a parameter default, which is the only place the
+    /// two environments are distinct.
+    pub blocked_var_names: Vec<String>,
 }
 
 /// A runtime import lowered to a local slot. The graph linker initializes the slot from the

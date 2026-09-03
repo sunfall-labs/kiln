@@ -912,6 +912,7 @@ fn run_agent_realm(group: &Arc<AgentGroup>, id: usize, source: &str) -> Result<(
         home: None,
         new_target: kiln_ir::EvalNewTarget::Forbidden,
         private_scopes: &[],
+        blocked_var_names: &[],
     })
     .map_err(|error| ExecutionError::Host {
         instruction: 0,

@@ -4506,6 +4506,8 @@ pub struct EvalSource<'a> {
     pub new_target: kiln_ir::EvalNewTarget,
     /// The private names the calling code can see, outermost class first.
     pub private_scopes: &'a [kiln_ir::PrivateScope],
+    /// Names a `var` in this source may not create, from [`kiln_ir::EvalSite::blocked_var_names`].
+    pub blocked_var_names: &'a [String],
 }
 
 /// Why a run-time compilation produced no program.
@@ -30451,6 +30453,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             home: site.and_then(|site| site.home.as_deref()),
             new_target,
             private_scopes: site.map_or(&no_private_scopes, |site| &site.private_scopes),
+            // An indirect eval *is* global code: its variable environment is the global one and
+            // there is no record between the two, so it never blocks a name.
+            blocked_var_names: site.map_or(&[], |site| &site.blocked_var_names),
         })
         .map_err(|error| match error {
             EvalCompileError::Syntax(message) => ExecutionError::SyntaxErrorMessage { message },
