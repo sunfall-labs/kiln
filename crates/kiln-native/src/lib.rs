@@ -2150,9 +2150,7 @@ fn native_builtin_supported_exports(
             "request",
         ],
         NodeBuiltin::Util => &[
-            // `TextDecoder` is declared beside it in the ABI and is deliberately absent here:
-            // the C runtime has an encoder builtin and no decoder, so the decoder holds an
-            // alignment slot and is refused as an import rather than answered with `undefined`.
+            "TextDecoder",
             "TextEncoder",
             "debuglog",
             "default",
@@ -2216,7 +2214,7 @@ fn native_builtin_supported_exports(
             "from",
             "isBuffer",
         ],
-        NodeBuiltin::AsyncHooks => &["AsyncResource", "default"],
+        NodeBuiltin::AsyncHooks => &["AsyncLocalStorage", "AsyncResource", "default"],
         NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
         _ => &[],
     }
@@ -2388,10 +2386,8 @@ exports[3] = namespace;"#,
         // alignment, not an export.
         NodeBuiltin::Http => Some(&NODE_HTTP_BODY),
         NodeBuiltin::Util => Some(
-            // Slot 0 is `TextDecoder`, which this runtime has no builtin for. It holds
-            // `undefined` to keep the slots aligned with the shared table and is refused as a
-            // named import by `native_builtin_supports_export`; it is a slot, not an export.
-            r#"kiln_value text_encoder = kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER);
+            r#"kiln_value text_decoder = kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_DECODER);
+kiln_value text_encoder = kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER);
 kiln_value debuglog = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_DEBUGLOG);
 kiln_value deprecate = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_DEPRECATE);
 kiln_value format = kiln_c99_method(KILN_C99_METHOD_NODE_UTIL_FORMAT);
@@ -2410,9 +2406,11 @@ status = kiln_c99_put(host, namespace, "inherits", 8, inherits, 0, NULL);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "inspect", 7, inspect, 0, NULL);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "TextDecoder", 11, text_decoder, 0, NULL);
+if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "TextEncoder", 11, text_encoder, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
+exports[0] = text_decoder;
 exports[1] = text_encoder;
 exports[2] = debuglog;
 exports[3] = namespace;
@@ -2768,17 +2766,16 @@ exports[8] = from;
 exports[9] = is_buffer;"#,
         ),
         NodeBuiltin::AsyncHooks => Some(
-            // Slot 0 is `AsyncLocalStorage`. The interpreter has one; this runtime does not,
-            // because a store has to be captured when work is queued and restored when it runs,
-            // and that is a change to the C job queue rather than one more builtin. It holds an
-            // alignment slot and is refused as a named import rather than answered `undefined`.
-            r#"kiln_value resource = kiln_c99_method(KILN_C99_METHOD_NODE_ASYNC_RESOURCE);
+            r#"kiln_value als = kiln_c99_method(KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE);
+kiln_value resource = kiln_c99_method(KILN_C99_METHOD_NODE_ASYNC_RESOURCE);
 kiln_value namespace;
 int status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "AsyncLocalStorage", 17, als, 0, NULL);
+if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "AsyncResource", 13, resource, 0, NULL);
 if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
+exports[0] = als;
 exports[1] = resource;
 exports[2] = namespace;"#,
         ),
