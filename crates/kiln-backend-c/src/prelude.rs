@@ -1028,6 +1028,8 @@ method_ids! {
     // because the refusal does not need to be told which member it is: the instruction that
     // called it already carries the name, so this answers `CallMethod(readFileSync)`.
     (KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED, 482, Direct),
+    (KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF, 483, Generic),
+    (KILN_C99_METHOD_GENERATOR_THROW, 484, Generic),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -1305,6 +1307,8 @@ builtin_surface! {
     // their `Object` namesakes in what they answer and are their own.
     (KILN_C99_BUILTIN_REFLECT, "Reflect", "getOwnPropertyDescriptor",
      code(KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_DESCRIPTOR)),
+    (KILN_C99_BUILTIN_REFLECT, "Reflect", "getPrototypeOf",
+     code(KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF)),
     (KILN_C99_BUILTIN_REFLECT, "Reflect", "has", code(KILN_C99_METHOD_REFLECT_HAS)),
     (KILN_C99_BUILTIN_REFLECT, "Reflect", "ownKeys", code(KILN_C99_METHOD_REFLECT_OWN_KEYS)),
     (KILN_C99_BUILTIN_REFLECT, "Reflect", "set", code(KILN_C99_METHOD_REFLECT_SET)),
@@ -1470,8 +1474,6 @@ builtin_backlog! {
     ("Reflect", "defineProperty",
      "answers a boolean where Object.defineProperty answers the target, so it is not the \
               same operation under another name"),
-    ("Reflect", "getPrototypeOf",
-     "not implemented"),
     ("Reflect", "setPrototypeOf",
      "answers a boolean where Object.setPrototypeOf answers the target, so it is not the \
               same operation under another name"),
@@ -1807,7 +1809,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 19,
+        sites: 25,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member, kiln_c99_is_array_buffer_member, \
@@ -2420,6 +2422,7 @@ enum kiln_value_tag {
  * runtime code, so no URL-specific value tag or ABI representation crosses the boundary. */
 #define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_BUILTIN_BUFFER 64
+#define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 65
 
 /* Array methods, part two.
  *
@@ -2920,6 +2923,8 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_REFLECT_DELETE_PROPERTY),
     emit_method_define!(KILN_C99_METHOD_REFLECT_APPLY),
     emit_method_define!(KILN_C99_METHOD_REFLECT_CONSTRUCT),
+    emit_method_define!(KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF),
+    emit_method_define!(KILN_C99_METHOD_GENERATOR_THROW),
     r#"
 /* `Proxy.revocable(target, handler)` and the function it hands back. The second is reached only
  * through the first, as a bound method whose receiver is the proxy it retires -- which is what
