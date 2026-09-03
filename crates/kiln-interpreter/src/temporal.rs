@@ -449,6 +449,47 @@ fn prototype_method(kind: engine::Kind, name: &str) -> Option<Method> {
     }
 }
 
+/// The keys `from` and `with` read on this type.
+///
+/// A `ZonedDateTime` takes three because it has a zone to resolve as well as a calendar to
+/// overflow; every other type takes `overflow` alone, and the two without a calendar -- a
+/// `Duration` and an `Instant` -- take nothing.
+const fn overflow_keys(kind: engine::Kind) -> &'static [&'static str] {
+    match kind {
+        engine::Kind::ZonedDateTime => options::ZONED_OVERFLOW,
+        engine::Kind::Duration | engine::Kind::Instant => options::NONE,
+        _ => options::OVERFLOW,
+    }
+}
+
+/// The keys `toString` reads on this type.
+const fn string_keys(kind: engine::Kind) -> &'static [&'static str] {
+    match kind {
+        engine::Kind::PlainDate | engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay => {
+            options::CALENDAR_NAME
+        }
+        engine::Kind::PlainTime | engine::Kind::Duration | engine::Kind::Instant => {
+            options::TIME_PRECISION
+        }
+        engine::Kind::PlainDateTime => options::DATE_TIME_STRING,
+        engine::Kind::ZonedDateTime => options::ZONED_STRING,
+    }
+}
+
+/// Whether `add`/`subtract` on this type reads an options bag at all.
+///
+/// The four with a calendar do, because a month has an end to fall off; the other four have a
+/// one-argument signature in the specification and ignore whatever follows.
+const fn takes_arithmetic_options(kind: engine::Kind) -> bool {
+    matches!(
+        kind,
+        engine::Kind::PlainDate
+            | engine::Kind::PlainDateTime
+            | engine::Kind::PlainYearMonth
+            | engine::Kind::ZonedDateTime
+    )
+}
+
 /// An engine failure, already classified, becoming the error the program catches.
 fn thrown(error: engine::Error) -> ExecutionError {
     ExecutionError::TemporalFailure {
@@ -471,24 +512,71 @@ fn wrap(value: engine::TemporalValue) -> Value {
     Value::Temporal(Rc::new(value))
 }
 
-/// The property names an options bag is read for, in the order the specification reads them.
+/// The option names one operation reads, in the order it reads them.
 ///
-/// The order is observable: every one of these can be a getter, and Test262 checks which runs
-/// first. Alphabetical is what the specification's own option-reading steps come out as, and
-/// keeping the list in one place is what stops two call sites from disagreeing about it.
-const OPTION_KEYS: [&str; 11] = [
-    "calendarName",
-    "disambiguation",
-    "fractionalSecondDigits",
-    "largestUnit",
-    "offset",
-    "overflow",
-    "relativeTo",
-    "roundingIncrement",
-    "roundingMode",
-    "smallestUnit",
-    "timeZoneName",
-];
+/// Every read is observable -- each of these can be a getter, and Test262 counts exactly which
+/// ones run and in what order -- so a single shared list of every name the realm knows is not the
+/// conservative choice it looks like, it is a wrong answer: `plainDate.toString(observer)`
+/// recorded thirteen reads where the specification makes one, and `instant.since(other, observer)`
+/// ran the program's `overflow` getter for an operation that has no `overflow`.
+///
+/// The lists are alphabetical because the specification's option-reading steps come out that way,
+/// and they are grouped by operation rather than by type because that is how the specification
+/// groups them: every difference takes the same four, every calendar conversion takes `overflow`.
+mod options {
+    /// `from`, `with`, `add` and `subtract` on the four types with a calendar to fall off the end
+    /// of.
+    pub const OVERFLOW: &[&str] = &["overflow"];
+    /// The same three operations on a `ZonedDateTime`, which also has to be told what to do with
+    /// a wall-clock time its zone skips or repeats.
+    pub const ZONED_OVERFLOW: &[&str] = &["disambiguation", "offset", "overflow"];
+    /// `until` and `since`, on every type that has them.
+    pub const DIFFERENCE: &[&str] = &[
+        "largestUnit",
+        "roundingIncrement",
+        "roundingMode",
+        "smallestUnit",
+    ];
+    /// `round`, on the four types whose rounding has no calendar in it.
+    pub const ROUND: &[&str] = &["roundingIncrement", "roundingMode", "smallestUnit"];
+    /// `Temporal.Duration.prototype.round`, which does: a duration in months rounds differently
+    /// depending on which months, so it takes an anchor and a largest unit as well.
+    pub const DURATION_ROUND: &[&str] = &[
+        "largestUnit",
+        "relativeTo",
+        "roundingIncrement",
+        "roundingMode",
+        "smallestUnit",
+    ];
+    /// `Temporal.Duration.prototype.total`.
+    pub const TOTAL: &[&str] = &["relativeTo", "unit"];
+    /// `Temporal.Duration.compare`.
+    pub const RELATIVE_TO: &[&str] = &["relativeTo"];
+    /// `Temporal.PlainDateTime.prototype.toZonedDateTime`.
+    pub const DISAMBIGUATION: &[&str] = &["disambiguation"];
+    /// A date has only a calendar to name in its string form.
+    pub const CALENDAR_NAME: &[&str] = &["calendarName"];
+    /// A time has only a precision to round to.
+    pub const TIME_PRECISION: &[&str] = &["fractionalSecondDigits", "roundingMode", "smallestUnit"];
+    /// A date-and-time has both.
+    pub const DATE_TIME_STRING: &[&str] = &[
+        "calendarName",
+        "fractionalSecondDigits",
+        "roundingMode",
+        "smallestUnit",
+    ];
+    /// A zoned date-time has both, plus the two annotations only it carries.
+    pub const ZONED_STRING: &[&str] = &[
+        "calendarName",
+        "fractionalSecondDigits",
+        "offset",
+        "roundingMode",
+        "smallestUnit",
+        "timeZoneName",
+    ];
+    /// An operation that validates its bag is an object and reads nothing out of it.
+    pub const NONE: &[&str] = &[];
+}
 
 /// The calendar and wall-clock field names, in the order the specification reads them.
 const FIELD_KEYS: [&str; 15] = [
@@ -664,14 +752,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     .map_err(thrown)
             }
             Op::From(kind) => {
-                let options = self.temporal_options(arguments.get(1), instruction)?;
+                let options =
+                    self.temporal_options(overflow_keys(kind), arguments.get(1), instruction)?;
                 let value = arguments.first().cloned().unwrap_or(Value::Undefined);
                 self.coerce_temporal(kind, &value, &options, instruction)
                     .map(wrap)
             }
             Op::Compare(kind) => {
                 let options = if kind == engine::Kind::Duration {
-                    self.temporal_options(arguments.get(2), instruction)?
+                    self.temporal_options(options::RELATIVE_TO, arguments.get(2), instruction)?
                 } else {
                     engine::Options::default()
                 };
@@ -758,7 +847,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             )),
             Method::ToString | Method::ToLocaleString | Method::ToJson => {
                 let options = if matches!(method, Method::ToString) {
-                    self.temporal_options(arguments.first(), instruction)?
+                    self.temporal_options(string_keys(kind), arguments.first(), instruction)?
                 } else {
                     engine::Options::default()
                 };
@@ -771,7 +860,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let Some(item) = arguments.first() else {
                     return Err(type_error("with needs a property bag"));
                 };
-                if !matches!(item, Value::Object(_)) {
+                // Any object will do -- a proxy included -- but not a `Temporal` value:
+                // `RejectTemporalLikeObject` refuses one outright, because `date.with(otherDate)`
+                // reads as replacing every field and means replacing none of them.
+                if !crate::is_an_object(item) || matches!(item, Value::Temporal(_)) {
                     return Err(type_error("with needs a property bag"));
                 }
                 if kind == engine::Kind::Duration {
@@ -779,12 +871,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     return value.duration_with(&fields).map(wrap).map_err(thrown);
                 }
                 let fields = self.temporal_fields(item, instruction)?;
-                let options = self.temporal_options(arguments.get(1), instruction)?;
+                let options =
+                    self.temporal_options(overflow_keys(kind), arguments.get(1), instruction)?;
                 value.with(&fields, &options).map(wrap).map_err(thrown)
             }
             Method::Add | Method::Subtract => {
                 let operand = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let options = self.temporal_options(arguments.get(1), instruction)?;
+                // Only the four types with a calendar to overflow take an options bag at all.
+                // A `PlainTime` wraps around the clock, a `Duration` and an `Instant` have no
+                // month to fall off the end of, and the specification gives all three a
+                // one-argument signature -- so reading a second argument here made
+                // `time.add(d, null)` a TypeError where the language ignores the argument.
+                let options = if takes_arithmetic_options(kind) {
+                    self.temporal_options(options::OVERFLOW, arguments.get(1), instruction)?
+                } else {
+                    engine::Options::default()
+                };
                 let duration = self.coerce_temporal(
                     engine::Kind::Duration,
                     &operand,
@@ -800,7 +902,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             Method::Until | Method::Since => {
                 let operand = arguments.first().cloned().unwrap_or(Value::Undefined);
-                let options = self.temporal_options(arguments.get(1), instruction)?;
+                let options =
+                    self.temporal_options(options::DIFFERENCE, arguments.get(1), instruction)?;
                 let other =
                     self.coerce_temporal(kind, &operand, &engine::Options::default(), instruction)?;
                 let difference = if matches!(method, Method::Until) {
@@ -827,15 +930,14 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         return Err(type_error("round needs a unit"));
                     }
                     other => {
-                        let mut options = self.temporal_options(other, instruction)?;
-                        if matches!(method, Method::Total) {
-                            options.unit = self.temporal_option_string(
-                                other.expect("checked above"),
-                                "unit",
-                                instruction,
-                            )?;
-                        }
-                        options
+                        let keys = if matches!(method, Method::Total) {
+                            options::TOTAL
+                        } else if kind == engine::Kind::Duration {
+                            options::DURATION_ROUND
+                        } else {
+                            options::ROUND
+                        };
+                        self.temporal_options(keys, other, instruction)?
                     }
                 };
                 if matches!(method, Method::Total) {
@@ -886,7 +988,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Method::ToZonedDateTime => {
                 let (zone, time) = match arguments.first() {
                     Some(Value::String(zone)) => (Some(zone.clone()), None),
-                    Some(item @ Value::Object(_)) => {
+                    Some(item) if crate::is_an_object(item) => {
                         let zone = match self.read_property(item, "timeZone", instruction)? {
                             Value::Undefined => None,
                             other => self.temporal_string_argument(Some(&other), instruction)?,
@@ -907,7 +1009,15 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 let Some(zone) = zone else {
                     return Err(type_error("toZonedDateTime needs a time zone"));
                 };
-                let options = self.temporal_options(arguments.get(1), instruction)?;
+                // A `PlainDate` names a whole day, so nothing about it can be skipped or
+                // repeated by a zone; a `PlainDateTime` names a wall-clock time, which can be
+                // both, and that is the one that takes `disambiguation`.
+                let keys = if kind == engine::Kind::PlainDateTime {
+                    options::DISAMBIGUATION
+                } else {
+                    options::NONE
+                };
+                let options = self.temporal_options(keys, arguments.get(1), instruction)?;
                 value
                     .to_zoned_date_time(&zone, time.as_ref(), &options)
                     .map(wrap)
@@ -921,10 +1031,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     engine::Kind::PlainYearMonth | engine::Kind::PlainMonthDay
                 ) =>
             {
-                let Some(item) = arguments
-                    .first()
-                    .filter(|item| matches!(item, Value::Object(_)))
-                else {
+                let Some(item) = arguments.first().filter(|item| crate::is_an_object(item)) else {
                     return Err(type_error("toPlainDate needs a property bag"));
                 };
                 let fields = self.temporal_fields(item, instruction)?;
@@ -991,7 +1098,11 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     engine::parse(kind, text).map_err(thrown)
                 }
             }
-            Value::Object(_) => {
+            // A property bag is anything the language calls an object, which is the question
+            // `ToTemporalDate` and its siblings ask. Naming one representation left a proxy --
+            // and a function, and an array -- reading as "not a Temporal.Duration" when the
+            // fields were right there behind it.
+            other if crate::is_an_object(other) => {
                 if kind == engine::Kind::Duration {
                     let fields = self.temporal_duration_fields(value, instruction)?;
                     return engine::duration_from_fields(&fields).map_err(thrown);
@@ -1110,6 +1221,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
     /// operation *could* take. Reading too few would hide a getter a test is counting.
     fn temporal_options(
         &mut self,
+        keys: &[&str],
         value: Option<&Value>,
         instruction: usize,
     ) -> Result<engine::Options, ExecutionError> {
@@ -1117,12 +1229,16 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         let Some(value) = value else {
             return Ok(options);
         };
+        // `GetOptionsObject` asks the *language's* question -- is this an Object -- and this
+        // asked which of three Rust representations it was. A proxy is an object and was refused,
+        // which is what every `order-of-operations` test in the corpus hands here: the observer
+        // that records the read order is a `Proxy`, so the ordering was never even reached.
         match value {
             Value::Undefined => return Ok(options),
-            Value::Object(_) | Value::Function(_) | Value::Array(_) => {}
+            other if crate::is_an_object(other) => {}
             _ => return Err(type_error("options must be an object")),
         }
-        for name in OPTION_KEYS {
+        for name in keys.iter().copied() {
             let read = self.read_property(value, name, instruction)?;
             if matches!(read, Value::Undefined) {
                 continue;
@@ -1175,23 +1291,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         "overflow" => options.overflow = Some(text),
                         "roundingMode" => options.rounding_mode = Some(text),
                         "smallestUnit" => options.smallest_unit = Some(text),
-                        _ => options.time_zone_name = Some(text),
+                        "timeZoneName" => options.time_zone_name = Some(text),
+                        _ => options.unit = Some(text),
                     }
                 }
             }
         }
         Ok(options)
-    }
-
-    /// One named option off a bag, for the operations whose option is not in the shared list.
-    fn temporal_option_string(
-        &mut self,
-        value: &Value,
-        name: &str,
-        instruction: usize,
-    ) -> Result<Option<String>, ExecutionError> {
-        let read = self.read_property(value, name, instruction)?;
-        self.temporal_string_argument(Some(&read), instruction)
     }
 
     /// `ToString`, with `undefined` staying absent rather than becoming the word.
