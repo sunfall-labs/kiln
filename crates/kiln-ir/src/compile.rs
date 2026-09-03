@@ -663,6 +663,11 @@ struct Compiler {
     /// `eval` reads it -- a direct eval in strict code gets its own scope for its declarations,
     /// and in sloppy code shares the caller's.
     strict: bool,
+    /// The local holding the completion value, while compiling an eval body's statements.
+    ///
+    /// `Some` only for the top level of an eval program: a value produced inside a function is
+    /// that function's business, and `enclosing` being non-empty is what says we are in one.
+    completion: Option<u32>,
     /// Whether this compilation is an `eval` program rather than a file.
     ///
     /// The one thing it changes is the temporal dead zone. Both files and eval code preserve a
@@ -930,6 +935,7 @@ impl Compiler {
             // `compile` and `compile_module` -- and one of them would have been forgotten.
             captured: names_captured_by_nested_functions(&module.body),
             strict: false,
+            completion: None,
             eval_program: false,
             module_body: false,
             parameter_dead_zone: false,
@@ -1006,9 +1012,10 @@ impl Compiler {
     /// nothing -- a declaration, a loop -- leaves the previous one standing, which is what the
     /// specification's completion records do.
     ///
-    /// Only the top level is tracked. A value produced inside an `if` or a block is a completion
-    /// value too, and reporting `undefined` for one is a gap rather than a wrong answer: nothing
-    /// else can claim to be the result.
+    /// Tracked at every depth, because a completion value is usually produced below the top
+    /// level: `eval("2; switch (1) { case 1: 3; break; }")` is 3, and `eval("1; if (true) { }")`
+    /// is `undefined` rather than 1. See `reset_completion` for which statements normalise an
+    /// empty completion and which pass one through.
     fn compile_eval_body(&mut self, module: &Module) {
         let completion = self.local_count;
         self.local_count += 1;
@@ -1026,16 +1033,13 @@ impl Compiler {
                 self.emit_function_declaration(function, statement.span);
             }
         }
+        self.completion = Some(completion);
         for statement in &module.body {
-            match &statement.kind {
-                StatementKind::Function(_) => {}
-                StatementKind::Expression(expression) => {
-                    self.expression(expression);
-                    self.code.push(Instruction::StoreLocal(completion));
-                }
-                _ => self.statement(statement),
+            if !matches!(statement.kind, StatementKind::Function(_)) {
+                self.statement(statement);
             }
         }
+        self.completion = None;
         self.code.push(Instruction::LoadLocal(completion));
         self.code.push(Instruction::Return);
     }
@@ -1117,7 +1121,58 @@ impl Compiler {
         });
     }
 
+    /// The completion slot, when the statement being compiled can contribute to one.
+    ///
+    /// Inside a function body it cannot: `enclosing` is non-empty there, the slot index belongs
+    /// to another frame's locals, and the value is the function's to return.
+    fn completion_slot(&self) -> Option<u32> {
+        self.enclosing.is_empty().then_some(self.completion).flatten()
+    }
+
+    /// `UpdateEmpty(stmtCompletion, undefined)`, which is how most statements end.
+    ///
+    /// `if`, the five loops, `switch`, `with` and `try` each normalise an empty body completion
+    /// to `undefined` rather than passing the previous statement's value along -- so
+    /// `eval("1; if (true) { }")` is `undefined`, not 1. Seeding the slot before the body is the
+    /// same thing said forwards: whatever the body produces overwrites it, and a body that
+    /// produces nothing leaves the `undefined` standing.
+    ///
+    /// A block and a labelled statement are deliberately *not* in that list. They pass an empty
+    /// completion through, which is why `eval("1; { }")` and `eval("1; lbl: { }")` are both 1.
+    fn reset_completion(&mut self) {
+        if let Some(slot) = self.completion_slot() {
+            self.push_constant(Constant::Undefined);
+            self.code.push(Instruction::StoreLocal(slot));
+        }
+    }
+
+    /// Compile `body` with the completion slot detached, and put it back afterwards.
+    ///
+    /// A `finally` block's completion is discarded unless it is abrupt, so its statements must
+    /// not touch the slot: `eval("try { 2; } finally { 3; }")` is 2.
+    fn without_completion(&mut self, body: impl FnOnce(&mut Self)) {
+        let saved = self.completion.take();
+        body(self);
+        self.completion = saved;
+    }
+
     fn statement(&mut self, statement: &Statement) {
+        // Every statement that normalises an empty completion to `undefined`, named here rather
+        // than in nine separate compile functions so the list can be read against the grammar.
+        if matches!(
+            statement.kind,
+            StatementKind::If { .. }
+                | StatementKind::While { .. }
+                | StatementKind::DoWhile { .. }
+                | StatementKind::For { .. }
+                | StatementKind::ForIn { .. }
+                | StatementKind::ForOf { .. }
+                | StatementKind::Switch { .. }
+                | StatementKind::With { .. }
+                | StatementKind::Try { .. }
+        ) {
+            self.reset_completion();
+        }
         match &statement.kind {
             StatementKind::Variable { kind, declarations } => {
                 for declaration in declarations {
@@ -1154,7 +1209,12 @@ impl Compiler {
             }
             StatementKind::Expression(expression) => {
                 self.expression(expression);
-                self.code.push(Instruction::Pop);
+                // At any depth, not just the top level: `eval("2; switch (1) { case 1: 3; }")`
+                // is 3, and the statement that produced it is two blocks down.
+                match self.completion_slot() {
+                    Some(slot) => self.code.push(Instruction::StoreLocal(slot)),
+                    None => self.code.push(Instruction::Pop),
+                }
             }
             StatementKind::Block(statements) => {
                 self.scopes.push(HashMap::new());
@@ -2714,7 +2774,8 @@ impl Compiler {
         match cleanup {
             Cleanup::Finally(statements) => {
                 self.scopes.push(HashMap::new());
-                self.statements(statements);
+                let body = statements.clone();
+                self.without_completion(|compiler| compiler.statements(&body));
                 self.scopes.pop().expect("finalizer scope was just pushed");
             }
             Cleanup::CloseIterator { binding } => self.emit_iterator_close(&binding.clone()),
@@ -3412,7 +3473,10 @@ impl Compiler {
     ) {
         self.scopes.push(HashMap::new());
         if let Some(init) = init {
-            self.statement(init);
+            // The head of a `for` is not a statement of the program, whatever it is spelled as
+            // here: `eval("for (false; false; false);")` is `undefined`, not `false`. Only the
+            // body can contribute a completion value.
+            self.without_completion(|compiler| compiler.statement(init));
         }
         // Only a captured binding can tell one iteration's copy from another's, and only a
         // captured binding is boxed -- so the boxed `let`s of the head are exactly the set that
