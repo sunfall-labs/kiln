@@ -148,3 +148,15 @@ console.log("apply short length", shape.apply(null, { length: 1, 0: "x", 1: "y" 
 console.log("apply nothing", shape.apply(null));
 console.log("apply null", shape.apply(null, null));
 console.log("apply typed", shape.apply(null, new Uint8Array([4, 5])));
+
+// A static hung on a bound function or a runtime-supplied method is an own property like any
+// other, and it lives in the store a *read* of that static comes out of. Asking the question two
+// different ways is what caught this: `b.tag` answered 1 while `Object.hasOwn(b, "tag")` answered
+// false, which is the silent shape -- the value is plainly there and the question about it says
+// no. `name` and `length` are derived rather than stored and are own for every callable.
+function carrier() {}
+const bound = carrier.bind(null);
+bound.tag = 1;
+console.log("bound static", bound.tag, Object.hasOwn(bound, "tag"), bound.hasOwnProperty("tag"));
+console.log("bound derived", Object.hasOwn(bound, "name"), Object.hasOwn(bound, "length"));
+console.log("bound absent", Object.hasOwn(bound, "missing"));
