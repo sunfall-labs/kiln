@@ -10962,8 +10962,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // A proxy answers `in` with a trap, and an object on the left is a key that
                 // `ToPropertyKey` has to reduce first -- `({toString(){return "K"}}) in o` asks
                 // about `K`. Either way the operator needs the machine, which `binary` is not.
+                // Any object receiver, not only a proxy: a proxy reached through the prototype
+                // chain has to run its `has` trap too, and only the machine path can call one.
+                // The pure path below still answers for a primitive receiver, which throws.
                 Instruction::Binary(BinaryOp::In)
-                    if matches!(self.stack.last(), Some(Value::Proxy(_)))
+                    if matches!(self.stack.last(), Some(right) if is_reflect_target(right))
                         || matches!(
                             self.stack
                                 .len()
@@ -28010,7 +28013,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Setter-only, so there is nothing to read.
                 None => Ok(Value::Undefined),
             },
-            _ => Ok(self.property(target, name)),
+            _ => {
+                let found = self.property(target, name);
+                // Nothing in any store, so a proxy further up the chain is the one thing that
+                // could still answer. `OrdinaryGet` keeps the *original* receiver as it walks,
+                // which is what the trap's third argument is for.
+                if matches!(found, Value::Undefined)
+                    && let Some(proxy) = self.proxy_on_chain(target)
+                {
+                    return self.proxy_get_with_receiver(
+                        &proxy,
+                        &Value::String(name.to_owned()),
+                        target,
+                        instruction,
+                    );
+                }
+                Ok(found)
+            }
         }
     }
 
@@ -29241,6 +29260,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(keys)
     }
 
+    /// The first proxy on `target`'s prototype chain, not counting `target` itself.
+    ///
+    /// A proxy is usually reached directly, and then its traps run. Reached *through* an object
+    /// that inherits from it, they did not: the walk that finds an inherited property reads
+    /// property stores, and a proxy has none for it to read, so the chain simply ended there.
+    /// `Object.create(new Proxy({}, { get, has }))` answered `undefined` for every property and
+    /// `false` for every `in` -- the traps never ran, and a proxy used as a prototype is how a
+    /// library gives an object dynamic members it cannot enumerate in advance.
+    fn proxy_on_chain(&self, target: &Value) -> Option<Value> {
+        let mut current = prototype_of(target);
+        for _ in 0..MAX_PROTOTYPE_DEPTH {
+            match current {
+                Value::Proxy(_) => return Some(current),
+                Value::Null | Value::Undefined => return None,
+                other => current = prototype_of(&other),
+            }
+        }
+        None
+    }
+
     /// Does `target` have `key`, running a proxy's `has` trap.
     fn has(
         &mut self,
@@ -29249,7 +29288,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<bool, ExecutionError> {
         let Value::Proxy(proxy) = target else {
-            return Ok(has_property(&self.intrinsics, target, key));
+            if has_property(&self.intrinsics, target, key) {
+                return Ok(true);
+            }
+            // Nothing found by walking the stores, so a proxy further up is the one thing that
+            // could still answer yes.
+            if let Some(proxy) = self.proxy_on_chain(target) {
+                return self.has(&proxy, key, instruction);
+            }
+            return Ok(false);
         };
         let proxy = Rc::clone(proxy);
         let inner = proxy.target.clone();
@@ -29695,6 +29742,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(());
                 }
                 if self.inherited_setter(object, target, &name, &value, instruction)? {
+                    return Ok(());
+                }
+                // No own property and no inherited setter, so a proxy further up the chain is
+                // what `OrdinarySetWithOwnDescriptor` reaches next -- its `set` trap decides,
+                // and creating an own property here instead would shadow it silently.
+                if object.borrow().lookup(&name).is_none()
+                    && let Some(proxy) = self.proxy_on_chain(target)
+                {
+                    self.set_computed(&proxy, key, value, instruction)?;
                     return Ok(());
                 }
                 object.borrow_mut().set(&name, value);
