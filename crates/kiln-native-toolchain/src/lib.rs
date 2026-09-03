@@ -1042,6 +1042,46 @@ impl Toolchain {
         // declarations are generated from the provider registry precisely so the compiler can name
         // the missing symbol, at the step where it went missing.
         args.push(OsString::from("-Werror=implicit-function-declaration"));
+        // Compile as though the source sat in `.`, whatever directory it really occupies.
+        //
+        // Emitted C is written to a workspace named for the process that made it --
+        // `kiln-native-<pid>-<n>-<nanos>` -- and an object records the path it was compiled from.
+        // Identical source therefore produced different object bytes in every process, while the
+        // artifact cache keys that object on the *source* digest. Two cold builds of the same
+        // translation unit then presented one key with two payloads, and the cache refused the
+        // second: "same cache key already contains a different payload". On a parallel cold run
+        // that was sixteen probes failing to build, which the corpus reported as divergences.
+        //
+        // Reproducibility is the cache's premise, so it belongs here rather than in a key: a
+        // compiler that answers differently for the same input has nothing a content address can
+        // describe.
+        if let Some(directory) = source
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            let mut map = OsString::from("-ffile-prefix-map=");
+            map.push(directory.as_os_str());
+            map.push("=.");
+            args.push(map);
+        }
+        // Seed the compiler's internal name generation from the translation unit, not from where
+        // it happens to be written.
+        //
+        // Absent `-frandom-seed`, gcc derives one from the *output* path, and objects are built in
+        // a workspace named for the process that made them -- so the same source produced
+        // different bytes on every run. The artifact cache keys an object on its source digest, so
+        // two builds presented one key with two payloads and the cache refused the second: "same
+        // cache key already contains a different payload". A parallel cold corpus run turned that
+        // into sixteen probes that could not build.
+        //
+        // The file name is stable across runs and distinct between the units linked together,
+        // which is exactly what this seed has to be: it separates one unit's local symbols from
+        // another's, and nothing about it should depend on the directory.
+        if let Some(name) = source.file_name() {
+            let mut seed = OsString::from("-frandom-seed=");
+            seed.push(name);
+            args.push(seed);
+        }
         args.push(OsString::from("-c"));
         for flag in options.profile.compile_flags() {
             args.push(OsString::from(flag));
