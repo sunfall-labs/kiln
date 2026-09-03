@@ -1026,7 +1026,7 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
     add("")
     add("## Headline")
     add("")
-    add("| Class | Members | Share |")
+    add("| Class | Rows | Share |")
     add("| --- | ---: | ---: |")
     for name, label in (
         ("diverged", "**diverged** (native answered, and answered differently)"),
@@ -1189,12 +1189,14 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
     missing_total = totals["diverged"] + totals["refused"]
     top4 = sum(len(keys) for _, keys in ranked_members[:4])
     if missing_total:
+        top_names = ", ".join(f"`{name}`" for name, _ in ranked_members[:4])
         add(
-            f"The four names at the top of that table are {top4} of the {missing_total} missing "
-            f"members, which is {100.0 * top4 / missing_total:.0f}% of everything this inventory "
-            "found. They are what every callable and every constructor has, so they are one "
-            "decision about what a built-in *is* rather than a hundred and twenty-eight separate "
-            "omissions --- and the ordering follows: nothing else on this page buys as much."
+            f"The four rows at the top of that table --- {top_names} --- are {top4} of the "
+            f"{missing_total} missing, which is {100.0 * top4 / missing_total:.0f}% of everything "
+            "this inventory found. Each of them is one decision rather than N omissions: what a "
+            "built-in callable *is* (its own `length` and `prototype`, which is also what makes a "
+            "receiver unreachable and takes its `(itself)` row with it), and what a built-in is "
+            "*called*. The ordering follows: nothing else on this page buys as much."
         )
         add("")
 
