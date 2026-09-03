@@ -675,6 +675,7 @@ mod tests {
             kind: CompilerKind::Clang,
             version: "test".to_owned(),
             target: target.to_owned(),
+            linker: kiln_native_toolchain::LinkerKind::Default,
         }
     }
 
