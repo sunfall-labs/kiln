@@ -43,6 +43,22 @@ for pass in $(seq 1 "$PASSES"); do
 			bash "$HERE/drive-multi.sh" "$PROCS" "$CONNS" "$DURATION_MS" "$PORT" "$workload"
 			echo "  rss_kib=$(ps -o rss= -p "$server" | tr -d ' ')"
 			kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true
+			# A kiln server with KILN_WORKERS>1 forks; killing the parent reparents the children
+			# to init, where they keep the SO_REUSEPORT listener open and quietly serve the *next*
+			# run. That is not a slow teardown, it is a wrong number: measured once, twenty
+			# orphans had accumulated and every reading after the first was the whole pool.
+			for _ in $(seq 1 50); do
+				pids=$(ss -lntpH "sport = :$PORT" 2>/dev/null |
+					grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+				[[ -z $pids ]] && break
+				# shellcheck disable=SC2086
+				kill -9 $pids 2>/dev/null || true
+				sleep 0.1
+			done
+			if ss -lntH "sport = :$PORT" 2>/dev/null | grep -q .; then
+				printf 'port %s is still held after teardown; refusing to report a contaminated run\n' "$PORT" >&2
+				exit 1
+			fi
 			sleep 0.3
 		done
 	done
