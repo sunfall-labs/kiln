@@ -518,6 +518,11 @@ typedef struct kiln_regexp {
     int global;
     int sticky;
     double last_index;
+    const char *cache_ptr;
+    size_t cache_len;
+    int cache_matched;
+    size_t cache_groups;
+    int64_t cache_ranges[64];
 } kiln_regexp;
 
 /* A symbol: a property key with an identity of its own.
