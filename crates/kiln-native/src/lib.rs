@@ -1201,6 +1201,7 @@ impl NativeBuilder {
                     &loader,
                     &[module.symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
+                    self.toolchain.identity().kind,
                 )?;
                 let objects = [paths.module_o.clone(), paths.prelude_o.clone()];
                 let report =
@@ -1562,6 +1563,7 @@ impl NativeBuilder {
                     &loader,
                     &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
+                    self.toolchain.identity().kind,
                 )?;
                 let report =
                     self.toolchain
@@ -5677,6 +5679,7 @@ fn configure_shared_library_link(
     output: &Path,
     public_symbols: &[&str],
     workspace: &Path,
+    compiler: CompilerKind,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
     #[cfg(target_os = "macos")]
@@ -5711,7 +5714,13 @@ fn configure_shared_library_link(
         options
             .extra_args
             .push(format!("-Wl,--version-script,{}", exports.to_string_lossy()).into());
-        options.extra_args.push("-Wl,--exclude-libs,ALL".into());
+        // `zig cc` rejects `--exclude-libs` outright -- "unsupported linker arg" -- rather than
+        // passing it down, so a shared build under zig cannot use it. Nothing is lost: the version
+        // script above ends in `local: *;`, which already hides every symbol not named in it, and
+        // `--exclude-libs` was the second lock on the same door.
+        if compiler != CompilerKind::Zig {
+            options.extra_args.push("-Wl,--exclude-libs,ALL".into());
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (options, identity, public_symbols, workspace);
