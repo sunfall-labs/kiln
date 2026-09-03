@@ -737,13 +737,80 @@ static int kiln_c99_node_path_answer(uint32_t part, const uint8_t *first, uint64
     return KILN_C99_OK;
 }
 
-static int kiln_c99_node_path(kiln_value *result, uint64_t code,
-                              const kiln_value *args, size_t argc, kiln_value *thrown) {
-    kiln_text joined = {0};
+/* The interpreter's `normalize_posix_path`, appended to `out`.
+ *
+ * One normalizer under all three of `join`, `resolve` and `normalize`, because that is what they
+ * are in the interpreter -- three ways of assembling a string, and then this. Writing it once is
+ * also how the last divergence here gets closed: the older code inlined a normalizer that dropped
+ * a trailing separator the interpreter keeps, so `path.join("a", "b/")` answered "a/b" natively
+ * and "a/b/" interpreted. A wrong answer, and a quiet one, in the arithmetic a bundler uses to
+ * decide where a file is. */
+static int kiln_c99_posix_normalize(kiln_text *out, const char *path, size_t len) {
     const char **parts = NULL;
     size_t *lengths = NULL;
     size_t count = 0;
     size_t capacity = 0;
+    size_t index = 0;
+    int absolute = len > 0 && path[0] == '/';
+    int trailing = len > 0 && path[len - 1] == '/';
+    int status = KILN_C99_OK;
+    while (index <= len) {
+        size_t start = index;
+        size_t length;
+        while (index < len && path[index] != '/') ++index;
+        length = index - start;
+        ++index;
+        if (length == 0 || (length == 1 && path[start] == '.')) continue;
+        if (length == 2 && path[start] == '.' && path[start + 1] == '.') {
+            /* `..` cancels the component before it, but never another `..` -- so "a/../.." keeps
+             * one. With nothing to cancel it survives in a relative path and is dropped in an
+             * absolute one, which is what makes "/.." the root. */
+            if (count > 0 && !(lengths[count - 1] == 2 && parts[count - 1][0] == '.' &&
+                               parts[count - 1][1] == '.')) {
+                --count;
+                continue;
+            }
+            if (absolute) continue;
+        }
+        if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) !=
+            KILN_C99_OK) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+        {
+            size_t *grown = (size_t *)realloc(lengths, capacity * sizeof *lengths);
+            if (grown == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
+            lengths = grown;
+        }
+        parts[count] = path + start;
+        lengths[count++] = length;
+    }
+    if (absolute) status = kiln_c99_text_append_c(out, "/");
+    for (index = 0; status == KILN_C99_OK && index < count; ++index) {
+        if (out->len != 0 && out->bytes[out->len - 1] != '/')
+            status = kiln_c99_text_append_c(out, "/");
+        if (status == KILN_C99_OK)
+            status = kiln_c99_text_append(out, parts[index], lengths[index]);
+    }
+    if (status == KILN_C99_OK && out->len == 0) status = kiln_c99_text_append_c(out, ".");
+    /* The root and the current directory are already their own trailing separator; anything else
+     * keeps the one it was given. */
+    if (status == KILN_C99_OK && trailing &&
+        !(out->len == 1 && (out->bytes[0] == '/' || out->bytes[0] == '.')))
+        status = kiln_c99_text_append_c(out, "/");
+done:
+    free(parts);
+    free(lengths);
+    return status;
+}
+
+static int kiln_c99_node_path(kiln_value *result, uint64_t code,
+                              const kiln_value *args, size_t argc, kiln_value *thrown) {
+    kiln_text joined = {0};
+    kiln_text built = {0};
     size_t index;
     int absolute = code == KILN_C99_METHOD_NODE_PATH_RESOLVE;
     int status = KILN_C99_OK;
@@ -787,72 +854,47 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
                                          (uint64_t)to.len, from.len * 3 + to.len + 1, result,
                                          thrown);
     }
+    /* `join` concatenates every argument with a separator and normalizes the result -- the empty
+     * ones included, which is the interpreter's arithmetic exactly. Skipping an empty argument
+     * here instead is what made `join("a", "")` answer "a" where the interpreter answers "a/",
+     * and dropping the leading separator with it made `join("/a", "b/")` answer "a/b" -- a
+     * relative path where an absolute one was asked for, which is the worst shape this can take.
+     * `resolve` does skip the empty ones, and restarts at any argument that is itself absolute. */
     for (index = 0; index < argc; ++index) {
         kiln_value part;
         if (args[index].tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, args[index], "string path");
         part = args[index];
-        if (part.len == 0) continue;
-        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE && part.ptr[0] == '/') {
-            joined.len = 0;
-            absolute = 1;
-        }
-        if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
+        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE) {
+            if (part.len == 0) continue;
+            if (part.ptr[0] == '/') {
+                joined.len = 0;
+                absolute = 1;
+            }
+            if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
+                status = kiln_c99_text_append_c(&joined, "/");
+        } else if (index > 0) {
             status = kiln_c99_text_append_c(&joined, "/");
+        }
         if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part.ptr, part.len);
         if (status != KILN_C99_OK) goto done;
     }
     if (absolute && (joined.len == 0 || joined.bytes[0] != '/')) {
         kiln_text prefixed = {0};
         status = kiln_c99_text_append_c(&prefixed, "/");
-        if (status == KILN_C99_OK) status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
         free(joined.bytes);
         joined = prefixed;
         if (status != KILN_C99_OK) goto done;
     }
-    /* Normalize in place by retaining slices. `..` cannot escape an absolute root. */
-    for (index = 0; index <= joined.len;) {
-        size_t start = index;
-        size_t length;
-        while (index < joined.len && joined.bytes[index] != '/') ++index;
-        length = index - start;
-        ++index;
-        if (length == 0 || (length == 1 && joined.bytes[start] == '.')) continue;
-        if (length == 2 && joined.bytes[start] == '.' && joined.bytes[start + 1] == '.') {
-            if (count > 0 && !(lengths[count - 1] == 2 &&
-                parts[count - 1][0] == '.' && parts[count - 1][1] == '.')) {
-                --count;
-            } else if (!absolute) {
-                if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-                lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
-                if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-                parts[count] = joined.bytes + start; lengths[count++] = length;
-            }
-            continue;
-        }
-        if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-        lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
-        if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-        parts[count] = joined.bytes + start; lengths[count++] = length;
-    }
-    {
-        kiln_text normalized = {0};
-        if (absolute) status = kiln_c99_text_append_c(&normalized, "/");
-        for (index = 0; status == KILN_C99_OK && index < count; ++index) {
-            if (normalized.len != 0 && normalized.bytes[normalized.len - 1] != '/')
-                status = kiln_c99_text_append_c(&normalized, "/");
-            if (status == KILN_C99_OK)
-                status = kiln_c99_text_append(&normalized, parts[index], lengths[index]);
-        }
-        if (status == KILN_C99_OK && normalized.len == 0)
-            status = kiln_c99_text_append_c(&normalized, absolute ? "/" : ".");
-        if (status == KILN_C99_OK)
-            *result = kiln_c99_text_value(&normalized);
-        else free(normalized.bytes);
+    status = kiln_c99_posix_normalize(&built, joined.bytes, joined.len);
+    if (status == KILN_C99_OK) {
+        *result = kiln_c99_text_value(&built);
+    } else {
+        free(built.bytes);
     }
 done:
-    free(parts);
-    free(lengths);
     free(joined.bytes);
     return status;
 }
