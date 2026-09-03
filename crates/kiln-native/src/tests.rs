@@ -542,8 +542,12 @@ fn node_stream_and_perf_hooks_have_native_runtime_module_materializers() {
         "addAbortSignal"
     ));
 
+    // The realm's own `performance` builtin rather than a second object built here: node makes
+    // `require("node:perf_hooks").performance` and `globalThis.performance` one value, and two
+    // objects made a library's "have I already installed my shim" check answer wrong. `now`
+    // comes off that builtin's table, so the method code is no longer named in this body.
     let performance = native_builtin_body(NodeBuiltin::PerfHooks).expect("perf_hooks materializes");
-    assert!(performance.contains("KILN_C99_METHOD_PERFORMANCE_NOW"));
+    assert!(performance.contains("kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE)"));
     assert!(native_builtin_supports_export(
         NodeBuiltin::PerfHooks,
         "performance"
@@ -696,10 +700,13 @@ fn node_http_native_materializer_matches_the_authoritative_export_order() {
     // `request` and `typeof http` answered "function" where node answers "object";
     // `createServer` resolved to `get`, so the first real server refused with "a function is
     // not a request options object". Node is the arbiter on both and the corrected layout
-    // agrees with it, so the assertions below moved rather than the materializer.
+    // Slot 1 held `undefined` too until `METHODS` was materialized. It is a constant array,
+    // so the alignment slot it used to be became a wrong answer once the CommonJS projection
+    // started publishing a stand-in callable for every unbuilt name: `typeof http.METHODS`
+    // answered "function" against the interpreter's "object".
     let body = native_builtin_body(NodeBuiltin::Http).expect("http materializes");
     assert!(body.contains("exports[0] = kiln_c99_undefined();"));
-    assert!(body.contains("exports[1] = kiln_c99_undefined();"));
+    assert!(body.contains("exports[1] = methods;"));
     assert!(body.contains("exports[2] = server;"));
     assert!(body.contains("exports[3] = server_response;"));
     assert!(body.contains("exports[4] = create_server;"));
@@ -3423,6 +3430,15 @@ fn native_fastify_constructor_probe() {
     assert_eq!(report.stdout, b"function\n");
 }
 
+/// `require("node:buffer")` is the module, and `default` is the module namespace rather than
+/// the constructor.
+///
+/// This used to assert `buffer.Buffer === buffer.default`, which was true here and false in
+/// the interpreter -- `default` is the namespace object there, and `typeof` says "object"
+/// rather than "function". That is the class of divergence this backend is not allowed to
+/// have, and the assertion was encoding it as the contract. What the two engines really share
+/// is the identity every `Buffer.isBuffer` shim depends on: whichever way you reach the
+/// constructor, it is the same value.
 #[test]
 fn native_commonjs_builtin_namespace_is_not_its_default_export() {
     use kiln_module_resolver::NodeRuntimeResolver;
@@ -3433,10 +3449,10 @@ fn native_commonjs_builtin_namespace_is_not_its_default_export() {
     fs::write(root.path.join("pkg/package.json"), r#"{"type":"commonjs"}"#)
         .expect("write CommonJS package");
     fs::write(
-            root.path.join("pkg/index.js"),
-            "const buffer = require('node:buffer'); module.exports = typeof buffer.constants.MAX_STRING_LENGTH === 'number' && buffer.Buffer === buffer.default;",
-        )
-        .expect("write namespace consumer");
+        root.path.join("pkg/index.js"),
+        "const buffer = require('node:buffer'); module.exports = typeof buffer.constants.MAX_STRING_LENGTH === 'number' && buffer.Buffer !== buffer.default && buffer.default.Buffer === buffer.Buffer && typeof buffer.from === 'function';",
+    )
+    .expect("write namespace consumer");
     let entry = root.path.join("main.mjs");
     fs::write(
         &entry,

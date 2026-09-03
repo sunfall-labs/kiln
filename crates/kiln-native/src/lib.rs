@@ -2136,7 +2136,12 @@ fn native_builtin_supported_exports(
     match builtin {
         NodeBuiltin::Events => &["EventEmitter", "default"],
         NodeBuiltin::Net => &["connect", "createConnection", "createServer", "default"],
+        // `METHODS` is a constant array rather than a function, so it costs nothing to answer and
+        // a placeholder served it worst: the unmaterialized-callable fallback made
+        // `typeof http.METHODS` "function" against the interpreter's "object", which is a wrong
+        // answer rather than a refusal.
         NodeBuiltin::Http => &[
+            "METHODS",
             "Server",
             "ServerResponse",
             "createServer",
@@ -2197,7 +2202,20 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Module => &["createRequire", "default"],
         NodeBuiltin::QueryString => &["decode", "default", "parse"],
         NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
-        NodeBuiltin::Buffer => &["Buffer", "constants", "default"],
+        // Every name the shared ABI declares: `Buffer`'s statics are real methods in this
+        // runtime, so there is nothing here to hold an alignment slot for.
+        NodeBuiltin::Buffer => &[
+            "Buffer",
+            "alloc",
+            "allocUnsafe",
+            "allocUnsafeSlow",
+            "byteLength",
+            "concat",
+            "constants",
+            "default",
+            "from",
+            "isBuffer",
+        ],
         NodeBuiltin::AsyncHooks => &["AsyncResource", "default"],
         NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
         _ => &[],
@@ -2262,6 +2280,72 @@ fn emit_native_graph_module_with_policy(
     }
 }
 
+/// `node:http`'s materializer, which is the one body that is generated rather than written out.
+///
+/// `METHODS` is thirty-four strings that both engines have to publish identically, and the shared
+/// list lives in `kiln-node-abi`. Building the C from that list is what makes the two engines one
+/// fact: a method added there reaches the interpreter's array and this array in the same commit,
+/// where a hand-copied C literal would be a second list that agrees until it does not.
+///
+/// A `LazyLock` rather than a `String` return type so the other twenty-odd bodies stay `&'static
+/// str` literals; only this one needs to be computed.
+static NODE_HTTP_BODY: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let mut body = String::from(
+        r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER);
+kiln_value server_response = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE);
+kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
+kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
+kiln_value request = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_REQUEST);
+kiln_value methods;
+kiln_value method_name;
+kiln_value namespace;
+int status = kiln_c99_new_array(&methods);
+if (status != KILN_C99_OK) return status;
+"#,
+    );
+    for method in kiln_node_abi::HTTP_METHODS {
+        writeln!(
+            body,
+            "method_name = kiln_c99_copy_text({}, {});",
+            native_c_string(method),
+            method.len()
+        )
+        .unwrap();
+        writeln!(
+            body,
+            "if (method_name.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;"
+        )
+        .unwrap();
+        writeln!(body, "status = kiln_c99_array_push(methods, method_name);").unwrap();
+        writeln!(body, "if (status != KILN_C99_OK) return status;").unwrap();
+    }
+    body.push_str(
+        r#"status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "METHODS", 7, methods, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "Server", 6, server, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "ServerResponse", 14, server_response, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "get", 3, get, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "request", 7, request, 0, NULL);
+if (status != KILN_C99_OK) return status;
+exports[0] = kiln_c99_undefined();
+exports[1] = methods;
+exports[2] = server;
+exports[3] = server_response;
+exports[4] = create_server;
+exports[5] = namespace;
+exports[6] = get;
+exports[7] = request;"#,
+    );
+    body
+});
+
 fn native_builtin_body(builtin: kiln_module_resolver::NodeBuiltin) -> Option<&'static str> {
     use kiln_module_resolver::NodeBuiltin;
     match builtin {
@@ -2298,37 +2382,11 @@ exports[3] = namespace;"#,
         // rather than a refusal, which is the class regress/r07 exists to catch.
         //
         // `native_builtin_slots_match_the_shared_export_table` now pins this, so the next
-        // addition to the table fails a test here instead of miscompiling a server. The three
-        // Remaining gated names hold `undefined` because `native_builtin_supports_export`
-        // refuses them as named imports; they are slots to keep alignment, not exports.
-        NodeBuiltin::Http => Some(
-            r#"kiln_value server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER);
-kiln_value server_response = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE);
-kiln_value create_server = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER);
-kiln_value get = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_GET);
-kiln_value request = kiln_c99_method(KILN_C99_METHOD_NODE_HTTP_REQUEST);
-kiln_value namespace;
-int status = kiln_c99_new_object(&namespace);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "Server", 6, server, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "ServerResponse", 14, server_response, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "createServer", 12, create_server, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "get", 3, get, 0, NULL);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "request", 7, request, 0, NULL);
-if (status != KILN_C99_OK) return status;
-exports[0] = kiln_c99_undefined();
-exports[1] = kiln_c99_undefined();
-exports[2] = server;
-exports[3] = server_response;
-exports[4] = create_server;
-exports[5] = namespace;
-exports[6] = get;
-exports[7] = request;"#,
-        ),
+        // addition to the table fails a test here instead of miscompiling a server. The one
+        // remaining gated name -- `IncomingMessage` -- holds `undefined` because
+        // `native_builtin_supports_export` refuses it as a named import; it is a slot to keep
+        // alignment, not an export.
+        NodeBuiltin::Http => Some(&NODE_HTTP_BODY),
         NodeBuiltin::Util => Some(
             // Slot 0 is `TextDecoder`, which this runtime has no builtin for. It holds
             // `undefined` to keep the slots aligned with the shared table and is refused as a
@@ -2480,14 +2538,15 @@ exports[2] = add_abort_signal;
 exports[3] = stream;
 exports[4] = finished;"#,
         ),
+        // `require("node:perf_hooks").performance === globalThis.performance` in node, and a
+        // second object built here made them two. That is not cosmetic: the pair is how a library
+        // decides it has already installed its own timing shim, and two objects make it install
+        // twice. The realm's own `performance` builtin is the one value, so both spellings reach
+        // it and `now` comes off the same table the global does.
         NodeBuiltin::PerfHooks => Some(
-            r#"kiln_value performance;
-int status = kiln_c99_new_object(&performance);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, performance, "now", 3, kiln_c99_method(KILN_C99_METHOD_PERFORMANCE_NOW), 0, NULL);
-if (status != KILN_C99_OK) return status;
+            r#"kiln_value performance = kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE);
 kiln_value namespace;
-status = kiln_c99_new_object(&namespace);
+int status = kiln_c99_new_object(&namespace);
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, namespace, "performance", 11, performance, 0, NULL);
 if (status != KILN_C99_OK) return status;
@@ -2653,6 +2712,10 @@ exports[3] = parse;
 exports[4] = path_to_file_url;"#,
         ),
         NodeBuiltin::Buffer => Some(
+            // The seven statics are the same method codes the `Buffer` global answers, because
+            // they are the same functions: the interpreter hands `require("node:buffer").alloc`
+            // and `Buffer.alloc` the same value, and two different codes here would be two
+            // different functions to `===`.
             r#"kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER);
 kiln_value constants;
 int status = kiln_c99_new_object(&constants);
@@ -2661,9 +2724,44 @@ status = kiln_c99_put(host, constants, "MAX_STRING_LENGTH", 17, kiln_c99_number(
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, constructor, "constants", 9, constants, 0, NULL);
 if (status != KILN_C99_OK) return status;
+kiln_value alloc = kiln_c99_method(KILN_C99_METHOD_BUFFER_ALLOC);
+kiln_value byte_length = kiln_c99_method(KILN_C99_METHOD_BUFFER_BYTE_LENGTH);
+kiln_value concat = kiln_c99_method(KILN_C99_METHOD_BUFFER_CONCAT);
+kiln_value from = kiln_c99_method(KILN_C99_METHOD_BUFFER_FROM);
+kiln_value is_buffer = kiln_c99_method(KILN_C99_METHOD_BUFFER_IS_BUFFER);
+kiln_value namespace;
+status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "Buffer", 6, constructor, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "alloc", 5, alloc, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "allocUnsafe", 11, alloc, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "allocUnsafeSlow", 15, alloc, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "byteLength", 10, byte_length, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "concat", 6, concat, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "constants", 9, constants, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "from", 4, from, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "isBuffer", 8, is_buffer, 0, NULL);
+if (status != KILN_C99_OK) return status;
 exports[0] = constructor;
-exports[1] = constants;
-exports[2] = constructor;"#,
+exports[1] = alloc;
+exports[2] = alloc;
+exports[3] = alloc;
+exports[4] = byte_length;
+exports[5] = concat;
+exports[6] = constants;
+/* `default` is the module namespace, not the constructor: that is what the interpreter answers,
+ * and `typeof require("node:buffer").default` is "object" there. It read "function" here. */
+exports[7] = namespace;
+exports[8] = from;
+exports[9] = is_buffer;"#,
         ),
         NodeBuiltin::AsyncHooks => Some(
             // Slot 0 is `AsyncLocalStorage`. The interpreter has one; this runtime does not,
