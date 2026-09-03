@@ -2429,7 +2429,7 @@ enum kiln_value_tag {
  * runtime code, so no URL-specific value tag or ABI representation crosses the boundary. */
 #define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_BUILTIN_BUFFER 64
-#define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 65
+#define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
 
 /* Array methods, part two.
  *

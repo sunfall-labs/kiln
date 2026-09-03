@@ -3954,6 +3954,7 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
             !(key_len >= 2 && key[0] == '@' && key[1] == '@');
         object->properties[position].writable = 1;
         object->properties[position].configurable = 1;
+        object->properties[position].symbol_hidden = 0;
         object->properties[position].accessor = 0;
         object->properties[position].refused = 0;
         object->properties[position].value = kiln_c99_undefined();
@@ -6498,6 +6499,17 @@ static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *o
         }
     }
     return 0;
+}
+
+/* What the program would see as this property's `enumerable`. For a string key that is the stored
+ * bit. For a symbol key the stored bit is held at 0 so the walks over own string keys skip the
+ * `@@` spelling, and the program's own answer lives in `symbol_hidden` -- see `kiln_property`. */
+static int kiln_c99_property_is_enumerable(const kiln_property *property) {
+    kiln_value symbol;
+    if (kiln_c99_symbol_of_key(property->key, property->key_len, &symbol)) {
+        return !property->symbol_hidden;
+    }
+    return property->enumerable;
 }
 
 /* The string a value names a property under.

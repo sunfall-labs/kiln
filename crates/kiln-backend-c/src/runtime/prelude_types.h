@@ -211,6 +211,16 @@ typedef struct kiln_property {
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
     int enumerable;
+    /* A symbol key the program hid with a descriptor. This is a second bit rather than a value of
+     * `enumerable` because a symbol key is stored with `enumerable = 0` unconditionally, so that
+     * every walk over own *string* keys skips it without having to know about the `@@` prefix.
+     * That forcing erases the program's own answer, and three separate reads wanted it back:
+     * a spread carries symbol keys across and so must skip a hidden one; a descriptor reports
+     * what the program asked for; and `Object.keys`/`JSON.stringify` must keep skipping it
+     * whatever it asked. Overloading one bit for two questions answered all three wrongly at
+     * once -- and two of them by printing the internal `@@symbol:N` spelling into program output.
+     * Zero means visible, so a slot that nobody hid is correct from `calloc` alone. */
+    int symbol_hidden;
     /* Whether an assignment may replace the value, and whether `delete` may remove the property
      * or `defineProperty` redefine it. Both are true for everything an assignment or a literal
      * creates, which is why they went unmodelled for so long: only `Object.defineProperty` and
