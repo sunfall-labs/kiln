@@ -11305,6 +11305,27 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 Instruction::SetPrototype => {
                     let prototype = self.pop(current)?;
                     let target = self.pop(current)?;
+                    // `class D extends X` links the two constructors with this instruction, and
+                    // a *function* target is what tells that apart from `{ __proto__: x }`,
+                    // whose target is always the new object. The specification checks the
+                    // heritage at definition: anything that is not `null` and not a constructor
+                    // is a `TypeError`. Without the check `class D extends 5 {}` and
+                    // `class D extends (() => {}) {}` both built a class whose `super()` could
+                    // never work -- the failure arriving at construction, or not at all.
+                    if matches!(target, Value::Function(_))
+                        && !matches!(prototype, Value::Null)
+                        && !is_constructor(&prototype)
+                    {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "class heritage {} is not a constructor",
+                                prototype.to_display_string()
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
                     // Only an object or `null` can be a prototype, and `{ __proto__: 1 }` is
                     // neither an error nor a property: the literal quietly keeps the prototype
                     // it already had. Recording the primitive instead would make
