@@ -153,6 +153,9 @@ pub enum BuildProfile {
     Release,
     /// Validation artifacts with assertions or sanitizers enabled.
     Check,
+    /// Release artifacts carrying profiler instrumentation. Its own bucket so an instrumented
+    /// object can never satisfy a release build, or the other way round.
+    Profile,
     /// A caller-defined profile name.
     Custom(String),
 }
@@ -164,6 +167,7 @@ impl BuildProfile {
             Self::Debug => "debug",
             Self::Release => "release",
             Self::Check => "check",
+            Self::Profile => "profile",
             Self::Custom(name) => name,
         }
     }

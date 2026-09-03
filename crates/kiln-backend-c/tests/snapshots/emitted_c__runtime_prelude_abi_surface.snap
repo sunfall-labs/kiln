@@ -812,6 +812,8 @@ static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int p
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_own_data_hot_key(kiln_value target, int id, kiln_value value);
+static int kiln_c99_put_hot_key(kiln_host *host, kiln_value target, int id, kiln_value value,
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char *key,
@@ -1020,6 +1022,16 @@ typedef struct kiln_gc_slab {
 typedef struct kiln_gc_ptrset {
 typedef struct kiln_key_entry {
 typedef struct kiln_key_table {
+#define KILN_C99_HOT_KEYS(X)                     \
+#define KILN_C99_HOT_KEY_ENUM(id, text) KILN_C99_HOT_KEY_##id,
+enum kiln_c99_http_key {
+#undef KILN_C99_HOT_KEY_ENUM
+#define KILN_C99_HOT_KEY_TEXT(id, text) text,
+static const char *const kiln_c99_hot_key_text[KILN_C99_HOT_KEY_COUNT] = {
+#undef KILN_C99_HOT_KEY_TEXT
+#define KILN_C99_HOT_KEY_LEN(id, text) sizeof(text) - 1,
+static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
+#undef KILN_C99_HOT_KEY_LEN
 typedef struct kiln_gc_heap {
 static const kiln_gc_hooks kiln_c99_gc_hooks;
 static kiln_gc_heap kiln_c99_gc_fallback;
@@ -1121,6 +1133,9 @@ static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, siz
 static int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
+static const char *kiln_c99_hot_key(int id) {
+static int kiln_c99_put_hot_key(kiln_host *host, kiln_value target, int id, kiln_value value,
+static int kiln_c99_own_data_hot_key(kiln_value target, int id, kiln_value value) {
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
 static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_value receiver,
 static double kiln_c99_instant_from_parts(const double parts[7]) {

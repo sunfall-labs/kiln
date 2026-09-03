@@ -414,8 +414,9 @@ fn parse_profile(raw: &str) -> Result<NativeProfile> {
         "native-dev" => Ok(NativeProfile::Dev),
         "native-check" => Ok(NativeProfile::Check),
         "native-release" => Ok(NativeProfile::Release),
+        "native-profile" => Ok(NativeProfile::Profile),
         _ => Err(Error::usage(format!(
-            "--profile expects native-dev, native-check, or native-release, got `{raw}`"
+            "--profile expects native-dev, native-check, native-release, or native-profile, got `{raw}`"
         ))),
     }
 }
@@ -483,7 +484,9 @@ options:
     --dry-run          with `cache gc`, report the sweep without deleting anything
     --output <path>    with `build`, write the native executable or shared library here
     --out <path>       with `test`, write schema-1 conformance results here
-    --profile <name>   native-dev, native-check, or native-release
+    --profile <name>   native-dev, native-check, native-release, or native-profile
+                       (native-profile is native-release plus gprof instrumentation;
+                        see scripts/profile-native.sh)
     --max-steps <n>    with `run`, refuse after n interpreter steps. Unbounded by
                        default: a program you are running yourself is not one this
                        tool needs protecting from. The conformance corpus keeps its

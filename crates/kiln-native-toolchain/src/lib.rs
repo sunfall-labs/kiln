@@ -361,6 +361,13 @@ pub enum BuildProfile {
     NativeCheck,
     /// Optimized release objects and links.
     NativeRelease,
+    /// Release objects, plus `gprof` instrumentation.
+    ///
+    /// Release rather than debug on purpose: a profile of `-O0` code measures the wrong program,
+    /// since the inlining that removes most prelude call overhead is exactly what `-O3` does. The
+    /// `mcount` calls `-pg` inserts do perturb it -- a tiny hot function pays proportionally more
+    /// than a large one -- so this answers "where does the time go", not "how fast is it".
+    NativeProfile,
 }
 
 impl BuildProfile {
@@ -369,6 +376,7 @@ impl BuildProfile {
             Self::NativeDev => &["-O0"],
             Self::NativeCheck => &["-O0", "-g", "-fsanitize=undefined"],
             Self::NativeRelease => &["-O3"],
+            Self::NativeProfile => &["-O3", "-pg"],
         }
     }
 
@@ -377,6 +385,7 @@ impl BuildProfile {
             Self::NativeDev => &[],
             Self::NativeCheck => &["-fsanitize=undefined"],
             Self::NativeRelease => &["-O3"],
+            Self::NativeProfile => &["-O3", "-pg"],
         }
     }
 }
