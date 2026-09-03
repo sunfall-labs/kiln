@@ -137,20 +137,28 @@ fn find_project_root(target: Option<&Path>) -> Result<PathBuf> {
     };
 
     let mut current = Some(start_dir.as_path());
-    let mut git_root = None;
 
     while let Some(dir) = current {
         if dir.join("package.json").is_file() || dir.join("node_modules").is_dir() {
             return Ok(dir.to_path_buf());
         }
-        if git_root.is_none() && dir.join(".git").exists() {
-            git_root = Some(dir.to_path_buf());
+        // A repository is a project boundary, and the search stops at one rather than treating
+        // it as a fallback to be used only if nothing above matched. It was a fallback, and a
+        // `node_modules` *above* the repository therefore captured the root: with one at
+        // `~/Developer/Personal`, running a file inside `~/Developer/Personal/kiln` made the
+        // project `~/Developer/Personal` -- so the walk covered every sibling checkout, hit its
+        // ten-thousand-file ceiling, and printed a truncation note on stderr for every run.
+        //
+        // That note is what turned the thirdparty gate red: it compares stderr against node's,
+        // and node says nothing. The bundles themselves were fine, which is why all nineteen
+        // "diverged" with identical stdout.
+        //
+        // A `node_modules` that belongs to this project is still found, because it is at or
+        // below the repository root and so is reached before this returns.
+        if dir.join(".git").exists() {
+            return Ok(dir.to_path_buf());
         }
         current = dir.parent();
-    }
-
-    if let Some(git) = git_root {
-        return Ok(git);
     }
 
     Ok(start_dir)
