@@ -910,6 +910,7 @@ true
 # on the order two responses happen to complete in.
 [[test]]
 id = "regress/r08-node-async-context"
+requires_host = "node"
 group = "regress"
 source = "regress/r08-node-async-context.js"
 status = "runnable"

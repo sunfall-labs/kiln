@@ -34,6 +34,7 @@ pub struct EmissionPolicy {
     pub entropy: EmissionEntropyPolicy,
     pub timezone: EmissionStringPolicy,
     pub locale: EmissionStringPolicy,
+    pub decoupled_prelude: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -2395,8 +2396,9 @@ pub fn builtin_surface_members(global: &str) -> Vec<&'static str> {
         .collect()
 }
 
-const HEADER: &str = concat!(
-    r#"/* Kiln C99 backend: deterministic scalar unit. */
+macro_rules! header_prefix {
+    () => {
+        r#"/* Kiln C99 backend: deterministic scalar unit. */
 /* `sigaction`, `SA_RESTART` and `write` are POSIX, and `-std=c99` puts glibc in strict-ANSI mode
  * where none of them is declared -- which shows up as `storage size of 'action' isn't known`, not
  * as a missing header. A feature-test macro has to be asked for before the first include, so this
@@ -2433,7 +2435,13 @@ const HEADER: &str = concat!(
  * so": a `catch` takes this and must not take the others. */
 #define KILN_C99_THROWN (-7)
 
-/* Refusals are runtime/compiler diagnostics, not JavaScript exceptions.  Keep the most specific
+"#
+    };
+}
+
+macro_rules! header_static_diagnostics {
+    () => {
+        r#"/* Refusals are runtime/compiler diagnostics, not JavaScript exceptions.  Keep the most specific
  * detail at the failing helper and attach the generated module + bytecode site as control
  * unwinds.  The entry boundary renders this into its ordinary scalar result, so no private
  * runtime pointer or new public ABI type escapes. */
@@ -2529,6 +2537,43 @@ static int kiln_c99_internal_status(const char *converted_by) {
     return kiln_c99_refuse_named((lacked), (subject), (subject_len))
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 
+"#
+    };
+}
+
+macro_rules! header_extern_diagnostics {
+    () => {
+        r#"/* Refusals are runtime/compiler diagnostics, not JavaScript exceptions. */
+extern const char *kiln_c99_diagnostic_site;
+extern const char *kiln_c99_diagnostic_operation;
+extern size_t kiln_c99_diagnostic_instruction;
+extern size_t kiln_c99_diagnostic_depth;
+extern uint64_t kiln_c99_diagnostic_method;
+extern uint64_t kiln_c99_diagnostic_receiver_tag;
+extern int kiln_c99_diagnostic_has_method;
+extern const char *kiln_c99_diagnostic_detail;
+extern const char *kiln_c99_diagnostic_function;
+extern size_t kiln_c99_diagnostic_function_len;
+extern char kiln_c99_diagnostic_compose[128];
+extern int kiln_c99_diagnostic_active_depth;
+
+int kiln_c99_refuse(const char *lacked);
+int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len);
+int kiln_c99_internal_status(const char *converted_by);
+
+#define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
+#define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
+    return kiln_c99_refuse_named((lacked), (subject), (subject_len))
+#define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
+
+"#
+    };
+}
+
+macro_rules! header_rest {
+    () => {
+        concat!(
+            r#"/* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
 /* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
  *
  * A refusal says "the language puts a member here and this backend has not built it" and stops
@@ -2564,6 +2609,7 @@ static int kiln_c99_internal_status(const char *converted_by) {
  * these are not: a generated body holds its stack and locals as automatic arrays, so the safe
  * bound is far lower and has to be enforced rather than hoped for. */
 #define KILN_C99_MAX_CALL_DEPTH 256
+
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
@@ -3546,8 +3592,16 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
     return (kiln_c99_method_groups(code) & group) != 0;
 }
 "#,
-    include_str!("runtime/prelude_types.h"),
-    kiln_native_number_abi::provider_abi_registry!(provider_c_declaration),
+            include_str!("runtime/prelude_types.h"),
+            kiln_native_number_abi::provider_abi_registry!(provider_c_declaration),
+        )
+    };
+}
+
+const HEADER: &str = concat!(
+    header_prefix!(),
+    header_static_diagnostics!(),
+    header_rest!(),
     include_str!("runtime/prelude_runtime.c"),
     emit_method_code_list!(),
     r#"};
@@ -4020,6 +4074,107 @@ static const kiln_builtin_gap kiln_c99_builtin_backlog[] = {
     emit_builtin_backlog_rows!(),
     include_str!("runtime/prelude_core.c"),
 );
+
+const PRELUDE_HEADER: &str = concat!(
+    header_prefix!(),
+    header_extern_diagnostics!(),
+    header_rest!(),
+    include_str!("runtime/prelude_declarations.h"),
+);
+
+static DEFAULT_RUNTIME_PRELUDE_SOURCE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Return the program-independent C11 runtime prelude source for standalone compilation with a specific policy.
+pub fn runtime_prelude_source_with_policy(policy: &EmissionPolicy) -> String {
+    if *policy == EmissionPolicy::default() {
+        return runtime_prelude_source().to_owned();
+    }
+    let mut output = String::new();
+    render_emission_policy(&mut output, policy);
+    let text = HEADER.replace(
+        "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+        &render_native_constructor_table(),
+    );
+    output.push_str(&build_runtime_prelude_source(&text));
+    output
+}
+
+/// Return the deterministic, program-independent C11 runtime prelude source for standalone compilation.
+pub fn runtime_prelude_source() -> &'static str {
+    DEFAULT_RUNTIME_PRELUDE_SOURCE.get_or_init(|| {
+        let text = HEADER.replace(
+            "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+            &render_native_constructor_table(),
+        );
+        build_runtime_prelude_source(&text)
+    })
+}
+
+/// Return the C11 declarations header for modules compiled against the standalone runtime prelude.
+pub fn runtime_prelude_header() -> &'static str {
+    PRELUDE_HEADER
+}
+
+fn build_runtime_prelude_source(src: &str) -> String {
+    let mut out = String::with_capacity(src.len() + 1024);
+    const VARS_TO_EXPORT: &[&str] = &[
+        "kiln_c99_diagnostic_site",
+        "kiln_c99_diagnostic_operation",
+        "kiln_c99_diagnostic_instruction",
+        "kiln_c99_diagnostic_depth",
+        "kiln_c99_diagnostic_method",
+        "kiln_c99_diagnostic_receiver_tag",
+        "kiln_c99_diagnostic_has_method",
+        "kiln_c99_diagnostic_detail",
+        "kiln_c99_diagnostic_function",
+        "kiln_c99_diagnostic_function_len",
+        "kiln_c99_diagnostic_compose",
+        "kiln_c99_diagnostic_active_depth",
+        "kiln_c99_new_target",
+        "kiln_c99_inheriting_new_target",
+        "kiln_c99_adopted_this",
+        "kiln_c99_frame_args",
+        "kiln_c99_frame_argc",
+        "kiln_c99_captured_arguments",
+        "kiln_c99_frame_arguments_object",
+        "kiln_c99_frame_is_arrow",
+        "kiln_c99_frame_mapped_arguments",
+        "kiln_c99_frame_callee",
+        "kiln_c99_symbols",
+        "kiln_c99_globals",
+        "kiln_c99_process",
+        "kiln_c99_atomics",
+    ];
+
+    for line in src.lines() {
+        if let Some(rem) = line.strip_prefix("static ") {
+            if line.contains('(') {
+                if let Some(tail) = rem.strip_prefix("inline int kiln_c99_invoke_closure(") {
+                    out.push_str("int kiln_c99_invoke_closure(");
+                    out.push_str(tail);
+                } else {
+                    out.push_str(rem);
+                }
+            } else {
+                let mut matched = false;
+                for var in VARS_TO_EXPORT {
+                    if line.contains(var) {
+                        out.push_str(rem);
+                        matched = true;
+                        break;
+                    }
+                }
+                if !matched {
+                    out.push_str(line);
+                }
+            }
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    out
+}
 
 /// Mutable static state embedded in the generated-C prelude, classified by its required owner.
 ///
@@ -5873,13 +6028,22 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         symbol.to_owned()
     };
     let max_stack = plan.body;
-    let mut output = String::with_capacity(HEADER.len() + program.code.len() * 64);
+    let header_len = if policy.decoupled_prelude {
+        PRELUDE_HEADER.len()
+    } else {
+        HEADER.len()
+    };
+    let mut output = String::with_capacity(header_len + program.code.len() * 64);
     render_emission_policy(&mut output, policy);
-    output.push_str(HEADER);
-    output = output.replace(
-        "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
-        &render_native_constructor_table(),
-    );
+    if policy.decoupled_prelude {
+        output.push_str(PRELUDE_HEADER);
+    } else {
+        output.push_str(HEADER);
+        output = output.replace(
+            "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+            &render_native_constructor_table(),
+        );
+    }
     writeln!(
         output,
         "/* Program hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}. */"
@@ -6019,13 +6183,22 @@ fn render_module(
         symbol.to_owned()
     };
     let max_stack = plan.body;
-    let mut output = String::with_capacity(HEADER.len() + program.code.len() * 72);
+    let header_len = if policy.decoupled_prelude {
+        PRELUDE_HEADER.len()
+    } else {
+        HEADER.len()
+    };
+    let mut output = String::with_capacity(header_len + program.code.len() * 72);
     render_emission_policy(&mut output, policy);
-    output.push_str(HEADER);
-    output = output.replace(
-        "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
-        &render_native_constructor_table(),
-    );
+    if policy.decoupled_prelude {
+        output.push_str(PRELUDE_HEADER);
+    } else {
+        output.push_str(HEADER);
+        output = output.replace(
+            "/* KILN_NATIVE_CONSTRUCTOR_TABLE */",
+            &render_native_constructor_table(),
+        );
+    }
     writeln!(
         output,
         "/* Module hash: {program_hash:016x}; bytecode version: {BYTECODE_VERSION}; imports: {}; exports: {}. */",
@@ -7653,7 +7826,12 @@ fn hash_program_with_policy_and_seed(program: &Program, policy: &EmissionPolicy,
         EmissionEntropyPolicy::Seeded(seed) => (1, Some(seed)),
         EmissionEntropyPolicy::Host => (2, None),
     };
-    for value in [0x70, u8::from(policy.host_clock), entropy_tag] {
+    for value in [
+        0x70,
+        u8::from(policy.host_clock),
+        entropy_tag,
+        u8::from(policy.decoupled_prelude),
+    ] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
     }
@@ -8110,7 +8288,12 @@ fn hash_module_with_policy_and_seed(
         EmissionEntropyPolicy::Seeded(seed) => (1, Some(seed)),
         EmissionEntropyPolicy::Host => (2, None),
     };
-    for value in [0x71, u8::from(policy.host_clock), entropy_tag] {
+    for value in [
+        0x71,
+        u8::from(policy.host_clock),
+        entropy_tag,
+        u8::from(policy.decoupled_prelude),
+    ] {
         hash ^= u64::from(value);
         hash = hash.wrapping_mul(0x100000001b3);
     }

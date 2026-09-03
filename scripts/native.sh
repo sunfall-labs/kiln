@@ -88,8 +88,28 @@ run_probe() {
 		return 0
 	fi
 
+	# A build that failed is not a backend that refused.
+	#
+	# `^kiln: native ` matched both, so `native toolchain failed:` and `native number provider
+	# failed:` -- a broken link, a compiler whose target disagrees with the provider's -- were
+	# counted under "the backlog, not a failure" and the run still reported success. That is how
+	# this corpus answered `0 matched, 89 refused` and `69 matched, 20 refused` on consecutive
+	# runs of the same tree without anything saying a word: every one of those refusals was a
+	# build that did not happen.
+	local broken
+	broken="$(printf '%s\n' "$native" | grep -m1 -E '^kiln: native (toolchain|number provider) failed' || true)"
+	if [[ -n $broken ]]; then
+		printf '%s\n' "$native" > "$WORK_DIR/$name.broken"
+		return 0
+	fi
+
+	# A real refusal names the backlog it hit: the backend declining a construct it cannot emit
+	# yet. Both spellings are listed rather than prefix-matched, so a new `kiln: native ...`
+	# message has to be classified by somebody instead of quietly joining the backlog.
 	local refusal
-	refusal="$(printf '%s\n' "$native" | grep -m1 '^kiln: native ' || true)"
+	refusal="$(printf '%s\n' "$native" |
+		grep -m1 -E '^kiln: native (backend refusal:|emission failed: unsupported native emission:)' ||
+		true)"
 	if [[ -n $refusal ]]; then
 		local reason
 		reason="$(printf '%s' "$refusal" | sed 's/^kiln: //; s/ module=[^ ]*//')"
@@ -134,6 +154,10 @@ for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
 	if [[ -f "$WORK_DIR/$name.failed" ]]; then
 		kiln_say "FAILED: the interpreter cannot run $name, so there is nothing to compare:"
 		kiln_say "$(<"$WORK_DIR/$name.failed")"
+		exit 1
+	elif [[ -f "$WORK_DIR/$name.broken" ]]; then
+		kiln_say "FAILED: the native build of $name did not complete, so there is nothing to compare:"
+		kiln_say "$(<"$WORK_DIR/$name.broken")"
 		exit 1
 	elif [[ -f "$WORK_DIR/$name.matched" ]]; then
 		matched=$((matched + 1))

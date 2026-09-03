@@ -3017,14 +3017,41 @@ where
     realm.run_next_timer()
 }
 
+/// Where [`CaptureHost`]'s clock starts: 2020-01-01T00:00:00Z, obviously synthetic and stable.
+const CAPTURE_HOST_CLOCK_START_MS: f64 = 1_577_836_800_000.0;
+/// How far it moves per read. One millisecond keeps ordinary elapsed-time code sane.
+const CAPTURE_HOST_CLOCK_STEP_MS: f64 = 1.0;
+
 /// A deterministic host used by the interpreter, tests, and CLI execution mode.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CaptureHost {
     stdout: String,
     /* Separate from `stdout`, because which stream a line went to is observable: a caller that
      * redirects one and not the other sees the difference, and node puts `console.error` on this
      * one. Kept as its own buffer rather than interleaved so a test can assert either alone. */
     stderr: String,
+    /// Epoch milliseconds this host will answer `ClockNow` with next.
+    ///
+    /// A deterministic host still has to *have* a clock. `--node` asks for
+    /// [`ClockCapability::Host`], because a Node program expects real time (ADR 0044), and a host
+    /// that refuses the question leaves the realm asking for time from something that has none --
+    /// which is how `fastify` and `express` came to be unrunnable here: any real library
+    /// timestamps something.
+    ///
+    /// Fixed start, fixed step, so a run is reproducible and two reads never return the same
+    /// value. Monotonic rather than constant because code that waits for the clock to move is
+    /// ordinary, and against a constant clock it would wait forever.
+    clock_ms: f64,
+}
+
+impl Default for CaptureHost {
+    fn default() -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: String::new(),
+            clock_ms: CAPTURE_HOST_CLOCK_START_MS,
+        }
+    }
 }
 
 impl CaptureHost {
@@ -3077,9 +3104,14 @@ impl HostOps for CaptureHost {
                 sink.push('\n');
                 Ok(HostValue::Undefined)
             }
-            HostOp::ClockNow | HostOp::EntropyU64 | HostOp::TimeZone | HostOp::Locale => Err(
-                HostError::new(format!("deterministic host does not provide {operation:?}")),
-            ),
+            HostOp::ClockNow => {
+                let now = self.clock_ms;
+                self.clock_ms += CAPTURE_HOST_CLOCK_STEP_MS;
+                Ok(HostValue::number(now))
+            }
+            HostOp::EntropyU64 | HostOp::TimeZone | HostOp::Locale => Err(HostError::new(format!(
+                "deterministic host does not provide {operation:?}"
+            ))),
         }
     }
 }
