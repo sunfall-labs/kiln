@@ -16211,6 +16211,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 parts.push(Value::String(utf16_slice(&subject, copied..subject.len())));
                 Ok(Value::Array(ArrayData::new(parts)))
             }
+            // `subarray` builds a second view over the same bytes, and it is specified over
+            // `TypedArraySpeciesCreate` like `slice` and `map` -- so a subclass gets its own type
+            // back and `@@species` is read. The machine-free implementation stamped out an
+            // intrinsic of the receiver's kind and read neither.
+            Native::TypedArraySubarray => {
+                let Value::TypedArray(view) = receiver else {
+                    return Ok(Value::Undefined);
+                };
+                let view = Rc::clone(view);
+                if view.buffer.detached() {
+                    return Err(ExecutionError::BufferDetached);
+                }
+                let (start, end) = slice_bounds(arguments, view.len());
+                // A slice of a length-tracking view is itself length-tracking when no end was
+                // given, so the length is left off the argument list entirely rather than frozen
+                // at what today's length happens to be.
+                let tracking = view.length.is_none()
+                    && matches!(arguments.get(1), None | Some(Value::Undefined));
+                let mut built = vec![
+                    Value::ArrayBuffer(Rc::clone(&view.buffer)),
+                    Value::Number((view.offset + start * view.kind.width()) as f64),
+                ];
+                if !tracking {
+                    built.push(Value::Number(end.saturating_sub(start) as f64));
+                }
+                return self.typed_array_species_over(receiver, view.kind, &built, instruction);
+            }
             Native::StringSearch => {
                 let Value::String(text) = receiver else {
                     return Ok(Value::Number(-1.0));
@@ -26910,10 +26937,74 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let count = elements.len();
+        let Some(species) = self.typed_array_species(exemplar, instruction)? else {
+            return construct_typed_array(kind, &[Value::Array(ArrayData::new(elements))]);
+        };
+        let out = self.construct_value(
+            species.clone(),
+            vec![Value::Number(count as f64)],
+            species,
+            instruction,
+        )?;
+        // `ValidateTypedArray` on what it handed back: a species that answers an ordinary array,
+        // or a view too short to hold the result, is a `TypeError`.
+        let Value::TypedArray(target) = &out else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "a typed array species must answer a typed array".to_owned(),
+            });
+        };
+        if target.len() < count {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "a typed array species answered a view that is too short".to_owned(),
+            });
+        }
+        for (index, item) in elements.iter().enumerate() {
+            target.set(index, item)?;
+        }
+        Ok(out)
+    }
+
+    /// `TypedArraySpeciesCreate` over an argument list, for a view that shares its buffer.
+    ///
+    /// `subarray` is the one of these that does not copy: it builds a second view onto the same
+    /// bytes, so the species is constructed with `«buffer, byteOffset[, length]»` and nothing is
+    /// filled afterwards. Everything else about the walk is the same, which is why the species
+    /// itself is resolved in one place for both.
+    fn typed_array_species_over(
+        &mut self,
+        exemplar: &Value,
+        kind: TypedKind,
+        arguments: &[Value],
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Some(species) = self.typed_array_species(exemplar, instruction)? else {
+            return construct_typed_array(kind, arguments);
+        };
+        let out =
+            self.construct_value(species.clone(), arguments.to_vec(), species, instruction)?;
+        if !matches!(out, Value::TypedArray(_)) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "a typed array species must answer a typed array".to_owned(),
+            });
+        }
+        Ok(out)
+    }
+
+    /// `SpeciesConstructor(exemplar, %TypedArray%)`, or `None` for "use the default".
+    ///
+    /// Every step is observable and every step is taken: `constructor` off the exemplar, then
+    /// `@@species` off that. `null` and `undefined` both mean the default, which is how a
+    /// subclass opts *out* -- `static get [Symbol.species]() { return Int8Array; }` -- and
+    /// anything else that is not a constructor is a `TypeError` rather than a silent fallback.
+    fn typed_array_species(
+        &mut self,
+        exemplar: &Value,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
         let constructor = self.read_property(exemplar, "constructor", instruction)?;
         let species = match &constructor {
-            // `SpeciesConstructor` step 2: an absent `constructor` is the default, and anything
-            // that is not an object is a `TypeError` rather than a silent fallback.
+            // An absent `constructor` is the default; anything that is not an object is a
+            // `TypeError` rather than a silent fallback.
             Value::Undefined => Value::Undefined,
             other if is_an_object(other) || is_callable(other) => {
                 self.read_property(other, WellKnown::Species.property_key(), instruction)?
@@ -26927,44 +27018,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
         };
-        let built = match species {
-            // `null` and `undefined` both mean "use the default", which is how a subclass opts
-            // out of this and gets the intrinsic back.
-            Value::Undefined | Value::Null => {
-                construct_typed_array(kind, &[Value::Array(ArrayData::new(elements.clone()))])?
-            }
-            species if is_constructor(&species) => {
-                let out = self.construct_value(
-                    species.clone(),
-                    vec![Value::Number(count as f64)],
-                    species,
-                    instruction,
-                )?;
-                // `ValidateTypedArray` on what it handed back: a species that answers an
-                // ordinary array, or a view too short to hold the result, is a `TypeError`.
-                let Value::TypedArray(target) = &out else {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "a typed array species must answer a typed array".to_owned(),
-                    });
-                };
-                if target.len() < count {
-                    return Err(ExecutionError::TypeErrorMessage {
-                        message: "a typed array species answered a view that is too short"
-                            .to_owned(),
-                    });
-                }
-                for (index, item) in elements.iter().enumerate() {
-                    target.set(index, item)?;
-                }
-                return Ok(out);
-            }
-            other => {
-                return Err(ExecutionError::TypeErrorMessage {
-                    message: format!("{} is not a constructor", other.to_display_string()),
-                });
-            }
-        };
-        Ok(built)
+        match species {
+            Value::Undefined | Value::Null => Ok(None),
+            species if is_constructor(&species) => Ok(Some(species)),
+            other => Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not a constructor", other.to_display_string()),
+            }),
+        }
     }
 
     /// The key a trap is handed.
