@@ -26,6 +26,14 @@ receiver is probed in rounds: run the whole pending list, keep every answer that
 the one that refused, drop it, run again. A receiver costs one native compile per refusal plus
 one. Receivers are independent, so the rounds run in parallel.
 
+AND THE RECEIVER IS ASKED ABOUT ITSELF, not only about its members. A walk that only enumerates
+members cannot see a receiver that is the wrong *kind* of thing: `require("node:module")` is a
+callable class in node and in the interpreter and was a namespace object in the native backend,
+and every member of it agreed, so nothing here reported anything for months. Each receiver
+therefore carries two more rows --- `(itself)`, its own `typeof`, and `(itself).name` where either
+engine answers one --- classified exactly like a member. A blind spot in the instrument is worse
+than a gap in the engine, because it hides an unknown number of gaps.
+
 Three classes come out, and the order they are reported in is the point:
 
   diverged     native answered, and answered differently from the interpreter. Includes the
@@ -118,6 +126,14 @@ NODE_SPECIFIERS = [
 SENTINEL = "#END"
 
 IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+
+# The two rows a receiver contributes about *itself*. They are spelled as members so that every
+# count, every table and the gate treat them like any other row -- a receiver that is an object in
+# one engine and a function in the other is a divergence of exactly the kind this tool reports,
+# and it was invisible while the walk only ever asked about members. The names are not identifiers,
+# so nothing can collide with a real member: `Object.getOwnPropertyNames` never returns these.
+SELF_TYPEOF = "(itself)"
+SELF_NAME = "(itself).name"
 
 # `kiln: native backend refusal: module=... instruction=41 operation=GetProperty(seal) ...`
 REFUSAL = re.compile(r"^kiln: native (?:backend )?(.*)$")
@@ -215,6 +231,12 @@ class Receiver:
     native_names: list[str] | None = None  # what native publishes, or None if it refused to say
     self_description: str | None = None  # why it refused to say
     unreachable: str | None = None
+    # The receiver's own two readings, keyed by SELF_TYPEOF / SELF_NAME. A receiver is a value
+    # before it is a bag of members, and until this existed the tool could not see a receiver that
+    # was the wrong *kind* of thing in one engine -- only that its members happened to answer.
+    self_interpreted: dict[str, str] = field(default_factory=dict)
+    self_native: dict[str, str] = field(default_factory=dict)
+    self_refused: dict[str, str] = field(default_factory=dict)
 
 
 class Runner:
@@ -336,6 +358,13 @@ function wellKnown(sym) {
 }
 function report(key, v) {
   var own;
+  // The receiver's own answer, before any of its members. It is printed first because it is the
+  // one reading that does not depend on the walk getting anywhere: a receiver whose own keys
+  // cannot be listed still has a `typeof`, and `typeof require("node:module")` differing between
+  // the engines went unmeasured for months precisely because nothing asked this.
+  var selfName;
+  try { selfName = kilnDescribe(v.name); } catch (e) { selfName = "throws"; }
+  console.log("S\\t" + key + "\\t" + kilnDescribe(v) + "\\t" + selfName);
   try { own = Object.getOwnPropertyNames(v); } catch (e) { return; }
   var syms = [];
   try { syms = Object.getOwnPropertySymbols(v); } catch (e) { syms = []; }
@@ -404,6 +433,12 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
     def ingest(lines: list[str], needs_node: bool) -> None:
         for line in lines:
             parts = line.split("\t")
+            if len(parts) == 4 and parts[0] == "S":
+                _, key, described, named = parts
+                rec = receiver_for(key, needs_node)
+                rec.self_interpreted[SELF_TYPEOF] = described
+                rec.self_interpreted[SELF_NAME] = named
+                continue
             if len(parts) != 4 or parts[0] != "M":
                 continue
             _, key, name, value = parts
@@ -442,35 +477,88 @@ def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
 # Stage 2: put every name to the native backend, in rounds.
 # --------------------------------------------------------------------------------------------
 
-PUBLISHED = """
-console.log("P\\t" + Object.getOwnPropertyNames(%(expr)s).sort().join(","));
+# Three readings in one compile, in the order that loses the least to a refusal. `T` is the
+# receiver's own `typeof`, which every receiver has and nothing can refuse once the expression
+# evaluates. `P` is its own key list, which refuses on most built-ins. `N` is its `.name`, put
+# last because it is the only one of the three whose loss is repaired by a second compile below.
+DESCRIBE_SELF = """
+%(describe)s
+var recv;
+try { recv = %(expr)s; } catch (e) { recv = undefined; }
+console.log("T\\t" + kilnDescribe(recv));
+console.log("P\\t" + Object.getOwnPropertyNames(recv).sort().join(","));
+console.log("N\\t" + kilnDescribe(recv.name));
+console.log("#END");
+"""
+
+# The repair run: `typeof` again (free, and it re-proves the expression evaluates) and the name,
+# with nothing between them that can refuse.
+DESCRIBE_SELF_NAME = """
+%(describe)s
+var recv;
+try { recv = %(expr)s; } catch (e) { recv = undefined; }
+console.log("T\\t" + kilnDescribe(recv));
+console.log("N\\t" + kilnDescribe(recv.name));
 console.log("#END");
 """
 
 
 def probe_published(runner: Runner, rec: Receiver) -> None:
-    """What native says its own surface is.
+    """What native says it *is*, and what it says its own surface is.
 
     ADR 0043 made `Object.getOwnPropertyNames` answer on a built-in constructor rather than refuse,
     and it turns out to answer on the prototypes and the `node:` namespaces too. That is cheap and
     it is a measurement in its own right: a name native publishes that the interpreter does not is
     an *invented* member, which no per-name read would ever have found because nothing would think
     to ask for it.
+
+    The receiver's own `typeof` and `.name` ride along in the same compile, because they cost
+    nothing here and because the walk that follows can only ever ask about members. That blind
+    spot is what let `typeof require("node:module")` be "function" in one engine and "object" in
+    the other while every member of it agreed: a report of an instrument that cannot see the
+    receiver hides an unknown number of gaps, which is worse than a gap it names.
     """
-    source = PUBLISHED % {"expr": rec.expr}
+    source = DESCRIBE_SELF % {"describe": DESCRIBE, "expr": rec.expr}
     lines, refusal = runner.run(
         source, native=True, node=rec.needs_node, tag=f"published-{safe_tag(rec.key)}"
     )
+    published = None
     for line in lines:
-        if line.startswith("P\t"):
-            rec.native_names = sorted(n for n in line[2:].split(",") if n)
-            return
-    # Measured, not assumed: `Object.getOwnPropertyNames` answers on the fifteen built-ins ADR 0043
-    # put on the table and on the prototypes and namespaces, and refuses on the rest. Where it
-    # refuses the backend cannot describe itself, so an invented member on that receiver is
-    # invisible to this tool and the report says so.
-    rec.native_names = None
-    rec.self_description = refusal or "no answer"
+        if line.startswith("T\t"):
+            rec.self_native[SELF_TYPEOF] = line[2:]
+        elif line.startswith("N\t"):
+            rec.self_native[SELF_NAME] = line[2:]
+        elif line.startswith("P\t"):
+            published = sorted(n for n in line[2:].split(",") if n)
+    if published is not None:
+        rec.native_names = published
+    else:
+        # Measured, not assumed: `Object.getOwnPropertyNames` answers on the fifteen built-ins ADR
+        # 0043 put on the table and on the prototypes and namespaces, and refuses on the rest.
+        # Where it refuses the backend cannot describe itself, so an invented member on that
+        # receiver is invisible to this tool and the report says so.
+        rec.native_names = None
+        rec.self_description = refusal or "no answer"
+    if SELF_NAME in rec.self_native:
+        return
+    # The name was lost to whatever refused ahead of it, which is a refusal about *that* reading
+    # and not about this one. Asking again without it is one compile and keeps a refusal on the
+    # key list from being filed as a refusal on the name.
+    lines, name_refusal = runner.run(
+        DESCRIBE_SELF_NAME % {"describe": DESCRIBE, "expr": rec.expr},
+        native=True,
+        node=rec.needs_node,
+        tag=f"self-name-{safe_tag(rec.key)}",
+    )
+    for line in lines:
+        if line.startswith("T\t"):
+            rec.self_native[SELF_TYPEOF] = line[2:]
+        elif line.startswith("N\t"):
+            rec.self_native[SELF_NAME] = line[2:]
+    if SELF_NAME not in rec.self_native and name_refusal is not None:
+        rec.self_refused[SELF_NAME] = name_refusal
+    if SELF_TYPEOF not in rec.self_native and name_refusal is not None:
+        rec.self_refused[SELF_TYPEOF] = name_refusal
 
 
 def safe_tag(key: str) -> str:
@@ -638,6 +726,30 @@ def guard_disk(root: Path, floor_gib: float, stop_gib: float, always: bool = Fal
 # --------------------------------------------------------------------------------------------
 
 
+def self_rows(rec: Receiver) -> list[str]:
+    """Which of the receiver's own readings this receiver contributes a row for.
+
+    `typeof` always: every receiver is a value, and the two engines either agree about what kind
+    of value it is or they do not. `.name` only where one of the engines answers something --- a
+    row saying both agree that a namespace object has no name is not a measurement of anything,
+    and 148 of them would bury the ones that matter.
+    """
+    rows = [SELF_TYPEOF]
+    answers = {rec.self_interpreted.get(SELF_NAME), rec.self_native.get(SELF_NAME)}
+    if answers - {None, "undefined"} or SELF_NAME in rec.self_refused:
+        rows.append(SELF_NAME)
+    return rows
+
+
+def row_count(rec: Receiver) -> int:
+    """How many rows this receiver contributes: its members, plus its own readings.
+
+    The classes below have to add up to this, so the receiver's own rows are counted here rather
+    than left out of the denominator they are already in the numerator of.
+    """
+    return len(rec.names) + sum(1 for row in self_rows(rec) if row in rec.self_interpreted)
+
+
 def classify(rec: Receiver) -> dict[str, list[tuple[str, str, str]]]:
     out: dict[str, list[tuple[str, str, str]]] = {
         "diverged": [],
@@ -646,6 +758,21 @@ def classify(rec: Receiver) -> dict[str, list[tuple[str, str, str]]]:
         "invented": [],
         "unmeasured": [],
     }
+    # What the receiver itself is, classified exactly like a member of it. A receiver that is a
+    # function in one engine and an object in the other is the same class of wrong answer as a
+    # member that is --- `typeof require("node:module") === "function"` is a real feature test --
+    # and it is one the walk below can never reach, because the walk only asks about members.
+    for row in self_rows(rec):
+        want = rec.self_interpreted.get(row)
+        if want is None:
+            continue
+        if row in rec.self_refused:
+            out["refused"].append((row, want, rec.self_refused[row]))
+        elif row in rec.self_native:
+            got = rec.self_native[row]
+            out["implemented" if got == want else "diverged"].append((row, want, got))
+        else:
+            out["unmeasured"].append((row, want, "not probed: no answer and no refusal"))
     # A receiver that reads `undefined` natively is not a receiver that refuses. Every member on
     # it would throw `undefined is not an object` at run time, which is the wrong-answer cascade
     # and not the honest stop, so they are counted with the divergence that caused them rather
@@ -776,6 +903,9 @@ def main() -> int:
             rec.refused = row["refused"]
             rec.native_names = row["native_names"]
             rec.self_description = row.get("self_description")
+            rec.self_interpreted = row.get("self_interpreted", {})
+            rec.self_native = row.get("self_native", {})
+            rec.self_refused = row.get("self_refused", {})
             rec.unreachable = row["unreachable"]
             receivers[key] = rec
         runner = Runner(kiln, root, root, args.timeout)
@@ -794,7 +924,7 @@ def main() -> int:
         order = sorted(receivers)
         if args.only:
             order = [k for k in order if args.only in k]
-        members = sum(len(receivers[k].names) for k in order)
+        members = sum(row_count(receivers[k]) for k in order)
         print(f"  {len(order)} receivers, {members} members", file=sys.stderr)
         if args.stage == "enumerate":
             for key in order:
@@ -833,6 +963,9 @@ def main() -> int:
             "refused": receivers[key].refused,
             "native_names": receivers[key].native_names,
             "self_description": receivers[key].self_description,
+            "self_interpreted": receivers[key].self_interpreted,
+            "self_native": receivers[key].self_native,
+            "self_refused": receivers[key].self_refused,
         }
         for key in order
     }
@@ -877,7 +1010,7 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
     per = {key: classify(receivers[key]) for key in order}
     classes = ("diverged", "refused", "implemented", "invented", "unmeasured")
     totals = {k: sum(len(per[key][k]) for key in order) for k in classes}
-    members = sum(len(receivers[key].names) for key in order)
+    members = sum(row_count(receivers[key]) for key in order)
 
     lines: list[str] = []
     add = lines.append
@@ -921,6 +1054,21 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         "reaches. `node:` receivers were probed with `--node`; everything else without it."
     )
     add("")
+    self_total = sum(
+        1 for key in order for cls in per[key].values() for name, _, _ in cls
+        if name in (SELF_TYPEOF, SELF_NAME)
+    )
+    add(
+        f"`(itself)` and `(itself).name` are rows about the receiver rather than about a member "
+        f"of it, and there are {self_total} of them. They exist because the walk cannot ask them: "
+        "it enumerates members, so a receiver that is a *function* in one engine and an *object* "
+        "in the other agrees on every member it has and diverges on what it is. "
+        "`typeof require(\"node:module\") === \"function\"` is a real feature test, and it read "
+        "two ways in the two engines for months with every member of the module agreeing. A "
+        "`.name` row appears only where one of the engines answers a name; a receiver both engines "
+        "agree has none is not a measurement of anything."
+    )
+    add("")
 
     add("## What to do first")
     add("")
@@ -938,10 +1086,10 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
     )[:5]
     for key in worst_diverged:
         n = len(per[key]["diverged"])
-        add(f"1. **`{key}` — {n} wrong answers** out of {len(receivers[key].names)} members.")
+        add(f"1. **`{key}` — {n} wrong answers** out of {row_count(receivers[key])} rows.")
     for key in worst_refused:
         n = len(per[key]["refused"])
-        add(f"1. `{key}` — {n} refusals out of {len(receivers[key].names)} members.")
+        add(f"1. `{key}` — {n} refusals out of {row_count(receivers[key])} rows.")
     if not worst_diverged and not worst_refused:
         add("Nothing is missing.")
     add("")
@@ -995,7 +1143,7 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
     add("")
     add("Receivers with anything missing, worst first. `missing` is diverged plus refused.")
     add("")
-    add("| Receiver | Kind | Members | Diverged | Refused | Implemented | Missing |")
+    add("| Receiver | Kind | Rows | Diverged | Refused | Implemented | Missing |")
     add("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
     ranked = sorted(
         order,
@@ -1010,7 +1158,7 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         if d + r == 0:
             continue
         add(
-            f"| `{key}` | {receivers[key].kind} | {len(receivers[key].names)} | {d} | {r} | {i} | "
+            f"| `{key}` | {receivers[key].kind} | {row_count(receivers[key])} | {d} | {r} | {i} | "
             f"{d + r} |"
         )
     add("")
@@ -1078,7 +1226,9 @@ def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> 
         "finds missing on dozens of receivers --- the scaffolding would report its own gap and "
         "call it the member's. Two different functions therefore compare equal, and so do two "
         "different objects. A member that is present, callable, and *wrong* is outside this "
-        "inventory; `conformance/native` is where that is caught."
+        "inventory; `conformance/native` is where that is caught. The `(itself).name` row is "
+        "the one exception, and it is narrow: a receiver's *own* name is read, because a "
+        "receiver is named for what it is rather than for a member it publishes."
     )
     add(
         "- **One level of nesting.** Globals, their statics, their prototypes, the object each of "
