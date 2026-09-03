@@ -52,6 +52,7 @@ static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceL
 static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const PRIVATE_ASYNC_ABI_VERSION: u32 = 6;
+const NATIVE_PRELUDE_VERSION: u32 = 2;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
@@ -205,7 +206,14 @@ impl NativeRealmPolicy {
                 NativeStringPolicy::Named(value) => EmissionStringPolicy::Named(value.clone()),
                 NativeStringPolicy::Host => EmissionStringPolicy::Host,
             },
+            decoupled_prelude: true,
         }
+    }
+
+    fn emission_executable(&self) -> EmissionPolicy {
+        let mut policy = self.emission();
+        policy.decoupled_prelude = true;
+        policy
     }
 }
 
@@ -500,10 +508,25 @@ pub struct NativeBuilder {
     number_provider: OnceLock<Result<NumberProvider, String>>,
 }
 
+fn cache_with_optional_shared(cache_root: impl Into<PathBuf>) -> ArtifactCache {
+    let local = cache_root.into();
+    if let Ok(shared_path) = std::env::var("KILN_SHARED_CACHE")
+        && !shared_path.trim().is_empty()
+    {
+        let shared = PathBuf::from(shared_path.trim());
+        ArtifactCache::with_layers([
+            kiln_artifact_cache::CacheLayer::writable(shared),
+            kiln_artifact_cache::CacheLayer::writable(local),
+        ])
+    } else {
+        ArtifactCache::new(local)
+    }
+}
+
 impl NativeBuilder {
     pub fn discover(cache_root: impl Into<PathBuf>) -> Result<Self, NativeError> {
         Ok(Self::new(
-            ArtifactCache::new(cache_root),
+            cache_with_optional_shared(cache_root),
             Toolchain::discover()?,
         ))
     }
@@ -513,7 +536,7 @@ impl NativeBuilder {
         let toolchain = DISCOVERED_TOOLCHAIN
             .get_or_init(Toolchain::discover)
             .clone()?;
-        Ok(Self::new(ArtifactCache::new(cache_root), toolchain))
+        Ok(Self::new(cache_with_optional_shared(cache_root), toolchain))
     }
 
     pub const fn new(cache: ArtifactCache, toolchain: Toolchain) -> Self {
@@ -568,6 +591,12 @@ impl NativeBuilder {
             CacheProfile::Debug,
         );
         allow(
+            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+            Backend::Custom("native-prelude-source".to_owned()),
+            &runtime_abi,
+            CacheProfile::Debug,
+        );
+        allow(
             format!("kiln-launcher-{NATIVE_RUNTIME_VERSION}"),
             Backend::Custom("native-launcher-source".to_owned()),
             &runtime_abi,
@@ -615,12 +644,20 @@ impl NativeBuilder {
                     runtime_abi.as_str(),
                 ),
                 (
+                    Backend::Custom("native-runtime-prelude".to_owned()),
+                    runtime_abi.as_str(),
+                ),
+                (
                     Backend::Custom("native-launcher".to_owned()),
                     runtime_abi.as_str(),
                 ),
                 (Backend::C, runtime_abi.as_str()),
                 (
                     Backend::Custom("native-shared-library".to_owned()),
+                    embedding_abi.as_str(),
+                ),
+                (
+                    Backend::Custom("native-shared-prelude".to_owned()),
                     embedding_abi.as_str(),
                 ),
                 (
@@ -686,7 +723,8 @@ impl NativeBuilder {
     ) -> Result<NativeBuildReport, NativeError> {
         let total_started = Instant::now();
         let emit_started = Instant::now();
-        let module = emit_with_policy(program, options.realm.emission())?;
+        let emission = options.realm.emission_executable();
+        let module = emit_with_policy(program, emission.clone())?;
         let launcher = launcher_source(&module.symbol)?;
         let emit_elapsed = emit_started.elapsed();
         let runtime = runtime_source();
@@ -727,6 +765,20 @@ impl NativeBuilder {
         let (runtime_bytes, runtime_source_digest, runtime_generated_c_cache_hit) =
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
 
+        let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
+        let prelude_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+            Backend::Custom("native-prelude-source".to_owned()),
+            &runtime_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"portable-prelude-c11"),
+            [Digest::hash(prelude_source.as_bytes())],
+        );
+        let (prelude_bytes, prelude_source_digest, _) =
+            self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
+
         let launcher_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-launcher-{NATIVE_RUNTIME_VERSION}"),
@@ -758,6 +810,16 @@ impl NativeBuilder {
             object_options,
             [module_source_digest],
         );
+        let prelude_key = key(
+            ArtifactKind::RuntimeLibrary,
+            &compiler,
+            Backend::Custom("native-runtime-prelude".to_owned()),
+            &runtime_abi,
+            &target,
+            profile.cache(),
+            object_options,
+            [prelude_source_digest],
+        );
         let runtime_key = key(
             ArtifactKind::RuntimeLibrary,
             &compiler,
@@ -779,24 +841,103 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
+        let link_options_digest = Digest::hash(
+            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
+        );
+        if let Some(app_info) = self.lookup_digest(&application_key)?
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+            && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
+            && let Some(launcher_info) = self.lookup_digest(&launcher_key)?
+        {
+            let candidate_executable_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::C,
+                &runtime_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                [
+                    app_info.0,
+                    prelude_info.0,
+                    runtime_info.0,
+                    launcher_info.0,
+                    number_provider_digest,
+                ],
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&candidate_executable_key)? {
+                debug_assert_eq!(artifact.digest, Digest::hash(&artifact.bytes));
+                materialize(&options.output, &artifact.bytes, true)?;
+                return Ok(NativeBuildReport {
+                    output: options.output.clone(),
+                    module_symbol: module.symbol,
+                    tool: identity,
+                    cache_hits: CacheHits {
+                        generated_c: generated_c_hit,
+                        application_object: true,
+                        runtime_object: true,
+                        launcher_object: true,
+                        executable: true,
+                    },
+                    sizes: ArtifactSizes {
+                        generated_c: module_source.len() as u64,
+                        application_object: app_info.1,
+                        runtime_object: runtime_info.1,
+                        launcher_object: launcher_info.1,
+                        executable: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_started.elapsed(),
+                    },
+                    module_artifacts: vec![ModuleArtifactInfo {
+                        logical_path: None,
+                        generated_c_cache_hit: generated_c_hit,
+                        object_cache_hit: true,
+                        generated_c_bytes: module_source.len() as u64,
+                        object_bytes: app_info.1,
+                    }],
+                    runtime_generated_c_cache_hit,
+                    launcher_generated_c_cache_hit,
+                });
+            }
+        }
+
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             ..CompileOptions::default()
         };
         let compile_started = Instant::now();
-        let ((application_result, runtime_result), launcher_result) = rayon::join(
+        let (((application_result, prelude_result), runtime_result), launcher_result) = rayon::join(
             || {
                 rayon::join(
                     || {
-                        run_worker("application compile", || {
-                            self.object(
-                                &application_key,
-                                &module_source,
-                                &paths.module_c,
-                                &paths.module_o,
-                                &compile_options,
-                            )
-                        })
+                        rayon::join(
+                            || {
+                                run_worker("application compile", || {
+                                    self.object(
+                                        &application_key,
+                                        &module_source,
+                                        &paths.module_c,
+                                        &paths.module_o,
+                                        &compile_options,
+                                    )
+                                })
+                            },
+                            || {
+                                run_worker("prelude compile", || {
+                                    self.object(
+                                        &prelude_key,
+                                        &prelude_bytes,
+                                        &paths.prelude_c,
+                                        &paths.prelude_o,
+                                        &compile_options,
+                                    )
+                                })
+                            },
+                        )
                     },
                     || {
                         run_worker("runtime compile", || {
@@ -825,9 +966,10 @@ impl NativeBuilder {
         );
         let (application, application_digest, application_hit, _application_elapsed) =
             application_result?;
+        let (prelude_object, prelude_digest, prelude_hit, _prelude_elapsed) = prelude_result?;
         let (runtime_object, runtime_digest, runtime_hit, _runtime_elapsed) = runtime_result?;
         let (launcher_object, launcher_digest, launcher_hit, _launcher_elapsed) = launcher_result?;
-        let compile_elapsed = if application_hit && runtime_hit && launcher_hit {
+        let compile_elapsed = if application_hit && prelude_hit && runtime_hit && launcher_hit {
             Duration::ZERO
         } else {
             compile_started.elapsed()
@@ -846,6 +988,7 @@ impl NativeBuilder {
             link_options_digest,
             [
                 application_digest,
+                prelude_digest,
                 runtime_digest,
                 launcher_digest,
                 number_provider_digest,
@@ -856,6 +999,7 @@ impl NativeBuilder {
                 Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
                 Lookup::Miss => {
                     materialize(&paths.module_o, &application, false)?;
+                    materialize(&paths.prelude_o, &prelude_object, false)?;
                     materialize(&paths.runtime_o, &runtime_object, false)?;
                     materialize(&paths.launcher_o, &launcher_object, false)?;
                     materialize(&paths.number_provider_a, &number_provider, false)?;
@@ -874,6 +1018,7 @@ impl NativeBuilder {
                     let report = self.toolchain.link_executable(
                         &[
                             paths.module_o.clone(),
+                            paths.prelude_o.clone(),
                             paths.runtime_o.clone(),
                             paths.launcher_o.clone(),
                         ],
@@ -965,6 +1110,7 @@ impl NativeBuilder {
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
+        let runtime_abi = runtime_abi_identity();
         let embedding_abi = shared_embedding_abi_identity();
         let target = target_identity(&identity);
         let compiler = compiler_identity(&identity);
@@ -1017,26 +1163,142 @@ impl NativeBuilder {
             object_options,
             [module_source_digest],
         );
+        let prelude_source =
+            kiln_backend_c::runtime_prelude_source_with_policy(&options.realm.emission());
+        let prelude_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+            Backend::Custom("native-prelude-source".to_owned()),
+            &runtime_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"portable-prelude-c11"),
+            [Digest::hash(prelude_source.as_bytes())],
+        );
+        let (prelude_bytes, prelude_source_digest, _) =
+            self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
+        let prelude_key = key(
+            ArtifactKind::NativeObject,
+            &compiler,
+            Backend::Custom("native-shared-prelude".to_owned()),
+            &embedding_abi,
+            &target,
+            profile.cache(),
+            object_options,
+            [prelude_source_digest],
+        );
+
+        if let Some(object_info) = self.lookup_digest(&object_key)?
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+        {
+            let link_inputs = [object_info.0, prelude_info.0, number_provider_digest];
+            let loader = shared_library_loader_path(
+                &options.output,
+                shared_library_content_identity(
+                    &compiler,
+                    Backend::Custom("native-shared-library-loader".to_owned()),
+                    &embedding_abi,
+                    &target,
+                    profile,
+                    &[module.symbol.as_str(), module_api_symbol.as_str()],
+                    link_inputs,
+                ),
+            )?;
+            let link_options_digest = Digest::hash(
+                format!(
+                    "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    profile.as_str(),
+                    shared_library_name(),
+                    shared_library_link_identity(&loader),
+                    shared_library_link_policy(),
+                    EMBEDDING_MODULE_API_VERSION,
+                    [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
+                )
+                .as_bytes(),
+            );
+            let library_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::Custom("native-shared-library".to_owned()),
+                &embedding_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                link_inputs,
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&library_key)? {
+                publish_shared_artifacts_with_symbols(
+                    &options.output,
+                    &loader,
+                    header_source.as_bytes(),
+                    &artifact.bytes,
+                    &module.symbol,
+                    &module_api_symbol,
+                )?;
+                return Ok(NativeSharedLibraryReport {
+                    output: options.output.clone(),
+                    loader,
+                    header,
+                    module_symbol: module.symbol,
+                    module_api_symbol,
+                    tool: identity,
+                    cache_hits: NativeSharedLibraryCacheHits {
+                        generated_c: generated_c_hit,
+                        object: true,
+                        library: true,
+                    },
+                    sizes: NativeSharedLibrarySizes {
+                        generated_c: module_source.len() as u64,
+                        object: object_info.1,
+                        library: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_started.elapsed(),
+                    },
+                });
+            }
+        }
+
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             position_independent: true,
             ..CompileOptions::default()
         };
         let compile_started = Instant::now();
-        let (object, object_digest, object_hit, object_elapsed) = self.object(
-            &object_key,
-            &module_source,
-            &paths.module_c,
-            &paths.module_o,
-            &compile_options,
-        )?;
-        let compile_elapsed = if object_hit {
+        let (module_compile, prelude_compile) = rayon::join(
+            || {
+                self.object(
+                    &object_key,
+                    &module_source,
+                    &paths.module_c,
+                    &paths.module_o,
+                    &compile_options,
+                )
+            },
+            || {
+                self.object(
+                    &prelude_key,
+                    &prelude_bytes,
+                    &paths.prelude_c,
+                    &paths.prelude_o,
+                    &compile_options,
+                )
+            },
+        );
+        let (object, object_digest, object_hit, object_elapsed) = module_compile?;
+        let (prelude_object, prelude_digest, prelude_hit, prelude_elapsed) = prelude_compile?;
+        let compile_elapsed = if object_hit && prelude_hit {
             Duration::ZERO
         } else {
-            object_elapsed.max(compile_started.elapsed())
+            object_elapsed
+                .max(prelude_elapsed)
+                .max(compile_started.elapsed())
         };
 
-        let link_inputs = [object_digest, number_provider_digest];
+        let link_inputs = [object_digest, prelude_digest, number_provider_digest];
         let loader = shared_library_loader_path(
             &options.output,
             shared_library_content_identity(
@@ -1075,6 +1337,7 @@ impl NativeBuilder {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
                 materialize(&paths.module_o, &object, false)?;
+                materialize(&paths.prelude_o, &prelude_object, false)?;
                 materialize(&paths.number_provider_a, &number_provider, false)?;
                 let mut link_options = LinkOptions {
                     profile: profile.toolchain(),
@@ -1091,8 +1354,9 @@ impl NativeBuilder {
                     &loader,
                     &[module.symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
+                    self.toolchain.identity().kind,
                 )?;
-                let objects = [paths.module_o.clone()];
+                let objects = [paths.module_o.clone(), paths.prelude_o.clone()];
                 let report =
                     self.toolchain
                         .link_shared_library(&objects, &paths.library, &link_options)?;
@@ -1196,7 +1460,11 @@ impl NativeBuilder {
         header_source.shrink_to_fit();
 
         let workspace = WorkDirectory::create()?;
-        let paths = SharedGraphLibraryPaths::new(workspace.path(), modules.len());
+        let symbol_list = modules
+            .iter()
+            .map(|(_, emitted)| &emitted.symbol)
+            .collect::<Vec<_>>();
+        let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
@@ -1291,8 +1559,141 @@ impl NativeBuilder {
             wrapper_object_options,
             [wrapper_source_digest, topology],
         );
+        let prelude_source =
+            kiln_backend_c::runtime_prelude_source_with_policy(&options.realm.emission());
+        let prelude_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+            Backend::Custom("native-prelude-source".to_owned()),
+            &embedding_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"portable-prelude-c11"),
+            [Digest::hash(prelude_source.as_bytes())],
+        );
+        let (prelude_bytes, prelude_source_digest, _) =
+            self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
+        let shared_prelude_object_options = Digest::hash(
+            format!(
+                "shared-library\0pic\0c11\0{}\0{}\0generator-{C_GENERATOR_VERSION}",
+                identity.kind,
+                profile.as_str()
+            )
+            .as_bytes(),
+        );
+        let prelude_key = key(
+            ArtifactKind::NativeObject,
+            &compiler,
+            Backend::Custom("native-shared-prelude".to_owned()),
+            &shared_embedding_abi_identity(),
+            &target,
+            profile.cache(),
+            shared_prelude_object_options,
+            [prelude_source_digest],
+        );
+
+        let mut module_object_infos = Vec::with_capacity(module_keys.len());
+        let mut all_modules_cached = true;
+        for key in &module_keys {
+            match self.lookup_digest(key)? {
+                Some(info) => module_object_infos.push(info),
+                None => {
+                    all_modules_cached = false;
+                    break;
+                }
+            }
+        }
+        if all_modules_cached
+            && let Some(wrapper_info) = self.lookup_digest(&wrapper_object_key)?
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+        {
+            let mut link_inputs = module_object_infos
+                .iter()
+                .map(|(digest, _)| *digest)
+                .collect::<Vec<_>>();
+            link_inputs.push(number_provider_digest);
+            link_inputs.push(prelude_info.0);
+            link_inputs.push(wrapper_info.0);
+            let loader = shared_library_loader_path(
+                &options.output,
+                shared_library_content_identity(
+                    &compiler,
+                    Backend::Custom("native-shared-graph-loader".to_owned()),
+                    &embedding_abi,
+                    &target,
+                    profile,
+                    &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
+                    link_inputs.iter().copied(),
+                ),
+            )?;
+            let link_options_digest = Digest::hash(
+                format!(
+                    "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    profile.as_str(),
+                    shared_library_name(),
+                    shared_library_link_identity(&loader),
+                    shared_library_link_policy(),
+                    EMBEDDING_MODULE_API_VERSION,
+                    [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
+                )
+                .as_bytes(),
+            );
+            let library_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::Custom("native-shared-graph".to_owned()),
+                &embedding_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                link_inputs,
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&library_key)? {
+                publish_shared_artifacts_with_symbols(
+                    &options.output,
+                    &loader,
+                    header_source.as_bytes(),
+                    &artifact.bytes,
+                    &wrapper_symbol,
+                    &module_api_symbol,
+                )?;
+                return Ok(NativeSharedLibraryReport {
+                    output: options.output.clone(),
+                    loader,
+                    header,
+                    module_symbol: wrapper_symbol,
+                    module_api_symbol,
+                    tool: identity,
+                    cache_hits: NativeSharedLibraryCacheHits {
+                        generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
+                        object: true,
+                        library: true,
+                    },
+                    sizes: NativeSharedLibrarySizes {
+                        generated_c: module_sources
+                            .iter()
+                            .map(|(source, _, _)| source.len() as u64)
+                            .sum::<u64>()
+                            + wrapper_bytes.len() as u64,
+                        object: module_object_infos
+                            .iter()
+                            .map(|(_, size)| *size)
+                            .sum::<u64>()
+                            + wrapper_info.1,
+                        library: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_started.elapsed(),
+                    },
+                });
+            }
+        }
+
         let compile_started = Instant::now();
-        let (module_objects, wrapper_object) = rayon::join(
+        let (module_objects, other_objects) = rayon::join(
             || {
                 let module_keys_ref = &module_keys;
                 let module_sources_ref = &module_sources;
@@ -1311,20 +1712,40 @@ impl NativeBuilder {
                 })
             },
             || {
-                run_worker("shared graph wrapper compile", || {
-                    self.object(
-                        &wrapper_object_key,
-                        &wrapper_bytes,
-                        &paths.wrapper_c,
-                        &paths.wrapper_o,
-                        &wrapper_compile_options,
-                    )
-                })
+                rayon::join(
+                    || {
+                        run_worker("shared graph wrapper compile", || {
+                            self.object(
+                                &wrapper_object_key,
+                                &wrapper_bytes,
+                                &paths.wrapper_c,
+                                &paths.wrapper_o,
+                                &wrapper_compile_options,
+                            )
+                        })
+                    },
+                    || {
+                        run_worker("shared graph prelude compile", || {
+                            self.object(
+                                &prelude_key,
+                                &prelude_bytes,
+                                &paths.prelude_c,
+                                &paths.prelude_o,
+                                &wrapper_compile_options,
+                            )
+                        })
+                    },
+                )
             },
         );
         let module_objects = module_objects?;
+        let (wrapper_object, prelude_object) = other_objects;
         let wrapper_object = wrapper_object?;
-        let compile_elapsed = if module_objects.iter().all(|(_, _, hit)| *hit) && wrapper_object.2 {
+        let prelude_object = prelude_object?;
+        let compile_elapsed = if module_objects.iter().all(|(_, _, hit)| *hit)
+            && wrapper_object.2
+            && prelude_object.2
+        {
             Duration::ZERO
         } else {
             compile_started.elapsed()
@@ -1335,6 +1756,7 @@ impl NativeBuilder {
             .map(|(_, digest, _)| *digest)
             .collect::<Vec<_>>();
         link_inputs.push(number_provider_digest);
+        link_inputs.push(prelude_object.1);
         link_inputs.push(wrapper_object.1);
         let loader = shared_library_loader_path(
             &options.output,
@@ -1373,11 +1795,13 @@ impl NativeBuilder {
         let (library, library_hit, link_elapsed) = match self.lookup(&library_key)? {
             Lookup::Hit(artifact) => (artifact.bytes, true, Duration::ZERO),
             Lookup::Miss => {
-                let mut objects = Vec::with_capacity(modules.len() + 1);
+                let mut objects = Vec::with_capacity(modules.len() + 2);
                 for (index, (object, _, _)) in module_objects.iter().enumerate() {
                     materialize(&paths.module_o[index], object, false)?;
                     objects.push(paths.module_o[index].clone());
                 }
+                materialize(&paths.prelude_o, &prelude_object.0, false)?;
+                objects.push(paths.prelude_o.clone());
                 materialize(&paths.number_provider_a, &number_provider, false)?;
                 materialize(&paths.wrapper_o, &wrapper_object.0, false)?;
                 objects.push(paths.wrapper_o.clone());
@@ -1396,6 +1820,7 @@ impl NativeBuilder {
                     &loader,
                     &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
                     workspace.path(),
+                    self.toolchain.identity().kind,
                 )?;
                 let report =
                     self.toolchain
@@ -1463,12 +1888,13 @@ impl NativeBuilder {
         validate_native_node_builtins(graph)?;
         let total_started = Instant::now();
         let emit_started = Instant::now();
+        let emission = options.realm.emission_executable();
         let mut modules = Vec::with_capacity(graph.module_count());
         let mut logical_paths = Vec::with_capacity(graph.module_count());
         let mut symbols = std::collections::HashSet::with_capacity(graph.module_count());
         for node in graph.modules() {
             let logical_path = logical_module_path(graph.project_root(), &node.path)?;
-            let emitted = emit_native_graph_module(node, &logical_path, &options.realm)?;
+            let emitted = emit_native_graph_module_with_policy(node, &logical_path, &emission)?;
             if !symbols.insert(emitted.symbol.clone()) {
                 return Err(NativeError::SymbolCollision {
                     symbol: emitted.symbol,
@@ -1482,7 +1908,11 @@ impl NativeBuilder {
         let runtime = runtime_source();
 
         let workspace = WorkDirectory::create()?;
-        let paths = GraphBuildPaths::new(workspace.path(), modules.len());
+        let symbol_list = modules
+            .iter()
+            .map(|(_, emitted)| &emitted.symbol)
+            .collect::<Vec<_>>();
+        let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
@@ -1517,6 +1947,20 @@ impl NativeBuilder {
         );
         let (runtime_bytes, runtime_source_digest, runtime_generated_c_cache_hit) =
             self.cached_payload(&runtime_source_key, runtime.as_bytes())?;
+        let prelude_source = kiln_backend_c::runtime_prelude_source_with_policy(&emission);
+        let prelude_source_key = key(
+            ArtifactKind::GeneratedC,
+            format!("kiln-runtime-prelude-{NATIVE_PRELUDE_VERSION}"),
+            Backend::Custom("native-prelude-source".to_owned()),
+            &runtime_abi,
+            &target,
+            CacheProfile::Debug,
+            Digest::hash(b"portable-prelude-c11"),
+            [Digest::hash(prelude_source.as_bytes())],
+        );
+        let (prelude_bytes, prelude_source_digest, _) =
+            self.cached_payload(&prelude_source_key, prelude_source.as_bytes())?;
+
         let launcher_source_key = key(
             ArtifactKind::GeneratedC,
             format!("kiln-graph-launcher-{NATIVE_RUNTIME_VERSION}"),
@@ -1560,6 +2004,16 @@ impl NativeBuilder {
                 [*source_digest],
             ));
         }
+        let prelude_key = key(
+            ArtifactKind::RuntimeLibrary,
+            &compiler,
+            Backend::Custom("native-runtime-prelude".to_owned()),
+            &runtime_abi,
+            &target,
+            profile.cache(),
+            object_options,
+            [prelude_source_digest],
+        );
         let runtime_key = key(
             ArtifactKind::RuntimeLibrary,
             &compiler,
@@ -1580,7 +2034,94 @@ impl NativeBuilder {
             object_options,
             [launcher_source_digest],
         );
-        let (module_objects, (runtime_object, launcher_object)) = rayon::join(
+
+        let link_options_digest = Digest::hash(
+            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
+        );
+
+        let mut module_object_infos = Vec::with_capacity(module_keys.len());
+        let mut all_modules_cached = true;
+        for key in &module_keys {
+            match self.lookup_digest(key)? {
+                Some(info) => module_object_infos.push(info),
+                None => {
+                    all_modules_cached = false;
+                    break;
+                }
+            }
+        }
+        if all_modules_cached
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+            && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
+            && let Some(launcher_info) = self.lookup_digest(&launcher_key)?
+        {
+            let mut link_inputs = module_object_infos
+                .iter()
+                .map(|(digest, _)| *digest)
+                .collect::<Vec<_>>();
+            link_inputs.push(prelude_info.0);
+            link_inputs.push(runtime_info.0);
+            link_inputs.push(launcher_info.0);
+            link_inputs.push(number_provider_digest);
+            let candidate_executable_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::C,
+                &runtime_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                link_inputs,
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&candidate_executable_key)? {
+                debug_assert_eq!(artifact.digest, Digest::hash(&artifact.bytes));
+                materialize(&options.output, &artifact.bytes, true)?;
+                let mut module_artifacts = Vec::with_capacity(modules.len());
+                for (index, _) in modules.iter().enumerate() {
+                    module_artifacts.push(ModuleArtifactInfo {
+                        logical_path: Some(logical_paths[index].clone()),
+                        generated_c_cache_hit: module_sources[index].2,
+                        object_cache_hit: true,
+                        generated_c_bytes: module_sources[index].0.len() as u64,
+                        object_bytes: module_object_infos[index].1,
+                    });
+                }
+                let total_elapsed = total_started.elapsed();
+                return Ok(NativeBuildReport {
+                    output: options.output.clone(),
+                    module_symbol: modules[0].1.symbol.clone(),
+                    tool: identity,
+                    cache_hits: CacheHits {
+                        generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
+                        application_object: true,
+                        runtime_object: true,
+                        launcher_object: true,
+                        executable: true,
+                    },
+                    sizes: ArtifactSizes {
+                        generated_c: module_sources
+                            .iter()
+                            .map(|(source, _, _)| source.len() as u64)
+                            .sum(),
+                        application_object: module_object_infos.iter().map(|(_, size)| *size).sum(),
+                        runtime_object: runtime_info.1,
+                        launcher_object: launcher_info.1,
+                        executable: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_elapsed,
+                    },
+                    module_artifacts,
+                    runtime_generated_c_cache_hit,
+                    launcher_generated_c_cache_hit,
+                });
+            }
+        }
+
+        let (module_objects, ((prelude_object, runtime_object), launcher_object)) = rayon::join(
             || {
                 let module_keys_ref = &module_keys;
                 let module_sources_ref = &module_sources;
@@ -1601,15 +2142,30 @@ impl NativeBuilder {
             || {
                 rayon::join(
                     || {
-                        run_worker("runtime compile", || {
-                            self.object(
-                                &runtime_key,
-                                &runtime_bytes,
-                                &paths.runtime_c,
-                                &paths.runtime_o,
-                                &compile_options,
-                            )
-                        })
+                        rayon::join(
+                            || {
+                                run_worker("prelude compile", || {
+                                    self.object(
+                                        &prelude_key,
+                                        &prelude_bytes,
+                                        &paths.prelude_c,
+                                        &paths.prelude_o,
+                                        &compile_options,
+                                    )
+                                })
+                            },
+                            || {
+                                run_worker("runtime compile", || {
+                                    self.object(
+                                        &runtime_key,
+                                        &runtime_bytes,
+                                        &paths.runtime_c,
+                                        &paths.runtime_o,
+                                        &compile_options,
+                                    )
+                                })
+                            },
+                        )
                     },
                     || {
                         run_worker("launcher compile", || {
@@ -1626,16 +2182,18 @@ impl NativeBuilder {
             },
         );
         let module_objects = module_objects?;
-        let runtime_object = runtime_object?;
-        let launcher_object = launcher_object?;
-        let (runtime_object, runtime_digest, runtime_hit, _) = runtime_object;
-        let (launcher_object, launcher_digest, launcher_hit, _) = launcher_object;
-        let compile_elapsed =
-            if module_objects.iter().all(|(_, _, hit)| *hit) && runtime_hit && launcher_hit {
-                Duration::ZERO
-            } else {
-                compile_started.elapsed()
-            };
+        let (prelude_object, prelude_digest, prelude_hit, _) = prelude_object?;
+        let (runtime_object, runtime_digest, runtime_hit, _) = runtime_object?;
+        let (launcher_object, launcher_digest, launcher_hit, _) = launcher_object?;
+        let compile_elapsed = if module_objects.iter().all(|(_, _, hit)| *hit)
+            && prelude_hit
+            && runtime_hit
+            && launcher_hit
+        {
+            Duration::ZERO
+        } else {
+            compile_started.elapsed()
+        };
 
         let link_options_digest = Digest::hash(
             format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
@@ -1644,6 +2202,7 @@ impl NativeBuilder {
             .iter()
             .map(|(_, digest, _)| *digest)
             .collect::<Vec<_>>();
+        link_inputs.push(prelude_digest);
         link_inputs.push(runtime_digest);
         link_inputs.push(launcher_digest);
         link_inputs.push(number_provider_digest);
@@ -1663,14 +2222,16 @@ impl NativeBuilder {
         {
             Lookup::Hit(artifact) => (artifact.bytes, artifact.digest, true, Duration::ZERO),
             Lookup::Miss => {
-                let mut objects = Vec::with_capacity(modules.len() + 2);
+                let mut objects = Vec::with_capacity(modules.len() + 3);
                 for (index, (object, _, _)) in module_objects.iter().enumerate() {
                     materialize(&paths.module_o[index], object, false)?;
                     objects.push(paths.module_o[index].clone());
                 }
+                materialize(&paths.prelude_o, &prelude_object, false)?;
                 materialize(&paths.runtime_o, &runtime_object, false)?;
                 materialize(&paths.launcher_o, &launcher_object, false)?;
                 materialize(&paths.number_provider_a, &number_provider, false)?;
+                objects.push(paths.prelude_o.clone());
                 objects.push(paths.runtime_o.clone());
                 objects.push(paths.launcher_o.clone());
                 let mut link_options = LinkOptions {
@@ -1839,6 +2400,12 @@ impl NativeBuilder {
         #[cfg(test)]
         self.assert_live_cache_identity(key);
         Ok(self.cache.lookup(key)?)
+    }
+
+    fn lookup_digest(&self, key: &ArtifactKey) -> Result<Option<(Digest, u64)>, NativeError> {
+        #[cfg(test)]
+        self.assert_live_cache_identity(key);
+        Ok(self.cache.lookup_digest(key)?)
     }
 
     #[cfg(test)]
@@ -2062,6 +2629,14 @@ fn emit_native_graph_module(
     logical_path: &str,
     policy: &NativeRealmPolicy,
 ) -> Result<kiln_backend_c::CModule, NativeError> {
+    emit_native_graph_module_with_policy(node, logical_path, &policy.emission())
+}
+
+fn emit_native_graph_module_with_policy(
+    node: &kiln_module_graph::ModuleNode,
+    logical_path: &str,
+    policy: &EmissionPolicy,
+) -> Result<kiln_backend_c::CModule, NativeError> {
     match node.source {
         ModuleSource::NodeBuiltin(builtin) => {
             let materializer =
@@ -2079,7 +2654,7 @@ fn emit_native_graph_module(
         ModuleSource::CommonJs => Ok(emit_commonjs_module_with_logical_path_and_policy(
             &node.program,
             logical_path,
-            policy.emission(),
+            policy.clone(),
         )?),
         ModuleSource::Json => {
             let source = node.data.as_deref().ok_or_else(|| {
@@ -2102,7 +2677,7 @@ fn emit_native_graph_module(
         ModuleSource::Source => Ok(emit_module_with_logical_path_and_policy(
             &node.program,
             logical_path,
-            policy.emission(),
+            policy.clone(),
         )?),
     }
 }
@@ -5263,6 +5838,8 @@ impl Drop for WorkDirectory {
 struct BuildPaths {
     module_c: PathBuf,
     module_o: PathBuf,
+    prelude_c: PathBuf,
+    prelude_o: PathBuf,
     runtime_c: PathBuf,
     runtime_o: PathBuf,
     launcher_c: PathBuf,
@@ -5274,6 +5851,8 @@ struct BuildPaths {
 struct SharedLibraryPaths {
     module_c: PathBuf,
     module_o: PathBuf,
+    prelude_c: PathBuf,
+    prelude_o: PathBuf,
     number_provider_a: PathBuf,
     library: PathBuf,
 }
@@ -5281,6 +5860,8 @@ struct SharedLibraryPaths {
 struct SharedGraphLibraryPaths {
     module_c: Vec<PathBuf>,
     module_o: Vec<PathBuf>,
+    prelude_c: PathBuf,
+    prelude_o: PathBuf,
     number_provider_a: PathBuf,
     wrapper_c: PathBuf,
     wrapper_o: PathBuf,
@@ -5290,6 +5871,8 @@ struct SharedGraphLibraryPaths {
 struct GraphBuildPaths {
     module_c: Vec<PathBuf>,
     module_o: Vec<PathBuf>,
+    prelude_c: PathBuf,
+    prelude_o: PathBuf,
     runtime_c: PathBuf,
     runtime_o: PathBuf,
     launcher_c: PathBuf,
@@ -5299,16 +5882,19 @@ struct GraphBuildPaths {
 }
 
 impl GraphBuildPaths {
-    fn new(root: &Path, module_count: usize) -> Self {
-        let mut module_c = Vec::with_capacity(module_count);
-        let mut module_o = Vec::with_capacity(module_count);
-        for index in 0..module_count {
-            module_c.push(root.join(format!("module-{index}.c")));
-            module_o.push(root.join(format!("module-{index}.o")));
+    fn new(root: &Path, symbols: &[impl AsRef<str>]) -> Self {
+        let mut module_c = Vec::with_capacity(symbols.len());
+        let mut module_o = Vec::with_capacity(symbols.len());
+        for symbol in symbols {
+            let symbol = symbol.as_ref();
+            module_c.push(root.join(format!("{symbol}.c")));
+            module_o.push(root.join(format!("{symbol}.o")));
         }
         Self {
             module_c,
             module_o,
+            prelude_c: root.join("prelude.c"),
+            prelude_o: root.join("prelude.o"),
             runtime_c: root.join("runtime.c"),
             runtime_o: root.join("runtime.o"),
             launcher_c: root.join("launcher.c"),
@@ -5328,6 +5914,8 @@ impl BuildPaths {
         Self {
             module_c: root.join("module.c"),
             module_o: root.join("module.o"),
+            prelude_c: root.join("prelude.c"),
+            prelude_o: root.join("prelude.o"),
             runtime_c: root.join("runtime.c"),
             runtime_o: root.join("runtime.o"),
             launcher_c: root.join("launcher.c"),
@@ -5347,6 +5935,8 @@ impl SharedLibraryPaths {
         Self {
             module_c: root.join("module.c"),
             module_o: root.join("module.o"),
+            prelude_c: root.join("prelude.c"),
+            prelude_o: root.join("prelude.o"),
             number_provider_a: root.join("libkiln_native_number_provider.a"),
             library: root.join(shared_library_name()),
         }
@@ -5354,16 +5944,19 @@ impl SharedLibraryPaths {
 }
 
 impl SharedGraphLibraryPaths {
-    fn new(root: &Path, module_count: usize) -> Self {
-        let mut module_c = Vec::with_capacity(module_count);
-        let mut module_o = Vec::with_capacity(module_count);
-        for index in 0..module_count {
-            module_c.push(root.join(format!("module-{index}.c")));
-            module_o.push(root.join(format!("module-{index}.o")));
+    fn new(root: &Path, symbols: &[impl AsRef<str>]) -> Self {
+        let mut module_c = Vec::with_capacity(symbols.len());
+        let mut module_o = Vec::with_capacity(symbols.len());
+        for symbol in symbols {
+            let symbol = symbol.as_ref();
+            module_c.push(root.join(format!("{symbol}.c")));
+            module_o.push(root.join(format!("{symbol}.o")));
         }
         Self {
             module_c,
             module_o,
+            prelude_c: root.join("prelude.c"),
+            prelude_o: root.join("prelude.o"),
             number_provider_a: root.join("libkiln_native_number_provider.a"),
             wrapper_c: root.join("wrapper.c"),
             wrapper_o: root.join("wrapper.o"),
@@ -5494,6 +6087,7 @@ fn configure_shared_library_link(
     output: &Path,
     public_symbols: &[&str],
     workspace: &Path,
+    compiler: CompilerKind,
 ) -> Result<(), NativeError> {
     let identity = shared_library_link_identity(output);
     #[cfg(target_os = "macos")]
@@ -5528,7 +6122,13 @@ fn configure_shared_library_link(
         options
             .extra_args
             .push(format!("-Wl,--version-script,{}", exports.to_string_lossy()).into());
-        options.extra_args.push("-Wl,--exclude-libs,ALL".into());
+        // `zig cc` rejects `--exclude-libs` outright -- "unsupported linker arg" -- rather than
+        // passing it down, so a shared build under zig cannot use it. Nothing is lost: the version
+        // script above ends in `local: *;`, which already hides every symbol not named in it, and
+        // `--exclude-libs` was the second lock on the same door.
+        if compiler != CompilerKind::Zig {
+            options.extra_args.push("-Wl,--exclude-libs,ALL".into());
+        }
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     let _ = (options, identity, public_symbols, workspace);
@@ -5561,6 +6161,34 @@ mod tests {
         }
     }
 
+    fn shared_test_cache_root() -> PathBuf {
+        static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+        CACHE_DIR
+            .get_or_init(|| {
+                if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+                    let target_cache =
+                        Path::new(&manifest_dir).join("../../target/kiln-test-cache");
+                    if fs::create_dir_all(&target_cache).is_ok() {
+                        return target_cache;
+                    }
+                }
+                let fallback = std::env::temp_dir()
+                    .join(format!("kiln-test-shared-cache-{}", std::process::id()));
+                let _ = fs::create_dir_all(&fallback);
+                fallback
+            })
+            .clone()
+    }
+
+    fn test_cache(local_root: impl Into<PathBuf>) -> ArtifactCache {
+        let local = local_root.into();
+        let shared = shared_test_cache_root();
+        ArtifactCache::with_layers([
+            kiln_artifact_cache::CacheLayer::writable(shared),
+            kiln_artifact_cache::CacheLayer::writable(local),
+        ])
+    }
+
     struct TestDirectory {
         path: PathBuf,
     }
@@ -5574,6 +6202,14 @@ mod tests {
             ));
             fs::create_dir(&path).expect("create native test directory");
             Self { path }
+        }
+
+        fn cache(&self) -> ArtifactCache {
+            test_cache(self.path.join("cache"))
+        }
+
+        fn builder(&self, toolchain: Toolchain) -> NativeBuilder {
+            NativeBuilder::new(self.cache(), toolchain)
         }
     }
 
@@ -5601,7 +6237,8 @@ mod tests {
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = project
+            .builder(toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -5806,15 +6443,15 @@ mod tests {
             return;
         };
         let root = TestDirectory::new("kiln-native-cache-identities");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let identities = builder
             .live_cache_identities()
             .expect("current native identities are enumerable");
 
         assert_eq!(
             identities.len(),
-            34,
-            "six generated-source families, one number provider, and nine stage families across three profiles"
+            41,
+            "seven generated-source families, one number provider, and eleven stage families across three profiles"
         );
 
         let tool = builder.toolchain().identity();
@@ -5947,7 +6584,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
             eprintln!("skipping native querystring integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -6077,7 +6714,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6163,7 +6800,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6393,7 +7030,7 @@ console.log("pass");
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6451,7 +7088,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             node.source,
             ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Net)
         )));
-        let builder = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain);
         let report = builder
             .build_graph(
                 &graph,
@@ -6564,7 +7201,7 @@ socket.on("close", () => {{
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6613,7 +7250,7 @@ socket.on("close", () => {{
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6700,7 +7337,7 @@ server.listen({port}, "127.0.0.1");
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6891,7 +7528,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             node.source,
             ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Http)
         )));
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7011,7 +7648,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         )
         .expect("Fastify source graph compiles");
         let project = TestDirectory::new("kiln-native-fastify");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7116,7 +7753,7 @@ server.listen(0, "127.0.0.1", () => {
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7184,7 +7821,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7309,7 +7946,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7871,7 +8508,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             eprintln!("skipping native Realm graph integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -7925,7 +8562,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         )
         .expect("process.argv source compiles");
         let output = project.path.join("program");
-        NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7993,7 +8630,7 @@ setTimeout(function () { console.log(order.join(",")); }, 0);
             OxcFrontend,
         )
         .expect("process.nextTick source compiles");
-        let run = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let run = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -8024,10 +8661,7 @@ setTimeout(function () { console.log(order.join(",")); }, 0);
         };
         let root = TestDirectory::new("kiln-native-embedded-realm-graph");
         let graph = realm_scheduling_graph(&root.path.join("project"));
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let library = builder
             .build_shared_graph(
                 &graph,
@@ -8323,7 +8957,7 @@ int main(void) {{
             eprintln!("skipping native star integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -8443,7 +9077,7 @@ int main(void) {{
             eprintln!("skipping native CommonJS execution: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -8592,7 +9226,7 @@ int main(void) {{
             eprintln!("skipping native builtin projection integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -8641,7 +9275,7 @@ int main(void) {{
             eprintln!("skipping native CommonJS exit-status integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -8694,7 +9328,7 @@ int main(void) {{
             eprintln!("skipping native CommonJS callable integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -8747,7 +9381,7 @@ console.log(written === read, read.realmMarker.answer);"#,
             eprintln!("skipping realm callable-property integration: no C compiler found");
             return;
         };
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -8800,7 +9434,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping realm-singleton integration: no C compiler found");
             return;
         };
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -8985,7 +9619,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping native builtin namespace integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -9041,7 +9675,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping native CommonJS JSON execution: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -9083,7 +9717,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping native namespace integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -9148,7 +9782,7 @@ console.log(direct === via, via.answer);
             OxcFrontend,
         )
         .expect("namespace re-export graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -9237,7 +9871,7 @@ console.log(direct === via, via.answer);
             OxcFrontend,
         )
         .expect("CommonJS re-export graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -9313,6 +9947,8 @@ console.log(direct === via, via.answer);
         assert!(second.build.cache_hits.runtime_object);
         assert!(second.build.cache_hits.launcher_object);
         assert!(second.build.cache_hits.executable);
+        assert_eq!(second.build.timings.compile, Duration::ZERO);
+        assert_eq!(second.build.timings.link, Duration::ZERO);
         assert_eq!(second.exit_code, Some(0));
         assert_eq!(second.stdout, b"native 42\n");
         assert!(second.stderr.is_empty());
@@ -9568,10 +10204,7 @@ int main(void) {
             return;
         };
         let root = TestDirectory::new("kiln-native-owned-result-test");
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
@@ -9714,19 +10347,16 @@ int main(void) {{
             local_count: 0,
             functions: Vec::new(),
         };
-        let report = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        )
-        .build_shared_library(
-            &program,
-            &NativeBuildOptions {
-                output: root.path.join(shared_library_name()),
-                profile: NativeProfile::Dev,
-                realm: NativeRealmPolicy::default(),
-            },
-        )
-        .expect("build malformed-host scalar library");
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+            .build_shared_library(
+                &program,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("build malformed-host scalar library");
         let header_name = report
             .header
             .file_name()
@@ -9826,19 +10456,16 @@ int main(void) {{
             thrown.clone()
         })
         .expect("construct throw graph");
-        let report = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        )
-        .build_shared_graph(
-            &graph,
-            &NativeBuildOptions {
-                output: root.path.join(shared_library_name()),
-                profile: NativeProfile::Dev,
-                realm: NativeRealmPolicy::default(),
-            },
-        )
-        .expect("build throw graph");
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("build throw graph");
         let header_name = report
             .header
             .file_name()
@@ -10033,7 +10660,7 @@ int main(void) {{
             OxcFrontend,
         )
         .expect("catchable JSON exception source compiles");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let caught = builder
             .run_graph(
                 &graph,
@@ -10237,6 +10864,8 @@ int main(void) {{
         // Diagnostics use logical project-relative paths, so sibling roots reuse launchers too.
         assert!(second.build.cache_hits.launcher_object);
         assert!(second.build.cache_hits.executable);
+        assert_eq!(second.build.timings.compile, Duration::ZERO);
+        assert_eq!(second.build.timings.link, Duration::ZERO);
         assert_eq!(second.stdout, b"42\n");
         assert_eq!(second.result, Some(HostValue::Number(99.0_f64.to_bits())));
 
@@ -10497,10 +11126,7 @@ int main(void) {{
         assert!(!wrapper.contains("static kiln_value kiln_export"));
         assert!(!wrapper.contains("kiln_cli_host_call"));
         assert!(!wrapper.contains("setlocale"));
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let report = builder
             .build_shared_graph(
                 &graph,
@@ -10708,10 +11334,7 @@ int main(void) {{
                 }
             })
             .expect("construct shared host graph");
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let report = builder
             .build_shared_graph(
                 &graph,
@@ -10880,10 +11503,7 @@ int main(void) {{
             local_count: 0,
             functions: Vec::new(),
         };
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let first = builder
             .build_shared_library(
                 &program(11.0),
@@ -11012,10 +11632,7 @@ int main(void) {{
             "logical-path entries must collide for this interposition regression"
         );
 
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let first = builder
             .build_shared_graph(
                 &first_graph,
@@ -11231,7 +11848,7 @@ int main(int argc, char **argv) {{
             return;
         };
         let root = TestDirectory::new("kiln-native-host-clock");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
@@ -11299,7 +11916,7 @@ int main(int argc, char **argv) {{
             return;
         };
         let root = TestDirectory::new("kiln-native-entropy");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
@@ -11385,7 +12002,7 @@ console.log(first === Math.random());"#,
             eprintln!("skipping native graph entropy integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         for (name, entropy) in [
             ("default", NativeEntropyPolicy::Deterministic),
             ("seeded", NativeEntropyPolicy::Seeded(7)),

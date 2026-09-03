@@ -481,6 +481,35 @@ impl ArtifactCache {
         self.lookup(key)
     }
 
+    /// Check whether an artifact exists in cache and return its payload digest and size without
+    /// reading or allocating the entire payload into memory.
+    pub fn lookup_digest(&self, key: &ArtifactKey) -> Result<Option<(Digest, u64)>, CacheError> {
+        let key_digest = key.digest();
+        for layer in &self.layers {
+            if !cache_parent_exists(layer.root(), key)? {
+                continue;
+            }
+            let path = path_for_root(layer.root(), key);
+            let mut file = match std::fs::File::open(&path) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(io_error("open cache artifact header", &path, err)),
+            };
+            let mut header = [0u8; HEADER_BYTES];
+            use std::io::Read;
+            if file.read_exact(&mut header).is_err() {
+                continue;
+            }
+            if let Ok((payload_digest, payload_len)) = decode_header(&path, key_digest, &header) {
+                if self.refresh_recency_on_hit && layer.is_writable() {
+                    eviction::refresh_recency(&path);
+                }
+                return Ok(Some((payload_digest, payload_len as u64)));
+            }
+        }
+        Ok(None)
+    }
+
     /// Atomically store an artifact in the first writable layer.
     ///
     /// An existing record for the same key is accepted only when its payload is identical. A
@@ -767,11 +796,11 @@ fn encode_header(
     header
 }
 
-fn decode_record(
+fn decode_header(
     path: &Path,
     expected_key: Digest,
     bytes: &[u8],
-) -> Result<(Digest, Vec<u8>), CacheError> {
+) -> Result<(Digest, usize), CacheError> {
     let corrupt = |reason: String| CacheError::Corrupt {
         path: path.to_owned(),
         reason,
@@ -808,6 +837,19 @@ fn decode_record(
     let payload_len = u64::from_le_bytes(length_bytes);
     let payload_len_usize = usize::try_from(payload_len)
         .map_err(|_| corrupt("record payload length does not fit in this process".to_owned()))?;
+    Ok((payload_digest, payload_len_usize))
+}
+
+fn decode_record(
+    path: &Path,
+    expected_key: Digest,
+    bytes: &[u8],
+) -> Result<(Digest, Vec<u8>), CacheError> {
+    let corrupt = |reason: String| CacheError::Corrupt {
+        path: path.to_owned(),
+        reason,
+    };
+    let (payload_digest, payload_len_usize) = decode_header(path, expected_key, bytes)?;
     let expected_total = HEADER_BYTES
         .checked_add(payload_len_usize)
         .ok_or_else(|| corrupt("record payload length overflows record size".to_owned()))?;
@@ -937,8 +979,13 @@ mod tests {
         let first = key("one");
         let second = key("two");
         assert_eq!(cache.lookup(&first).expect("lookup succeeds"), Lookup::Miss);
+        assert_eq!(cache.lookup_digest(&first).expect("lookup succeeds"), None);
         let stored = cache.put(&first, b"generated C").expect("store succeeds");
         assert_eq!(stored.bytes_written, 11);
+        assert_eq!(
+            cache.lookup_digest(&first).expect("lookup succeeds"),
+            Some((Digest::hash(b"generated C"), 11))
+        );
         let Lookup::Hit(hit) = cache.lookup(&first).expect("lookup succeeds") else {
             panic!("stored artifact should hit");
         };

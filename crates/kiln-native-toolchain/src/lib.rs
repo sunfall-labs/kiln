@@ -667,6 +667,37 @@ impl fmt::Display for ToolchainError {
 
 impl std::error::Error for ToolchainError {}
 
+/// The `-target` `zig cc` needs to agree with the Rust side, or `None` to leave it alone.
+///
+/// `zig cc` defaults to musl on Linux. The private number provider is a Rust staticlib built for
+/// the *host* triple, which on an ordinary Linux box is glibc, so the two disagree about libc and
+/// the link fails with a target mismatch rather than a missing symbol. Zig can target glibc
+/// perfectly well -- being a cross compiler is the point of it -- it simply has to be told.
+///
+/// The host's ABI is known without probing anything: this crate is compiled for the same target
+/// the provider will be, so `cfg!` answers it. Zig spells a triple `arch-os-abi`, with no vendor
+/// field, which is why this is built rather than reused from Rust's own triple.
+///
+/// `None` everywhere else on purpose. On macOS zig's default is already the host, and on a musl
+/// host so is musl; forcing a triple there would replace a correct default with a guess.
+fn zig_host_target() -> Option<String> {
+    if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        Some(format!("{}-linux-gnu", std::env::consts::ARCH))
+    } else {
+        None
+    }
+}
+
+/// `zig cc`, plus the target when this host needs one named.
+fn zig_command_prefix() -> Vec<OsString> {
+    let mut prefix = vec![OsString::from("cc")];
+    if let Some(target) = zig_host_target() {
+        prefix.push(OsString::from("-target"));
+        prefix.push(OsString::from(target));
+    }
+    prefix
+}
+
 /// A configured, versioned C compiler driver.
 pub struct Toolchain {
     identity: ToolIdentity,
@@ -714,7 +745,8 @@ impl Toolchain {
     pub fn discover_with_runner(runner: Arc<dyn ProcessRunner>) -> Result<Self, ToolchainError> {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let entries = std::env::split_paths(&path).collect::<Vec<_>>();
-        Self::discover_in_path_entries(&entries, runner)
+        let cc = std::env::var_os("CC");
+        Self::discover_in_path_entries_with_cc(&entries, cc.as_deref(), runner)
     }
 
     /// Find a compiler in explicit path entries.  This is useful for hermetic callers and tests.
@@ -722,6 +754,42 @@ impl Toolchain {
         entries: &[PathBuf],
         runner: Arc<dyn ProcessRunner>,
     ) -> Result<Self, ToolchainError> {
+        Self::discover_in_path_entries_with_cc(entries, None, runner)
+    }
+
+    /// Find a compiler in explicit path entries, optionally honoring an explicit `CC` specification.
+    pub fn discover_in_path_entries_with_cc(
+        entries: &[PathBuf],
+        cc: Option<&std::ffi::OsStr>,
+        runner: Arc<dyn ProcessRunner>,
+    ) -> Result<Self, ToolchainError> {
+        if let Some(cc) = cc {
+            let cc_trimmed = cc.to_str().map(str::trim).unwrap_or("");
+            if !cc_trimmed.is_empty() {
+                let mut parts = cc_trimmed.split_whitespace();
+                let binary = parts.next().unwrap_or(cc_trimmed);
+                let binary_path = Path::new(binary);
+
+                if binary_path.is_absolute() || binary_path.components().count() > 1 {
+                    if is_executable_file(binary_path) {
+                        return Self::from_compiler_with_runner(binary_path, runner);
+                    }
+                } else {
+                    for entry in entries {
+                        let path = entry.join(binary);
+                        if is_executable_file(&path)
+                            && let Ok(toolchain) =
+                                Self::from_compiler_with_runner(&path, Arc::clone(&runner))
+                        {
+                            return Ok(toolchain);
+                        }
+                    }
+                }
+                return Err(ToolchainError::NoCompiler {
+                    searched: vec![cc_trimmed.to_owned()],
+                });
+            }
+        }
         let searched = DEFAULT_COMPILER_CANDIDATES
             .iter()
             .map(|candidate| (*candidate).to_owned())
@@ -792,7 +860,13 @@ impl Toolchain {
         let target_probe = if kind == CompilerKind::Zig {
             CommandSpec::new(
                 path.clone(),
-                vec![OsString::from("cc"), OsString::from("-dumpmachine")],
+                {
+                    // Asked with the same `-target` it will be compiled with, or the probe would
+                    // report musl and everything downstream would key on a triple never used.
+                    let mut probe = zig_command_prefix();
+                    probe.push(OsString::from("-dumpmachine"));
+                    probe
+                },
                 None,
             )
             .with_environment_lock(
@@ -814,7 +888,7 @@ impl Toolchain {
             })
             .unwrap_or_else(|| "unknown".to_owned());
         let command_prefix = if kind == CompilerKind::Zig {
-            vec![OsString::from("cc")]
+            zig_command_prefix()
         } else {
             Vec::new()
         };
@@ -929,6 +1003,17 @@ impl Toolchain {
         );
         for library in &options.libraries {
             args.push(OsString::from(format!("-l{library}")));
+        }
+        // The private number provider is a Rust staticlib, and Rust's panic machinery calls the
+        // unwinder: `_Unwind_RaiseException`, `_Unwind_Backtrace`, `rust_eh_personality` and the
+        // rest. `gcc` and `clang` link that implicitly, so nothing had to ask for it; `zig cc`
+        // links only what it is told, and the failure is thirteen undefined `_Unwind_*` symbols
+        // pointing into an archive that looks, from the message, like it is missing pieces.
+        //
+        // Zig ships the unwinder, so naming it is the whole fix. Last, after the archives that
+        // reference it, because a static link resolves left to right.
+        if self.identity.kind == CompilerKind::Zig {
+            args.push(OsString::from("-lunwind"));
         }
         args.extend(options.extra_args.iter().cloned());
         args.push(OsString::from("-o"));
@@ -1479,8 +1564,10 @@ mod tests {
         assert_eq!(toolchain.identity().version, "0.14.0");
         assert_eq!(toolchain.identity().target, "aarch64-macos");
 
-        // The version probe is followed by `zig cc -dumpmachine`; the latter is the target
-        // query understood by Zig's C driver rather than a shell-expanded command.
+        // The version probe is followed by `zig cc [-target <host>] -dumpmachine`; the latter is
+        // the target query understood by Zig's C driver rather than a shell-expanded command.
+        // The `-target` is present exactly where `zig_host_target` says the default is wrong, and
+        // the probe has to carry it or it would report a triple nothing is built with.
         let runner_impl = Arc::new(FakeRunner::new(
             [
                 ProcessOutput::success("0.14.0\n", ""),
@@ -1491,10 +1578,18 @@ mod tests {
         let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
         let _ = Toolchain::from_compiler_with_runner("/opt/zig", runner).expect("probe");
         let commands = runner_impl.commands();
-        assert_eq!(
-            commands[1].args,
-            [OsString::from("cc"), OsString::from("-dumpmachine")]
-        );
+        let mut expected_probe = zig_command_prefix();
+        expected_probe.push(OsString::from("-dumpmachine"));
+        assert_eq!(commands[1].args, expected_probe);
+        assert_eq!(commands[1].args.first(), Some(&OsString::from("cc")));
+        // On a glibc Linux host the default really is wrong, so the target has to be named.
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            assert!(
+                commands[1].args.contains(&OsString::from("-target")),
+                "a glibc host must ask zig for glibc: {:?}",
+                commands[1].args
+            );
+        }
         assert_eq!(
             commands[1]
                 .environment
@@ -1772,5 +1867,58 @@ mod tests {
             .expect("shared link");
         assert!(report.output_size > 0);
         fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
+    #[test]
+    fn discover_with_cc_selects_explicit_compiler() {
+        let directory = temp_dir("cc-discovery");
+        let gcc_path = directory.join("gcc");
+        let clang_path = directory.join("clang");
+        fs::write(&gcc_path, "").expect("write fake gcc");
+        fs::write(&clang_path, "").expect("write fake clang");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gcc_path, fs::Permissions::from_mode(0o755)).expect("chmod gcc");
+            fs::set_permissions(&clang_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod clang");
+        }
+
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("gcc (Ubuntu 13.2.0) 13.2.0\n", ""),
+                ProcessOutput::success("x86_64-linux-gnu\n", ""),
+            ],
+            false,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+
+        let toolchain = Toolchain::discover_in_path_entries_with_cc(
+            &[directory.clone()],
+            Some(std::ffi::OsStr::new("gcc")),
+            runner,
+        )
+        .expect("discover explicit gcc");
+
+        assert_eq!(toolchain.identity().kind, CompilerKind::Gcc);
+        assert_eq!(toolchain.identity().path, gcc_path);
+
+        let runner_empty: Arc<dyn ProcessRunner> = Arc::new(FakeRunner::new([], false));
+        let error = Toolchain::discover_in_path_entries_with_cc(
+            &[directory.clone()],
+            Some(std::ffi::OsStr::new("nonexistent-cc")),
+            runner_empty,
+        )
+        .expect_err("nonexistent CC must fail");
+
+        match error {
+            ToolchainError::NoCompiler { searched } => {
+                assert_eq!(searched, vec!["nonexistent-cc".to_owned()]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        fs::remove_dir_all(directory).expect("cleanup");
     }
 }

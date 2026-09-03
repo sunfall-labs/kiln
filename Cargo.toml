@@ -193,3 +193,8 @@ debug = 0
 opt-level = 0
 debug = 1
 incremental = true
+
+# Optimize external dependencies (parsers, regex, unicode, tokio) during dev & test
+[profile.dev.package."*"]
+opt-level = 2
+
