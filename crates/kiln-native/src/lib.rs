@@ -1460,7 +1460,11 @@ impl NativeBuilder {
         header_source.shrink_to_fit();
 
         let workspace = WorkDirectory::create()?;
-        let paths = SharedGraphLibraryPaths::new(workspace.path(), modules.len());
+        let symbol_list = modules
+            .iter()
+            .map(|(_, emitted)| &emitted.symbol)
+            .collect::<Vec<_>>();
+        let paths = SharedGraphLibraryPaths::new(workspace.path(), &symbol_list);
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
@@ -1904,7 +1908,11 @@ impl NativeBuilder {
         let runtime = runtime_source();
 
         let workspace = WorkDirectory::create()?;
-        let paths = GraphBuildPaths::new(workspace.path(), modules.len());
+        let symbol_list = modules
+            .iter()
+            .map(|(_, emitted)| &emitted.symbol)
+            .collect::<Vec<_>>();
+        let paths = GraphBuildPaths::new(workspace.path(), &symbol_list);
         let identity = self.toolchain.identity().clone();
         let profile = options.profile;
         let module_abi = module_abi_identity();
@@ -5822,12 +5830,13 @@ struct GraphBuildPaths {
 }
 
 impl GraphBuildPaths {
-    fn new(root: &Path, module_count: usize) -> Self {
-        let mut module_c = Vec::with_capacity(module_count);
-        let mut module_o = Vec::with_capacity(module_count);
-        for index in 0..module_count {
-            module_c.push(root.join(format!("module-{index}.c")));
-            module_o.push(root.join(format!("module-{index}.o")));
+    fn new(root: &Path, symbols: &[impl AsRef<str>]) -> Self {
+        let mut module_c = Vec::with_capacity(symbols.len());
+        let mut module_o = Vec::with_capacity(symbols.len());
+        for symbol in symbols {
+            let symbol = symbol.as_ref();
+            module_c.push(root.join(format!("{symbol}.c")));
+            module_o.push(root.join(format!("{symbol}.o")));
         }
         Self {
             module_c,
@@ -5883,12 +5892,13 @@ impl SharedLibraryPaths {
 }
 
 impl SharedGraphLibraryPaths {
-    fn new(root: &Path, module_count: usize) -> Self {
-        let mut module_c = Vec::with_capacity(module_count);
-        let mut module_o = Vec::with_capacity(module_count);
-        for index in 0..module_count {
-            module_c.push(root.join(format!("module-{index}.c")));
-            module_o.push(root.join(format!("module-{index}.o")));
+    fn new(root: &Path, symbols: &[impl AsRef<str>]) -> Self {
+        let mut module_c = Vec::with_capacity(symbols.len());
+        let mut module_o = Vec::with_capacity(symbols.len());
+        for symbol in symbols {
+            let symbol = symbol.as_ref();
+            module_c.push(root.join(format!("{symbol}.c")));
+            module_o.push(root.join(format!("{symbol}.o")));
         }
         Self {
             module_c,
