@@ -4386,3 +4386,24 @@ real node 60/60 idle and 40/40 loaded, which the timer-anchored versions never d
 
 `conformance/node/UPSTREAM.md` now records why the oracle is the settlement and not a timer.
 Restoring the timer would look like tightening the test and would be putting the flake back.
+
+## Conformance test runner parallelization (2026-09-03, Antigravity)
+
+The three top-level runner scripts (`scripts/native.sh`, `scripts/differential.sh`, and
+`scripts/thirdparty.sh`) each executed their probe lists in a sequential, single-threaded bash loop.
+On a 16-core machine, 15 cores were idle while `clang` and `kiln --one-shot` churned:
+`native.sh` took 9m 17s (557s) for 78 probes, `thirdparty.sh` took 6m 15s (375s) for 22 bundles,
+and `differential.sh` took ~50s for 111 probes.
+
+All three now use a bash worker queue bounded by `KILN_JOBS` (defaulting to `nproc` capped at 16,
+configurable down to 1), with child process traps isolated so subshells do not prematurely delete
+the parent's results directory. Results are written to an ephemeral scratch directory and collated
+in the original sorted order, preserving 100% identical diagnostic format and exit statuses.
+
+Measurements on 16 cores:
+- `scripts/native.sh`: **9m 17s -> 44s** (12.6x speedup)
+- `scripts/thirdparty.sh`: **6m 15s -> 18s** (20.8x speedup)
+- `scripts/differential.sh`: **50s -> 6s** (8.3x speedup)
+
+Combined wall-clock test iteration time dropped from **~16.5 minutes down to ~1 minute**.
+
