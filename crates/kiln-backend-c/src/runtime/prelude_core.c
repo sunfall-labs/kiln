@@ -19795,6 +19795,30 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TEXT_ENCODER) {
         return kiln_c99_new_text_encoder(result);
     }
+    if (callee.tag == KILN_VALUE_BOUND) {
+        /* `[[Construct]]` on a bound function prepends the bound arguments and forwards to the
+         * target. The bound *receiver* is dropped: `new` makes its own, which is the whole
+         * difference between calling a bound function and constructing one. The target also
+         * takes the wrapper's place as `new.target`, so the instance inherits from the target's
+         * `prototype` -- a bound function has none. */
+        kiln_bound *bound = (kiln_bound *)(uintptr_t)callee.bits;
+        kiln_value *joined;
+        if (bound->count == 0) {
+            return kiln_c99_construct(host, result, bound->target, args, argc, depth, thrown);
+        }
+        joined = (kiln_value *)malloc((bound->count + argc) * sizeof *joined);
+        if (joined == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        memcpy(joined, bound->arguments, bound->count * sizeof *joined);
+        if (argc != 0) {
+            memcpy(joined + bound->count, args, argc * sizeof *joined);
+        }
+        status = kiln_c99_construct(host, result, bound->target, joined, bound->count + argc,
+                                    depth, thrown);
+        free(joined);
+        return status;
+    }
     if (callee.tag != KILN_VALUE_FUNCTION) {
         KILN_C99_REFUSE("new on a callee that is not a generated function");
     }
