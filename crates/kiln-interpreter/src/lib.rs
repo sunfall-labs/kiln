@@ -16211,6 +16211,36 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 parts.push(Value::String(utf16_slice(&subject, copied..subject.len())));
                 Ok(Value::Array(ArrayData::new(parts)))
             }
+            // `%TypedArray%.prototype.fill` converts all three of its arguments, and the
+            // machine-free implementation converted none of them: `view.fill({ valueOf: () => 5
+            // })` filled with zeroes and `view.fill(7, { valueOf: () => 1 })` filled nothing.
+            //
+            // The order is observable and is value, then start, then end -- a probe with three
+            // logging objects sees `v,s,e` in node. The value becomes a *primitive* rather than a
+            // number, so that a `BigInt64Array` still gets a BigInt and the existing per-element
+            // conversion keeps deciding what is allowed.
+            Native::TypedArrayFill
+                if matches!(receiver, Value::TypedArray(_))
+                    && arguments
+                        .iter()
+                        .take(3)
+                        .any(|argument| is_an_object(argument) && !is_callable(argument)) =>
+            {
+                let mut converted = arguments.to_vec();
+                for index in 0..converted.len().min(3) {
+                    if !is_an_object(&converted[index]) || is_callable(&converted[index]) {
+                        continue;
+                    }
+                    converted[index] = if index == 0 {
+                        self.as_primitive(&converted[index].clone(), false, instruction)?
+                    } else {
+                        Value::Number(
+                            self.as_number_argument(Some(&converted[index].clone()), instruction)?,
+                        )
+                    };
+                }
+                return self.dispatch_native(native, receiver, &converted, instruction);
+            }
             // `SetTypedArrayFromArrayLike`: a source that is neither an array nor a view is
             // still read as one, through `length` and its indices. The machine-free
             // implementation recognised only those two kinds and answered an empty list for
