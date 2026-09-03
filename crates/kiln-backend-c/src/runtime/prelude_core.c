@@ -10976,8 +10976,20 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (subject.tag != KILN_VALUE_STRING) {
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if (kiln_c99_to_units(subject, &units, &count) != KILN_C99_OK) {
-                return KILN_C99_OUT_OF_MEMORY;
+            uint16_t stack_units[256];
+            int units_allocated = 0;
+            if (kiln_c99_string_is_ascii(subject) && subject.len <= 256) {
+                size_t idx;
+                for (idx = 0; idx < subject.len; ++idx) {
+                    stack_units[idx] = (uint16_t)(unsigned char)subject.ptr[idx];
+                }
+                units = stack_units;
+                count = subject.len;
+            } else {
+                if (kiln_c99_to_units(subject, &units, &count) != KILN_C99_OK) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                units_allocated = 1;
             }
             /* Only a `g` or `y` pattern has a cursor; everything else searches from the start
              * however many times it is asked. */
@@ -10987,7 +10999,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             status = kiln_c99_regexp_find(regexp, units, count, start, ranges,
                                           sizeof ranges / sizeof *ranges, &groups, &matched);
             if (status != KILN_C99_OK) {
-                free(units);
+                if (units_allocated) free(units);
                 return status;
             }
             if (regexp->global || regexp->sticky) {
@@ -10996,13 +11008,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 regexp->last_index = matched ? (double)ranges[1] : 0.0;
             }
             if (!matched) {
-                free(units);
+                if (units_allocated) free(units);
                 *result = code == KILN_C99_METHOD_REGEXP_TEST ? kiln_c99_boolean(0)
                                                               : kiln_c99_null();
                 return KILN_C99_OK;
             }
             if (code == KILN_C99_METHOD_REGEXP_TEST) {
-                free(units);
+                if (units_allocated) free(units);
                 *result = kiln_c99_boolean(1);
                 return KILN_C99_OK;
             }
@@ -11017,17 +11029,22 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     int64_t from = ranges[group * 2];
                     int64_t to = ranges[group * 2 + 1];
                     /* A group that did not participate is undefined rather than empty. */
-                    status = kiln_c99_array_push(
-                        built, from < 0 ? kiln_c99_undefined()
-                                        : kiln_c99_from_units(units + (size_t)from,
-                                                              (size_t)(to - from)));
+                    kiln_value piece;
+                    if (from < 0) {
+                        piece = kiln_c99_undefined();
+                    } else if (kiln_c99_string_is_ascii(subject)) {
+                        piece = kiln_c99_copy_text(subject.ptr + (size_t)from, (size_t)(to - from));
+                    } else {
+                        piece = kiln_c99_from_units(units + (size_t)from, (size_t)(to - from));
+                    }
+                    status = kiln_c99_array_push(built, piece);
                 }
                 if (status == KILN_C99_OK) {
                     status = kiln_c99_put(host, built, "index", 5,
                                           kiln_c99_number((double)ranges[0]), depth, thrown);
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, built, "input", 5, kiln_c99_from_units(units, count),
+                    status = kiln_c99_put(host, built, "input", 5, subject,
                                           depth, thrown);
                 }
                 if (status == KILN_C99_OK) {
@@ -11037,7 +11054,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     status = kiln_c99_put(host, built, "groups", 6, kiln_c99_undefined(), depth,
                                           thrown);
                 }
-                free(units);
+                if (units_allocated) free(units);
                 *result = built;
                 return status;
             }
@@ -14425,7 +14442,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
          * of the answer rather than an implementation detail. The comparator can call back into
          * the program, so every comparison has to be able to fail. */
         kiln_value comparator = argc > 0 ? args[0] : kiln_c99_undefined();
-        size_t sorted;
         /* Holes and undefined sort to the end, ahead of the comparator ever seeing them. */
         size_t live = 0;
         /* `undefined` means the default ordering; anything else has to be callable. The check
@@ -14447,44 +14463,73 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         for (index = live; index < array->count; ++index) {
             array->elements[index] = kiln_c99_undefined();
         }
-        for (sorted = 1; sorted < live; ++sorted) {
-            kiln_value moving = array->elements[sorted];
-            size_t place = sorted;
-            while (place > 0) {
-                double order;
-                if (kiln_c99_is_callable(comparator)) {
-                    kiln_value pair[2];
-                    kiln_value produced;
-                    pair[0] = array->elements[place - 1];
-                    pair[1] = moving;
-                    status = kiln_c99_call(host, &produced, comparator, kiln_c99_undefined(), pair,
-                                           2, depth, thrown);
-                    if (status != KILN_C99_OK) {
-                        return status;
-                    }
-                    order = kiln_c99_as_number(produced);
-                    /* A comparator that answers NaN is treated as "equal", which keeps the sort
-                     * total rather than letting it loop. */
-                    if (isnan(order)) {
-                        order = 0.0;
-                    }
-                } else {
-                    /* Without a comparator the elements are compared *as text*, which is the
-                     * language's oldest surprise: `[10, 9].sort()` is `[10, 9]`. */
-                    kiln_value left = kiln_c99_text(array->elements[place - 1]);
-                    kiln_value right = kiln_c99_text(moving);
-                    if (left.tag != KILN_VALUE_STRING || right.tag != KILN_VALUE_STRING) {
-                        return KILN_C99_OUT_OF_MEMORY;
-                    }
-                    order = (double)kiln_c99_string_compare(left, right);
-                }
-                if (order <= 0.0) {
-                    break;
-                }
-                array->elements[place] = array->elements[place - 1];
-                place -= 1;
+        if (live > 1) {
+            kiln_value *src = array->elements;
+            kiln_value *dst = (kiln_value *)malloc(live * sizeof(kiln_value));
+            size_t width;
+            int is_callable_cmp = kiln_c99_is_callable(comparator);
+            if (dst == NULL) {
+                return KILN_C99_OUT_OF_MEMORY;
             }
-            array->elements[place] = moving;
+            for (width = 1; width < live; width *= 2) {
+                size_t start;
+                for (start = 0; start < live; start += 2 * width) {
+                    size_t middle = start + width < live ? start + width : live;
+                    size_t end = start + 2 * width < live ? start + 2 * width : live;
+                    size_t left = start;
+                    size_t right = middle;
+                    size_t out_idx = start;
+                    while (left < middle && right < end) {
+                        double order;
+                        if (is_callable_cmp) {
+                            kiln_value pair[2];
+                            kiln_value produced;
+                            pair[0] = src[left];
+                            pair[1] = src[right];
+                            status = kiln_c99_call(host, &produced, comparator, kiln_c99_undefined(), pair,
+                                                   2, depth, thrown);
+                            if (status != KILN_C99_OK) {
+                                free(dst == array->elements ? src : dst);
+                                return status;
+                            }
+                            order = kiln_c99_as_number(produced);
+                            if (isnan(order)) {
+                                order = 0.0;
+                            }
+                        } else {
+                            kiln_value left_text = kiln_c99_text(src[left]);
+                            kiln_value right_text = kiln_c99_text(src[right]);
+                            if (left_text.tag != KILN_VALUE_STRING || right_text.tag != KILN_VALUE_STRING) {
+                                free(dst == array->elements ? src : dst);
+                                return KILN_C99_OUT_OF_MEMORY;
+                            }
+                            order = (double)kiln_c99_string_compare(left_text, right_text);
+                        }
+                        if (order <= 0.0) {
+                            dst[out_idx++] = src[left++];
+                        } else {
+                            dst[out_idx++] = src[right++];
+                        }
+                    }
+                    while (left < middle) {
+                        dst[out_idx++] = src[left++];
+                    }
+                    while (right < end) {
+                        dst[out_idx++] = src[right++];
+                    }
+                }
+                {
+                    kiln_value *tmp = src;
+                    src = dst;
+                    dst = tmp;
+                }
+            }
+            if (src != array->elements) {
+                memcpy(array->elements, src, live * sizeof(kiln_value));
+                free(src);
+            } else {
+                free(dst);
+            }
         }
         /* The array itself, so `a.sort()` can be chained and `a.sort() === a` holds. */
         *result = receiver;
@@ -16539,14 +16584,21 @@ static int kiln_c99_json_needs_escape(const char *bytes, size_t len) {
 static int kiln_c99_json_quote(kiln_text *text, const char *bytes, size_t len) {
     static const char digits[] = "0123456789abcdef";
     size_t index;
+    if (!kiln_c99_json_needs_escape(bytes, len)) {
+        int status = kiln_c99_reserve((void **)&text->bytes, &text->capacity, text->len + len + 2, 1);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        text->bytes[text->len] = '"';
+        if (len > 0) {
+            memcpy(text->bytes + text->len + 1, bytes, len);
+        }
+        text->bytes[text->len + 1 + len] = '"';
+        text->len += len + 2;
+        return KILN_C99_OK;
+    }
     if (kiln_c99_text_append(text, "\"", 1) != KILN_C99_OK) {
         return KILN_C99_OUT_OF_MEMORY;
-    }
-    if (!kiln_c99_json_needs_escape(bytes, len)) {
-        if (kiln_c99_text_append(text, bytes, len) != KILN_C99_OK) {
-            return KILN_C99_OUT_OF_MEMORY;
-        }
-        return kiln_c99_text_append(text, "\"", 1);
     }
     for (index = 0; index < len; ++index) {
         char byte = bytes[index];
@@ -16992,27 +17044,35 @@ static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
     uint16_t pending_high = 0;
     reader->at += 1;
     while (reader->at < reader->len) {
-        char byte = reader->bytes[reader->at];
-        if (byte == '"') {
+        size_t run_start = reader->at;
+        while (reader->at < reader->len) {
+            unsigned char b = (unsigned char)reader->bytes[reader->at];
+            if (b == '"') {
+                if (text.bytes == NULL && pending_high == 0) {
+                    *out = kiln_c99_copy_text(reader->bytes + run_start, reader->at - run_start);
+                    reader->at += 1;
+                    return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+                }
+                if (reader->at > run_start &&
+                    kiln_c99_text_append(&text, reader->bytes + run_start, reader->at - run_start) != KILN_C99_OK) {
+                    free(text.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                reader->at += 1;
+                if (pending_high != 0 &&
+                    kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
+                    free(text.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+                *out = kiln_c99_text_value(&text);
+                return KILN_C99_OK;
+            }
+            if (b == '\\' || b < 0x20) {
+                break;
+            }
             reader->at += 1;
-            /* A high surrogate left unpaired at the end is written as the replacement
-             * character, for the same reason as everywhere else: this string cannot hold one. */
-            if (pending_high != 0 &&
-                kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
-                free(text.bytes);
-                return KILN_C99_OUT_OF_MEMORY;
-            }
-            *out = kiln_c99_text_value(&text);
-            return KILN_C99_OK;
         }
-        if (byte != '\\') {
-            /* JSON strings may contain ordinary Unicode text, but the sixteen C0 control
-             * characters must be escaped.  Letting one through would make JSON.parse accept a
-             * JavaScript source string that the JSON grammar rejects. */
-            if ((unsigned char)byte < 0x20) {
-                free(text.bytes);
-                KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
-            }
+        if (reader->at > run_start) {
             if (pending_high != 0) {
                 if (kiln_c99_text_append_c(&text, "\xEF\xBF\xBD") != KILN_C99_OK) {
                     free(text.bytes);
@@ -17020,12 +17080,17 @@ static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
                 }
                 pending_high = 0;
             }
-            if (kiln_c99_text_append(&text, &byte, 1) != KILN_C99_OK) {
+            if (kiln_c99_text_append(&text, reader->bytes + run_start, reader->at - run_start) != KILN_C99_OK) {
                 free(text.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            reader->at += 1;
-            continue;
+        }
+        if (reader->at >= reader->len) {
+            break;
+        }
+        if ((unsigned char)reader->bytes[reader->at] < 0x20) {
+            free(text.bytes);
+            KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
         }
         reader->at += 1;
         if (reader->at >= reader->len) {
