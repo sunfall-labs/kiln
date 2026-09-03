@@ -1574,6 +1574,7 @@ impl Compiler {
         self.load_hidden(next_method);
         self.code.push(Instruction::NewArray { count: 0 });
         self.code.push(Instruction::Apply);
+        self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
         let finished_key = self.constant_index(Constant::String("done".to_owned()));
@@ -1627,6 +1628,7 @@ impl Compiler {
         self.load_hidden(next_method);
         self.code.push(Instruction::NewArray { count: 0 });
         self.code.push(Instruction::Apply);
+        self.guard_iterator_result();
         self.store_hidden(step);
         self.load_hidden(step);
         let finished_key = self.constant_index(Constant::String("done".to_owned()));
@@ -3153,6 +3155,7 @@ impl Compiler {
             self.code.push(Instruction::Await);
             self.patch_jump(ready);
         }
+        self.guard_iterator_result();
         self.declare_hidden(&result_binding, span);
 
         self.load_hidden(&result_binding);
@@ -3346,6 +3349,7 @@ impl Compiler {
             self.code.push(Instruction::Await);
             self.patch_jump(sync_step);
         }
+        self.guard_iterator_result();
         self.declare_hidden(&step_binding, span);
 
         self.load_hidden(&step_binding);
@@ -3388,6 +3392,53 @@ impl Compiler {
         let plain = self.emit_jump(Instruction::JumpIfFalse(0));
         self.code.push(Instruction::Await);
         self.patch_jump(plain);
+    }
+
+    /// Throw a `TypeError` unless the value on top of the stack is an object.
+    ///
+    /// `IteratorNext` requires the result to be an Object, and the two compiled walks -- `for...of`
+    /// and `yield*` -- read `done` off it with `GetProperty`. A primitive answers `undefined`
+    /// there, which is falsy, which reads as "not done": `for (const x of { [Symbol.iterator]:
+    /// () => ({ next: () => 1 }) })` looped for ever, with no diagnostic and no way out. A hang
+    /// is the worst answer available, and the one shape that gives a program no thread to pull.
+    ///
+    /// Emitted rather than made an instruction, because an instruction has to be implemented in
+    /// the C backend too, and everything this needs already exists there.
+    ///
+    /// The value is left on the stack.
+    fn guard_iterator_result(&mut self) {
+        // `typeof v === "object"` is true for null as well, so the null case is excluded by the
+        // second test rather than by the first.
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("object".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let object_like = self.emit_jump(Instruction::JumpIfTruthy(0));
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("function".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let callable = self.emit_jump(Instruction::JumpIfTruthy(0));
+        self.emit_iterator_result_type_error();
+        self.patch_jump(object_like);
+        self.patch_jump(callable);
+        // `typeof null` is "object", so the null case reaches here and is rejected separately.
+        self.code.push(Instruction::Dup);
+        self.push_constant(Constant::Null);
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let not_null = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.emit_iterator_result_type_error();
+        self.patch_jump(not_null);
+    }
+
+    /// `throw new TypeError("...")`, spelled in the instructions that already exist.
+    fn emit_iterator_result_type_error(&mut self) {
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "iterator result is not an object".to_owned(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
     }
 
     fn store_hidden(&mut self, name: &str) {
