@@ -2720,6 +2720,9 @@ fn emit_instruction(
                 kiln_ir::Builtin::TextEncoder => {
                     "kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER)"
                 }
+                kiln_ir::Builtin::TextDecoder => {
+                    "kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_DECODER)"
+                }
                 // Not built like `Atomics` and `process` are, which are real objects because a
                 // program writes to them. Nothing writes to `performance`, so it stays the
                 // built-in value it already was on `globalThis` -- and the two spellings reach
