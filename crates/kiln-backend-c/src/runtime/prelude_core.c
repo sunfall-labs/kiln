@@ -4073,6 +4073,30 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return KILN_C99_OK;
         }
         KILN_C99_ABSENT("not a member of Number.prototype", out);
+    case KILN_VALUE_SYMBOL: {
+        if (kiln_c99_same_name(key, key_len, "constructor")) {
+            *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "toString")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "valueOf")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
+            return KILN_C99_OK;
+        }
+        if (kiln_c99_same_name(key, key_len, "description")) {
+            kiln_symbol *symbol = kiln_c99_symbol_of(target);
+            if (symbol != NULL && symbol->description != NULL) {
+                *out = kiln_c99_copy_text(symbol->description, symbol->description_len);
+            } else {
+                *out = kiln_c99_undefined();
+            }
+            return KILN_C99_OK;
+        }
+        KILN_C99_ABSENT("not a member of Symbol.prototype", out);
+    }
     default:
         /* A boolean or callable has no own properties here. */
         KILN_C99_REFUSE("own properties are not modelled on this value");
@@ -9908,6 +9932,81 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = kiln_c99_undefined();
         return KILN_C99_OK;
     }
+    if (code == KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Class constructor AsyncLocalStorage cannot be invoked without 'new'");
+    }
+    if (code == KILN_C99_METHOD_NODE_ALS_GET_STORE) {
+        if (receiver.tag != KILN_VALUE_OBJECT) {
+            *result = kiln_c99_undefined();
+            return KILN_C99_OK;
+        }
+        int status = kiln_c99_get(host, receiver, "*store", 6, result, depth, thrown);
+        if (status != KILN_C99_OK) *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_ALS_ENTER_WITH) {
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            kiln_value store = argc > 0 ? args[0] : kiln_c99_undefined();
+            kiln_c99_put(host, receiver, "*store", 6, store, 0, NULL);
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_ALS_DISABLE) {
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            kiln_c99_put(host, receiver, "*store", 6, kiln_c99_undefined(), 0, NULL);
+        }
+        *result = kiln_c99_undefined();
+        return KILN_C99_OK;
+    }
+    if (code == KILN_C99_METHOD_NODE_ALS_RUN) {
+        if (argc < 2) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "AsyncLocalStorage.run requires at least 2 arguments");
+        }
+        kiln_value store = args[0];
+        kiln_value callback = args[1];
+        if (!kiln_c99_is_callable(callback)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "AsyncLocalStorage callback is not a function");
+        }
+        kiln_value old_store = kiln_c99_undefined();
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            kiln_c99_get(host, receiver, "*store", 6, &old_store, depth, thrown);
+            kiln_c99_put(host, receiver, "*store", 6, store, 0, NULL);
+        }
+        const kiln_value *cb_args = argc > 2 ? args + 2 : NULL;
+        size_t cb_argc = argc > 2 ? argc - 2 : 0;
+        int status = kiln_c99_call(host, result, callback, kiln_c99_undefined(), cb_args, cb_argc, depth, thrown);
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            kiln_c99_put(host, receiver, "*store", 6, old_store, 0, NULL);
+        }
+        return status;
+    }
+    if (code == KILN_C99_METHOD_NODE_ALS_EXIT) {
+        if (argc < 1) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "AsyncLocalStorage.exit requires a callback");
+        }
+        kiln_value callback = args[0];
+        if (!kiln_c99_is_callable(callback)) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "AsyncLocalStorage callback is not a function");
+        }
+        kiln_value old_store = kiln_c99_undefined();
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            kiln_c99_get(host, receiver, "*store", 6, &old_store, depth, thrown);
+            kiln_c99_put(host, receiver, "*store", 6, kiln_c99_undefined(), 0, NULL);
+        }
+        const kiln_value *cb_args = argc > 1 ? args + 1 : NULL;
+        size_t cb_argc = argc > 1 ? argc - 1 : 0;
+        int status = kiln_c99_call(host, result, callback, kiln_c99_undefined(), cb_args, cb_argc, depth, thrown);
+        if (receiver.tag == KILN_VALUE_OBJECT) {
+            kiln_c99_put(host, receiver, "*store", 6, old_store, 0, NULL);
+        }
+        return status;
+    }
     if (code == KILN_C99_METHOD_NODE_CRYPTO_RANDOM_UUID) {
         static const char hex[] = "0123456789abcdef";
         uint8_t bytes[16];
@@ -10582,6 +10681,37 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_c99_typed_set(kiln_c99_typed_array_of(*result), byte,
                                    (double)(unsigned char)text.ptr[byte]);
             return KILN_C99_OK;
+        }
+        case KILN_C99_METHOD_TEXT_DECODER_DECODE: {
+            if (argc == 0 || args[0].tag == KILN_VALUE_UNDEFINED) {
+                *result = kiln_c99_from_units(NULL, 0);
+                return KILN_C99_OK;
+            }
+            if (args[0].tag == KILN_VALUE_TYPED_ARRAY) {
+                kiln_typed_array *ta = kiln_c99_typed_array_of(args[0]);
+                if (ta == NULL || ta->buffer == NULL || ta->buffer->bytes == NULL) {
+                    *result = kiln_c99_from_units(NULL, 0);
+                    return KILN_C99_OK;
+                }
+                size_t byte_len = ta->length * kiln_c99_typed_width(ta->kind);
+                if (ta->byte_offset + byte_len > ta->buffer->byte_length) {
+                    byte_len = ta->buffer->byte_length > ta->byte_offset ? ta->buffer->byte_length - ta->byte_offset : 0;
+                }
+                const char *bytes = (const char *)(ta->buffer->bytes + ta->byte_offset);
+                *result = kiln_c99_copy_text(bytes, byte_len);
+                return KILN_C99_OK;
+            }
+            if (args[0].tag == KILN_VALUE_ARRAY_BUFFER) {
+                kiln_typed_buffer *buf = (kiln_typed_buffer *)(uintptr_t)args[0].bits;
+                if (buf == NULL || buf->bytes == NULL) {
+                    *result = kiln_c99_from_units(NULL, 0);
+                    return KILN_C99_OK;
+                }
+                *result = kiln_c99_copy_text((const char *)buf->bytes, buf->byte_length);
+                return KILN_C99_OK;
+            }
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                        "The provided value is not of type ArrayBuffer or ArrayBufferView");
         }
         case KILN_C99_METHOD_SET_TIMEOUT:
         case KILN_C99_METHOD_SET_INTERVAL:
@@ -11466,7 +11596,8 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
              * value; refusing by name says so, where answering would be a guess. */
             if (argc == 0 ||
                 (args[0].tag != KILN_VALUE_OBJECT && args[0].tag != KILN_VALUE_ARRAY &&
-                 args[0].tag != KILN_VALUE_FUNCTION)) {
+                 args[0].tag != KILN_VALUE_FUNCTION && args[0].tag != KILN_VALUE_BUILTIN &&
+                 args[0].tag != KILN_VALUE_METHOD && args[0].tag != KILN_VALUE_BOUND)) {
                 KILN_C99_REFUSE("Object.assign target must be an object, an array or a function");
             }
             target = args[0];
@@ -13259,6 +13390,36 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                                      : (uint16_t)number;
             }
             *result = kiln_c99_from_units(units, argc);
+            free(units);
+            return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+        }
+        case KILN_C99_METHOD_STRING_FROM_CODE_POINT: {
+            uint16_t *units = NULL;
+            size_t out_count = 0;
+            size_t at;
+            if (argc > 0) {
+                units = (uint16_t *)malloc(argc * 2 * sizeof *units);
+                if (units == NULL) {
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            }
+            for (at = 0; at < argc; ++at) {
+                double number = kiln_c99_as_number(args[at]);
+                if (isnan(number) || floor(number) != number || number < 0.0 || number > 1114111.0) {
+                    free(units);
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                "Invalid code point");
+                }
+                uint32_t cp = (uint32_t)number;
+                if (cp <= 0xFFFF) {
+                    units[out_count++] = (uint16_t)cp;
+                } else {
+                    cp -= 0x10000;
+                    units[out_count++] = (uint16_t)(0xD800 + (cp >> 10));
+                    units[out_count++] = (uint16_t)(0xDC00 + (cp & 0x3FF));
+                }
+            }
+            *result = kiln_c99_from_units(units, out_count);
             free(units);
             return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
         }
@@ -21671,12 +21832,16 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     }
     if (callee.tag == KILN_VALUE_METHOD &&
         (callee.bits == KILN_C99_METHOD_NODE_EVENT_EMITTER ||
+         callee.bits == KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE ||
          callee.bits == KILN_C99_METHOD_NODE_HTTP_CREATE_SERVER ||
          callee.bits == KILN_C99_METHOD_NODE_STREAM ||
          callee.bits == KILN_C99_METHOD_NODE_READABLE ||
          callee.bits == KILN_C99_METHOD_NODE_WRITABLE ||
          callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE ||
          callee.bits == KILN_C99_METHOD_NODE_HTTP_SERVER)) {
+        if (callee.bits == KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE) {
+            return kiln_c99_new_async_local_storage(result);
+        }
         /* Runtime-provided constructors are methods so their identity can cross generated
          * modules without exporting a backend-private closure. EventEmitter is constructible,
          * and its ordinary-call and `new` forms deliberately share one initializer. */
@@ -21993,6 +22158,9 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     }
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TEXT_ENCODER) {
         return kiln_c99_new_text_encoder(result);
+    }
+    if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_TEXT_DECODER) {
+        return kiln_c99_new_text_decoder(result, args, argc, thrown);
     }
     if (callee.tag == KILN_VALUE_BOUND) {
         /* `[[Construct]]` on a bound function prepends the bound arguments and forwards to the
@@ -22860,6 +23028,271 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Division by zero");
     }
     *out = kiln_c99_bigint_value(answer);
+    return KILN_C99_OK;
+}
+
+/* =========================================================================
+ * Outlined instruction operation helpers (compact scalar emission)
+ * ========================================================================= */
+
+static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
+                                    const char *key, size_t key_len,
+                                    int depth, kiln_value *thrown, kiln_c99_site *site) {
+    kiln_value read;
+    kiln_value target = stack[*sp - 1];
+    int status = kiln_c99_get_site(host, target, key, key_len, &read, depth, thrown, site);
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
+        if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
+            const char *named = kiln_c99_builtin_name(target.bits);
+            if (named != NULL) {
+                kiln_c99_diagnostic_function = named;
+                kiln_c99_diagnostic_function_len = strlen(named);
+            }
+        }
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "GetProperty lookup refused";
+    }
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = read;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp,
+                                    int depth, kiln_value *thrown) {
+    kiln_value key = stack[--(*sp)];
+    kiln_value read;
+    kiln_value target = stack[*sp - 1];
+    int status = kiln_c99_get_computed(host, target, key, &read, depth, thrown);
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
+        if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {
+            const char *named = target.tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(target.bits) : NULL;
+            if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {
+                size_t pos = 0;
+                if (named != NULL) {
+                    size_t nlen = strlen(named);
+                    if (nlen < sizeof kiln_c99_diagnostic_compose - 1) {
+                        memcpy(kiln_c99_diagnostic_compose, named, nlen);
+                        pos = nlen;
+                        kiln_c99_diagnostic_compose[pos++] = '.';
+                    }
+                }
+                size_t klen = key.len;
+                if (pos + klen >= sizeof kiln_c99_diagnostic_compose) {
+                    klen = sizeof kiln_c99_diagnostic_compose - 1 - pos;
+                }
+                memcpy(kiln_c99_diagnostic_compose + pos, key.ptr, klen);
+                pos += klen;
+                kiln_c99_diagnostic_compose[pos] = '\0';
+                kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose;
+                kiln_c99_diagnostic_function_len = pos;
+            } else if (named != NULL) {
+                kiln_c99_diagnostic_function = named;
+                kiln_c99_diagnostic_function_len = strlen(named);
+            }
+        }
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "GetComputed lookup refused";
+    }
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = read;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp,
+                                   const char *key, size_t key_len, size_t argc,
+                                   int depth, kiln_value *thrown, kiln_c99_site *site,
+                                   const char *inst_site, size_t inst_idx, const char *inst_op,
+                                   kiln_value *result) {
+    kiln_value method;
+    kiln_value call_result = kiln_c99_undefined();
+    kiln_value self_value = stack[*sp - argc - 1];
+    kiln_value call_argbuf[KILN_C99_COERCED_INLINE + 1];
+    kiln_value *call_args = NULL;
+    int status;
+
+    if (argc > 0) {
+        if (argc <= KILN_C99_COERCED_INLINE) {
+            call_args = call_argbuf;
+        } else {
+            call_args = (kiln_value *)malloc(argc * sizeof *call_args);
+            if (call_args == NULL) return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (size_t i = 0; i < argc; i++) {
+            call_args[i] = stack[*sp - argc + i];
+        }
+    }
+
+    status = kiln_c99_get_site(host, self_value, key, key_len, &method, depth, thrown, site);
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag;
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup refused";
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    } else if (status == KILN_C99_THROWN) {
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup threw";
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    }
+    if (status != KILN_C99_OK) {
+        if (call_args != NULL && call_args != call_argbuf) free(call_args);
+        return status;
+    }
+
+    status = kiln_c99_call(host, &call_result, method, self_value, call_args, argc, depth, thrown);
+    if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
+        if (call_args != NULL && call_args != call_argbuf) free(call_args);
+        *result = call_result;
+        return status;
+    }
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag;
+        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod invocation refused";
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    } else if (status == KILN_C99_THROWN) {
+        if (kiln_c99_diagnostic_detail == NULL) {
+            kiln_c99_diagnostic_receiver_tag = self_value.tag;
+            kiln_c99_diagnostic_detail = "CallMethod invocation threw";
+        }
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    }
+
+    if (call_args != NULL && call_args != call_argbuf) free(call_args);
+    if (status != KILN_C99_OK) return status;
+
+    *sp -= (argc + 1);
+    stack[(*sp)++] = call_result;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
+                            int depth, kiln_value *thrown,
+                            const char *inst_site, size_t inst_idx, const char *inst_op,
+                            kiln_value *result) {
+    kiln_value call_result = kiln_c99_undefined();
+    kiln_value callee = stack[*sp - argc - 1];
+    kiln_value call_argbuf[KILN_C99_COERCED_INLINE + 1];
+    kiln_value *call_args = NULL;
+    int status;
+
+    if (argc > 0) {
+        if (argc <= KILN_C99_COERCED_INLINE) {
+            call_args = call_argbuf;
+        } else {
+            call_args = (kiln_value *)malloc(argc * sizeof *call_args);
+            if (call_args == NULL) return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (size_t i = 0; i < argc; i++) {
+            call_args[i] = stack[*sp - argc + i];
+        }
+    }
+
+    {
+        kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL;
+        if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
+            status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, argc, depth, thrown, NULL, 0);
+        } else {
+            status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, argc, depth, thrown);
+        }
+    }
+
+    if (call_args != NULL && call_args != call_argbuf) free(call_args);
+
+    if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
+        *result = call_result;
+        return status;
+    }
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = callee.tag;
+        if (kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {
+            kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model";
+        }
+        kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+    }
+
+    if (status != KILN_C99_OK) return status;
+
+    *sp -= (argc + 1);
+    stack[(*sp)++] = call_result;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
+                           int depth, kiln_value *thrown) {
+    kiln_value built;
+    kiln_value callee = stack[*sp - argc - 1];
+    kiln_value call_argbuf[KILN_C99_COERCED_INLINE + 1];
+    kiln_value *call_args = NULL;
+    int status;
+
+    if (argc > 0) {
+        if (argc <= KILN_C99_COERCED_INLINE) {
+            call_args = call_argbuf;
+        } else {
+            call_args = (kiln_value *)malloc(argc * sizeof *call_args);
+            if (call_args == NULL) return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (size_t i = 0; i < argc; i++) {
+            call_args[i] = stack[*sp - argc + i];
+        }
+    }
+
+    status = kiln_c99_construct(host, &built, callee, call_args, argc, depth, thrown);
+    if (call_args != NULL && call_args != call_argbuf) free(call_args);
+
+    if (status == KILN_C99_CONTROL_ERROR) {
+        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = callee.tag;
+        if (callee.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
+            const char *named = kiln_c99_builtin_name(callee.bits);
+            if (named != NULL) {
+                kiln_c99_diagnostic_function = named;
+                kiln_c99_diagnostic_function_len = strlen(named);
+            }
+        }
+        if (kiln_c99_diagnostic_detail == NULL) {
+            kiln_c99_diagnostic_detail = "New target is unsupported by the native constructor model";
+        }
+    }
+
+    if (status != KILN_C99_OK) return status;
+
+    *sp -= (argc + 1);
+    stack[(*sp)++] = built;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp, kiln_value *thrown) {
+    kiln_value *target = kiln_c99_cell_of(cell);
+    if (target->tag == KILN_VALUE_UNINITIALIZED) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
+    }
+    stack[(*sp)++] = *target;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown) {
+    if (val.tag == KILN_VALUE_UNINITIALIZED) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp,
+                                    const char *key, size_t key_len, int strict,
+                                    int depth, kiln_value *thrown, kiln_c99_site *site) {
+    kiln_value member = stack[--(*sp)];
+    kiln_value target = stack[*sp - 1];
+    int status = kiln_c99_put_site(host, target, key, key_len, member, strict, depth, thrown, site);
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = member;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp,
+                                    int strict, int depth, kiln_value *thrown) {
+    kiln_value member = stack[--(*sp)];
+    kiln_value key = stack[--(*sp)];
+    kiln_value target = stack[*sp - 1];
+    int status = kiln_c99_set_computed_mode(host, target, key, member, strict, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = member;
     return KILN_C99_OK;
 }
 

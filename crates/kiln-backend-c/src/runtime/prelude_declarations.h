@@ -163,5 +163,14 @@ extern int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
 extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
 extern uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 extern uint64_t kiln_c99_string_method(const char *key, size_t key_len);
+extern int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp, int depth, kiln_value *thrown);
+extern int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, size_t argc, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);
+extern int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);
+extern int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown);
+extern int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp, kiln_value *thrown);
+extern int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown);
+extern int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp, int strict, int depth, kiln_value *thrown);
 
 #endif /* KILN_PRELUDE_DECLARATIONS_H */
