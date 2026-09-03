@@ -25,12 +25,18 @@ static void kiln_module_78eefada6f9a430a971c166d0826322b_gc_roots(void *heap, vo
     if (phase == KILN_GC_PHASE_RESET) kiln_module_78eefada6f9a430a971c166d0826322b_keys_ready = 0;
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static int kiln_module_78eefada6f9a430a971c166d0826322b_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);
+static int kiln_module_78eefada6f9a430a971c166d0826322b_fn_0(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);
 static const char kiln_module_78eefada6f9a430a971c166d0826322b_name_0[] = "receiver";
 /* function 0: receiver */
-static int kiln_module_78eefada6f9a430a971c166d0826322b_fn_0(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame) {
+static int kiln_module_78eefada6f9a430a971c166d0826322b_fn_0(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
     size_t sp = 0;
     size_t slot;
+    kiln_host *host = ctx ? ctx->host : NULL;
+    kiln_value *thrown = ctx ? ctx->thrown : NULL;
+    kiln_generator *frame = ctx ? ctx->frame : NULL;
+    int depth = ctx ? ctx->depth : 0;
+    kiln_value receiver = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
+    (void)receiver_ptr;
     kiln_c99_frame_mapped_arguments = 0;
     kiln_value stack[2];
     kiln_value locals[1];
