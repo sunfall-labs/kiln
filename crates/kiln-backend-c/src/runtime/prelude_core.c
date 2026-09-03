@@ -5735,6 +5735,36 @@ static int kiln_c99_string_pattern(kiln_host *host, kiln_value *result, uint64_t
     int64_t ranges[64];
     kiln_text built = {NULL, 0, 0};
     kiln_value collected = kiln_c99_undefined();
+    if (code == KILN_C99_METHOD_SPLIT && regexp == NULL) {
+        kiln_value r_str = kiln_c99_text(receiver);
+        kiln_value s_str = kiln_c99_text(pattern);
+        if (r_str.tag == KILN_VALUE_STRING && s_str.tag == KILN_VALUE_STRING && s_str.len == 1) {
+            char sep = s_str.ptr[0];
+            kiln_value arr_val;
+            int st = kiln_c99_new_array(&arr_val);
+            if (st != KILN_C99_OK) return st;
+            kiln_array *arr = kiln_c99_array_of(arr_val);
+            arr->elements = (kiln_value *)malloc(16 * sizeof(kiln_value));
+            if (arr->elements != NULL) arr->capacity = 16;
+            const char *p = r_str.ptr;
+            size_t remaining = r_str.len;
+            while (remaining > 0) {
+                const char *found = (const char *)memchr(p, sep, remaining);
+                if (found == NULL) {
+                    break;
+                }
+                size_t segment_len = (size_t)(found - p);
+                st = kiln_c99_array_push(arr_val, kiln_c99_copy_text(p, segment_len));
+                if (st != KILN_C99_OK) return st;
+                remaining -= segment_len + 1;
+                p = found + 1;
+            }
+            st = kiln_c99_array_push(arr_val, kiln_c99_copy_text(p, remaining));
+            if (st != KILN_C99_OK) return st;
+            *result = arr_val;
+            return KILN_C99_OK;
+        }
+    }
     int status = kiln_c99_to_units(receiver, &units, &count);
     int every;
     if (status != KILN_C99_OK) {
@@ -14079,13 +14109,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         *result = array->elements[array->count];
         return KILN_C99_OK;
     case KILN_C99_METHOD_JOIN: {
-        kiln_text joined = {NULL, 0, 0};
+        kiln_text joined = {(char *)malloc(256), 0, 256};
         kiln_value separator = argc > 0 ? args[0] : kiln_c99_undefined();
         const char *bytes = ",";
         size_t len = 1;
+        if (joined.bytes == NULL) return KILN_C99_OUT_OF_MEMORY;
         if (separator.tag != KILN_VALUE_UNDEFINED) {
             kiln_value shown = kiln_c99_text(separator);
             if (shown.tag != KILN_VALUE_STRING) {
+                free(joined.bytes);
                 KILN_C99_REFUSE("join given a separator with no text form");
             }
             bytes = shown.ptr;
@@ -14103,7 +14135,12 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_c99_is_hole(element)) {
                 continue;
             }
-            {
+            if (element.tag == KILN_VALUE_STRING) {
+                if (kiln_c99_text_append(&joined, element.ptr, element.len) != KILN_C99_OK) {
+                    free(joined.bytes);
+                    return KILN_C99_OUT_OF_MEMORY;
+                }
+            } else {
                 kiln_value shown = kiln_c99_text(element);
                 if (shown.tag != KILN_VALUE_STRING ||
                     kiln_c99_text_append(&joined, shown.ptr, shown.len) != KILN_C99_OK) {
@@ -14128,16 +14165,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             if (kiln_c99_is_hole(array->elements[index])) {
                 /* The only place `indexOf` and `includes` disagree, and the reason `includes`
                  * exists: one skips a hole and the other reads it as undefined. */
-                found = code == KILN_C99_METHOD_INCLUDES && needle.tag == KILN_VALUE_UNDEFINED;
-                if (found) {
+                if (code == KILN_C99_METHOD_INCLUDES &&
+                    needle.tag == KILN_VALUE_UNDEFINED) {
+                    found = 1;
                     break;
                 }
                 continue;
             }
-            found = code == KILN_C99_METHOD_INCLUDES
-                        ? kiln_c99_same_value_zero(array->elements[index], needle)
-                        : kiln_c99_strict_equal(array->elements[index], needle);
-            if (found) {
+            if (kiln_c99_strict_equal(array->elements[index], needle)) {
+                found = 1;
                 break;
             }
         }
@@ -14158,11 +14194,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         if (status != KILN_C99_OK) {
             return status;
         }
-        for (index = start; index < end && index < array->count; ++index) {
-            status = kiln_c99_array_push(built, array->elements[index]);
-            if (status != KILN_C99_OK) {
-                return status;
-            }
+        size_t slice_count = (end > start && start < array->count) ? (end < array->count ? end - start : array->count - start) : 0;
+        if (slice_count > 0) {
+            kiln_array *out_arr = kiln_c99_array_of(built);
+            out_arr->elements = (kiln_value *)malloc(slice_count * sizeof(kiln_value));
+            if (out_arr->elements == NULL) return KILN_C99_OUT_OF_MEMORY;
+            out_arr->capacity = slice_count;
+            out_arr->count = slice_count;
+            memcpy(out_arr->elements, array->elements + start, slice_count * sizeof(kiln_value));
         }
         *result = built;
         return KILN_C99_OK;
