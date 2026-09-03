@@ -141,6 +141,14 @@ notify-debouncer-full = { version = "0.7", default-features = false }
 # FxHashMap, for process-local tables where SipHash's DoS resistance and cross-release
 # stability are both irrelevant. Never for a hash that is persisted or sent on the wire.
 rustc-hash = { version = "2.1", default-features = false, features = ["std"] }
+# Fast modern synchronization primitives (1-byte mutex, no poison panics, fast uncontended locks)
+parking_lot = { version = "0.12", default-features = false }
+# SIMD-accelerated byte search routines (AVX2/SSE2/NEON) for string and source scanning
+memchr = { version = "2.7", default-features = false, features = ["std"] }
+# Inline small vector optimization avoiding heap allocations for small lists
+smallvec = { version = "1.14", default-features = false, features = ["serde"] }
+# High performance AES-NI hardware-accelerated hasher for internal tables
+ahash = { version = "0.8", default-features = false, features = ["std"] }
 # Snapshot assertions for the C backend's emitted translation units, a dev-dependency only.
 # `colors` (its default) is dropped: the diff is read in CI logs and in a plain terminal, and
 # pulling `console` into the workspace graph to tint it is not worth the edge.
