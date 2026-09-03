@@ -52,7 +52,7 @@ The machine was shared while these ran; the per-pass ranges and raw log are in
 table, `bench/server/run.sh` one row.
 
 The same script on Linux/x86_64 (Xeon Platinum 8259CL, 2026-09-03, node 22.23 and bun 1.4, no deno
-installed) puts kiln ahead on hello world and a little behind bun on the small service:
+installed):
 
 | runtime | hello | small service | resident |
 |---|---|---|---|
@@ -60,10 +60,24 @@ installed) puts kiln ahead on hello world and a little behind bun on the small s
 | bun 1.4 | 65.5k | 44.7k | 66-76 MB |
 | node 22.23 | 39.0k | 27.4k | 81-83 MB |
 
-Those absolute numbers are about half the table above, which was taken on an unrecorded machine;
-the two are not comparable and neither is presented as the other. Full provenance, and what the
-`KILN_WORKERS` realms are worth once the client stops being the bottleneck (2.3x, 47.1k to 107.8k
-at ten client processes), is in `.scratch/server-throughput/measurements-2026-09-03.md`.
+Read that row honestly: it is **one** kiln realm, on one core, against runtimes that are not
+single-threaded. Measured while serving, bun runs twelve threads and node five, and kiln one -- so
+kiln leads hello world and trails bun on the small service by four percent while doing *less* work
+per request than either (23.7 microseconds of CPU against bun's 26.7).
+
+A realm owns its thread, so the way kiln uses the other fifteen cores is `KILN_WORKERS`, which
+forks that many realms over one `SO_REUSEPORT` listener. With four of them the small service
+serves **51.8k**, ahead of bun, and ten client processes are needed before the load generator
+stops being the limit:
+
+| clients | workers=1 | workers=2 | workers=4 |
+|---|---|---|---|
+| 10 (hello) | 47.1k | 84.4k | **107.8k** |
+
+The comparison table above stays single-realm because that is the like-for-like core-for-core
+number, and it is the one to beat. Absolute figures are about half the macOS table further up,
+which was taken on an unrecorded machine; the two are not comparable and neither is presented as
+the other. Full provenance is in `.scratch/server-throughput/measurements-2026-09-03.md`.
 
 ## Using it
 
