@@ -1208,6 +1208,32 @@ HEAD /streamed 200 undefined undefined ""
 """
 
 [[test]]
+id = "server/s07-vite-dev-server"
+requires_host = "node"
+group = "server"
+source = "server/s07-vite-dev-server.mjs"
+status = "runnable"
+features = ["modules", "builtin-modules", "node-http", "promises", "async-await", "collections", "closures", "event-emitter", "for-of", "destructuring"]
+catches = """
+A modern frontend Vite dev server workflow: virtual file routing, ESM import rewriting \
+of bare specifiers, client HMR route handling, and transform pipelines for CSS-in-JS and \
+JSON modules, verified end-to-end over loopback HTTP with orderly shutdown.
+"""
+notes = """
+Simulates the core architectural pipeline of Vite dev server (module graph, import rewrite, \
+CSS injection, virtual modules) on top of kiln's native compiled server stack.
+"""
+expected_stdout = """
+/ 200 text/html kiln-vite-engine <!DOCTYPE html><html><head><script type=
+/@vite/client 200 application/javascript kiln-vite-engine // [vite] client\\nexport function createH
+/src/main.js 200 application/javascript kiln-vite-engine import { ref } from "/@modules/vue.js";\\n
+/@modules/vue.js 200 application/javascript kiln-vite-engine // [vite] synthetic bundle for vue\\nexpor
+/src/style.css 200 application/javascript kiln-vite-engine const css = "body { margin: 0; backgroun
+/src/config.json 200 application/javascript kiln-vite-engine export default {"version":"1.0.0","name"
+/missing.js 404 text/plain kiln-vite-engine Not Found
+"""
+
+[[test]]
 id = "regress/r09-sloppy-code-binds-globals-and-this"
 group = "regress"
 source = "regress/r09-sloppy-code-binds-globals-and-this.js"

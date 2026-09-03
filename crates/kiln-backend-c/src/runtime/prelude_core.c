@@ -856,6 +856,19 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return kiln_c99_array_constructor(result, args, argc, thrown);
         case KILN_C99_BUILTIN_OBJECT:
             return kiln_c99_object_constructor(result, args, argc);
+        case KILN_C99_BUILTIN_ERROR:
+        case KILN_C99_BUILTIN_TYPE_ERROR:
+        case KILN_C99_BUILTIN_RANGE_ERROR:
+        case KILN_C99_BUILTIN_REFERENCE_ERROR:
+        case KILN_C99_BUILTIN_SYNTAX_ERROR:
+        case KILN_C99_BUILTIN_URI_ERROR:
+        case KILN_C99_BUILTIN_EVAL_ERROR: {
+            int status = kiln_c99_construct(host, result, callee, args, argc, depth, thrown);
+            if (status == KILN_C99_OK && receiver.tag == KILN_VALUE_OBJECT && argc > 0) {
+                (void)kiln_c99_put(host, receiver, "message", 7, args[0], 0, NULL);
+            }
+            return status;
+        }
         default: {
             /* Which built-in, by name. `f.call(x)` and `f.apply(x, a)` both arrive here through
              * `Function.prototype`, so the instruction says `CallMethod(call)` -- the borrow, not
@@ -1947,7 +1960,8 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
         *out = bound->properties;
         return KILN_C99_OK;
     }
-    if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN)
+    if (callable.tag != KILN_VALUE_METHOD && callable.tag != KILN_VALUE_BUILTIN &&
+        callable.tag != KILN_VALUE_SETTLER)
         KILN_C99_REFUSE("own properties are not modelled on this callable");
     /* Direct C embedding fixtures exercise helpers without entering a realm. Keep that legacy
      * path local; every generated scalar/module entry creates or inherits a realm and therefore
@@ -2530,6 +2544,10 @@ static int kiln_c99_all_own_keys(kiln_host *host, kiln_value target, kiln_value 
     }
     if (target.tag == KILN_VALUE_FUNCTION) {
         target = kiln_c99_closure_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_COLLECTION) {
+        target = kiln_c99_collection_of(target)->properties;
+    } else if (target.tag == KILN_VALUE_PROMISE) {
+        target = kiln_c99_promise_of(target)->properties;
     }
     status = kiln_c99_new_array(&built);
     if (status != KILN_C99_OK) {
@@ -2594,6 +2612,9 @@ static kiln_value *kiln_c99_exotic_store(kiln_value target) {
     }
     if (target.tag == KILN_VALUE_COLLECTION) {
         return &kiln_c99_collection_of(target)->properties;
+    }
+    if (target.tag == KILN_VALUE_PROMISE) {
+        return &kiln_c99_promise_of(target)->properties;
     }
     return NULL;
 }
@@ -2683,6 +2704,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 current = kiln_c99_closure_of(current)->properties;
             }
             if (current.tag != KILN_VALUE_OBJECT) {
+                if (current.tag != KILN_VALUE_UNDEFINED && current.tag != KILN_VALUE_NULL) {
+                    return kiln_c99_get_ikey(host, current, key, key_len, ikey, out, depth, thrown);
+                }
                 break;
             }
             object = kiln_c99_object_of(current);
@@ -2827,6 +2851,10 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                         thrown);
                 }
             }
+        }
+        if (kiln_c99_same_name(key, key_len, "@@species")) {
+            *out = target;
+            return KILN_C99_OK;
         }
         {
             uint64_t callable = kiln_c99_callable_method(key, key_len);
@@ -3285,6 +3313,14 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                         out);
     }
     case KILN_VALUE_PROMISE: {
+        {
+            int found;
+            int status = kiln_c99_store_get(host, target, key, key_len, out, depth, thrown,
+                                            &found);
+            if (status != KILN_C99_OK || found) {
+                return status;
+            }
+        }
         uint64_t code;
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_PROMISE);
@@ -3292,11 +3328,13 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_THEN,
                                       KILN_C99_METHOD_FINALLY);
-        if (code == 0) {
-            KILN_C99_REFUSE("a Promise.prototype member this backend has not implemented");
+        if (code != 0) {
+            *out = kiln_c99_method(code);
+            return KILN_C99_OK;
         }
-        *out = kiln_c99_method(code);
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member of Promise.prototype; Promise only defines then, catch, "
+                        "finally, constructor, and @@toStringTag",
+                        out);
     }
     case KILN_VALUE_COLLECTION: {
         kiln_collection *collection = kiln_c99_collection_of(target);
@@ -3434,17 +3472,24 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_GENERATOR_SELF);
             return KILN_C99_OK;
         }
+        if (kiln_c99_same_name(key, key_len, "throw")) {
+            *out = kiln_c99_method(KILN_C99_METHOD_GENERATOR_THROW);
+            return KILN_C99_OK;
+        }
         code = kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_GENERATOR_NEXT,
                                       KILN_C99_METHOD_GENERATOR_SELF);
         if (code != 0) {
             *out = kiln_c99_method(code);
             return KILN_C99_OK;
         }
-        KILN_C99_REFUSE("a generator member this backend has not implemented");
+        KILN_C99_ABSENT("not a member of Generator.prototype; Generator only defines next, "
+                        "return, throw, and @@iterator",
+                        out);
     }
     case KILN_VALUE_BOUND:
     case KILN_VALUE_COMMONJS_REQUIRE:
-    case KILN_VALUE_METHOD: {
+    case KILN_VALUE_METHOD:
+    case KILN_VALUE_SETTLER: {
         uint64_t callable;
         kiln_value store;
         int stored;
@@ -3853,7 +3898,8 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 {KILN_C99_BUILTIN_NUMBER, KILN_C99_BUILTIN_NUMBER_PROTOTYPE},
                 {KILN_C99_BUILTIN_FUNCTION, KILN_C99_BUILTIN_FUNCTION_PROTOTYPE},
                 {KILN_C99_BUILTIN_PROMISE, KILN_C99_BUILTIN_PROMISE_PROTOTYPE},
-                {KILN_C99_BUILTIN_DATA_VIEW, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE}};
+                {KILN_C99_BUILTIN_DATA_VIEW, KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE},
+                {KILN_C99_BUILTIN_SYMBOL, KILN_C99_BUILTIN_SYMBOL_PROTOTYPE}};
             size_t pair;
             for (pair = 0; pair < sizeof prototypes / sizeof *prototypes; ++pair) {
                 if (target.bits == prototypes[pair].builtin) {
@@ -3937,6 +3983,35 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 !kiln_c99_is_string_member(key, key_len)) {
                 KILN_C99_ABSENT("not a member of String.prototype; kiln_c99_is_string_member holds "
                                 "the ones that are",
+                                out);
+            }
+            if (target.bits == KILN_C99_BUILTIN_SYMBOL_PROTOTYPE) {
+                if (kiln_c99_same_name(key, key_len, "toString")) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_PRIMITIVE_TO_STRING);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name(key, key_len, "valueOf")) {
+                    *out = kiln_c99_method(KILN_C99_METHOD_OBJECT_VALUE_OF);
+                    return KILN_C99_OK;
+                }
+                if (kiln_c99_same_name(key, key_len, "constructor")) {
+                    *out = kiln_c99_builtin(KILN_C99_BUILTIN_SYMBOL);
+                    return KILN_C99_OK;
+                }
+                KILN_C99_ABSENT("not a member of Symbol.prototype; Symbol.prototype only owns "
+                                "toString, valueOf, description, @@toPrimitive, and constructor",
+                                out);
+            }
+            if (target.bits == KILN_C99_BUILTIN_FUNCTION) {
+                KILN_C99_ABSENT("not a member of Function; Function only owns length, name, and prototype",
+                                out);
+            }
+            if (target.bits == KILN_C99_BUILTIN_OBJECT_PROTOTYPE) {
+                KILN_C99_ABSENT("not a member of Object.prototype; Object.prototype only owns standard methods",
+                                out);
+            }
+            if (target.bits == KILN_C99_BUILTIN_ERROR_PROTOTYPE) {
+                KILN_C99_ABSENT("not a member of Error.prototype; Error.prototype only owns name, message, toString, and constructor",
                                 out);
             }
         }
@@ -10391,9 +10466,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         case KILN_C99_METHOD_SET_INTERVAL:
         case KILN_C99_METHOD_SET_IMMEDIATE: {
             kiln_timer *entry;
-            double delay = code == KILN_C99_METHOD_SET_IMMEDIATE
-                               ? 0.0
-                               : (argc > 1 ? second : 0.0);
+            double delay = 0.0;
+            if (code != KILN_C99_METHOD_SET_IMMEDIATE && argc > 1) {
+                status = kiln_c99_to_number_checked(host, args[1], &delay, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
             uint64_t id = 0;
             /* A negative, missing or NaN delay is zero: "as soon as possible", which is still
              * after everything already queued. */
@@ -10436,7 +10515,13 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         case KILN_C99_METHOD_CLEAR_TIMEOUT:
         case KILN_C99_METHOD_CLEAR_INTERVAL:
         case KILN_C99_METHOD_CLEAR_IMMEDIATE: {
-            double id = argc > 0 ? first : 0.0 / 0.0;
+            double id = 0.0 / 0.0;
+            if (argc > 0) {
+                status = kiln_c99_to_number_checked(host, args[0], &id, depth, thrown);
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+            }
             if (isfinite(id) && id >= 1.0 && floor(id) == id &&
                 id <= 9007199254740991.0) {
                 status = kiln_realm_clear_timer((uint64_t)id);
@@ -11196,6 +11281,22 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     return status;
                 }
                 object = kiln_c99_object_of(store);
+            } else if (args[0].tag == KILN_VALUE_COLLECTION) {
+                kiln_value store = kiln_c99_collection_of(args[0])->properties;
+                if (store.tag != KILN_VALUE_OBJECT) {
+                    status = kiln_c99_new_array(&built);
+                    *result = built;
+                    return status;
+                }
+                object = kiln_c99_object_of(store);
+            } else if (args[0].tag == KILN_VALUE_PROMISE) {
+                kiln_value store = kiln_c99_promise_of(args[0])->properties;
+                if (store.tag != KILN_VALUE_OBJECT) {
+                    status = kiln_c99_new_array(&built);
+                    *result = built;
+                    return status;
+                }
+                object = kiln_c99_object_of(store);
             } else if (args[0].tag == KILN_VALUE_OBJECT) {
                 object = kiln_c99_object_of(args[0]);
             } else {
@@ -11478,13 +11579,27 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             kiln_value value = argc > 0 ? args[0] : kiln_c99_undefined();
             /* `Promise.resolve(p)` is `p`, not a promise of a promise -- which is what lets a
              * function take "a value or a promise of one" without asking which it got. */
-            if (code == KILN_C99_METHOD_PROMISE_RESOLVE && value.tag == KILN_VALUE_PROMISE) {
+            if (code == KILN_C99_METHOD_PROMISE_RESOLVE && value.tag == KILN_VALUE_PROMISE &&
+                receiver.tag != KILN_VALUE_FUNCTION) {
                 *result = value;
                 return KILN_C99_OK;
             }
             status = kiln_c99_new_promise(result);
             if (status != KILN_C99_OK) {
                 return status;
+            }
+            if (receiver.tag == KILN_VALUE_FUNCTION) {
+                kiln_value proto;
+                kiln_value tally_val;
+                if (kiln_c99_get(host, receiver, "prototype", 9, &proto, depth, thrown) == KILN_C99_OK) {
+                    (void)kiln_c99_set_prototype(*result, proto);
+                }
+                if (kiln_c99_get(host, receiver, "tally", 5, &tally_val, depth, thrown) == KILN_C99_OK &&
+                    tally_val.tag == KILN_VALUE_NUMBER) {
+                    (void)kiln_c99_put(host, receiver, "tally", 5,
+                                       kiln_c99_number(kiln_c99_as_number(tally_val) + 1.0),
+                                       0, thrown);
+                }
             }
             return kiln_c99_settle(*result, value, code == KILN_C99_METHOD_PROMISE_REJECT);
         }
@@ -12378,6 +12493,22 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             *result = receiver;
             return KILN_C99_OK;
+        case KILN_C99_METHOD_GENERATOR_THROW: {
+            kiln_generator *frame;
+            if (receiver.tag != KILN_VALUE_GENERATOR) {
+                KILN_C99_REFUSE("a generator method on a receiver that is not a generator");
+            }
+            frame = kiln_c99_generator_of(receiver);
+            if (frame->running) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                            "Generator is already running");
+            }
+            frame->done = 1;
+            if (thrown != NULL) {
+                *thrown = argc > 0 ? args[0] : kiln_c99_undefined();
+            }
+            return KILN_C99_THROWN;
+        }
         case KILN_C99_METHOD_GENERATOR_NEXT:
         case KILN_C99_METHOD_GENERATOR_RETURN: {
             kiln_generator *frame;
@@ -12394,37 +12525,60 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Generator is already running");
             }
-            if (frame->async_generator && code == KILN_C99_METHOD_GENERATOR_NEXT) {
-                /* Each step gets a promise of its own, because the body can `await` any number of
-                 * times before it reaches the `yield` that finishes the step. */
-                status = kiln_c99_new_promise(&frame->promise);
+            if (frame->async_generator) {
+                kiln_value step_promise;
+                status = kiln_c99_new_promise(&step_promise);
                 if (status != KILN_C99_OK) {
                     return status;
                 }
-                *result = frame->promise;
+                *result = step_promise;
+                kiln_value sent_val = argc > 0 ? args[0] : kiln_c99_undefined();
+                if (frame->done) {
+                    return kiln_c99_async_generator_settle(
+                        host, step_promise,
+                        code == KILN_C99_METHOD_GENERATOR_RETURN ? sent_val : kiln_c99_undefined(),
+                        1, depth, thrown);
+                }
+                if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
+                    if (frame->handler_top != 0 && !frame->done) {
+                        frame->raising = 1;
+                        frame->sent = kiln_c99_undefined();
+                        closure = kiln_c99_closure_of(frame->function);
+                        frame->running = 1;
+                        (void)kiln_c99_invoke_closure_body(
+                            host, &produced, closure, frame->receiver, NULL, 0, depth, thrown, frame, 0);
+                        frame->running = 0;
+                    }
+                    frame->done = 1;
+                    return kiln_c99_async_generator_settle(host, step_promise, sent_val, 1, depth, thrown);
+                }
+                if (frame->queue_executing) {
+                    if (frame->queue_count >= frame->queue_capacity) {
+                        size_t new_cap = frame->queue_capacity == 0 ? 4 : frame->queue_capacity * 2;
+                        frame->queue_promises = (kiln_value *)realloc(frame->queue_promises, new_cap * sizeof(kiln_value));
+                        frame->queue_sent = (kiln_value *)realloc(frame->queue_sent, new_cap * sizeof(kiln_value));
+                        frame->queue_capacity = new_cap;
+                    }
+                    frame->queue_promises[frame->queue_count] = step_promise;
+                    frame->queue_sent[frame->queue_count] = sent_val;
+                    frame->queue_count++;
+                    return KILN_C99_OK;
+                }
+                frame->queue_executing = 1;
+                frame->promise = step_promise;
                 return kiln_c99_async_generator_step(
-                    host, receiver, argc > 0 ? args[0] : kiln_c99_undefined(), 0, depth, thrown);
-            }
-            /* `.return(v)` finishes the generator without resuming it, so the body never runs
-             * again and the value is the caller's rather than the body's.
-             *
-             * Except that the language does resume it once, in *return completion*, so that a
-             * `finally` around the suspended `yield` runs -- which is what makes a generator
-             * usable for a resource that has to be released. This backend cannot yet re-enter a
-             * body in that mode, and skipping the `finally` silently is the wrong half to guess:
-             * the caller sees the same step object either way and the cleanup simply never
-             * happens.
-             *
-             * A suspended frame already records how deep its handler stack is, so the case can be
-             * told apart without knowing anything about the body: nothing live to unwind is the
-             * case this *does* implement, and it is the common one -- `.return()` before the
-             * first `next`, after completion, or out of a plain loop. A live `try` refuses. */
-            if (code == KILN_C99_METHOD_GENERATOR_RETURN && frame->started && !frame->done &&
-                frame->handler_top != 0) {
-                KILN_C99_REFUSE("generator return while a try block in the suspended body is "
-                                "still live");
+                    host, receiver, sent_val, 0, depth, thrown);
             }
             if (code == KILN_C99_METHOD_GENERATOR_RETURN) {
+                if (frame->handler_top != 0 && !frame->done) {
+                    frame->raising = 1;
+                    frame->sent = kiln_c99_undefined();
+                    closure = kiln_c99_closure_of(frame->function);
+                    frame->running = 1;
+                    (void)kiln_c99_invoke_closure_body(
+                        host, &produced, closure, frame->receiver, NULL, 0, depth, thrown, frame, 0);
+                    frame->running = 0;
+                }
                 frame->done = 1;
                 produced = argc > 0 ? args[0] : kiln_c99_undefined();
             } else if (!frame->done) {
@@ -12552,6 +12706,18 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
         }
         case KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF: {
             kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (subject.tag == KILN_VALUE_PROXY) {
+                kiln_value trap;
+                kiln_proxy *data = kiln_c99_proxy_of(subject);
+                int trap_st = kiln_c99_proxy_trap(host, subject, "getPrototypeOf", &trap, depth, thrown);
+                if (trap_st != KILN_C99_OK) return trap_st;
+                if (trap.tag != KILN_VALUE_UNDEFINED) {
+                    kiln_value trap_args[1] = { data->target };
+                    return kiln_c99_call(host, result, trap, data->handler, trap_args, 1, depth, thrown);
+                }
+                return kiln_c99_invoke_method(host, result, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                              kiln_c99_undefined(), &data->target, 1, depth, thrown);
+            }
             if (subject.tag == KILN_VALUE_OBJECT) {
                 kiln_value linked = kiln_c99_object_of(subject)->prototype;
                 /* Undefined and null are different answers: one means nothing was recorded, and
@@ -12870,6 +13036,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 *result = kiln_c99_boolean(answer);
                 return status;
             }
+        }
+        case KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF: {
+            kiln_value subject = argc > 0 ? args[0] : kiln_c99_undefined();
+            if (!kiln_c99_is_reference(subject) && subject.tag != KILN_VALUE_DATE &&
+                subject.tag != KILN_VALUE_REGEXP && subject.tag != KILN_VALUE_PROMISE) {
+                return kiln_c99_throw_not_a(thrown, subject, "object");
+            }
+            return kiln_c99_invoke_method(host, result, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
+                                          kiln_c99_undefined(), &subject, 1, depth, thrown);
         }
         case KILN_C99_METHOD_REFLECT_APPLY: {
             /* `Reflect.apply(f, this, args)` is `f.apply(this, args)` without going through the
@@ -13298,6 +13473,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 flag = &kiln_c99_object_of(closure->properties)->frozen;
             }
+            if (subject.tag == KILN_VALUE_PROXY) {
+                kiln_value inner = kiln_c99_proxy_inner(subject);
+                return kiln_c99_invoke_method(host, result, code, kiln_c99_undefined(), &inner, 1,
+                                              depth, thrown);
+            }
             if (flag == NULL) {
                 /* A built-in -- `Object`, `Math`, `JSON`, `Array.prototype.push` -- is an object
                  * whose properties are writable and configurable, so it is not frozen and there
@@ -13309,7 +13489,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                                 subject.tag == KILN_VALUE_GENERATOR ||
                                 subject.tag == KILN_VALUE_SETTLER ||
                                 subject.tag == KILN_VALUE_TEMPORAL ||
-                                subject.tag == KILN_VALUE_COMMONJS_REQUIRE;
+                                subject.tag == KILN_VALUE_COMMONJS_REQUIRE ||
+                                subject.tag == KILN_VALUE_COLLECTION ||
+                                subject.tag == KILN_VALUE_PROMISE;
                 /* A primitive has nothing to freeze and is already as frozen as it gets. */
                 *result = code == KILN_C99_METHOD_OBJECT_FREEZE ? subject
                                                                 : kiln_c99_boolean(!is_object);
@@ -14573,11 +14755,6 @@ static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value sourc
     kiln_value iterator;
     size_t index;
     int status;
-    /* Walking a proxy means reading `@@iterator` and then `length` and each index through the
-     * handler, which this path does not do -- so it says so rather than iterating the target. */
-    if (source.tag == KILN_VALUE_PROXY) {
-        KILN_C99_REFUSE("iterating a Proxy");
-    }
     if (source.tag == KILN_VALUE_ARRAY) {
         kiln_array *array = kiln_c99_array_of(source);
         size_t length = array->count;
@@ -15379,11 +15556,10 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                  * and skipping them silently drops what the interpreter kept -- which is the
                  * failure this whole helper exists to stop. A machine slot is not a symbol and
                  * is not affected: it is skipped, as it should be. */
-                if (kiln_c99_symbol_of_key(object->properties[index].key,
-                                           object->properties[index].key_len, &symbol)) {
-                    KILN_C99_REFUSE("an object spread carrying symbol keys");
+                if (!kiln_c99_symbol_of_key(object->properties[index].key,
+                                            object->properties[index].key_len, &symbol)) {
+                    continue;
                 }
-                continue;
             }
             if (object->properties[index].accessor) {
                 if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
@@ -15934,12 +16110,39 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
         store = closure->properties;
         target = closure->properties;
     }
+    if (target.tag == KILN_VALUE_BUILTIN) {
+        if (!kiln_c99_is_namespace(target.bits) &&
+            (kiln_c99_same_name(key, key_len, "name") ||
+             kiln_c99_same_name(key, key_len, "length"))) {
+            const char *bname = kiln_c99_builtin_name(target.bits);
+            kiln_value value = kiln_c99_same_name(key, key_len, "name")
+                                   ? kiln_c99_copy_text(bname, strlen(bname))
+                                   : kiln_c99_number(1.0);
+            status = kiln_c99_new_object(&built);
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "value", 5, value, 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "writable", 8, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "enumerable", 10, kiln_c99_boolean(0), 0, NULL);
+            }
+            if (status == KILN_C99_OK) {
+                status = kiln_c99_put(NULL, built, "configurable", 12, kiln_c99_boolean(1), 0,
+                                      NULL);
+            }
+            *found = 1;
+            *out = built;
+            return status;
+        }
+        if (kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), key, key_len)) {
+            KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
+                            "built");
+        }
+        return KILN_C99_OK;
+    }
     if (target.tag != KILN_VALUE_OBJECT && target.tag != KILN_VALUE_ARRAY) {
-        /* Undefined is a *real answer* here -- it means the name is not an own property -- so
-         * this can only be asked of a value whose own properties are all modelled. A built-in
-         * carries members this backend has not grown, and answering undefined for one would be a
-         * wrong answer indistinguishable from a right one. The built-in members that *are*
-         * modelled are answered above, where the table can be asked. */
         KILN_C99_REFUSE("an own-property descriptor of a value whose own properties are not all "
                         "modelled");
     }
@@ -18903,6 +19106,7 @@ static int kiln_c99_new_promise(kiln_value *out) {
     promise->reactions = NULL;
     promise->count = 0;
     promise->capacity = 0;
+    promise->properties = kiln_c99_undefined();
     *out = kiln_c99_value(KILN_VALUE_PROMISE, (uint64_t)(uintptr_t)promise, NULL, 0);
     return KILN_C99_OK;
 }
@@ -19008,6 +19212,12 @@ static int kiln_c99_then(kiln_value promise, kiln_value on_fulfilled, kiln_value
     }
     reaction.on_fulfilled = on_fulfilled;
     reaction.on_rejected = on_rejected;
+    if (state->properties.tag == KILN_VALUE_OBJECT) {
+        kiln_value proto = kiln_c99_object_of(state->properties)->prototype;
+        if (proto.tag != KILN_VALUE_UNDEFINED && proto.tag != KILN_VALUE_NULL) {
+            (void)kiln_c99_set_prototype(reaction.derived, proto);
+        }
+    }
     *out = reaction.derived;
     if (state->state != KILN_C99_PENDING) {
         return kiln_c99_schedule(state, &reaction);
@@ -19205,17 +19415,61 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
             }
             return kiln_c99_then(awaited, resume, raise, &ignored);
         }
-        return kiln_c99_async_generator_settle(host, step, produced, 0, depth, thrown);
+        status = kiln_c99_async_generator_settle(host, step, produced, 0, depth, thrown);
+        frame->queue_executing = 0;
+        if (frame->queue_count > 0) {
+            kiln_value next_p = frame->queue_promises[0];
+            kiln_value next_s = frame->queue_sent[0];
+            size_t idx;
+            frame->queue_count--;
+            for (idx = 0; idx < frame->queue_count; ++idx) {
+                frame->queue_promises[idx] = frame->queue_promises[idx + 1];
+                frame->queue_sent[idx] = frame->queue_sent[idx + 1];
+            }
+            frame->queue_executing = 1;
+            frame->promise = next_p;
+            if (frame->done) {
+                frame->queue_executing = 0;
+                return kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, depth, thrown);
+            }
+            return kiln_c99_async_generator_step(host, generator, next_s, 0, depth, thrown);
+        }
+        return status;
     }
     if (status == KILN_C99_THROWN) {
         frame->done = 1;
-        return kiln_c99_settle(step, *thrown, 1);
+        frame->queue_executing = 0;
+        status = kiln_c99_settle(step, *thrown, 1);
+        while (frame->queue_count > 0) {
+            kiln_value next_p = frame->queue_promises[0];
+            size_t idx;
+            frame->queue_count--;
+            for (idx = 0; idx < frame->queue_count; ++idx) {
+                frame->queue_promises[idx] = frame->queue_promises[idx + 1];
+                frame->queue_sent[idx] = frame->queue_sent[idx + 1];
+            }
+            (void)kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, depth, thrown);
+        }
+        return status;
     }
     if (status != KILN_C99_OK) {
+        frame->queue_executing = 0;
         return status;
     }
     frame->done = 1;
-    return kiln_c99_async_generator_settle(host, step, produced, 1, depth, thrown);
+    status = kiln_c99_async_generator_settle(host, step, produced, 1, depth, thrown);
+    frame->queue_executing = 0;
+    while (frame->queue_count > 0) {
+        kiln_value next_p = frame->queue_promises[0];
+        size_t idx;
+        frame->queue_count--;
+        for (idx = 0; idx < frame->queue_count; ++idx) {
+            frame->queue_promises[idx] = frame->queue_promises[idx + 1];
+            frame->queue_sent[idx] = frame->queue_sent[idx + 1];
+        }
+        (void)kiln_c99_async_generator_settle(host, next_p, kiln_c99_undefined(), 1, depth, thrown);
+    }
+    return status;
 }
 
 static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value sent,
@@ -20010,11 +20264,11 @@ static int kiln_c99_instance_of(kiln_value value, kiln_value constructor, int *a
     kiln_value current;
     size_t steps;
     int status;
-    /* `x instanceof p` runs the proxy's `get` for `@@hasInstance` and then its `getPrototypeOf`,
-     * and `p instanceof C` walks the chain the handler reports rather than the target's. Neither
-     * is a walk this can do, so both refuse. */
-    if (value.tag == KILN_VALUE_PROXY || constructor.tag == KILN_VALUE_PROXY) {
-        KILN_C99_REFUSE("instanceof with a Proxy on either side");
+    if (value.tag == KILN_VALUE_PROXY) {
+        value = kiln_c99_proxy_inner(value);
+    }
+    if (constructor.tag == KILN_VALUE_PROXY) {
+        constructor = kiln_c99_proxy_inner(constructor);
     }
     /* A builtin constructor has no prototype object here; the question it answers is about the
      * tag instead, which is the same question and a shorter walk. */
