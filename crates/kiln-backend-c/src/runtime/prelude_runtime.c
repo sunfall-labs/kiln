@@ -2672,9 +2672,10 @@ static int kiln_c99_buffer_from(kiln_value *out, kiln_value source, kiln_value *
     if (source.tag == KILN_VALUE_STRING) {
         status = kiln_c99_typed_alloc(&built, KILN_TYPED_UINT8, source.len);
         if (status != KILN_C99_OK) return status;
-        for (index = 0; index < source.len; ++index) {
-            kiln_c99_typed_set(kiln_c99_typed_array_of(built), index,
-                               (double)(unsigned char)source.ptr[index]);
+        if (source.len > 0) {
+            kiln_typed_array *view = kiln_c99_typed_array_of(built);
+            uint8_t *dest = (uint8_t *)view->buffer->bytes + view->byte_offset;
+            memcpy(dest, source.ptr, source.len);
         }
     } else if (source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_ARRAY) {
         status = kiln_c99_new_typed_array(&built, KILN_TYPED_UINT8, source, 0, 0, 0, thrown);
