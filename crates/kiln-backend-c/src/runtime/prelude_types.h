@@ -443,6 +443,8 @@ typedef struct kiln_entry {
 
 typedef struct kiln_collection {
     kiln_entry *entries;
+    int32_t *hash_table;
+    size_t hash_capacity;
     /* How many slots have ever been used, dead ones included -- what iteration walks. */
     size_t count;
     /* How many are still there, which is what `size` reports. */

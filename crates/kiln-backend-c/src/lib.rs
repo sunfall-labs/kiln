@@ -722,6 +722,14 @@ static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_boolean(int b) {
     return v;
 }
 
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_undefined(void) {
+    kiln_value v;
+    v.tag = 0;
+    v.len = 0;
+    v.bits = 0;
+    return v;
+}
+
 static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
     if (KILN_LIKELY(val.tag == KILN_VALUE_BOOLEAN)) {
         return val.bits != 0;
@@ -963,20 +971,25 @@ fn render_function(
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown; (void)frame;\n");
         output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
-        writeln!(
-            output,
-            "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
-        )
-        .unwrap();
         if proto.parameter_count == 0 {
             output.push_str("    (void)args; (void)argc;\n");
+            if locals > 0 {
+                writeln!(
+                    output,
+                    "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_fast_undefined();"
+                )
+                .unwrap();
+            }
         } else {
-            // Parameters occupy the first slots in declaration order. An argument that was not
-            // passed leaves its slot undefined, which is what a missing argument is.
             writeln!(
                 output,
                 "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
                 proto.parameter_count
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    for (; slot < (size_t){locals}; ++slot) locals[slot] = kiln_fast_undefined();"
             )
             .unwrap();
         }
@@ -2288,14 +2301,14 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             let direct_call = if let Some(func_idx) = *current_func {
                 format!(
-                    "if (KILN_LIKELY(plain != NULL && plain->body == {symbol}_fn_{func_idx} && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = {symbol}_fn_{func_idx}(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else "
+                    "if (KILN_LIKELY(plain != NULL && plain->body == {symbol}_fn_{func_idx} && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = {symbol}_fn_{func_idx}(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else "
                 )
             } else {
                 String::new()
             };
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; {direct_call}if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = plain->body(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_fast_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; {direct_call}if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = plain->body(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();

@@ -33,6 +33,14 @@ static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_boolean(int b) {
     return v;
 }
 
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_undefined(void) {
+    kiln_value v;
+    v.tag = 0;
+    v.len = 0;
+    v.bits = 0;
+    return v;
+}
+
 static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
     if (KILN_LIKELY(val.tag == KILN_VALUE_BOOLEAN)) {
         return val.bits != 0;
