@@ -415,6 +415,35 @@ fn bigint_digits(raw: &str) -> Option<String> {
     Some(num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)?.to_string())
 }
 
+/// How many bytes of whitespace and comments `text` opens with.
+///
+/// A hand-rolled scan rather than a re-lex: the only caller needs the *end* of the trivia after
+/// one keyword, and the parser has already proved the text is well formed -- so an unterminated
+/// comment cannot arrive here, and one that somehow did stops at the end rather than running off
+/// it.
+fn skipped_trivia(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut at = 0;
+    loop {
+        let rest = &text[at..];
+        let spaces = rest.len() - rest.trim_start().len();
+        at += spaces;
+        if text[at..].starts_with("/*") {
+            match text[at + 2..].find("*/") {
+                Some(close) => at += 2 + close + 2,
+                None => return bytes.len(),
+            }
+        } else if text[at..].starts_with("//") {
+            match text[at..].find('\n') {
+                Some(newline) => at += newline + 1,
+                None => return bytes.len(),
+            }
+        } else {
+            return at;
+        }
+    }
+}
+
 struct Lowerer<'a> {
     /// The source being lowered, so a span can be *read* and not merely recorded.
     ///
@@ -433,9 +462,11 @@ impl Lowerer<'_> {
     /// `static` is unaffected -- `static static() {}` drops the first word and keeps the second,
     /// which is the same rule applied once.
     ///
-    /// Whitespace between the keyword and the key is skipped; a comment there is not, and would
-    /// be reproduced. That is a wrong answer in a place no program looks, and it is visibly the
-    /// text that was written rather than an invented one.
+    /// Whitespace *and comments* between the keyword and the key are skipped. Both are trivia
+    /// belonging to neither production, and the corpus checks it directly:
+    /// `class F { static /* before */f() {} }` must answer `"f() {}"`, and keeping the comment
+    /// left a string the NativeFunction and MethodDefinition grammars both reject -- so twenty
+    /// variants failed on the *text* rather than on anything about the method.
     fn method_definition_span(&self, span: HirSpan, is_static: bool) -> HirSpan {
         if !is_static {
             return span;
@@ -447,9 +478,8 @@ impl Lowerer<'_> {
         else {
             return span;
         };
-        let skipped = text.len() - text.trim_start().len();
         HirSpan::new(
-            span.start + "static".len() as u32 + skipped as u32,
+            span.start + "static".len() as u32 + skipped_trivia(text) as u32,
             span.end,
         )
     }

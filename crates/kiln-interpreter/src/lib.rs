@@ -4353,6 +4353,14 @@ impl Value {
             }
             Self::CommonJsRequire(_) => "function require() { [native code] }".to_owned(),
             Self::CommonJsResolve(_) => "function resolve() { [native code] }".to_owned(),
+            // A proxy of a *function* has no source text of its own, and answering with the
+            // target's is a wrong answer rather than a missing one: `Function.prototype.toString`
+            // requires the NativeFunction shape, so a proxy that reported `() => {}` reads as
+            // the arrow it wraps to anything that parses this. Node answers the anonymous form
+            // for every function proxy, whatever it wraps. A proxy of anything else still
+            // stringifies as what it wraps, which is what makes `String(new Proxy([1, 2], {}))`
+            // "1,2".
+            Self::Proxy(proxy) if is_callable(&proxy.target) => native_code_source(""),
             Self::Proxy(proxy) => proxy.target.to_display_string(),
             // Like an array: `String(new Uint8Array([1, 2]))` is "1,2".
             Self::TypedArray(view) => join(&view.items(), ",").unwrap_or_default(),
@@ -42882,6 +42890,19 @@ fn empty_items(count: usize) -> String {
 /// `/\{\s*\[native code\]/.test(String(fn))` to tell a real built-in from a polyfill that
 /// replaced it, so this is not decoration -- it is the answer to a question real code asks.
 fn native_code_source(name: &str) -> String {
+    // A symbol-keyed built-in carries the reserved key internally -- `get @@species` -- and that
+    // is not a PropertyName any source could write, so the grammar rejects the whole string and
+    // `assertNativeFunction` reports the *function* as not native. Spelled as the computed key a
+    // program would actually write, which is node's answer too:
+    // `function get [Symbol.species]() { [native code] }`.
+    let name = match name.find(symbol::RESERVED_KEY_PREFIX) {
+        Some(at) => format!(
+            "{}[Symbol.{}]",
+            &name[..at],
+            &name[at + symbol::RESERVED_KEY_PREFIX.len()..]
+        ),
+        None => name.to_owned(),
+    };
     format!("function {name}() {{ [native code] }}")
 }
 
