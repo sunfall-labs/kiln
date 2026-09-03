@@ -8098,10 +8098,13 @@ static const char *kiln_c99_temporal_now_name(uint64_t code) {
 
 /* The option names, in the order the language reads them off an options bag.
  *
- * The reads are observable and the specification runs them all, whichever options the operation
- * actually uses -- so reading fewer would hide a getter a test is counting. `slot` is where the
- * string lands in the provider's option array; the two numeric options are named here and handled
- * apart, because one of them has a spelling (`"auto"`) that is not a number. */
+ * The reads are observable -- each can be a getter, and the corpus counts exactly which ones run
+ * and in what order -- so this is the *vocabulary*, not the set any one operation reads. Reading
+ * all eleven every time is not the conservative choice it looks like: `date.toString(bag)` ran
+ * eleven getters where the specification runs one. Which subset an operation takes is a mask,
+ * below. `slot` is where the string lands in the provider's option array; the two numeric options
+ * are named here and handled apart, because one of them has a spelling (`"auto"`) that is not a
+ * number. */
 #define KILN_C99_TEMPORAL_OPTION_COUNT 11
 #define KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS 9
 #define KILN_C99_TEMPORAL_OPTION_NUMBER_SLOTS 2
@@ -8112,6 +8115,101 @@ static const kiln_temporal_key KILN_C99_TEMPORAL_OPTION_KEYS[KILN_C99_TEMPORAL_O
     {"relativeTo", -2, -1},           {"roundingIncrement", 0, -1},
     {"roundingMode", -1, 5},          {"smallestUnit", -1, 6},
     {"timeZoneName", -1, 7}};
+
+/* One bit per entry of the table above, so an operation can name the subset it reads.
+ *
+ * Grouped by operation rather than by type, because that is how the specification groups them:
+ * every difference takes the same four, every calendar conversion takes `overflow`. These are the
+ * same sets the interpreter's `temporal::options` module holds, and the corpus probe in
+ * `conformance/native/temporal.ts` is what keeps the two spellings honest. */
+#define KILN_C99_TEMPORAL_OPT_CALENDAR_NAME (1u << 0)
+#define KILN_C99_TEMPORAL_OPT_DISAMBIGUATION (1u << 1)
+#define KILN_C99_TEMPORAL_OPT_FRACTIONAL (1u << 2)
+#define KILN_C99_TEMPORAL_OPT_LARGEST_UNIT (1u << 3)
+#define KILN_C99_TEMPORAL_OPT_OFFSET (1u << 4)
+#define KILN_C99_TEMPORAL_OPT_OVERFLOW (1u << 5)
+#define KILN_C99_TEMPORAL_OPT_RELATIVE_TO (1u << 6)
+#define KILN_C99_TEMPORAL_OPT_ROUNDING_INCREMENT (1u << 7)
+#define KILN_C99_TEMPORAL_OPT_ROUNDING_MODE (1u << 8)
+#define KILN_C99_TEMPORAL_OPT_SMALLEST_UNIT (1u << 9)
+#define KILN_C99_TEMPORAL_OPT_TIME_ZONE_NAME (1u << 10)
+
+/* `from`, `with`, `add` and `subtract` on the four types with a calendar to fall off the end of. */
+#define KILN_C99_TEMPORAL_OPTS_OVERFLOW KILN_C99_TEMPORAL_OPT_OVERFLOW
+/* The same on a `ZonedDateTime`, which also has to be told what to do with a wall-clock time its
+ * zone skips or repeats. */
+#define KILN_C99_TEMPORAL_OPTS_ZONED_OVERFLOW                                                      \
+    (KILN_C99_TEMPORAL_OPT_DISAMBIGUATION | KILN_C99_TEMPORAL_OPT_OFFSET |                          \
+     KILN_C99_TEMPORAL_OPT_OVERFLOW)
+/* `until` and `since`, on every type that has them. */
+#define KILN_C99_TEMPORAL_OPTS_DIFFERENCE                                                          \
+    (KILN_C99_TEMPORAL_OPT_LARGEST_UNIT | KILN_C99_TEMPORAL_OPT_ROUNDING_INCREMENT |                \
+     KILN_C99_TEMPORAL_OPT_ROUNDING_MODE | KILN_C99_TEMPORAL_OPT_SMALLEST_UNIT)
+/* `round`, on the four types whose rounding has no calendar in it. */
+#define KILN_C99_TEMPORAL_OPTS_ROUND                                                               \
+    (KILN_C99_TEMPORAL_OPT_ROUNDING_INCREMENT | KILN_C99_TEMPORAL_OPT_ROUNDING_MODE |               \
+     KILN_C99_TEMPORAL_OPT_SMALLEST_UNIT)
+/* `Temporal.Duration.prototype.round`, which does: a duration in months rounds differently
+ * depending on which months, so it takes an anchor and a largest unit as well. */
+#define KILN_C99_TEMPORAL_OPTS_DURATION_ROUND                                                      \
+    (KILN_C99_TEMPORAL_OPTS_ROUND | KILN_C99_TEMPORAL_OPT_LARGEST_UNIT |                            \
+     KILN_C99_TEMPORAL_OPT_RELATIVE_TO)
+/* `Temporal.Duration.prototype.total` and `Temporal.Duration.compare`. `total` also reads `unit`,
+ * which is not in the shared vocabulary and is read after this set, which is where the
+ * specification's alphabetical order puts it. */
+#define KILN_C99_TEMPORAL_OPTS_RELATIVE_TO KILN_C99_TEMPORAL_OPT_RELATIVE_TO
+/* `Temporal.PlainDateTime.prototype.toZonedDateTime`. */
+#define KILN_C99_TEMPORAL_OPTS_DISAMBIGUATION KILN_C99_TEMPORAL_OPT_DISAMBIGUATION
+/* A date has only a calendar to name in its string form. */
+#define KILN_C99_TEMPORAL_OPTS_CALENDAR_NAME KILN_C99_TEMPORAL_OPT_CALENDAR_NAME
+/* A time has only a precision to round to. */
+#define KILN_C99_TEMPORAL_OPTS_TIME_PRECISION                                                      \
+    (KILN_C99_TEMPORAL_OPT_FRACTIONAL | KILN_C99_TEMPORAL_OPT_ROUNDING_MODE |                       \
+     KILN_C99_TEMPORAL_OPT_SMALLEST_UNIT)
+/* A date-and-time has both. */
+#define KILN_C99_TEMPORAL_OPTS_DATE_TIME_STRING                                                    \
+    (KILN_C99_TEMPORAL_OPTS_TIME_PRECISION | KILN_C99_TEMPORAL_OPT_CALENDAR_NAME)
+/* A zoned date-time has both, plus the two annotations only it carries. */
+#define KILN_C99_TEMPORAL_OPTS_ZONED_STRING                                                        \
+    (KILN_C99_TEMPORAL_OPTS_DATE_TIME_STRING | KILN_C99_TEMPORAL_OPT_OFFSET |                       \
+     KILN_C99_TEMPORAL_OPT_TIME_ZONE_NAME)
+/* An operation that validates its bag is an object and reads nothing out of it. */
+#define KILN_C99_TEMPORAL_OPTS_NONE 0u
+
+/* The keys `from` and `with` read on this kind: a `ZonedDateTime` has a zone to resolve as well as
+ * a calendar to overflow, and the two kinds without a calendar read nothing. */
+static unsigned kiln_c99_temporal_overflow_keys(int32_t kind) {
+    if (kind == 7) {
+        return KILN_C99_TEMPORAL_OPTS_ZONED_OVERFLOW;
+    }
+    if (kind == 5 || kind == 6) {
+        return KILN_C99_TEMPORAL_OPTS_NONE;
+    }
+    return KILN_C99_TEMPORAL_OPTS_OVERFLOW;
+}
+
+/* The keys `toString` reads on this kind. */
+static unsigned kiln_c99_temporal_string_keys(int32_t kind) {
+    switch (kind) {
+    case 0:
+    case 3:
+    case 4:
+        return KILN_C99_TEMPORAL_OPTS_CALENDAR_NAME;
+    case 2:
+        return KILN_C99_TEMPORAL_OPTS_DATE_TIME_STRING;
+    case 7:
+        return KILN_C99_TEMPORAL_OPTS_ZONED_STRING;
+    default:
+        return KILN_C99_TEMPORAL_OPTS_TIME_PRECISION;
+    }
+}
+
+/* Whether `add`/`subtract` on this kind reads an options bag at all. A `PlainTime` wraps around the
+ * clock, and a `Duration` and an `Instant` have no month to fall off the end of, so all three take
+ * a one-argument signature and ignore whatever follows. */
+static int kiln_c99_temporal_takes_arithmetic_options(int32_t kind) {
+    return kind == 0 || kind == 2 || kind == 3 || kind == 7;
+}
 
 /* The field string slots: era, monthCode, offset, timeZone, calendar. `overflow` is not among
  * them any more -- it is an option, and options travel in their own array. */
@@ -8178,12 +8276,12 @@ static void kiln_c99_temporal_options_init(kiln_temporal_options *options) {
     options->relative_to = kiln_c99_undefined();
 }
 
-/* Read every option this realm knows about, in the order the specification reads them.
+/* Read the options this operation takes, in the order the specification reads them.
  *
- * All of them, rather than only the ones this operation uses: the reads are observable, a getter
- * on an options bag runs, and the specification's own option steps run for every option the
- * operation could take. Reading fewer would hide a getter a test is counting. */
-static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag,
+ * `keys` is the mask above: the reads are observable, so which of them run is part of the answer
+ * and not an implementation detail. The bag is still checked for objecthood when the mask is
+ * empty, because `GetOptionsObject` runs whether or not the operation goes on to read anything. */
+static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag, unsigned keys,
                                           kiln_temporal_options *options, int depth,
                                           kiln_value *thrown) {
     size_t index;
@@ -8198,6 +8296,9 @@ static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag,
     for (index = 0; index < KILN_C99_TEMPORAL_OPTION_COUNT; ++index) {
         const kiln_temporal_key *key = &KILN_C99_TEMPORAL_OPTION_KEYS[index];
         kiln_value read;
+        if ((keys & (1u << index)) == 0u) {
+            continue;
+        }
         int status = kiln_c99_get(host, bag, key->name, strlen(key->name), &read, depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
@@ -8553,7 +8654,9 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
         char *packed_options;
         void *handle = NULL;
         int32_t answered;
-        status = kiln_c99_temporal_read_options(host, options, &settings, depth, thrown);
+        status = kiln_c99_temporal_read_options(host, options,
+                                                kiln_c99_temporal_overflow_keys(kind), &settings,
+                                                depth, thrown);
         if (status != KILN_C99_OK) {
             return status;
         }
@@ -8583,7 +8686,8 @@ static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value it
         return status;
     }
     /* The options are read after the fields, which is the order the specification puts them in. */
-    status = kiln_c99_temporal_read_options(host, options, &settings, depth, thrown);
+    status = kiln_c99_temporal_read_options(host, options, kiln_c99_temporal_overflow_keys(kind),
+                                            &settings, depth, thrown);
     if (status != KILN_C99_OK) {
         return status;
     }
@@ -8667,8 +8771,9 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
          * way the operand is a duration, and reaching one that is not is the engine's TypeError. */
         status = kiln_c99_temporal_coerce(host, 5, first, kiln_c99_undefined(), &operand, depth,
                                           thrown);
-        if (status == KILN_C99_OK) {
-            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+        if (status == KILN_C99_OK && kiln_c99_temporal_takes_arithmetic_options(kind)) {
+            status = kiln_c99_temporal_read_options(host, second, KILN_C99_TEMPORAL_OPTS_OVERFLOW,
+                                                    &options, depth, thrown);
         }
     } else if (kiln_c99_same_name(name, strlen(name), "until") ||
                kiln_c99_same_name(name, strlen(name), "since") ||
@@ -8676,7 +8781,8 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
         status = kiln_c99_temporal_coerce(host, kind, first, kiln_c99_undefined(), &operand, depth,
                                           thrown);
         if (status == KILN_C99_OK && !kiln_c99_same_name(name, strlen(name), "equals")) {
-            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+            status = kiln_c99_temporal_read_options(host, second, KILN_C99_TEMPORAL_OPTS_DIFFERENCE,
+                                                    &options, depth, thrown);
         }
     } else if (kiln_c99_same_name(name, strlen(name), "round") ||
                kiln_c99_same_name(name, strlen(name), "total")) {
@@ -8690,7 +8796,10 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
             return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                         totalling ? "total needs a unit" : "round needs a unit");
         } else {
-            status = kiln_c99_temporal_read_options(host, first, &options, depth, thrown);
+            unsigned keys = totalling ? KILN_C99_TEMPORAL_OPTS_RELATIVE_TO
+                                      : (kind == 5 ? KILN_C99_TEMPORAL_OPTS_DURATION_ROUND
+                                                   : KILN_C99_TEMPORAL_OPTS_ROUND);
+            status = kiln_c99_temporal_read_options(host, first, keys, &options, depth, thrown);
             if (status == KILN_C99_OK && totalling) {
                 /* `unit` is not in the shared option list, because only `total` takes it. */
                 kiln_value read;
@@ -8714,7 +8823,8 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
                                             thrown);
         carries_fields = 1;
         if (status == KILN_C99_OK) {
-            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+            status = kiln_c99_temporal_read_options(
+                host, second, kiln_c99_temporal_overflow_keys(kind), &options, depth, thrown);
         }
     } else if (kiln_c99_same_name(name, strlen(name), "withCalendar") ||
                kiln_c99_same_name(name, strlen(name), "withTimeZone")) {
@@ -8763,7 +8873,12 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
                                         "toZonedDateTime needs a time zone");
         }
         if (status == KILN_C99_OK) {
-            status = kiln_c99_temporal_read_options(host, second, &options, depth, thrown);
+            /* A `PlainDate` names a whole day, so nothing about it can be skipped or repeated by a
+             * zone; a `PlainDateTime` names a wall-clock time, which can be both. */
+            status = kiln_c99_temporal_read_options(host, second,
+                                                    kind == 2 ? KILN_C99_TEMPORAL_OPTS_DISAMBIGUATION
+                                                              : KILN_C99_TEMPORAL_OPTS_NONE,
+                                                    &options, depth, thrown);
         }
     } else if (kiln_c99_same_name(name, strlen(name), "toPlainDate") && (kind == 3 || kind == 4)) {
         /* On a year-month or a month-day, `toPlainDate` supplies the component that was missing
@@ -8782,7 +8897,8 @@ static int kiln_c99_temporal_operation(kiln_host *host, kiln_value *result, uint
             carries_fields = 1;
         }
     } else if (kiln_c99_same_name(name, strlen(name), "toString")) {
-        status = kiln_c99_temporal_read_options(host, first, &options, depth, thrown);
+        status = kiln_c99_temporal_read_options(host, first, kiln_c99_temporal_string_keys(kind),
+                                                &options, depth, thrown);
     }
     if (status != KILN_C99_OK) {
         return status;
@@ -8897,7 +9013,8 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
             /* `Temporal.Duration.compare` takes its options at the *third* argument, because the
              * first two are the durations. Nothing else here takes any. */
             status = kiln_c99_temporal_read_options(host, argc > 2 ? args[2] : kiln_c99_undefined(),
-                                                    &options, depth, thrown);
+                                                    KILN_C99_TEMPORAL_OPTS_RELATIVE_TO, &options,
+                                                    depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
