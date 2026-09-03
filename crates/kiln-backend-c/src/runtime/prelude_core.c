@@ -13216,8 +13216,14 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 return status;
             }
             iterator_method = kiln_c99_undefined();
+            /* A generator is iterable and is not array-like: it has no `length`, so falling to
+             * the array-like path below read `undefined`, coerced it to zero, and answered `[]`
+             * for a generator that yields. That is the silent kind of wrong -- `Array.from(g())`
+             * is how a program drains one, and an empty array is a plausible answer a caller
+             * carries forward. It used to refuse here, so the answer got worse, not better. */
             if (source.tag == KILN_VALUE_ARRAY || source.tag == KILN_VALUE_STRING ||
-                source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_COLLECTION) {
+                source.tag == KILN_VALUE_TYPED_ARRAY || source.tag == KILN_VALUE_COLLECTION ||
+                source.tag == KILN_VALUE_GENERATOR) {
                 status = kiln_c99_get(host, source, "@@iterator", 10, &iterator_method, depth,
                                       thrown);
                 if (status != KILN_C99_OK) return status;
@@ -15557,7 +15563,8 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
                  * failure this whole helper exists to stop. A machine slot is not a symbol and
                  * is not affected: it is skipped, as it should be. */
                 if (!kiln_c99_symbol_of_key(object->properties[index].key,
-                                            object->properties[index].key_len, &symbol)) {
+                                            object->properties[index].key_len, &symbol) ||
+                    object->properties[index].symbol_hidden) {
                     continue;
                 }
             }
@@ -15940,7 +15947,16 @@ static int kiln_c99_define_property(kiln_host *host, kiln_value target, const ch
         slot->writable = kiln_c99_truthy(writable);
     }
     if (has_enumerable) {
-        slot->enumerable = kiln_c99_truthy(enumerable);
+        kiln_value symbol_key;
+        if (kiln_c99_symbol_of_key(slot->key, slot->key_len, &symbol_key)) {
+            /* A symbol key's `enumerable` is not the program's to set: holding it at 0 is what
+             * keeps the `@@` spelling out of `Object.keys` and `JSON.stringify`. The answer the
+             * program gave is kept beside it instead. */
+            slot->symbol_hidden = !kiln_c99_truthy(enumerable);
+            slot->enumerable = 0;
+        } else {
+            slot->enumerable = kiln_c99_truthy(enumerable);
+        }
     }
     if (has_configurable) {
         slot->configurable = kiln_c99_truthy(configurable);
@@ -16236,7 +16252,8 @@ static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const 
             }
             if (status == KILN_C99_OK) {
                 status = kiln_c99_put(NULL, built, "enumerable", 10,
-                                      kiln_c99_boolean(property.enumerable), 0, NULL);
+                                      kiln_c99_boolean(kiln_c99_property_is_enumerable(&property)),
+                                      0, NULL);
             }
             if (status == KILN_C99_OK) {
                 status = kiln_c99_put(NULL, built, "configurable", 12,
