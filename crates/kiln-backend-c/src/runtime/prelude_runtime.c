@@ -4159,6 +4159,14 @@ static const char *kiln_c99_method_name(uint64_t code) {
         return kiln_c99_temporal_now_name(code);
     }
     switch (code) {
+    /* What `require("node:assert")` and `require("node:events")` hand back. Both are the module's
+     * callable default, and node names them for the module rather than for the implementation:
+     * `assert` and `EventEmitter`. One code serves `assert`, `assert.ok` and `assert.strict` here,
+     * so the name is the one node gives the value `require` returns -- the read this was measured
+     * on -- and `assert.ok.name` reads "assert" rather than node's "ok" until the three become
+     * three codes. */
+    case KILN_C99_METHOD_NODE_ASSERT_OK: return "assert";
+    case KILN_C99_METHOD_NODE_EVENT_EMITTER: return "EventEmitter";
     case KILN_C99_METHOD_NODE_HTTP_SERVER: return "Server";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_GET: return "headers";
     case KILN_C99_METHOD_NODE_REQUEST_HEADERS_SET: return "headers";
@@ -4295,6 +4303,13 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_SET_INTERVAL: return "setInterval";
     case KILN_C99_METHOD_CLEAR_TIMEOUT: return "clearTimeout";
     case KILN_C99_METHOD_CLEAR_INTERVAL: return "clearInterval";
+    /* The immediate pair arrived after the other four timers and nothing carried the name over,
+     * so `setImmediate.name` read `""` against the interpreter's "setImmediate". Neither is
+     * reached through `kiln_c99_lookup_method`, so the guard that covers a lookup range could not
+     * see them; `every_global_reports_the_name_it_is_published_under` reads the global table
+     * itself and does. */
+    case KILN_C99_METHOD_SET_IMMEDIATE: return "setImmediate";
+    case KILN_C99_METHOD_CLEAR_IMMEDIATE: return "clearImmediate";
     case KILN_C99_METHOD_ESCAPE: return "escape";
     case KILN_C99_METHOD_UNESCAPE: return "unescape";
     case KILN_C99_METHOD_ENCODE_URI: return "encodeURI";
@@ -5293,6 +5308,14 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_PROXY: return "Proxy";
     case KILN_C99_BUILTIN_URL: return "URL";
     case KILN_C99_BUILTIN_BUFFER: return "Buffer";
+    /* The three web constructors this realm publishes. Absent from this switch they fell through
+     * to the error-name lookup and reported "anonymous" -- a name no program can have asked for
+     * and the very thing `X.name` is read to distinguish. `Object.getOwnPropertyNames(globalThis)`
+     * publishes them; `every_global_reports_the_name_it_is_published_under` now proves each one
+     * answers the name it went out under. */
+    case KILN_C99_BUILTIN_ABORT_CONTROLLER: return "AbortController";
+    case KILN_C99_BUILTIN_ABORT_SIGNAL: return "AbortSignal";
+    case KILN_C99_BUILTIN_TEXT_ENCODER: return "TextEncoder";
     case KILN_C99_BUILTIN_TEMPORAL: return "Temporal";
     case KILN_C99_BUILTIN_TEMPORAL_NOW: return "Now";
     case KILN_C99_BUILTIN_TEMPORAL_PLAIN_DATE: return "PlainDate";
@@ -6590,6 +6613,15 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
      * library feature-detects on, and it has to be the same word here as in the interpreter even
      * though every member behind it refuses. */
     if (builtin == KILN_C99_BUILTIN_INTL) {
+        return 1;
+    }
+    /* `performance` is a `Performance` *object* holding `now`, not something a program calls --
+     * node answers `typeof performance === "object"` and gives it no `name`. It was a callable
+     * here, so `typeof performance` read "function" and `performance.name` read "performance",
+     * which is an implementation detail leaking through a property a program reads to tell one
+     * function from another. `require("node:perf_hooks").performance` is this same value, so the
+     * two spellings are one object as they are in node. */
+    if (builtin == KILN_C99_BUILTIN_PERFORMANCE) {
         return 1;
     }
     return builtin == KILN_C99_BUILTIN_MATH || builtin == KILN_C99_BUILTIN_JSON ||

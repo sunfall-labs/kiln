@@ -302,6 +302,50 @@ pub const SPECIFIERS: &[&str] = &[
     "node:util",
 ];
 
+/// Node's public HTTP method catalogue, which `require("node:http").METHODS` answers with.
+///
+/// Semantic data rather than anything sourced from a parser: Hyper parses method tokens, while
+/// this list is a JavaScript compatibility contract. It lives here rather than in either engine
+/// because both have to answer it and they have to answer it identically -- the native backend
+/// published a placeholder callable for this name while the interpreter published the array, so
+/// `typeof http.METHODS` differed between two runs of the same bytecode.
+pub const HTTP_METHODS: &[&str] = &[
+    "ACL",
+    "BIND",
+    "CHECKOUT",
+    "CONNECT",
+    "COPY",
+    "DELETE",
+    "GET",
+    "HEAD",
+    "LINK",
+    "LOCK",
+    "M-SEARCH",
+    "MERGE",
+    "MKACTIVITY",
+    "MKCALENDAR",
+    "MKCOL",
+    "MOVE",
+    "NOTIFY",
+    "OPTIONS",
+    "PATCH",
+    "POST",
+    "PROPFIND",
+    "PROPPATCH",
+    "PURGE",
+    "PUT",
+    "REBIND",
+    "REPORT",
+    "SEARCH",
+    "SOURCE",
+    "SUBSCRIBE",
+    "TRACE",
+    "UNBIND",
+    "UNLINK",
+    "UNLOCK",
+    "UNSUBSCRIBE",
+];
+
 /// Look up a builtin with or without the canonical `node:` prefix.
 #[must_use]
 pub fn builtin_abi(specifier: &str) -> Option<&'static BuiltinAbi> {
