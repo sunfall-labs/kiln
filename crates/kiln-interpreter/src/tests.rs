@@ -1850,7 +1850,7 @@ fn object_equality_is_identity_not_structure() {
 
 #[test]
 fn engine_and_commonjs_values_are_reflexive_identity_objects() {
-    let temporal = Rc::new(
+    let temporal = temporal::wrap(
         kiln_temporal::plain_date(2026.0, 8.0, 31.0, None).expect("construct Temporal.PlainDate"),
     );
     let intl = Rc::new(intl::IntlValue::Locale("en-US".to_owned()));
@@ -1861,7 +1861,7 @@ fn engine_and_commonjs_values_are_reflexive_identity_objects() {
     )>()));
 
     let same_objects = [
-        Value::Temporal(Rc::clone(&temporal)),
+        temporal.clone(),
         Value::Intl(Rc::clone(&intl)),
         Value::CommonJsRequire(Rc::clone(&require)),
         Value::CommonJsResolve(Rc::clone(&require)),
@@ -1875,10 +1875,10 @@ fn engine_and_commonjs_values_are_reflexive_identity_objects() {
         );
     }
 
-    let other_temporal = Value::Temporal(Rc::new(
+    let other_temporal = temporal::wrap(
         kiln_temporal::plain_date(2026.0, 8.0, 31.0, None)
             .expect("construct equal but distinct Temporal.PlainDate"),
-    ));
+    );
     let other_intl = Value::Intl(Rc::new(intl::IntlValue::Locale("en-US".to_owned())));
     let other_require = Value::CommonJsRequire(Rc::new(CommonJsRequire::new(std::iter::empty::<(
         String,

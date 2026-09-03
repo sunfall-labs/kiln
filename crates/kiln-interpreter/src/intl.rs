@@ -1755,7 +1755,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         // A value in one calendar formatted by a formatter in another would be a different date
         // with the same digits. `iso8601` is the exception the specification makes, because it is
         // the calendar a `Temporal` value has when its program never chose one.
-        if let Some(kiln_temporal::Field::Text(calendar)) = temporal.get("calendarId")
+        if let Some(kiln_temporal::Field::Text(calendar)) = temporal.value().get("calendarId")
             && calendar != "iso8601"
             && calendar != formatter.calendar()
         {
@@ -1765,7 +1765,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 formatter.calendar()
             )));
         }
-        let at = kiln_temporal::format_instant(temporal)
+        let at = kiln_temporal::format_instant(temporal.value())
             .ok_or_else(|| type_error("this Temporal value has no instant to format"))?;
         Ok((Some(shape), at))
     }
