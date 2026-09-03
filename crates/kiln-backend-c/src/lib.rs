@@ -695,6 +695,371 @@ fn compute_guarded_loads(code: &[Instruction]) -> HashSet<usize> {
     guarded_loads
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValType {
+    Bottom,
+    Number,
+    Function(u32),
+    Any,
+}
+
+impl ValType {
+    fn join(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Bottom, x) | (x, Self::Bottom) => x,
+            (Self::Number, Self::Number) => Self::Number,
+            (Self::Function(a), Self::Function(b)) if a == b => Self::Function(a),
+            _ => Self::Any,
+        }
+    }
+}
+
+fn abstract_interpret(
+    code: &[Instruction],
+    constants: &[Constant],
+    local_count: u32,
+    initial_params: &[ValType],
+    function_signatures: &[(Vec<ValType>, ValType)],
+    current_func: Option<usize>,
+    observed_call_args: &mut [Vec<ValType>],
+) -> (HashSet<usize>, ValType) {
+    let n = code.len();
+    if n == 0 {
+        return (HashSet::new(), ValType::Bottom);
+    }
+
+    let mut in_locals: Vec<Option<Vec<ValType>>> = vec![None; n];
+    let mut in_stack: Vec<Option<Vec<ValType>>> = vec![None; n];
+    let mut known_numbers: HashSet<usize> = HashSet::new();
+    let mut observed_return = ValType::Bottom;
+
+    let mut init_loc = vec![ValType::Any; local_count as usize];
+    for (i, &p) in initial_params.iter().enumerate() {
+        if i < init_loc.len() && p != ValType::Bottom {
+            init_loc[i] = p;
+        }
+    }
+    in_locals[0] = Some(init_loc);
+    in_stack[0] = Some(Vec::new());
+
+    let mut worklist = vec![0usize];
+    let mut in_worklist = vec![false; n];
+    in_worklist[0] = true;
+
+    while let Some(pc) = worklist.pop() {
+        in_worklist[pc] = false;
+        let Some(cur_locals) = in_locals[pc].clone() else {
+            continue;
+        };
+        let Some(cur_stack) = in_stack[pc].clone() else {
+            continue;
+        };
+
+        let mut out_locals = cur_locals;
+        let mut out_stack = cur_stack;
+
+        match &code[pc] {
+            Instruction::Const(idx) => {
+                let ty = if matches!(constants.get(*idx as usize), Some(Constant::Number(_))) {
+                    ValType::Number
+                } else {
+                    ValType::Any
+                };
+                out_stack.push(ty);
+            }
+            Instruction::MakeFunction(proto_idx) => {
+                out_stack.push(ValType::Function(*proto_idx));
+            }
+            Instruction::LoadLocal(slot) => {
+                let ty = out_locals
+                    .get(*slot as usize)
+                    .copied()
+                    .unwrap_or(ValType::Any);
+                out_stack.push(ty);
+            }
+            Instruction::StoreLocal(slot) => {
+                let ty = out_stack.pop().unwrap_or(ValType::Any);
+                if (*slot as usize) < out_locals.len() {
+                    out_locals[*slot as usize] = ty;
+                }
+            }
+            Instruction::Pop => {
+                out_stack.pop();
+            }
+            Instruction::Dup => {
+                if let Some(&top) = out_stack.last() {
+                    out_stack.push(top);
+                }
+            }
+            Instruction::Dup2 => {
+                let len = out_stack.len();
+                if len >= 2 {
+                    let a = out_stack[len - 2];
+                    let b = out_stack[len - 1];
+                    out_stack.push(a);
+                    out_stack.push(b);
+                }
+            }
+            Instruction::Unary(op) => {
+                let val = out_stack.pop().unwrap_or(ValType::Any);
+                if val == ValType::Number
+                    && matches!(
+                        op,
+                        UnaryOp::Negate
+                            | UnaryOp::Plus
+                            | UnaryOp::ToNumeric
+                            | UnaryOp::Increment
+                            | UnaryOp::Decrement
+                    )
+                {
+                    known_numbers.insert(pc);
+                    out_stack.push(ValType::Number);
+                } else {
+                    known_numbers.remove(&pc);
+                    out_stack.push(ValType::Any);
+                }
+            }
+            Instruction::Binary(op) => {
+                let right = out_stack.pop().unwrap_or(ValType::Any);
+                let left = out_stack.pop().unwrap_or(ValType::Any);
+                if left == ValType::Number && right == ValType::Number {
+                    if matches!(
+                        op,
+                        BinaryOp::Add
+                            | BinaryOp::Subtract
+                            | BinaryOp::Multiply
+                            | BinaryOp::Divide
+                            | BinaryOp::Remainder
+                    ) {
+                        known_numbers.insert(pc);
+                        out_stack.push(ValType::Number);
+                    } else {
+                        known_numbers.remove(&pc);
+                        out_stack.push(ValType::Any);
+                    }
+                } else {
+                    known_numbers.remove(&pc);
+                    out_stack.push(ValType::Any);
+                }
+            }
+            Instruction::Call { argc } => {
+                let argc = *argc as usize;
+                let callee = if out_stack.len() > argc {
+                    out_stack[out_stack.len() - argc - 1]
+                } else {
+                    ValType::Any
+                };
+                let target_func = match callee {
+                    ValType::Function(idx) => Some(idx as usize),
+                    _ => current_func,
+                };
+                let mut args = Vec::with_capacity(argc);
+                for _ in 0..argc {
+                    args.push(out_stack.pop().unwrap_or(ValType::Any));
+                }
+                args.reverse();
+                out_stack.pop();
+
+                if let Some(target) = target_func {
+                    if target < observed_call_args.len() {
+                        for (arg_i, &arg_ty) in args.iter().enumerate() {
+                            if arg_i < observed_call_args[target].len() {
+                                observed_call_args[target][arg_i] =
+                                    observed_call_args[target][arg_i].join(arg_ty);
+                            }
+                        }
+                    }
+                    let ret_ty = function_signatures
+                        .get(target)
+                        .map(|(_, ret)| *ret)
+                        .unwrap_or(ValType::Any);
+                    out_stack.push(if ret_ty == ValType::Bottom {
+                        ValType::Any
+                    } else {
+                        ret_ty
+                    });
+                } else {
+                    out_stack.push(ValType::Any);
+                }
+            }
+            Instruction::Return => {
+                let ret = out_stack.pop().unwrap_or(ValType::Any);
+                observed_return = observed_return.join(ret);
+            }
+            _ => {}
+        }
+
+        let mut succs = Vec::with_capacity(2);
+        match &code[pc] {
+            Instruction::Jump(target) => {
+                succs.push(*target as usize);
+            }
+            Instruction::JumpIfFalse(target)
+            | Instruction::JumpIfTruthy(target)
+            | Instruction::JumpIfNotNullish(target) => {
+                out_stack.pop();
+                if pc + 1 < n {
+                    succs.push(pc + 1);
+                }
+                succs.push(*target as usize);
+            }
+            Instruction::Return | Instruction::Throw => {}
+            _ => {
+                if pc + 1 < n {
+                    succs.push(pc + 1);
+                }
+            }
+        }
+
+        for succ in succs {
+            if succ >= n {
+                continue;
+            }
+            let mut changed = false;
+            match (&mut in_locals[succ], &mut in_stack[succ]) {
+                (Some(succ_locals), Some(succ_stack)) => {
+                    for (i, val) in succ_locals.iter_mut().enumerate() {
+                        if let Some(&new_val) = out_locals.get(i) {
+                            let merged = val.join(new_val);
+                            if *val != merged {
+                                *val = merged;
+                                changed = true;
+                            }
+                        }
+                    }
+                    if succ_stack.len() == out_stack.len() {
+                        for (j, val) in succ_stack.iter_mut().enumerate() {
+                            let merged = val.join(out_stack[j]);
+                            if *val != merged {
+                                *val = merged;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                (loc, stk) => {
+                    *loc = Some(out_locals.clone());
+                    *stk = Some(out_stack.clone());
+                    changed = true;
+                }
+            }
+            if changed && !in_worklist[succ] {
+                worklist.push(succ);
+                in_worklist[succ] = true;
+            }
+        }
+    }
+
+    (known_numbers, observed_return)
+}
+
+fn infer_program_types(program: &Program) -> (Vec<HashSet<usize>>, HashSet<usize>) {
+    let mut signatures: Vec<(Vec<ValType>, ValType)> = program
+        .functions
+        .iter()
+        .map(|f| {
+            (
+                vec![ValType::Bottom; f.parameter_count as usize],
+                ValType::Bottom,
+            )
+        })
+        .collect();
+
+    for _ in 0..4 {
+        let mut observed_call_args: Vec<Vec<ValType>> = program
+            .functions
+            .iter()
+            .map(|f| vec![ValType::Bottom; f.parameter_count as usize])
+            .collect();
+        let mut observed_returns: Vec<ValType> = vec![ValType::Bottom; program.functions.len()];
+
+        abstract_interpret(
+            &program.code,
+            &program.constants,
+            program.local_count,
+            &[],
+            &signatures,
+            None,
+            &mut observed_call_args,
+        );
+
+        for (f_idx, proto) in program.functions.iter().enumerate() {
+            let (_, ret) = abstract_interpret(
+                &proto.code,
+                &program.constants,
+                proto.local_count,
+                &signatures[f_idx].0,
+                &signatures,
+                Some(f_idx),
+                &mut observed_call_args,
+            );
+            observed_returns[f_idx] = ret;
+        }
+
+        let mut changed = false;
+        for (f_idx, (params, ret)) in signatures.iter_mut().enumerate() {
+            for (p_idx, p_val) in params.iter_mut().enumerate() {
+                let obs = observed_call_args[f_idx][p_idx];
+                if *p_val != obs {
+                    *p_val = obs;
+                    changed = true;
+                }
+            }
+            if *ret != observed_returns[f_idx] {
+                *ret = observed_returns[f_idx];
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut dummy_call_args: Vec<Vec<ValType>> = program
+        .functions
+        .iter()
+        .map(|f| vec![ValType::Bottom; f.parameter_count as usize])
+        .collect();
+
+    let (module_known, _) = abstract_interpret(
+        &program.code,
+        &program.constants,
+        program.local_count,
+        &[],
+        &signatures,
+        None,
+        &mut dummy_call_args,
+    );
+
+    let mut func_known = Vec::with_capacity(program.functions.len());
+    for (f_idx, proto) in program.functions.iter().enumerate() {
+        let (k, _) = abstract_interpret(
+            &proto.code,
+            &program.constants,
+            proto.local_count,
+            &signatures[f_idx].0,
+            &signatures,
+            Some(f_idx),
+            &mut dummy_call_args,
+        );
+        func_known.push(k);
+    }
+
+    (func_known, module_known)
+}
+
+fn compute_guarded_loads_and_slots(code: &[Instruction]) -> (HashSet<usize>, HashSet<u32>) {
+    let guarded = compute_guarded_loads(code);
+    let guarded_slots = guarded
+        .iter()
+        .filter_map(|&idx| match code.get(idx)? {
+            Instruction::LoadLocal(slot) | Instruction::LoadCell(slot) => Some(*slot),
+            _ => None,
+        })
+        .collect();
+    (guarded, guarded_slots)
+}
+
 fn render_fast_inlines(output: &mut String) {
     output.push_str(
         r#"
@@ -766,6 +1131,7 @@ fn render_functions(
     diagnostic_site: &str,
     strict_functions: &[bool],
 ) {
+    let (func_known_numbers, _) = infer_program_types(program);
     for index in 0..program.functions.len() {
         writeln!(
             output,
@@ -805,6 +1171,7 @@ fn render_functions(
             symbol,
             diagnostic_site,
             strict_functions,
+            func_known_numbers.get(index).cloned().unwrap_or_default(),
         );
     }
 }
@@ -884,6 +1251,7 @@ fn render_function(
     symbol: &str,
     diagnostic_site: &str,
     strict_functions: &[bool],
+    known_number_binaries: HashSet<usize>,
 ) {
     let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
@@ -1005,6 +1373,7 @@ fn render_function(
             .unwrap();
         }
     }
+    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&proto.code);
     let emitter = Emitter {
         constants: &program.constants,
         frame_stacks,
@@ -1016,7 +1385,9 @@ fn render_function(
         callables: produces_references(program),
         handlers,
         site: ReturnSite::Body,
-        guarded: compute_guarded_loads(&proto.code),
+        guarded: guarded_loads,
+        guarded_slots,
+        known_number_binaries,
         current_func: Some(index),
     };
     for position in 0..proto.code.len() {
@@ -1576,6 +1947,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     for local in 0..program.local_count {
         writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
     }
+    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&program.code);
     let emitter = Emitter {
         constants: &program.constants,
         frame_stacks: &plan.functions,
@@ -1590,7 +1962,9 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
             exports: None,
             commonjs: false,
         },
-        guarded: compute_guarded_loads(&program.code),
+        guarded: guarded_loads,
+        guarded_slots,
+        known_number_binaries: HashSet::new(),
         current_func: None,
     };
     for index in 0..program.code.len() {
@@ -1763,6 +2137,7 @@ fn render_module(
             .unwrap();
         }
     }
+    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&program.code);
     let emitter = Emitter {
         constants: &program.constants,
         frame_stacks: &plan.functions,
@@ -1777,7 +2152,9 @@ fn render_module(
             exports: Some(&module.exports),
             commonjs,
         },
-        guarded: compute_guarded_loads(&program.code),
+        guarded: guarded_loads,
+        guarded_slots,
+        known_number_binaries: infer_program_types(program).1,
         current_func: None,
     };
     for index in 0..program.code.len() {
@@ -1890,6 +2267,10 @@ struct Emitter<'a> {
     /// The instruction indices of loads that can read an uninitialized slot, so a read of one is
     /// checked and every other read is not.
     guarded: HashSet<usize>,
+    /// The slots that have at least one guarded load.
+    guarded_slots: HashSet<u32>,
+    /// The binary instruction indices whose operands are provably numbers.
+    known_number_binaries: HashSet<usize>,
     /// The index of the function currently being rendered, if inside a function body.
     current_func: Option<usize>,
 }
@@ -1920,6 +2301,8 @@ fn emit_instruction(
         handlers,
         site,
         guarded,
+        guarded_slots,
+        known_number_binaries,
         current_func,
     } = emitter;
     // A public scalar instruction starts a fresh diagnostic attempt. Function bodies do not
@@ -2189,7 +2572,11 @@ fn emit_instruction(
             // address-escaped, and an escaped array cannot be promoted to registers *anywhere in
             // the function* -- so one TDZ mark in the prologue costs every loop in the body. The
             // body it replaces is two lines and is kept verbatim.
-            writeln!(output, "    if (locals[{local}].tag == KILN_VALUE_CELL) {{ *kiln_c99_cell_of(locals[{local}]) = kiln_c99_uninitialized(); }} else {{ locals[{local}] = kiln_c99_uninitialized(); }}").unwrap();
+            // Furthermore, if dataflow proves no load can observe this slot uninitialized,
+            // omitting the write avoids thrashing memory in tight loop bodies.
+            if guarded_slots.contains(local) {
+                writeln!(output, "    if (locals[{local}].tag == KILN_VALUE_CELL) {{ *kiln_c99_cell_of(locals[{local}]) = kiln_c99_uninitialized(); }} else {{ locals[{local}] = kiln_c99_uninitialized(); }}").unwrap();
+            }
         }
         // An upvalue slot always holds a cell -- that is what capturing means -- but the cell can
         // still be in its owner's temporal dead zone. The owner may be a module or an enclosing
@@ -2311,8 +2698,16 @@ fn emit_instruction(
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
             let direct_call = if let Some(func_idx) = *current_func {
+                let func_uses_this = functions.get(func_idx).is_some_and(|proto| {
+                    proto.code.iter().any(|inst| matches!(inst, Instruction::LoadThis))
+                });
+                let this_cond = if !func_uses_this {
+                    "1"
+                } else {
+                    "(plain->arrow || plain->strict)"
+                };
                 format!(
-                    "if (KILN_LIKELY(plain != NULL && plain->body == {symbol}_fn_{func_idx} && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = {symbol}_fn_{func_idx}(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else "
+                    "if (KILN_LIKELY(plain != NULL && plain->body == {symbol}_fn_{func_idx} && {this_cond} && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = {symbol}_fn_{func_idx}(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else "
                 )
             } else {
                 String::new()
@@ -2916,6 +3311,11 @@ fn emit_instruction(
             writeln!(output, "    stack[sp - 1] = kiln_c99_unary({}, stack[sp - 1]);", unary_code(*operator)).unwrap()
         }
         Instruction::Unary(operator) => {
+            if known_number_binaries.contains(&index)
+                && let Some(fast) = numeric_fast_unary_body(*operator) {
+                writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; double a = kiln_fast_to_double(operand.bits); kiln_value answer; {fast} stack[sp - 1] = answer; }}").unwrap();
+                return;
+            }
             let unwind = unwind_or_return(handlers, site);
             match numeric_fast_unary_body(*operator) {
                 Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (KILN_LIKELY(operand.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(operand.bits); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
@@ -2932,6 +3332,11 @@ fn emit_instruction(
             }
         }
         Instruction::Binary(operator) => {
+            if known_number_binaries.contains(&index)
+                && let Some(fast) = numeric_fast_body(*operator) {
+                writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; double a = kiln_fast_to_double(left.bits); double b = kiln_fast_to_double(right.bits); kiln_value answer; {fast} stack[sp++] = answer; }}").unwrap();
+                return;
+            }
             // An operator throws only when a BigInt is involved, and `kiln_c99_binary_checked`
             // hands every other case straight back to `kiln_c99_binary`.
             let unwind = unwind_or_return(handlers, site);

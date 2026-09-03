@@ -1692,7 +1692,7 @@ pub(crate) const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
     },
     InternalRefusal {
         function: "kiln_c99_json_read",
-        sites: 16,
+        sites: 17,
         converted_by: "JSON.parse, which turns it into a SyntaxError the program can catch",
     },
     InternalRefusal {

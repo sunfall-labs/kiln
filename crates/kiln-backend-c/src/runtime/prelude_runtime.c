@@ -1073,6 +1073,8 @@ typedef struct kiln_gc_heap {
     kiln_gc_slab *class_free_head[(KILN_GC_SLAB_CLASS_MAX - KILN_GC_SLAB_CLASS_MIN) /
                                        KILN_GC_SLAB_CLASS_STEP +
                                    1];
+    kiln_gc_slab *spare_slabs[16];
+    size_t spare_slabs_count;
     kiln_gc_block **stack;
     size_t stack_len;
     size_t stack_capacity;
@@ -1507,6 +1509,10 @@ static void kiln_c99_gc_slab_maybe_destroy(kiln_gc_heap *heap, kiln_gc_slab *sla
     kiln_c99_gc_slab_unlink_free(heap, slab);
     kiln_c99_gc_slab_unlink_all(heap, slab);
     kiln_c99_gc_ptrset_remove(&heap->slab_table, slab);
+    if (heap->spare_slabs_count < sizeof(heap->spare_slabs) / sizeof(heap->spare_slabs[0])) {
+        heap->spare_slabs[heap->spare_slabs_count++] = slab;
+        return;
+    }
     kiln_c99_gc_aligned_free(slab);
 }
 
@@ -1523,14 +1529,22 @@ static kiln_gc_slab *kiln_c99_gc_slab_new(kiln_gc_heap *heap, int class_index) {
     usable = KILN_GC_SLAB_SIZE - first_slot_offset;
     slot_count = usable / slot_size;
     if (slot_count == 0) return NULL;
-    slab = (kiln_gc_slab *)kiln_c99_gc_aligned_alloc(KILN_GC_SLAB_SIZE, KILN_GC_SLAB_SIZE);
-    if (slab == NULL) return NULL;
+    if (heap->spare_slabs_count > 0) {
+        slab = heap->spare_slabs[--heap->spare_slabs_count];
+    } else {
+        slab = (kiln_gc_slab *)kiln_c99_gc_aligned_alloc(KILN_GC_SLAB_SIZE, KILN_GC_SLAB_SIZE);
+        if (slab == NULL) return NULL;
+    }
     slab->class_index = (uint32_t)class_index;
     slab->slot_size = (uint32_t)slot_size;
     slab->slot_count = (uint32_t)slot_count;
     slab->free_count = (uint32_t)slot_count;
     slab->first_slot_offset = (uint32_t)first_slot_offset;
     slab->free_head = NULL;
+    slab->free_prev = NULL;
+    slab->free_next = NULL;
+    slab->all_prev = NULL;
+    slab->all_next = NULL;
     for (index = 0; index < (uint32_t)slot_count; ++index) {
         kiln_gc_block *slot = kiln_c99_gc_slab_slot(slab, index);
         slot->size = KILN_GC_SLOT_FREE;
@@ -2356,6 +2370,11 @@ static void kiln_c99_gc_sweep(kiln_gc_heap *heap, int orphan_marked) {
             kiln_c99_gc_slab_maybe_destroy(heap, slab);
         }
         slab = next_slab;
+    }
+    if (orphan_marked) {
+        while (heap->spare_slabs_count > 0) {
+            kiln_c99_gc_aligned_free(heap->spare_slabs[--heap->spare_slabs_count]);
+        }
     }
     heap->survived = survived;
     heap->since_collection = 0;

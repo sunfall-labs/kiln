@@ -11055,7 +11055,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             s_groups_key = kiln_c99_intern("groups", 6);
                         }
                         kiln_object *props = kiln_c99_object_of(arr->properties);
-                        props->properties = (kiln_property *)calloc(3, sizeof(kiln_property));
+                        props->properties = (kiln_property *)malloc(3 * sizeof(kiln_property));
                         if (props->properties == NULL) {
                             status = KILN_C99_OUT_OF_MEMORY;
                         } else {
@@ -11064,6 +11064,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             props->properties[0].key = s_index_key;
                             props->properties[0].key_len = 5;
                             props->properties[0].value = kiln_c99_number((double)ranges[0]);
+                            props->properties[0].getter = kiln_c99_undefined();
+                            props->properties[0].setter = kiln_c99_undefined();
+                            props->properties[0].accessor = 0;
                             props->properties[0].writable = 1;
                             props->properties[0].enumerable = 1;
                             props->properties[0].configurable = 1;
@@ -11071,6 +11074,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             props->properties[1].key = s_input_key;
                             props->properties[1].key_len = 5;
                             props->properties[1].value = subject;
+                            props->properties[1].getter = kiln_c99_undefined();
+                            props->properties[1].setter = kiln_c99_undefined();
+                            props->properties[1].accessor = 0;
                             props->properties[1].writable = 1;
                             props->properties[1].enumerable = 1;
                             props->properties[1].configurable = 1;
@@ -11078,6 +11084,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                             props->properties[2].key = s_groups_key;
                             props->properties[2].key_len = 6;
                             props->properties[2].value = kiln_c99_undefined();
+                            props->properties[2].getter = kiln_c99_undefined();
+                            props->properties[2].setter = kiln_c99_undefined();
+                            props->properties[2].accessor = 0;
                             props->properties[2].writable = 1;
                             props->properties[2].enumerable = 1;
                             props->properties[2].configurable = 1;
@@ -16729,15 +16738,15 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
     case KILN_VALUE_NUMBER: {
         /* NaN and both infinities have no JSON spelling, so they serialise as null. */
         double number = kiln_c99_as_number(value);
-        kiln_value shown;
         if (!isfinite(number)) {
             return kiln_c99_text_append_c(text, "null");
         }
-        shown = kiln_c99_text(value);
-        if (shown.tag != KILN_VALUE_STRING) {
+        char buffer[64];
+        int len = kiln_number_to_js_string(number, buffer, sizeof(buffer));
+        if (len < 0 || (size_t)len >= sizeof(buffer)) {
             KILN_C99_REFUSE("a number with no text form to serialise");
         }
-        return kiln_c99_text_append(text, shown.ptr, shown.len);
+        return kiln_c99_text_append(text, buffer, (size_t)len);
     }
     case KILN_VALUE_STRING:
         return kiln_c99_json_quote(text, value.ptr, value.len);
@@ -17304,15 +17313,38 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             return KILN_C99_OK;
         }
         for (;;) {
-            kiln_value key;
+            const char *key_ptr = NULL;
+            size_t key_len = 0;
+            kiln_value fallback_key = kiln_c99_undefined();
             kiln_value member;
             kiln_c99_json_space(reader);
             if (reader->at >= reader->len || reader->bytes[reader->at] != '"') {
                 KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
             }
-            status = kiln_c99_json_string(reader, &key);
-            if (status != KILN_C99_OK) {
-                return status;
+            reader->at += 1;
+            {
+                size_t key_start = reader->at;
+                while (reader->at < reader->len) {
+                    char c = reader->bytes[reader->at];
+                    if (c == '"') {
+                        key_ptr = reader->bytes + key_start;
+                        key_len = reader->at - key_start;
+                        reader->at += 1;
+                        break;
+                    }
+                    if (c == '\\' || (unsigned char)c < 0x20) {
+                        reader->at = key_start - 1;
+                        status = kiln_c99_json_string(reader, &fallback_key);
+                        if (status != KILN_C99_OK) return status;
+                        key_ptr = fallback_key.ptr;
+                        key_len = fallback_key.len;
+                        break;
+                    }
+                    reader->at += 1;
+                }
+                if (key_ptr == NULL) {
+                    KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
+                }
             }
             kiln_c99_json_space(reader);
             if (reader->at >= reader->len || reader->bytes[reader->at] != ':') {
@@ -17325,7 +17357,7 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_own_data(built, key.ptr, key.len, member);
+            status = kiln_c99_own_data(built, key_ptr, key_len, member);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -17351,7 +17383,12 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
          * how a decimal becomes a double. */
         size_t start = reader->at;
         size_t digits;
+        int is_negative = 0;
+        int has_dot = 0;
+        int has_exp = 0;
+        size_t dot_pos = 0;
         if (reader->bytes[reader->at] == '-') {
+            is_negative = 1;
             reader->at += 1;
         }
         if (reader->at >= reader->len) {
@@ -17373,6 +17410,8 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
         }
         if (reader->at < reader->len && reader->bytes[reader->at] == '.') {
+            has_dot = 1;
+            dot_pos = reader->at;
             reader->at += 1;
             digits = reader->at;
             while (reader->at < reader->len && reader->bytes[reader->at] >= '0' &&
@@ -17385,6 +17424,7 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
         }
         if (reader->at < reader->len &&
             (reader->bytes[reader->at] == 'e' || reader->bytes[reader->at] == 'E')) {
+            has_exp = 1;
             reader->at += 1;
             if (reader->at < reader->len &&
                 (reader->bytes[reader->at] == '+' || reader->bytes[reader->at] == '-')) {
@@ -17400,6 +17440,35 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             }
         }
         {
+            size_t num_len = reader->at - start;
+            if (!has_exp && num_len <= 15) {
+                if (!has_dot) {
+                    uint64_t v = 0;
+                    size_t p = is_negative ? start + 1 : start;
+                    for (; p < reader->at; ++p) {
+                        v = v * 10 + (uint64_t)(reader->bytes[p] - '0');
+                    }
+                    double number = is_negative ? -(double)v : (double)v;
+                    *out = kiln_c99_number(number);
+                    return KILN_C99_OK;
+                } else {
+                    double v = 0.0;
+                    size_t p = is_negative ? start + 1 : start;
+                    for (; p < dot_pos; ++p) {
+                        v = v * 10.0 + (double)(reader->bytes[p] - '0');
+                    }
+                    double frac = 0.0;
+                    double div = 1.0;
+                    for (p = dot_pos + 1; p < reader->at; ++p) {
+                        frac = frac * 10.0 + (double)(reader->bytes[p] - '0');
+                        div *= 10.0;
+                    }
+                    v += frac / div;
+                    double number = is_negative ? -v : v;
+                    *out = kiln_c99_number(number);
+                    return KILN_C99_OK;
+                }
+            }
             double number = kiln_string_to_number(reader->bytes + start, reader->at - start);
             if (isnan(number)) {
                 KILN_C99_REFUSE_INTERNAL("JSON.parse converts a reader refusal into a SyntaxError");
