@@ -4344,3 +4344,45 @@ And the number workers actually buy, once the client is not the bottleneck: at t
 processes, 47.1k -> 107.8k rps and p50 3.23 ms -> 1.24 ms. At four client processes hello gets
 *slower* with four workers, because the client saturates first. A throughput figure without its
 client count says nothing.
+
+## Two node-mode probes were asserting a race, and lost it every time under load (2026-09-03, Claude `fix/fs-promises-order`)
+
+`conformance/node`'s `fs-promises/concurrent-write-order` failed about one corpus run in three, and
+`fs-promises/concurrent-read-order` travelled with it, less often. Both are derived compatibility
+probes rather than upstream files, and both had the same oracle:
+
+```js
+fs.writeFile(a, 'a').then(...); fs.writeFile(b, 'b').then(...);
+Promise.resolve().then(...);
+setTimeout(() => { if (seen.length !== 3) throw ... }, 0);
+```
+
+That asks whether a due `setTimeout(0)` runs after two filesystem operations that were still in
+flight when the timer was armed. Nothing promises that. The engine says so on purpose --
+`next_turn`'s biased select gives an *already queued* completion priority over the timer and an
+in-flight one none, which is the same call the native drive made from the other direction in "a due
+timer is not a wait case" a day earlier -- and node says so too.
+
+**Measure the oracle against real node before believing it.** The same program on node v22.23.2,
+100 runs, printing `seen` instead of throwing: 35 saw both writes, 58 saw neither, 7 saw one. The
+read pair: 30 / 63 / 7. So the corpus was asserting a shape node itself produces a third of the
+time. Under a 16-way CPU load node dropped to 8 of 40, and kiln to **0 of 30 on both tests** --
+which is the useful reading, because an intermittent failure that becomes a certain one under load
+is latency, not ordering.
+
+**The standalone run was the tell, and it looked like the opposite of one.**
+`kiln run --node --one-shot` on the write case failed 30 out of 30 while the corpus passed two runs
+in three. Same binary, same file. The difference is that a corpus run has already executed 30-odd
+tests and the Tokio blocking pool is warm, so the write completes in the microseconds before the
+drive reaches `next_turn`; a fresh process has to spawn the pool thread first and never wins. A
+test that passes in company and fails alone is measuring its neighbours.
+
+Both files now anchor on `Promise.all` of the two operations -- the point where the order *is*
+defined -- and keep every assertion that was real: the microtask checkpoint drains before any
+filesystem completion, both operations complete with their own bytes (the write case now reads them
+back, so a resolved promise is not taken as proof), and a timer armed inside a completion callback
+is a later turn. 0 failures in 50 idle corpus runs and 30 under load, and the rewritten files pass
+real node 60/60 idle and 40/40 loaded, which the timer-anchored versions never did.
+
+`conformance/node/UPSTREAM.md` now records why the oracle is the settlement and not a timer.
+Restoring the timer would look like tightening the test and would be putting the flake back.
