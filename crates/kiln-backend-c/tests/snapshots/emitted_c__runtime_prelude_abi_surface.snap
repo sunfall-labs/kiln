@@ -125,7 +125,7 @@ KILN_VALUE_DATA_VIEW = 27
 #define KILN_C99_BUILTIN_TEMPORAL_NOW 62
 #define KILN_C99_BUILTIN_URL 63
 #define KILN_C99_BUILTIN_BUFFER 64
-#define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 65
+#define KILN_C99_BUILTIN_SYMBOL_PROTOTYPE 96
 #define KILN_C99_METHOD_ARRAY_AT 200
 #define KILN_C99_METHOD_ARRAY_FIND 201
 #define KILN_C99_METHOD_ARRAY_FIND_INDEX 202
@@ -1316,6 +1316,7 @@ static size_t kiln_c99_symbol_count;
 static size_t kiln_c99_symbol_capacity;
 static int kiln_c99_remember_symbol(kiln_value symbol) {
 static int kiln_c99_symbol_of_key(const char *key, size_t key_len, kiln_value *out) {
+static int kiln_c99_property_is_enumerable(const kiln_property *property) {
 static kiln_value kiln_c99_property_key(kiln_value key) {
 static int kiln_c99_new_symbol(kiln_value *out, kiln_value description) {
 static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {

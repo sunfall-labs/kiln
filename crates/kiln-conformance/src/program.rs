@@ -436,6 +436,50 @@ fn excerpt(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The stack every thread in this process that runs a *program* asks for.
+    ///
+    /// This mirrors `kiln_daemon::SERVE_STACK_BYTES` rather than importing it: `kiln-daemon`
+    /// depends on this crate, so the import would be a cycle. Keep the two in step -- they are
+    /// the same number for the same reason.
+    const PROGRAM_STACK_BYTES: usize = 16 * 1024 * 1024;
+
+    /// Run a closure on a thread sized for a program, and give back what it returned.
+    ///
+    /// libtest hands each test Rust's 2 MiB default. That is not enough room for a compiler
+    /// recursing over its input or a built-in calling back into JavaScript, which is why the
+    /// daemon's connection threads, the one-shot server and the corpus pool all ask for more.
+    /// A test that runs a real program through the production graph is doing exactly what those
+    /// threads do, and was the last place still taking the default.
+    ///
+    /// It does not fail as a test failure. The stack overflow aborts the whole binary --
+    /// `fatal runtime error: stack overflow`, SIGABRT -- so every other test in the crate goes
+    /// down with it and the diagnostic names no test. `fastify_server_case_...` reached it first
+    /// after an unrelated refactor grew a frame on the property path by a few hundred bytes; the
+    /// rest of these tests run the same graph and were behind it in the same queue.
+    ///
+    /// Scoped, so a case can keep borrowing the paths and strings it built on the test's stack.
+    fn on_a_program_stack<T: Send>(body: impl FnOnce() -> T + Send) -> T {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(PROGRAM_STACK_BYTES)
+                .spawn_scoped(scope, body)
+                .expect("a thread for the program under test")
+                .join()
+                .expect("the program under test did not panic")
+        })
+    }
+
+    /// The tests' own front door to [`super::run_node_against_expected_stdout`], which shadows it
+    /// so that every case in this module gets the stack above without naming it. The production
+    /// caller in `discovery.rs` already runs on the corpus pool and needs no wrapper.
+    fn run_node_against_expected_stdout(
+        path: &Path,
+        expected: &str,
+        mode: RunMode,
+    ) -> VariantResult {
+        on_a_program_stack(|| super::run_node_against_expected_stdout(path, expected, mode))
+    }
+
     #[test]
     fn only_javascript_runs_in_process() {
         assert!(out_of_process_build_requirement(Path::new("guard/g01.js")).is_none());
