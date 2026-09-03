@@ -4311,3 +4311,36 @@ the archive but is missing from that list cannot invalidate it. The comment dire
 says this, about the calendar adapter. The list lives in **three** places -- `number_provider.rs`
 and both provider scripts -- and `kiln-cli`'s `script_hygiene` test holds them equal; it caught the
 two I had not updated.
+
+## Workers reach the shipped binary, and two ways to measure nothing (2026-09-03, Claude `feat/workers`)
+
+`--workers` existed only for `kiln run`, so the artifact `kiln build` produces stayed on one core.
+It now reads `KILN_WORKERS` at startup. Three things are worth keeping.
+
+**Threads do not work; processes do.** The first implementation spawned pthreads and died at the
+first import with `undefined is not a function`. A module's namespaces live in `kiln_namespaces`,
+which is process-global, while the values inside belong to the realm that made them (ADR 0038), so
+two realms in one address space write one array and then read each other's values. Forking before
+any realm exists shares nothing but the read-only text segment. node's cluster is processes for
+exactly this reason. A pleasant consequence: a `SIGUSR1` diagnostic dump would be sound, because
+one realm per process means the signal lands on the realm's own thread.
+
+**A benchmark of the wrong artifact is not a slow benchmark, it is a different program.**
+`kiln build` defaults to `native-dev`. Measured with it by mistake: hello 56.7k, mixed 26.0k.
+Rebuilt with `--profile native-release`: 71.0k and 43.6k, so the mistake understated the engine by
+25% and 68%, and would have supported the conclusion "kiln does not lead on Linux", which is false
+for hello. The tell was a 3x gap against a previous table on comparable hardware. A discrepancy
+that large is nearly always the measurement.
+
+**Orphaned servers keep serving.** With `KILN_WORKERS>1` the server forks, and killing the parent
+reparents the children to init where they keep the `SO_REUSEPORT` listener. `compare.sh` killed
+only what it started, so each run inherited every previous run's workers: twenty had accumulated
+before the numbers stopped making physical sense -- 93k rps while the process being measured used
+18% of one core. It now reaps everything holding the port and refuses to report a run it could not
+clean up after. Same discipline as measuring in a worktree you own: a port something else is
+listening on is not yours either.
+
+And the number workers actually buy, once the client is not the bottleneck: at ten client
+processes, 47.1k -> 107.8k rps and p50 3.23 ms -> 1.24 ms. At four client processes hello gets
+*slower* with four workers, because the client saturates first. A throughput figure without its
+client count says nothing.

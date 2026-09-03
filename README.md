@@ -51,6 +51,20 @@ The machine was shared while these ran; the per-pass ranges and raw log are in
 `.scratch/server-throughput/measurements-2026-09-02.md`. `bench/server/compare.sh` reproduces the
 table, `bench/server/run.sh` one row.
 
+The same script on Linux/x86_64 (Xeon Platinum 8259CL, 2026-09-03, node 22.23 and bun 1.4, no deno
+installed) puts kiln ahead on hello world and a little behind bun on the small service:
+
+| runtime | hello | small service | resident |
+|---|---|---|---|
+| kiln native | 72.3k | 42.9k | 8-9 MB |
+| bun 1.4 | 65.5k | 44.7k | 66-76 MB |
+| node 22.23 | 39.0k | 27.4k | 81-83 MB |
+
+Those absolute numbers are about half the table above, which was taken on an unrecorded machine;
+the two are not comparable and neither is presented as the other. Full provenance, and what the
+`KILN_WORKERS` realms are worth once the client stops being the bottleneck (2.3x, 47.1k to 107.8k
+at ten client processes), is in `.scratch/server-throughput/measurements-2026-09-03.md`.
+
 ## Using it
 
 Rust 1.97.1 (pinned in `rust-toolchain.toml`) and a C compiler: Zig, Clang, cc or GCC on `PATH`.

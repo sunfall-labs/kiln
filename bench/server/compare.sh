@@ -48,8 +48,10 @@ for pass in $(seq 1 "$PASSES"); do
 			# run. That is not a slow teardown, it is a wrong number: measured once, twenty
 			# orphans had accumulated and every reading after the first was the whole pool.
 			for _ in $(seq 1 50); do
+				# `|| true` because an already-free port makes `grep` exit non-zero, and under
+				# `set -e` a failing command substitution in an assignment ends the run.
 				pids=$(ss -lntpH "sport = :$PORT" 2>/dev/null |
-					grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+					grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
 				[[ -z $pids ]] && break
 				# shellcheck disable=SC2086
 				kill -9 $pids 2>/dev/null || true
