@@ -2,6 +2,6 @@
 source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: "format!(\"content-addressed: {}\\nlogical path:      {}\\nprogram hash:      {:016x}\",\nby_content.symbol, by_path.symbol, by_path.program_hash)"
 ---
-content-addressed: kiln_module_c6d415922e92ef41bcd0947f5dad550a
+content-addressed: kiln_module_659cb65dc1a991aa4093bd7539036ba1
 logical path:      kiln_module_path_e47f2a05d5bff6260d4f0fc34e69677b
-program hash:      c6d415922e92ef41
+program hash:      659cb65dc1a991aa

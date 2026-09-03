@@ -744,231 +744,6 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
     size_t *lengths = NULL;
     size_t count = 0;
     size_t capacity = 0;
-    size_t index = 0;
-    int absolute = len > 0 && path[0] == '/';
-    int trailing = len > 0 && path[len - 1] == '/';
-    int status = KILN_C99_OK;
-    while (index <= len) {
-        size_t start = index;
-        size_t length;
-        while (index < len && path[index] != '/') ++index;
-        length = index - start;
-        ++index;
-        if (length == 0 || (length == 1 && path[start] == '.')) continue;
-        if (length == 2 && path[start] == '.' && path[start + 1] == '.') {
-            /* `..` cancels the component before it, but never another `..` -- so "a/../.." keeps
-             * one. With nothing to cancel it survives in a relative path and is dropped in an
-             * absolute one, which is what makes "/.." the root. */
-            if (count > 0 && !(lengths[count - 1] == 2 && parts[count - 1][0] == '.' &&
-                               parts[count - 1][1] == '.')) {
-                --count;
-                continue;
-            }
-            if (absolute) continue;
-        }
-        if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) !=
-            KILN_C99_OK) {
-            status = KILN_C99_OUT_OF_MEMORY;
-            goto done;
-        }
-        {
-            size_t *grown = (size_t *)realloc(lengths, capacity * sizeof *lengths);
-            if (grown == NULL) {
-                status = KILN_C99_OUT_OF_MEMORY;
-                goto done;
-            }
-            lengths = grown;
-        }
-        parts[count] = path + start;
-        lengths[count++] = length;
-    }
-    if (absolute) status = kiln_c99_text_append_c(out, "/");
-    for (index = 0; status == KILN_C99_OK && index < count; ++index) {
-        if (out->len != 0 && out->bytes[out->len - 1] != '/')
-            status = kiln_c99_text_append_c(out, "/");
-        if (status == KILN_C99_OK)
-            status = kiln_c99_text_append(out, parts[index], lengths[index]);
-    }
-    if (status == KILN_C99_OK && out->len == 0) status = kiln_c99_text_append_c(out, ".");
-    /* The root and the current directory are already their own trailing separator; anything else
-     * keeps the one it was given. */
-    if (status == KILN_C99_OK && trailing &&
-        !(out->len == 1 && (out->bytes[0] == '/' || out->bytes[0] == '.')))
-        status = kiln_c99_text_append_c(out, "/");
-done:
-    free(parts);
-    free(lengths);
-    return status;
-}
-
-/* Where the *body* of a path begins -- the point the component walk below will not go under.
- *
- * The four decompositions are Rust's `Path::parent`, `file_name` and `extension` in the
- * interpreter, so they inherit `Path::components`: a run of separators is not a component and a
- * `.` is normalized away, *except* for the single leading `.` that "./a" and "." start with. That
- * exception is the whole of this function, and leaving it out makes `dirname(".")` answer "/". */
-static size_t kiln_c99_posix_body_floor(const char *path, size_t len) {
-    if (len > 0 && path[0] == '/') return 1;
-    if (len == 1 && path[0] == '.') return 1;
-    if (len >= 2 && path[0] == '.' && path[1] == '/') return 1;
-    return 0;
-}
-
-/* The last component of `path[0, *end)` that is a name or `..`, read the way
- * `Components::next_back` reads one.
- *
- * `*end` is both the input bound and the output: on success it is moved to the end of the
- * component found, which is exactly where `as_path` would have trimmed the remainder to, and on
- * failure to the floor. That is why `dirname` can call this twice and do no trimming of its
- * own -- popping a component and trimming what the pop left behind are the same walk. */
-static int kiln_c99_posix_last_component(const char *path, size_t floor, size_t *start,
-                                         size_t *end) {
-    size_t at = *end;
-    while (at > floor) {
-        size_t from;
-        if (path[at - 1] == '/') {
-            --at;
-            continue;
-        }
-        from = at;
-        while (from > floor && path[from - 1] != '/') --from;
-        if (at - from == 1 && path[from] == '.') {
-            at = from;
-            continue;
-        }
-        *start = from;
-        *end = at;
-        return 1;
-    }
-    *end = at;
-    return 0;
-}
-
-/* The next `Component::Normal` of an already normalized path at or after `*at`.
- *
- * Names only: `relative` walks those and nothing else, because the normalizer has already folded
- * every `..` it could and a leading one that survived names no directory this walk could match
- * against the other side. */
-static int kiln_c99_posix_next_name(const char *path, size_t len, size_t *at, size_t *start,
-                                    size_t *stop) {
-    while (*at < len) {
-        size_t from = *at;
-        while (*at < len && path[*at] != '/') ++*at;
-        if (*at > from) {
-            size_t length = *at - from;
-            int dots = (length == 1 && path[from] == '.') ||
-                       (length == 2 && path[from] == '.' && path[from + 1] == '.');
-            if (!dots) {
-                *start = from;
-                *stop = *at;
-                if (*at < len) ++*at;
-                return 1;
-            }
-        }
-        if (*at < len) ++*at;
-    }
-    return 0;
-}
-
-/* `path.relative(from, to)`: the path that reaches `to` when walked from `from`.
- *
- * The two sides are normalized first and then walked in step. The pair that first disagrees is
- * the one the walk stops on, and it is not re-read: everything still ahead on the `from` side
- * becomes a `..`, and that pair's `to` half plus everything after it is the descent. */
-static int kiln_c99_posix_relative(kiln_text *out, const char *from, size_t from_len,
-                                   const char *to, size_t to_len) {
-    kiln_text left = {NULL, 0, 0};
-    kiln_text right = {NULL, 0, 0};
-    size_t left_at = 0;
-    size_t right_at = 0;
-    size_t up = 0;
-    size_t stop_start = 0;
-    size_t stop_stop = 0;
-    int stop_pending = 0;
-    int status = kiln_c99_posix_normalize(&left, from, from_len);
-    if (status == KILN_C99_OK) status = kiln_c99_posix_normalize(&right, to, to_len);
-    while (status == KILN_C99_OK) {
-        size_t left_start, left_stop, right_start, right_stop;
-        int have_left =
-            kiln_c99_posix_next_name(left.bytes, left.len, &left_at, &left_start, &left_stop);
-        int have_right =
-            kiln_c99_posix_next_name(right.bytes, right.len, &right_at, &right_start, &right_stop);
-        if (have_left && have_right && left_stop - left_start == right_stop - right_start &&
-            memcmp(left.bytes + left_start, right.bytes + right_start,
-                   left_stop - left_start) == 0) {
-            continue;
-        }
-        if (have_left) {
-            size_t ignored_start, ignored_stop;
-            up = 1;
-            while (kiln_c99_posix_next_name(left.bytes, left.len, &left_at, &ignored_start,
-                                            &ignored_stop))
-                ++up;
-        }
-        if (have_right) {
-            stop_pending = 1;
-            stop_start = right_start;
-            stop_stop = right_stop;
-        }
-        break;
-    }
-    while (status == KILN_C99_OK && up > 0) {
-        if (out->len != 0) status = kiln_c99_text_append_c(out, "/");
-        if (status == KILN_C99_OK) status = kiln_c99_text_append_c(out, "..");
-        --up;
-    }
-    if (status == KILN_C99_OK && stop_pending) {
-        if (out->len != 0) status = kiln_c99_text_append_c(out, "/");
-        if (status == KILN_C99_OK)
-            status = kiln_c99_text_append(out, right.bytes + stop_start, stop_stop - stop_start);
-        while (status == KILN_C99_OK) {
-            size_t start, stop;
-            if (!kiln_c99_posix_next_name(right.bytes, right.len, &right_at, &start, &stop)) break;
-            if (out->len != 0) status = kiln_c99_text_append_c(out, "/");
-            if (status == KILN_C99_OK)
-                status = kiln_c99_text_append(out, right.bytes + start, stop - start);
-        }
-    }
-    free(left.bytes);
-    free(right.bytes);
-    return status;
-}
-
-/* A path answer as a string value.
- *
- * Zero length goes through the tagged empty string rather than a zero-byte allocation, because an
- * allocator that answers NULL for zero bytes would otherwise make "" indistinguishable from
- * running out of memory -- and `basename`, `extname` and `relative` all answer "" legitimately. */
-static int kiln_c99_node_path_text(kiln_value *result, const char *text, size_t len) {
-    if (len == 0) {
-        *result = kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0);
-        return KILN_C99_OK;
-    }
-    *result = kiln_c99_copy_text(text, len);
-    return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
-}
-
-/* The argument at `index` as a path, or "" when it is absent.
- *
- * Absent rather than `undefined`: the interpreter defaults a missing path to the empty string and
- * coerces anything present, and the halfway house here -- refusing a non-string while defaulting
- * a missing one -- is the convention `join` and `resolve` already set on this surface. */
-static int kiln_c99_node_path_argument(const kiln_value *args, size_t argc, size_t index,
-                                       const char **text, size_t *len, kiln_value *thrown) {
-    *text = "";
-    *len = 0;
-    if (index >= argc) return KILN_C99_OK;
-    if (args[index].tag != KILN_VALUE_STRING)
-        return kiln_c99_throw_not_a(thrown, args[index], "string path");
-    *text = args[index].ptr;
-    *len = args[index].len;
-    return KILN_C99_OK;
-}
-
-static int kiln_c99_node_path(kiln_value *result, uint64_t code,
-                              const kiln_value *args, size_t argc, kiln_value *thrown) {
-    kiln_text joined = {0};
-    kiln_text built = {0};
     size_t index;
     int absolute = code == KILN_C99_METHOD_NODE_PATH_RESOLVE;
     int status = KILN_C99_OK;
@@ -1017,36 +792,67 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         if (args[index].tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, args[index], "string path");
         part = args[index];
-        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE) {
-            if (part.len == 0) continue;
-            if (part.ptr[0] == '/') {
-                joined.len = 0;
-                absolute = 1;
-            }
-            if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
-                status = kiln_c99_text_append_c(&joined, "/");
-        } else if (index > 0) {
-            status = kiln_c99_text_append_c(&joined, "/");
+        if (part.len == 0) continue;
+        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE && part.ptr[0] == '/') {
+            joined.len = 0;
+            absolute = 1;
         }
+        if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
+            status = kiln_c99_text_append_c(&joined, "/");
         if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part.ptr, part.len);
         if (status != KILN_C99_OK) goto done;
     }
     if (absolute && (joined.len == 0 || joined.bytes[0] != '/')) {
         kiln_text prefixed = {0};
         status = kiln_c99_text_append_c(&prefixed, "/");
-        if (status == KILN_C99_OK)
-            status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
+        if (status == KILN_C99_OK) status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
         free(joined.bytes);
         joined = prefixed;
         if (status != KILN_C99_OK) goto done;
     }
-    status = kiln_c99_posix_normalize(&built, joined.bytes, joined.len);
-    if (status == KILN_C99_OK) {
-        *result = kiln_c99_text_value(&built);
-    } else {
-        free(built.bytes);
+    /* Normalize in place by retaining slices. `..` cannot escape an absolute root. */
+    for (index = 0; index <= joined.len;) {
+        size_t start = index;
+        size_t length;
+        while (index < joined.len && joined.bytes[index] != '/') ++index;
+        length = index - start;
+        ++index;
+        if (length == 0 || (length == 1 && joined.bytes[start] == '.')) continue;
+        if (length == 2 && joined.bytes[start] == '.' && joined.bytes[start + 1] == '.') {
+            if (count > 0 && !(lengths[count - 1] == 2 &&
+                parts[count - 1][0] == '.' && parts[count - 1][1] == '.')) {
+                --count;
+            } else if (!absolute) {
+                if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+                lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
+                if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+                parts[count] = joined.bytes + start; lengths[count++] = length;
+            }
+            continue;
+        }
+        if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+        lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
+        if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
+        parts[count] = joined.bytes + start; lengths[count++] = length;
+    }
+    {
+        kiln_text normalized = {0};
+        if (absolute) status = kiln_c99_text_append_c(&normalized, "/");
+        for (index = 0; status == KILN_C99_OK && index < count; ++index) {
+            if (normalized.len != 0 && normalized.bytes[normalized.len - 1] != '/')
+                status = kiln_c99_text_append_c(&normalized, "/");
+            if (status == KILN_C99_OK)
+                status = kiln_c99_text_append(&normalized, parts[index], lengths[index]);
+        }
+        if (status == KILN_C99_OK && normalized.len == 0)
+            status = kiln_c99_text_append_c(&normalized, absolute ? "/" : ".");
+        if (status == KILN_C99_OK)
+            *result = kiln_c99_text_value(&normalized);
+        else free(normalized.bytes);
     }
 done:
+    free(parts);
+    free(lengths);
     free(joined.bytes);
     return status;
 }

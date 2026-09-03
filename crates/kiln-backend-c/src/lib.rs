@@ -1697,7 +1697,7 @@ builtin_surface! {
      code(KILN_C99_METHOD_ARRAY_BUFFER_IS_VIEW)),
 
     (KILN_C99_BUILTIN_PERFORMANCE, "performance", "now",
-     code(KILN_C99_METHOD_NODE_PERFORMANCE_NOW)),
+     code(KILN_C99_METHOD_PERFORMANCE_NOW)),
 
     // Every error constructor carries `captureStackTrace`, which `kiln_c99_namespace_method`
     // answers ahead of the table rather than repeating in a row per kind. The row is here so that
