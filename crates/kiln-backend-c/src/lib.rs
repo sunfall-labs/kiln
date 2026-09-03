@@ -1129,10 +1129,26 @@ static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
 }
 
 fn can_emit_fast_numeric(proto: &FunctionProto, _func_idx: usize, program: &Program) -> bool {
-    if proto.parameter_count == 0 || proto.parameter_count > 4 {
+    if proto.parameter_count > 4 {
         return false;
     }
     if proto.generator || binds_at_call(proto) {
+        return false;
+    }
+    if proto.parameter_count == 0
+        && proto
+            .code
+            .iter()
+            .any(|i| matches!(i, Instruction::Call { .. }))
+    {
+        return false;
+    }
+    let has_compute = proto.code.iter().enumerate().any(|(pos, i)| match i {
+        Instruction::Jump(t) => (*t as usize) <= pos,
+        Instruction::Call { .. } => true,
+        _ => false,
+    });
+    if !has_compute {
         return false;
     }
     for inst in &proto.code {
@@ -1188,63 +1204,65 @@ fn can_emit_fast_numeric(proto: &FunctionProto, _func_idx: usize, program: &Prog
         }
     }
 
-    // Verify that every LoadUpvalue is strictly consumed as a callee in Call
-    let mut sim_stack: Vec<bool> = Vec::new(); // true = Callee, false = Number
-    for inst in &proto.code {
-        match inst {
-            Instruction::LoadLocal(_)
-            | Instruction::Pop
-            | Instruction::Dup
-            | Instruction::Const(_) => {
-                sim_stack.push(false);
-            }
-            Instruction::StoreLocal(_) => {
-                sim_stack.pop();
-            }
-            Instruction::Binary(_) => {
-                let right = sim_stack.pop().unwrap_or(false);
-                let left = sim_stack.pop().unwrap_or(false);
-                if left || right {
-                    return false;
+    if !proto.upvalues.is_empty() {
+        // Verify that every LoadUpvalue is strictly consumed as a callee in Call
+        let mut sim_stack: Vec<bool> = Vec::new(); // true = Callee, false = Number
+        for inst in &proto.code {
+            match inst {
+                Instruction::LoadLocal(_)
+                | Instruction::Pop
+                | Instruction::Dup
+                | Instruction::Const(_) => {
+                    sim_stack.push(false);
                 }
-                sim_stack.push(false);
-            }
-            Instruction::Unary(_) => {
-                let op = sim_stack.pop().unwrap_or(false);
-                if op {
-                    return false;
+                Instruction::StoreLocal(_) => {
+                    sim_stack.pop();
                 }
-                sim_stack.push(false);
-            }
-            Instruction::Call { argc } => {
-                let count = *argc as usize;
-                for _ in 0..count {
-                    if sim_stack.pop().unwrap_or(false) {
+                Instruction::Binary(_) => {
+                    let right = sim_stack.pop().unwrap_or(false);
+                    let left = sim_stack.pop().unwrap_or(false);
+                    if left || right {
+                        return false;
+                    }
+                    sim_stack.push(false);
+                }
+                Instruction::Unary(_) => {
+                    let op = sim_stack.pop().unwrap_or(false);
+                    if op {
+                        return false;
+                    }
+                    sim_stack.push(false);
+                }
+                Instruction::Call { argc } => {
+                    let count = *argc as usize;
+                    for _ in 0..count {
+                        if sim_stack.pop().unwrap_or(false) {
+                            return false;
+                        }
+                    }
+                    let callee = sim_stack.pop().unwrap_or(false);
+                    if !callee {
+                        return false;
+                    }
+                    sim_stack.push(false);
+                }
+                Instruction::LoadUpvalue(_) => {
+                    sim_stack.push(true);
+                }
+                Instruction::Return => {
+                    let ret = sim_stack.pop().unwrap_or(false);
+                    if ret {
                         return false;
                     }
                 }
-                let callee = sim_stack.pop().unwrap_or(false);
-                if !callee {
-                    return false;
+                Instruction::JumpIfFalse(_) | Instruction::JumpIfTruthy(_) => {
+                    let cond = sim_stack.pop().unwrap_or(false);
+                    if cond {
+                        return false;
+                    }
                 }
-                sim_stack.push(false);
+                _ => {}
             }
-            Instruction::LoadUpvalue(_) => {
-                sim_stack.push(true);
-            }
-            Instruction::Return => {
-                let ret = sim_stack.pop().unwrap_or(false);
-                if ret {
-                    return false;
-                }
-            }
-            Instruction::JumpIfFalse(_) | Instruction::JumpIfTruthy(_) => {
-                let cond = sim_stack.pop().unwrap_or(false);
-                if cond {
-                    return false;
-                }
-            }
-            _ => {}
         }
     }
 
@@ -1258,10 +1276,14 @@ fn render_fast_numeric_function(
     func_idx: usize,
     symbol: &str,
 ) {
-    let params = (0..proto.parameter_count)
-        .map(|i| format!("double arg{i}"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let params = if proto.parameter_count == 0 {
+        "void".to_string()
+    } else {
+        (0..proto.parameter_count)
+            .map(|i| format!("double arg{i}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     writeln!(
         output,
         "static double {symbol}_fn_{func_idx}_fast({params}) {{"
@@ -1425,10 +1447,14 @@ fn render_functions(
     for (index, proto) in program.functions.iter().enumerate() {
         if can_emit_fast_numeric(proto, index, program) {
             has_fast[index] = true;
-            let params = (0..proto.parameter_count)
-                .map(|i| format!("double arg{i}"))
-                .collect::<Vec<_>>()
-                .join(", ");
+            let params = if proto.parameter_count == 0 {
+                "void".to_string()
+            } else {
+                (0..proto.parameter_count)
+                    .map(|i| format!("double arg{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
             writeln!(output, "static double {symbol}_fn_{index}_fast({params});").unwrap();
         }
     }
@@ -1658,20 +1684,28 @@ fn render_function(
         output.push_str("    (void)thrown; (void)frame;\n");
         output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
         if has_fast {
-            let param_conds = (0..proto.parameter_count as usize)
-                .map(|i| format!("args[{i}].tag == KILN_VALUE_NUMBER"))
-                .collect::<Vec<_>>()
-                .join(" && ");
-            let param_args = (0..proto.parameter_count as usize)
-                .map(|i| format!("kiln_fast_to_double(args[{i}].bits)"))
-                .collect::<Vec<_>>()
-                .join(", ");
-            writeln!(
-                output,
-                "    if (KILN_LIKELY(argc >= (size_t){} && {param_conds})) {{\n        *result = kiln_fast_number({symbol}_fn_{index}_fast({param_args}));\n        return KILN_C99_OK;\n    }}",
-                proto.parameter_count
-            )
-            .unwrap();
+            if proto.parameter_count == 0 {
+                writeln!(
+                    output,
+                    "    *result = kiln_fast_number({symbol}_fn_{index}_fast());\n    return KILN_C99_OK;"
+                )
+                .unwrap();
+            } else {
+                let param_conds = (0..proto.parameter_count as usize)
+                    .map(|i| format!("args[{i}].tag == KILN_VALUE_NUMBER"))
+                    .collect::<Vec<_>>()
+                    .join(" && ");
+                let param_args = (0..proto.parameter_count as usize)
+                    .map(|i| format!("kiln_fast_to_double(args[{i}].bits)"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(
+                    output,
+                    "    if (KILN_LIKELY(argc >= (size_t){} && {param_conds})) {{\n        *result = kiln_fast_number({symbol}_fn_{index}_fast({param_args}));\n        return KILN_C99_OK;\n    }}",
+                    proto.parameter_count
+                )
+                .unwrap();
+            }
         }
         if proto.parameter_count == 0 {
             output.push_str("    (void)args; (void)argc;\n");
