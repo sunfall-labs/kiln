@@ -16148,7 +16148,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Number(-1.0));
                 };
                 let subject: Vec<u16> = text.encode_utf16().collect();
-                let Some(regexp) = self.pattern_argument(arguments, instruction)? else {
+                let Some(regexp) = self.pattern_argument(arguments, "", instruction)? else {
                     return Ok(Value::Number(-1.0));
                 };
                 let Value::RegExp(regexp) = &regexp else {
@@ -16165,7 +16165,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     return Ok(Value::Null);
                 };
                 let subject: Vec<u16> = text.encode_utf16().collect();
-                let Some(pattern) = self.pattern_argument(arguments, instruction)? else {
+                // `matchAll` requires `g`; `match` takes the flags the pattern was given, which
+                // for a string pattern is none -- so it reports the first match, not every one.
+                let built_flags = if matches!(native, Native::StringMatchAll) {
+                    "g"
+                } else {
+                    ""
+                };
+                let Some(pattern) = self.pattern_argument(arguments, built_flags, instruction)?
+                else {
                     return Ok(Value::Null);
                 };
                 let Value::RegExp(regexp) = &pattern else {
@@ -26439,14 +26447,24 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn pattern_argument(
         &mut self,
         arguments: &[Value],
+        flags: &str,
         instruction: usize,
     ) -> Result<Option<Value>, ExecutionError> {
         match arguments.first() {
             Some(value @ Value::RegExp(_)) => Ok(Some(value.clone())),
-            None | Some(Value::Undefined) => Ok(None),
+            // `"abc".match()` is `RegExpCreate(undefined, undefined)`: the empty pattern, which
+            // matches at position zero. Answering `null` instead skipped the match entirely.
+            None | Some(Value::Undefined) => match build_regexp("", flags) {
+                Some(regexp) => Ok(Some(regexp)),
+                None => Ok(None),
+            },
             Some(value) => {
-                let escaped = regress::escape(&value.to_display_string());
-                match build_regexp(&escaped, "g") {
+                // `ToString`, which for an object *calls* its `toString` -- the display spelling
+                // is the machine's, and using it here matched the literal text
+                // "[object Object]" against the subject rather than what the program said.
+                let text = self.as_text(value, instruction)?;
+                let escaped = regress::escape(&text);
+                match build_regexp(&escaped, flags) {
                     Some(regexp) => Ok(Some(regexp)),
                     None => {
                         self.throw_error(
