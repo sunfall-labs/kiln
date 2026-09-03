@@ -14892,9 +14892,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::IteratorHelperReturn => self.iterator_helper_return(receiver, instruction),
             // Built on `Array.from`, so an iterable, an array-like and a mapping function all
             // behave the same way they do there.
+            // `%TypedArray%.from` and `.of` build through `this`, not through the kind whose
+            // name they were reached by: `Int8Array.from.call(Uint8Array, [1])` is a Uint8Array,
+            // and `Int8Array.of.call({}, 1)` is a `TypeError` because a plain object is not a
+            // constructor. Both baked the kind in and ignored the receiver, so the first answered
+            // an Int8Array and the second answered an ordinary object.
             Native::TypedArrayFrom(kind) => {
                 let collected = self.array_from(arguments, instruction)?;
-                construct_typed_array(kind, &[collected])
+                let Value::Array(items) = &collected else {
+                    return construct_typed_array(kind, &[collected]);
+                };
+                let elements = dense_items(&items.borrow());
+                self.typed_array_through(receiver, kind, elements, instruction)
+            }
+            Native::TypedArrayOf(kind) => {
+                self.typed_array_through(receiver, kind, arguments.to_vec(), instruction)
             }
             // `Math.random` advances state that lives on the machine, so it cannot be a pure
             // function of its arguments either.
@@ -27045,6 +27057,55 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(out)
     }
 
+    /// `TypedArrayCreateFromConstructor(C, «count»)`, then fill.
+    ///
+    /// `C` is the `this` of `%TypedArray%.from` and `.of`, which is what makes them inheritable:
+    /// a subclass reaches them through its own name and must get its own type back, and
+    /// `Int8Array.of.call({}, 1)` must be a `TypeError` rather than an ordinary object with a
+    /// `0` property. The intrinsic for `kind` is the fallback for a receiver that is not a
+    /// constructor value at all, which is how these are reached internally.
+    fn typed_array_through(
+        &mut self,
+        constructor: &Value,
+        kind: TypedKind,
+        elements: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        // Only an *absent* receiver falls back to the intrinsic, which is how these are reached
+        // internally. A receiver the program supplied is held to the specification's rule even
+        // when it is a plain object: `Int8Array.of.call({}, 1)` is a `TypeError`, not an Int8Array
+        // and not an ordinary object with a `0` property.
+        if matches!(constructor, Value::Undefined) {
+            return construct_typed_array(kind, &[Value::Array(ArrayData::new(elements))]);
+        }
+        if !is_constructor(constructor) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not a constructor", constructor.to_display_string()),
+            });
+        }
+        let count = elements.len();
+        let out = self.construct_value(
+            constructor.clone(),
+            vec![Value::Number(count as f64)],
+            constructor.clone(),
+            instruction,
+        )?;
+        let Value::TypedArray(target) = &out else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "a typed array constructor must answer a typed array".to_owned(),
+            });
+        };
+        if target.len() < count {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "a typed array constructor answered a view that is too short".to_owned(),
+            });
+        }
+        for (index, item) in elements.iter().enumerate() {
+            target.set(index, item)?;
+        }
+        Ok(out)
+    }
+
     /// `SpeciesConstructor(exemplar, %TypedArray%)`, or `None` for "use the default".
     ///
     /// Every step is observable and every step is taken: `constructor` off the exemplar, then
@@ -33358,6 +33419,13 @@ fn call_native(
                 ),
             });
         }
+        // Routed the same way and unreachable for the same reason: `of` builds through its `this`
+        // and so needs the machine that can run a constructor.
+        Native::TypedArrayOf(_) => {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "%TypedArray%.of was dispatched without its constructor".to_owned(),
+            });
+        }
         // Routed the same way, and unreachable for the same reason: an `Intl` option read is
         // observable, so it cannot happen where there is no machine to observe it with.
         Native::Intl(_) => {
@@ -34206,9 +34274,6 @@ fn call_native(
         }
         // `of` takes its elements as arguments where the constructor takes one list, which is
         // the whole difference: `Uint8Array.of(3)` is one element, `new Uint8Array(3)` is three.
-        Native::TypedArrayOf(kind) => {
-            construct_typed_array(kind, &[Value::Array(ArrayData::new(arguments.to_vec()))])?
-        }
         // `view.set(source, offset?)` copies elements in, converting each as an assignment does.
         Native::TypedArraySet => {
             let Value::TypedArray(view) = receiver else {
