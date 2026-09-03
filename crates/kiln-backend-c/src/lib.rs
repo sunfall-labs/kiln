@@ -581,14 +581,160 @@ fn handler_targets(code: &[Instruction]) -> Vec<u32> {
     targets
 }
 
-/// The local slots a body puts into the temporal dead zone.
-fn dead_zone_slots(code: &[Instruction]) -> HashSet<u32> {
-    code.iter()
+/// Compute which `LoadLocal`, `LoadCell`, and `LoadGlobal` instruction indices can observe an uninitialized binding.
+fn compute_guarded_loads(code: &[Instruction]) -> HashSet<usize> {
+    let uninit_slots: HashSet<u32> = code
+        .iter()
         .filter_map(|instruction| match instruction {
             Instruction::MarkUninitialized(local) => Some(*local),
             _ => None,
         })
-        .collect()
+        .collect();
+    if uninit_slots.is_empty() {
+        return HashSet::new();
+    }
+
+    let n = code.len();
+    let mut in_states: Vec<HashSet<u32>> = vec![HashSet::new(); n];
+    let mut worklist: Vec<usize> = (0..n).collect();
+    let mut in_worklist: Vec<bool> = vec![true; n];
+
+    // Find handler ranges: PushHandler(target) ... PopHandler
+    let mut active_handlers: Vec<usize> = Vec::new();
+    let mut inst_handlers: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (pc, inst) in code.iter().enumerate() {
+        match inst {
+            Instruction::PushHandler(target) => {
+                active_handlers.push(*target as usize);
+            }
+            Instruction::PopHandler => {
+                active_handlers.pop();
+            }
+            _ => {}
+        }
+        inst_handlers[pc] = active_handlers.clone();
+    }
+
+    while let Some(pc) = worklist.pop() {
+        in_worklist[pc] = false;
+        let in_state = in_states[pc].clone();
+
+        // Compute out_state
+        let mut out_state = in_state;
+        match code[pc] {
+            Instruction::MarkUninitialized(slot) => {
+                out_state.insert(slot);
+            }
+            Instruction::StoreLocal(slot)
+            | Instruction::StoreCell(slot)
+            | Instruction::StoreGlobal(slot) => {
+                out_state.remove(&slot);
+            }
+            _ => {}
+        }
+
+        // Determine successors
+        let mut succs = Vec::with_capacity(4);
+        match code[pc] {
+            Instruction::Jump(target) => {
+                succs.push(target as usize);
+            }
+            Instruction::JumpIfFalse(target)
+            | Instruction::JumpIfTruthy(target)
+            | Instruction::JumpIfNotNullish(target) => {
+                if pc + 1 < n {
+                    succs.push(pc + 1);
+                }
+                succs.push(target as usize);
+            }
+            Instruction::Return | Instruction::Throw => {}
+            _ => {
+                if pc + 1 < n {
+                    succs.push(pc + 1);
+                }
+            }
+        }
+
+        // If in an active handler, out_state also reaches handler targets
+        if !inst_handlers[pc].is_empty() {
+            for &handler_target in &inst_handlers[pc] {
+                if handler_target < n {
+                    succs.push(handler_target);
+                }
+            }
+        }
+
+        // Propagate to successors
+        for succ in succs {
+            if succ >= n {
+                continue;
+            }
+            let prev_len = in_states[succ].len();
+            in_states[succ].extend(out_state.iter().copied());
+            if in_states[succ].len() > prev_len && !in_worklist[succ] {
+                worklist.push(succ);
+                in_worklist[succ] = true;
+            }
+        }
+    }
+
+    let mut guarded_loads = HashSet::new();
+    for (pc, inst) in code.iter().enumerate() {
+        match inst {
+            Instruction::LoadLocal(slot)
+            | Instruction::LoadCell(slot)
+            | Instruction::LoadGlobal(slot)
+                if in_states[pc].contains(slot) =>
+            {
+                guarded_loads.insert(pc);
+            }
+            _ => {}
+        }
+    }
+
+    guarded_loads
+}
+
+fn render_fast_inlines(output: &mut String) {
+    output.push_str(
+        r#"
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number(double val) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    memcpy(&v.bits, &val, sizeof(v.bits));
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number_bits(uint64_t bits) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    v.bits = bits;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_boolean(int b) {
+    kiln_value v;
+    v.tag = KILN_VALUE_BOOLEAN;
+    v.len = 0;
+    v.bits = b ? 1u : 0u;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
+    if (KILN_LIKELY(val.tag == KILN_VALUE_BOOLEAN)) {
+        return val.bits != 0;
+    }
+    if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {
+        double d;
+        memcpy(&d, &val.bits, sizeof(d));
+        return d != 0.0 && !isnan(d);
+    }
+    return kiln_c99_truthy(val);
+}
+"#,
+    );
 }
 
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
@@ -846,7 +992,8 @@ fn render_function(
         callables: produces_references(program),
         handlers,
         site: ReturnSite::Body,
-        guarded: dead_zone_slots(&proto.code),
+        guarded: compute_guarded_loads(&proto.code),
+        current_func: Some(index),
     };
     for position in 0..proto.code.len() {
         writeln!(output, "kiln_label_{position}:;").unwrap();
@@ -1332,6 +1479,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
+    render_fast_inlines(&mut output);
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys);
     if uses_module_scope(program) {
@@ -1418,7 +1566,8 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
             exports: None,
             commonjs: false,
         },
-        guarded: dead_zone_slots(&program.code),
+        guarded: compute_guarded_loads(&program.code),
+        current_func: None,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -1489,6 +1638,7 @@ fn render_module(
     )
     .unwrap();
     render_constant_declarations(&mut output, program, symbol);
+    render_fast_inlines(&mut output);
     let keys = property_key_constants(program);
     render_key_table(&mut output, program, symbol, &keys);
     if uses_module_scope(program) {
@@ -1603,7 +1753,8 @@ fn render_module(
             exports: Some(&module.exports),
             commonjs,
         },
-        guarded: dead_zone_slots(&program.code),
+        guarded: compute_guarded_loads(&program.code),
+        current_func: None,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -1712,9 +1863,11 @@ struct Emitter<'a> {
     /// converted first. False for a scalar program, whose emitted bytes must not change.
     callables: bool,
     site: ReturnSite<'a>,
-    /// The local slots this body puts into the temporal dead zone, so a read of one is checked
-    /// and every other read is not.
-    guarded: HashSet<u32>,
+    /// The instruction indices of loads that can read an uninitialized slot, so a read of one is
+    /// checked and every other read is not.
+    guarded: HashSet<usize>,
+    /// The index of the function currently being rendered, if inside a function body.
+    current_func: Option<usize>,
 }
 
 enum ReturnSite<'a> {
@@ -1743,6 +1896,7 @@ fn emit_instruction(
         handlers,
         site,
         guarded,
+        current_func,
     } = emitter;
     // A public scalar instruction starts a fresh diagnostic attempt. Function bodies do not
     // clear this state: when one calls another, the deepest failing body owns the refusal
@@ -1961,10 +2115,10 @@ fn emit_instruction(
             Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
             Constant::Null => output.push_str("    stack[sp++] = kiln_c99_null();\n"),
             Constant::Boolean(value) => {
-                writeln!(output, "    stack[sp++] = kiln_c99_boolean({});", i32::from(*value)).unwrap()
+                writeln!(output, "    stack[sp++] = kiln_fast_boolean({});", i32::from(*value)).unwrap()
             }
             Constant::Number(bits) => {
-                writeln!(output, "    stack[sp++] = kiln_c99_number_bits(UINT64_C({bits}));").unwrap()
+                writeln!(output, "    stack[sp++] = kiln_fast_number_bits(UINT64_C({bits}));").unwrap()
             }
             Constant::String(value) => {
                 writeln!(output, "    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{constant}, {});", value.len()).unwrap()
@@ -1988,11 +2142,11 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::LoadCell(local) => {
-            if guarded.contains(local) {
+            if guarded.contains(&index) {
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if (kiln_c99_cell_of(locals[{local}])->tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    if (KILN_UNLIKELY(kiln_c99_cell_of(locals[{local}])->tag == KILN_VALUE_UNINITIALIZED)) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }}"
                 )
                 .unwrap();
             }
@@ -2132,35 +2286,26 @@ fn emit_instruction(
         Instruction::Call { argc } => {
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
-            // The fast path below skips `kiln_c99_call` and invokes the body directly, which is
-            // only sound while it can supply the same receiver the dispatcher would have. It
-            // supplies two: an arrow's captured `this`, and `undefined` for everything else.
-            //
-            // `undefined` stopped being the whole of the second case when the dispatcher learned
-            // `OrdinaryCallBindThis` -- sloppy code never sees `undefined` as `this`, it sees the
-            // global object -- so a sloppy non-arrow function taking this path got `undefined`
-            // where the interpreter gave it `globalThis`, and a UMD header's `this || global`
-            // silently picked the wrong branch. Neither side was written wrong: the fast path
-            // replicated a tail that later grew a rule, and the two only met at a merge.
-            //
-            // So the guard names the condition rather than the rule: take the fast path only when
-            // the receiver it already knows how to supply is the right one. The substitution
-            // itself stays in `kiln_c99_call` and stays written once, because a rule with two
-            // implementations is what drifted here in the first place. Modules are strict, so
-            // this costs nothing outside CommonJS.
+            let direct_call = if let Some(func_idx) = *current_func {
+                format!(
+                    "if (KILN_LIKELY(plain != NULL && plain->body == {symbol}_fn_{func_idx} && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = {symbol}_fn_{func_idx}(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else "
+                )
+            } else {
+                String::new()
+            };
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; {direct_call}if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = plain->body(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
         }
         Instruction::LoadLocal(local) => {
-            if guarded.contains(local) {
+            if guarded.contains(&index) {
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if (locals[{local}].tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    if (KILN_UNLIKELY(locals[{local}].tag == KILN_VALUE_UNINITIALIZED)) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }}"
                 )
                 .unwrap();
             }
@@ -2287,11 +2432,11 @@ fn emit_instruction(
         // Module scope is one array for the whole module, so a read from a function body names
         // it directly rather than reaching for a frame that may no longer exist.
         Instruction::LoadGlobal(slot) => {
-            if guarded.contains(slot) {
+            if guarded.contains(&index) {
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if ({symbol}_globals[{slot}].tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    if (KILN_UNLIKELY({symbol}_globals[{slot}].tag == KILN_VALUE_UNINITIALIZED)) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }}"
                 )
                 .unwrap();
             }
@@ -2741,8 +2886,8 @@ fn emit_instruction(
         Instruction::Unary(operator) => {
             let unwind = unwind_or_return(handlers, site);
             match numeric_fast_unary_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (operand.tag == KILN_VALUE_NUMBER) {{ double a; memcpy(&a, &operand.bits, sizeof(a)); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
-                None => writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (KILN_LIKELY(operand.tag == KILN_VALUE_NUMBER)) {{ double a; memcpy(&a, &operand.bits, sizeof(a)); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
             }
         }
         Instruction::Binary(operator) if !*callables => {
@@ -2750,7 +2895,7 @@ fn emit_instruction(
             // has nowhere to put a thrown value -- the entry point declares that slot only when
             // something can reach it -- so this is the form that program has to keep.
             match numeric_fast_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
                 None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap(),
             }
         }
@@ -2759,16 +2904,16 @@ fn emit_instruction(
             // hands every other case straight back to `kiln_c99_binary`.
             let unwind = unwind_or_return(handlers, site);
             match numeric_fast_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
-                None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
             }
         }
         Instruction::Jump(target) => writeln!(output, "    goto kiln_label_{target};").unwrap(),
         Instruction::JumpIfFalse(target) => {
-            writeln!(output, "    if (!kiln_c99_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
+            writeln!(output, "    if (!kiln_fast_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
         }
         Instruction::JumpIfTruthy(target) => {
-            writeln!(output, "    if (kiln_c99_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
+            writeln!(output, "    if (kiln_fast_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
         }
         Instruction::JumpIfNotNullish(target) => {
             writeln!(output, "    {{ kiln_value value = stack[--sp]; if (value.tag != KILN_VALUE_UNDEFINED && value.tag != KILN_VALUE_NULL) goto kiln_label_{target}; }}").unwrap()
@@ -2941,10 +3086,10 @@ fn unary_code(operator: UnaryOp) -> u16 {
 /// `pow`, and the bitwise operators and shifts need ToInt32, which is a separate decision.
 fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
     Some(match operator {
-        BinaryOp::Add => "answer = kiln_c99_number(a + b);",
-        BinaryOp::Subtract => "answer = kiln_c99_number(a - b);",
-        BinaryOp::Multiply => "answer = kiln_c99_number(a * b);",
-        BinaryOp::Divide => "answer = kiln_c99_number(a / b);",
+        BinaryOp::Add => "answer = kiln_fast_number(a + b);",
+        BinaryOp::Subtract => "answer = kiln_fast_number(a - b);",
+        BinaryOp::Multiply => "answer = kiln_fast_number(a * b);",
+        BinaryOp::Divide => "answer = kiln_fast_number(a / b);",
         // `%` is `fmod` by specification, and `fmod` is a call into libm that measured at 41% of a
         // Collatz benchmark's entire runtime. Two integral operands take the machine instruction
         // instead, which agrees exactly: C truncates toward zero and takes the sign of the
@@ -2952,14 +3097,14 @@ fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
         // double is not exactly an integer, a zero divisor must reach `fmod` for NaN, and a zero
         // dividend must too, because `-0 % 3` is `-0` and integer division would answer `+0`.
         BinaryOp::Remainder => {
-            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_number(fmod(a, b)); }"
+            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_fast_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_fast_number(fmod(a, b)); }"
         }
-        BinaryOp::StrictEqual => "answer = kiln_c99_boolean(a == b);",
-        BinaryOp::StrictNotEqual => "answer = kiln_c99_boolean(a != b);",
-        BinaryOp::LessThan => "answer = kiln_c99_boolean(a < b);",
-        BinaryOp::LessThanOrEqual => "answer = kiln_c99_boolean(a <= b);",
-        BinaryOp::GreaterThan => "answer = kiln_c99_boolean(a > b);",
-        BinaryOp::GreaterThanOrEqual => "answer = kiln_c99_boolean(a >= b);",
+        BinaryOp::StrictEqual => "answer = kiln_fast_boolean(a == b);",
+        BinaryOp::StrictNotEqual => "answer = kiln_fast_boolean(a != b);",
+        BinaryOp::LessThan => "answer = kiln_fast_boolean(a < b);",
+        BinaryOp::LessThanOrEqual => "answer = kiln_fast_boolean(a <= b);",
+        BinaryOp::GreaterThan => "answer = kiln_fast_boolean(a > b);",
+        BinaryOp::GreaterThanOrEqual => "answer = kiln_fast_boolean(a >= b);",
         _ => return None,
     })
 }
@@ -2969,12 +3114,12 @@ fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
 /// `typeof` and `void` do not touch the value and `~` needs ToInt32, so they keep the generic call.
 fn numeric_fast_unary_body(operator: UnaryOp) -> Option<&'static str> {
     Some(match operator {
-        UnaryOp::Plus | UnaryOp::ToNumeric => "answer = kiln_c99_number(a);",
-        UnaryOp::Negate => "answer = kiln_c99_number(-a);",
+        UnaryOp::Plus | UnaryOp::ToNumeric => "answer = kiln_fast_number(a);",
+        UnaryOp::Negate => "answer = kiln_fast_number(-a);",
         // `!x` on a number is false unless the number is zero or NaN.
-        UnaryOp::Not => "answer = kiln_c99_boolean(a == 0.0 || a != a);",
-        UnaryOp::Increment => "answer = kiln_c99_number(a + 1.0);",
-        UnaryOp::Decrement => "answer = kiln_c99_number(a - 1.0);",
+        UnaryOp::Not => "answer = kiln_fast_boolean(a == 0.0 || a != a);",
+        UnaryOp::Increment => "answer = kiln_fast_number(a + 1.0);",
+        UnaryOp::Decrement => "answer = kiln_fast_number(a - 1.0);",
         _ => return None,
     })
 }

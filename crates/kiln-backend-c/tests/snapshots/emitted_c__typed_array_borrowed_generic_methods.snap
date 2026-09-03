@@ -8,6 +8,42 @@ static const char kiln_module_78eefada6f9a430a971c166d0826322b_constant_3[] = "m
 static const char kiln_module_78eefada6f9a430a971c166d0826322b_constant_4[] = "call";
 static const char kiln_module_78eefada6f9a430a971c166d0826322b_constant_5[] = "constructor";
 static const char kiln_module_78eefada6f9a430a971c166d0826322b_constant_6[] = "2";
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number(double val) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    memcpy(&v.bits, &val, sizeof(v.bits));
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number_bits(uint64_t bits) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    v.bits = bits;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_boolean(int b) {
+    kiln_value v;
+    v.tag = KILN_VALUE_BOOLEAN;
+    v.len = 0;
+    v.bits = b ? 1u : 0u;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
+    if (KILN_LIKELY(val.tag == KILN_VALUE_BOOLEAN)) {
+        return val.bits != 0;
+    }
+    if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {
+        double d;
+        memcpy(&d, &val.bits, sizeof(d));
+        return d != 0.0 && !isnan(d);
+    }
+    return kiln_c99_truthy(val);
+}
 static const char *kiln_module_78eefada6f9a430a971c166d0826322b_key_2;
 static const char *kiln_module_78eefada6f9a430a971c166d0826322b_key_3;
 static const char *kiln_module_78eefada6f9a430a971c166d0826322b_key_4;
@@ -76,10 +112,10 @@ kiln_label_3:;
     stack[sp++] = kiln_c99_builtin(KILN_C99_BUILTIN_UINT8_ARRAY);
 kiln_label_4:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    stack[sp++] = kiln_c99_number_bits(UINT64_C(4607182418800017408));
+    stack[sp++] = kiln_fast_number_bits(UINT64_C(4607182418800017408));
 kiln_label_5:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    stack[sp++] = kiln_c99_number_bits(UINT64_C(4611686018427387904));
+    stack[sp++] = kiln_fast_number_bits(UINT64_C(4611686018427387904));
 kiln_label_6:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     {

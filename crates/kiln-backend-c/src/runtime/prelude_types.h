@@ -1,4 +1,16 @@
 
+#ifndef KILN_LIKELY
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_LIKELY(x)   (__builtin_expect(!!(x), 1))
+#define KILN_UNLIKELY(x) (__builtin_expect(!!(x), 0))
+#define KILN_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define KILN_LIKELY(x)   (x)
+#define KILN_UNLIKELY(x) (x)
+#define KILN_ALWAYS_INLINE
+#endif
+#endif
+
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
