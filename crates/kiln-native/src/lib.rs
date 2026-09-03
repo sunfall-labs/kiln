@@ -508,10 +508,25 @@ pub struct NativeBuilder {
     number_provider: OnceLock<Result<NumberProvider, String>>,
 }
 
+fn cache_with_optional_shared(cache_root: impl Into<PathBuf>) -> ArtifactCache {
+    let local = cache_root.into();
+    if let Ok(shared_path) = std::env::var("KILN_SHARED_CACHE")
+        && !shared_path.trim().is_empty()
+    {
+        let shared = PathBuf::from(shared_path.trim());
+        ArtifactCache::with_layers([
+            kiln_artifact_cache::CacheLayer::writable(shared),
+            kiln_artifact_cache::CacheLayer::writable(local),
+        ])
+    } else {
+        ArtifactCache::new(local)
+    }
+}
+
 impl NativeBuilder {
     pub fn discover(cache_root: impl Into<PathBuf>) -> Result<Self, NativeError> {
         Ok(Self::new(
-            ArtifactCache::new(cache_root),
+            cache_with_optional_shared(cache_root),
             Toolchain::discover()?,
         ))
     }
@@ -521,7 +536,7 @@ impl NativeBuilder {
         let toolchain = DISCOVERED_TOOLCHAIN
             .get_or_init(Toolchain::discover)
             .clone()?;
-        Ok(Self::new(ArtifactCache::new(cache_root), toolchain))
+        Ok(Self::new(cache_with_optional_shared(cache_root), toolchain))
     }
 
     pub const fn new(cache: ArtifactCache, toolchain: Toolchain) -> Self {
@@ -6084,6 +6099,34 @@ mod tests {
         }
     }
 
+    fn shared_test_cache_root() -> PathBuf {
+        static CACHE_DIR: OnceLock<PathBuf> = OnceLock::new();
+        CACHE_DIR
+            .get_or_init(|| {
+                if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+                    let target_cache =
+                        Path::new(&manifest_dir).join("../../target/kiln-test-cache");
+                    if fs::create_dir_all(&target_cache).is_ok() {
+                        return target_cache;
+                    }
+                }
+                let fallback = std::env::temp_dir()
+                    .join(format!("kiln-test-shared-cache-{}", std::process::id()));
+                let _ = fs::create_dir_all(&fallback);
+                fallback
+            })
+            .clone()
+    }
+
+    fn test_cache(local_root: impl Into<PathBuf>) -> ArtifactCache {
+        let local = local_root.into();
+        let shared = shared_test_cache_root();
+        ArtifactCache::with_layers([
+            kiln_artifact_cache::CacheLayer::writable(shared),
+            kiln_artifact_cache::CacheLayer::writable(local),
+        ])
+    }
+
     struct TestDirectory {
         path: PathBuf,
     }
@@ -6097,6 +6140,14 @@ mod tests {
             ));
             fs::create_dir(&path).expect("create native test directory");
             Self { path }
+        }
+
+        fn cache(&self) -> ArtifactCache {
+            test_cache(self.path.join("cache"))
+        }
+
+        fn builder(&self, toolchain: Toolchain) -> NativeBuilder {
+            NativeBuilder::new(self.cache(), toolchain)
         }
     }
 
@@ -6124,7 +6175,8 @@ mod tests {
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = project
+            .builder(toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6329,7 +6381,7 @@ mod tests {
             return;
         };
         let root = TestDirectory::new("kiln-native-cache-identities");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let identities = builder
             .live_cache_identities()
             .expect("current native identities are enumerable");
@@ -6470,7 +6522,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
             eprintln!("skipping native querystring integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -6600,7 +6652,7 @@ console.log(edges.missing === "", edges[""], edges["empty-value"] === "", edges.
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6686,7 +6738,7 @@ writeFile({path:?}, 'héllo').then(() => readFile({path:?}, 'utf8')).then((text)
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6916,7 +6968,7 @@ console.log("pass");
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -6974,7 +7026,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             node.source,
             ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Net)
         )));
-        let builder = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain);
         let report = builder
             .build_graph(
                 &graph,
@@ -7087,7 +7139,7 @@ socket.on("close", () => {{
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7136,7 +7188,7 @@ socket.on("close", () => {{
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7223,7 +7275,7 @@ server.listen({port}, "127.0.0.1");
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7414,7 +7466,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             node.source,
             ModuleSource::NodeBuiltin(kiln_module_resolver::NodeBuiltin::Http)
         )));
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7534,7 +7586,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         )
         .expect("Fastify source graph compiles");
         let project = TestDirectory::new("kiln-native-fastify");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7639,7 +7691,7 @@ server.listen(0, "127.0.0.1", () => {
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7707,7 +7759,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -7832,7 +7884,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             OxcFrontend,
         )
         .expect("source graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -8394,7 +8446,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
             eprintln!("skipping native Realm graph integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -8448,7 +8500,7 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         )
         .expect("process.argv source compiles");
         let output = project.path.join("program");
-        NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .build_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -8516,7 +8568,7 @@ setTimeout(function () { console.log(order.join(",")); }, 0);
             OxcFrontend,
         )
         .expect("process.nextTick source compiles");
-        let run = NativeBuilder::new(ArtifactCache::new(project.path.join("cache")), toolchain)
+        let run = NativeBuilder::new(test_cache(project.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -8547,10 +8599,7 @@ setTimeout(function () { console.log(order.join(",")); }, 0);
         };
         let root = TestDirectory::new("kiln-native-embedded-realm-graph");
         let graph = realm_scheduling_graph(&root.path.join("project"));
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let library = builder
             .build_shared_graph(
                 &graph,
@@ -8846,7 +8895,7 @@ int main(void) {{
             eprintln!("skipping native star integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -8966,7 +9015,7 @@ int main(void) {{
             eprintln!("skipping native CommonJS execution: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -9115,7 +9164,7 @@ int main(void) {{
             eprintln!("skipping native builtin projection integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -9164,7 +9213,7 @@ int main(void) {{
             eprintln!("skipping native CommonJS exit-status integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -9217,7 +9266,7 @@ int main(void) {{
             eprintln!("skipping native CommonJS callable integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -9270,7 +9319,7 @@ console.log(written === read, read.realmMarker.answer);"#,
             eprintln!("skipping realm callable-property integration: no C compiler found");
             return;
         };
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -9323,7 +9372,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping realm-singleton integration: no C compiler found");
             return;
         };
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -9499,7 +9548,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping native builtin namespace integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let run = builder
             .run_graph(
                 &graph,
@@ -9555,7 +9604,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping native CommonJS JSON execution: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -9597,7 +9646,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             eprintln!("skipping native namespace integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let report = builder
             .run_graph(
                 &graph,
@@ -9662,7 +9711,7 @@ console.log(direct === via, via.answer);
             OxcFrontend,
         )
         .expect("namespace re-export graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -9751,7 +9800,7 @@ console.log(direct === via, via.answer);
             OxcFrontend,
         )
         .expect("CommonJS re-export graph compiles");
-        let report = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain)
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain)
             .run_graph(
                 &graph,
                 &NativeBuildOptions {
@@ -10084,10 +10133,7 @@ int main(void) {
             return;
         };
         let root = TestDirectory::new("kiln-native-owned-result-test");
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
@@ -10230,19 +10276,16 @@ int main(void) {{
             local_count: 0,
             functions: Vec::new(),
         };
-        let report = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        )
-        .build_shared_library(
-            &program,
-            &NativeBuildOptions {
-                output: root.path.join(shared_library_name()),
-                profile: NativeProfile::Dev,
-                realm: NativeRealmPolicy::default(),
-            },
-        )
-        .expect("build malformed-host scalar library");
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+            .build_shared_library(
+                &program,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("build malformed-host scalar library");
         let header_name = report
             .header
             .file_name()
@@ -10342,19 +10385,16 @@ int main(void) {{
             thrown.clone()
         })
         .expect("construct throw graph");
-        let report = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        )
-        .build_shared_graph(
-            &graph,
-            &NativeBuildOptions {
-                output: root.path.join(shared_library_name()),
-                profile: NativeProfile::Dev,
-                realm: NativeRealmPolicy::default(),
-            },
-        )
-        .expect("build throw graph");
+        let report = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone())
+            .build_shared_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join(shared_library_name()),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("build throw graph");
         let header_name = report
             .header
             .file_name()
@@ -10549,7 +10589,7 @@ int main(void) {{
             OxcFrontend,
         )
         .expect("catchable JSON exception source compiles");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let caught = builder
             .run_graph(
                 &graph,
@@ -11015,10 +11055,7 @@ int main(void) {{
         assert!(!wrapper.contains("static kiln_value kiln_export"));
         assert!(!wrapper.contains("kiln_cli_host_call"));
         assert!(!wrapper.contains("setlocale"));
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let report = builder
             .build_shared_graph(
                 &graph,
@@ -11226,10 +11263,7 @@ int main(void) {{
                 }
             })
             .expect("construct shared host graph");
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let report = builder
             .build_shared_graph(
                 &graph,
@@ -11398,10 +11432,7 @@ int main(void) {{
             local_count: 0,
             functions: Vec::new(),
         };
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let first = builder
             .build_shared_library(
                 &program(11.0),
@@ -11530,10 +11561,7 @@ int main(void) {{
             "logical-path entries must collide for this interposition regression"
         );
 
-        let builder = NativeBuilder::new(
-            ArtifactCache::new(root.path.join("cache")),
-            toolchain.clone(),
-        );
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain.clone());
         let first = builder
             .build_shared_graph(
                 &first_graph,
@@ -11749,7 +11777,7 @@ int main(int argc, char **argv) {{
             return;
         };
         let root = TestDirectory::new("kiln-native-host-clock");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
@@ -11817,7 +11845,7 @@ int main(int argc, char **argv) {{
             return;
         };
         let root = TestDirectory::new("kiln-native-entropy");
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         let program = Program {
             source: "".into(),
             version: BYTECODE_VERSION,
@@ -11903,7 +11931,7 @@ console.log(first === Math.random());"#,
             eprintln!("skipping native graph entropy integration: no C compiler found");
             return;
         };
-        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let builder = NativeBuilder::new(test_cache(root.path.join("cache")), toolchain);
         for (name, entropy) in [
             ("default", NativeEntropyPolicy::Deterministic),
             ("seeded", NativeEntropyPolicy::Seeded(7)),
