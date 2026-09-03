@@ -11805,12 +11805,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // and every intrinsic this realm registers -- including the ones the
                     // compiler's built-in table does not name, which without this were
                     // unreachable by their own name however completely they were implemented.
-                    if let Value::Object(globals) = self.global_object() {
-                        let bound = globals.borrow().get_own(&name).cloned();
-                        if let Some(value) = bound {
-                            self.stack.push(value);
-                            continue;
-                        }
+                    // `get_own` was the read here, and it is data-only by construction -- so a
+                    // global installed as an *accessor* was invisible to identifier resolution
+                    // and its name answered `ReferenceError`. `Object.defineProperty(globalThis,
+                    // "x", { get() {...} })` then `x` is how a polyfill installs a lazy global,
+                    // and it is what test262's `PutValue` cases are built on.
+                    let globals = self.global_object();
+                    let present = match &globals {
+                        Value::Object(object) => object.borrow().get_own_property(&name).is_some(),
+                        _ => false,
+                    };
+                    if present {
+                        // A real read, because an accessor is a call: the getter runs, and it may
+                        // throw or -- as those cases do -- delete the very property being read.
+                        let value = self.read_property(&globals, &name, current)?;
+                        self.stack.push(value);
+                        continue;
                     }
                     self.throw_error(
                         ErrorKind::Reference,
@@ -11857,9 +11867,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // if it has one, and `undefined` if it does not -- which is the answer that
                     // makes `typeof maybeMissing === "undefined"` the feature test it is.
                     let name = self.string_constant(*name, current)?;
-                    let bound = match self.global_object() {
-                        Value::Object(globals) => globals.borrow().get_own(&name).cloned(),
-                        _ => None,
+                    // Accessor-aware for the same reason as identifier resolution above, and it
+                    // matters more here: `typeof x === "undefined"` is the feature test, so a
+                    // lazily-installed global reported as absent sends the program down the
+                    // polyfill branch it did not need.
+                    let globals = self.global_object();
+                    let present = match &globals {
+                        Value::Object(object) => object.borrow().get_own_property(&name).is_some(),
+                        _ => false,
+                    };
+                    let bound = if present {
+                        Some(self.read_property(&globals, &name, current)?)
+                    } else {
+                        None
                     };
                     self.stack.push(bound.unwrap_or(Value::Undefined));
                 }
@@ -11869,7 +11889,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // unresolvable one is a `ReferenceError` rather than a new global.
                     let name = self.string_constant(*name, current)?;
                     let present = match self.global_object() {
-                        Value::Object(globals) => globals.borrow().get_own(&name).is_some(),
+                        Value::Object(globals) => {
+                            globals.borrow().get_own_property(&name).is_some()
+                        }
                         _ => false,
                     };
                     if !present {
@@ -11891,7 +11913,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let value = self.pop(current)?;
                     let globals = self.global_object();
                     let present = match &globals {
-                        Value::Object(globals) => globals.borrow().get_own(&name).is_some(),
+                        Value::Object(globals) => {
+                            globals.borrow().get_own_property(&name).is_some()
+                        }
                         _ => false,
                     };
                     if !present {
