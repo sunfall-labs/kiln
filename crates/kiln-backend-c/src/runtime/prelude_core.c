@@ -19795,6 +19795,7 @@ static kiln_value kiln_c99_typeof(kiln_value value);
 
 typedef struct kiln_dyn_binding {
     char *name;
+    size_t name_len;
     kiln_value value;
 } kiln_dyn_binding;
 
@@ -19815,8 +19816,8 @@ static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
 static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
     size_t i;
     for (i = 0; i < scope->count; ++i) {
-        if (strlen(scope->bindings[i].name) == name_len &&
-            strncmp(scope->bindings[i].name, name, name_len) == 0) {
+        if (scope->bindings[i].name_len == name_len &&
+            memcmp(scope->bindings[i].name, name, name_len) == 0) {
             scope->bindings[i].value = val;
             return 1;
         }
@@ -19833,9 +19834,26 @@ static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t na
     memcpy(dup, name, name_len);
     dup[name_len] = '\0';
     scope->bindings[scope->count].name = dup;
+    scope->bindings[scope->count].name_len = name_len;
     scope->bindings[scope->count].value = val;
     scope->count++;
     return 1;
+}
+
+static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
+    kiln_dyn_scope *curr = scope;
+    while (curr != NULL) {
+        size_t i;
+        for (i = 0; i < curr->count; ++i) {
+            if (curr->bindings[i].name_len == name_len &&
+                memcmp(curr->bindings[i].name, name, name_len) == 0) {
+                curr->bindings[i].value = val;
+                return 1;
+            }
+        }
+        curr = curr->parent;
+    }
+    return 0;
 }
 
 static int kiln_dyn_scope_get(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value *out) {
@@ -19843,8 +19861,8 @@ static int kiln_dyn_scope_get(kiln_dyn_scope *scope, const char *name, size_t na
     while (curr != NULL) {
         size_t i;
         for (i = 0; i < curr->count; ++i) {
-            if (strlen(curr->bindings[i].name) == name_len &&
-                strncmp(curr->bindings[i].name, name, name_len) == 0) {
+            if (curr->bindings[i].name_len == name_len &&
+                memcmp(curr->bindings[i].name, name, name_len) == 0) {
                 *out = curr->bindings[i].value;
                 return 1;
             }
@@ -20639,6 +20657,31 @@ static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sc
     }
     if (lex->curr.kind == KILN_DYN_KW_TYPEOF) {
         kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind == KILN_DYN_IDENT) {
+            const char *name = lex->curr.start;
+            size_t name_len = lex->curr.len;
+            size_t saved_pos = lex->pos;
+            kiln_dyn_token saved_tok = lex->curr;
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind != KILN_DYN_DOT && lex->curr.kind != KILN_DYN_LBRACKET && lex->curr.kind != KILN_DYN_LPAREN) {
+                if (kiln_dyn_scope_get(scope, name, name_len, out)) {
+                    *out = kiln_c99_typeof(*out);
+                    return KILN_C99_OK;
+                }
+                kiln_value globals = kiln_c99_undefined();
+                int gstatus = kiln_c99_global_object(&globals);
+                if (gstatus == KILN_C99_OK) {
+                    if (kiln_c99_get(host, globals, name, name_len, out, depth, NULL) == KILN_C99_OK) {
+                        *out = kiln_c99_typeof(*out);
+                        return KILN_C99_OK;
+                    }
+                }
+                *out = kiln_c99_copy_text("undefined", 9);
+                return KILN_C99_OK;
+            }
+            lex->pos = saved_pos;
+            lex->curr = saved_tok;
+        }
         int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, out, thrown);
         if (status != KILN_C99_OK) return status;
         *out = kiln_c99_typeof(*out);
@@ -20837,7 +20880,9 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
             kiln_value cur_val = kiln_c99_number(0);
             kiln_dyn_scope_get(scope, name, name_len, &cur_val);
             double n = kiln_c99_as_number(cur_val);
-            kiln_dyn_scope_set(scope, name, name_len, kiln_c99_number(n + 1.0));
+            if (!kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n + 1.0))) {
+                kiln_dyn_scope_set(scope, name, name_len, kiln_c99_number(n + 1.0));
+            }
             *out = kiln_c99_number(n);
             return KILN_C99_OK;
         } else if (lex->curr.kind == KILN_DYN_MINUS_MINUS) {
@@ -20845,7 +20890,9 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
             kiln_value cur_val = kiln_c99_number(0);
             kiln_dyn_scope_get(scope, name, name_len, &cur_val);
             double n = kiln_c99_as_number(cur_val);
-            kiln_dyn_scope_set(scope, name, name_len, kiln_c99_number(n - 1.0));
+            if (!kiln_dyn_scope_update(scope, name, name_len, kiln_c99_number(n - 1.0))) {
+                kiln_dyn_scope_set(scope, name, name_len, kiln_c99_number(n - 1.0));
+            }
             *out = kiln_c99_number(n);
             return KILN_C99_OK;
         } else if (lex->curr.kind == KILN_DYN_ASSIGN) {
@@ -20853,10 +20900,7 @@ static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_d
             kiln_value rhs;
             int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
             if (status != KILN_C99_OK) return status;
-            kiln_value dummy;
-            if (kiln_dyn_scope_get(scope, name, name_len, &dummy)) {
-                kiln_dyn_scope_set(scope, name, name_len, rhs);
-            } else {
+            if (!kiln_dyn_scope_update(scope, name, name_len, rhs)) {
                 kiln_value globals = kiln_c99_undefined();
                 status = kiln_c99_global_object(&globals);
                 if (status == KILN_C99_OK) {

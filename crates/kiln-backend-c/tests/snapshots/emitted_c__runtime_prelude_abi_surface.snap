@@ -1705,6 +1705,7 @@ typedef struct kiln_dyn_binding {
 typedef struct kiln_dyn_scope {
 static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
 static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
+static int kiln_dyn_scope_update(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
 static int kiln_dyn_scope_get(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value *out) {
 static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
 typedef enum {
