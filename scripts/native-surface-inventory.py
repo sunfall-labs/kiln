@@ -1,0 +1,1064 @@
+#!/usr/bin/env python3
+"""Ask both engines what they implement, one member at a time, and write down the difference.
+
+WHY THIS EXISTS. ADR 0043 put the fifteen table-driven built-ins on a seam: one shared table, a
+`const` assertion that fails the build when the two engines drift, and a backlog with reasons.
+That inventory is trustworthy and it covers about a fifth of the surface. Everything else --- the
+prototype method tables, the `node:` namespaces, the globals that are not table-driven --- has no
+inventory at all, so its gaps have been discovered one npm bundle at a time. `node:path` publishes
+the interpreter's whole export list and fills five of them, which is how a bundled `postcss` walks
+past a feature guard into a wrong answer. Nothing in the repository could have told anyone that
+before this script.
+
+THE METHOD IS TO ASK, NOT TO READ. The six hand-written `kiln_c99_is_*_member` lists in the
+emitted C answer "is this a member of the language?", which is a different question from "does
+this backend implement it?", so they cannot be diffed into a list of what is missing. Instead:
+enumerate the interpreter's own surface with `Object.getOwnPropertyNames`, then put each name to
+the native backend and classify what comes back. No list in this file names a built-in or a
+member. Add a member to either engine and the next run finds it.
+
+THE OBSTACLE IS THAT A REFUSAL ABORTS THE PROCESS. It is not a JavaScript exception --- `try` does
+not catch it --- so a probe that walks the surface in one pass reports everything up to the first
+gap and nothing after. That is the same trap ADR 0043 describes: `Object` refused on
+`getOwnPropertySymbols`, and every name alphabetically later was invisible. The way out is that
+output *before* the refusal survives, and the refusal names the member it refused. So each
+receiver is probed in rounds: run the whole pending list, keep every answer that printed, record
+the one that refused, drop it, run again. A receiver costs one native compile per refusal plus
+one. Receivers are independent, so the rounds run in parallel.
+
+Three classes come out, and the order they are reported in is the point:
+
+  diverged     native answered, and answered differently from the interpreter. Includes the
+               present-but-`undefined` case, which is the dangerous one: `typeof x === "undefined"`
+               is how real code feature-detects, so the program takes the other branch and carries
+               on with a bad value.
+  refused      native stopped and named the member. Honest backlog; a program dies at the cause.
+  implemented  the two engines agree.
+
+Usage:
+
+    scripts/native-surface-inventory.py                    # full run, writes the report
+    scripts/native-surface-inventory.py --only node:       # one slice of the surface
+    scripts/native-surface-inventory.py --stage enumerate  # what the interpreter has, no compiles
+    scripts/native-surface-inventory.py --stage report     # re-render from the saved JSON
+
+It needs a release build (`mbx build --release -p kiln-cli`) and it costs several hundred native
+compiles, which is several gigabytes of `.kiln/cache`. `--disk-floor-gib` is the pressure valve:
+below it the tool reclaims its own build scratch and, if that is not enough, stops rather than
+filing a run that ended in ENOSPC. That is deliberate. A run that hits a full disk or a timeout is
+not a measurement, and `NOTES.md` has a day in it that says so.
+
+The tool is deliberately re-runnable and its outputs are deterministic (every list is sorted), so
+`git diff` on the report is the review after a backend change.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+
+# `$262` is the Test262 host hooks the runner installs. They are a statement about what the host
+# can do rather than about the language, and they are not the native backend's to carry ---
+# `conformance/native/global-surface.ts` skips them for the same reason and says so.
+HOST_HOOK_PREFIX = "$262"
+
+# The `node:` specifiers the module resolver knows. This is the one list the script does hold,
+# because a namespace is only reachable by naming it: there is no `Object.getOwnPropertyNames` for
+# "every module the host will resolve". It is checked against the resolver at run time by the
+# resolver refusing anything it does not know, which shows up as an unreachable receiver.
+NODE_SPECIFIERS = [
+    "node:assert",
+    "node:async_hooks",
+    "node:buffer",
+    "node:crypto",
+    "node:diagnostics_channel",
+    "node:dns",
+    "node:events",
+    "node:fs",
+    "node:fs/promises",
+    "node:http",
+    "node:http2",
+    "node:https",
+    "node:module",
+    "node:net",
+    "node:os",
+    "node:path",
+    "node:perf_hooks",
+    "node:querystring",
+    "node:stream",
+    "node:string_decoder",
+    "node:tty",
+    "node:url",
+    "node:util",
+    "node:worker_threads",
+    "node:zlib",
+]
+
+# Printed as the last line of every generated program. It is how the harness tells "ran to
+# completion" from "died", which the exit status cannot do here.
+SENTINEL = "#END"
+
+IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
+
+# `kiln: native backend refusal: module=... instruction=41 operation=GetProperty(seal) ...`
+REFUSAL = re.compile(r"^kiln: native (?:backend )?(.*)$")
+REFUSED_MEMBER = re.compile(r"operation=\w+\(([^)]*)\)")
+
+# Not every `kiln: native ...` line is a refusal, and the ones that are not must never be filed as
+# one. This tool hands its own build scratch back after every receiver while other receivers are
+# still compiling, so a compile can find the directory it was about to write into already gone and
+# say `cache failed: could not install cache artifact ...`. That is this tool tripping over its own
+# feet, not the backend declining a member --- and the first full run on `main` filed
+# `WeakRef.prototype`'s two members as refusals because of it. A run that says one of these is not
+# a measurement: retry it, and if it keeps happening, name it under "Runs that were not
+# measurements" rather than folding it into the backlog.
+NOT_A_REFUSAL = ("cache failed:",)
+
+# The shared description of a value. It must produce identical bytes in both engines from
+# operations both engines have, which rules out `Object.prototype.toString.call` and rules out
+# reading `.name` or `.length` off a built-in function --- ADR 0043 records that reading `length`
+# on a built-in refuses, and a probe whose own scaffolding refuses measures nothing. The cost is
+# that two different functions, or two different objects, both describe as "function"/"object";
+# see "What this cannot see" in the report.
+DESCRIBE = """
+function kilnDescribe(v) {
+  var t = typeof v;
+  if (t === "undefined") return "undefined";
+  if (t === "object") return v === null ? "null" : "object";
+  if (t === "function") return "function";
+  if (t === "symbol") return "symbol";
+  if (t === "string") return "string " + JSON.stringify(v);
+  return t + " " + String(v);
+}
+"""
+
+
+def js_string(text: str) -> str:
+    return json.dumps(text)
+
+
+def member_access(receiver: str, name: str) -> str:
+    """How a program actually spells this read.
+
+    An identifier gets dot access, which lowers to a named `GetProperty` --- so when the backend
+    refuses, the diagnostic carries the member's name and the round does not have to infer it from
+    how far the output got. A `@@` name is symbol-keyed and reached through `Symbol`, which lowers
+    to `GetComputed` and refuses anonymously; that is why the round parser keeps the positional
+    fallback.
+    """
+    if name.startswith("@@"):
+        return f"{receiver}[Symbol.{name[2:]}]"
+    if IDENTIFIER.match(name):
+        return f"{receiver}.{name}"
+    return f"{receiver}[{js_string(name)}]"
+
+
+def receiver_expression(key: str) -> tuple[str, str]:
+    """Turn a receiver key back into the JavaScript that reaches it.
+
+    The key is the path the walk took, so the expression is derivable from it and the two stay in
+    step without a second table. `globalThis.X` rather than a bare `X` on purpose: a global the
+    native backend does not have then refuses by name, which is a measurement, where a bare
+    identifier would be a link failure, which is not.
+    """
+    if key.startswith("node:"):
+        return "namespace", f"require({js_string(key)})"
+    kind = "static"
+    base = key
+    wrap = 0
+    while base.endswith("^"):
+        base = base[:-1]
+        wrap += 1
+    if base.endswith(".prototype"):
+        kind = "prototype"
+        expr = f"globalThis.{base[: -len('.prototype')]}.prototype"
+    elif base == "globalThis":
+        kind = "global"
+        expr = "globalThis"
+    else:
+        expr = f"globalThis.{base}"
+    for _ in range(wrap):
+        kind = "inherited"
+        expr = f"Object.getPrototypeOf({expr})"
+    return kind, expr
+
+
+@dataclass
+class Receiver:
+    key: str  # stable id, e.g. "Array.prototype" or "node:path"
+    kind: str  # "global" | "static" | "prototype" | "namespace"
+    expr: str  # JavaScript that evaluates to the receiver
+    needs_node: bool
+    names: list[str] = field(default_factory=list)  # what the interpreter publishes
+    interpreted: dict[str, str] = field(default_factory=dict)
+    native: dict[str, str] = field(default_factory=dict)
+    refused: dict[str, str] = field(default_factory=dict)  # name -> refusal detail
+    native_names: list[str] | None = None  # what native publishes, or None if it refused to say
+    self_description: str | None = None  # why it refused to say
+    unreachable: str | None = None
+
+
+class Runner:
+    def __init__(self, kiln: Path, root: Path, workdir: Path, timeout: int) -> None:
+        self.kiln = kiln
+        self.root = root
+        self.workdir = workdir
+        self.timeout = timeout
+        self.native_runs = 0
+        self.errors: list[str] = []
+
+    def run(self, source: str, *, native: bool, node: bool, tag: str) -> tuple[list[str], str | None]:
+        """Run one generated program, retrying anything that is not a clean answer or a refusal.
+
+        Returns (printed lines, refusal text or None). A refusal is the measurement and is never
+        retried. Anything else that fails --- a timeout, a link that ran out of disk, a toolchain
+        hiccup under load --- is *not* a measurement, and the note this repository keeps about
+        `native.sh` miscounting under load says exactly what happens when such a run is filed as
+        one: phantom divergences that nobody can reproduce. So those are retried, and if they
+        still fail they are counted as errors and named in the report rather than folded into a
+        class.
+        """
+        for attempt in range(3):
+            lines, refusal, ok = self._attempt(source, native=native, node=node, tag=tag)
+            if ok:
+                return lines, refusal
+        self.errors.append(f"{tag}: {refusal}")
+        # `not probed:` is the spelling `classify` routes to *unmeasured*. Saying it here is what
+        # keeps a run that failed three times out of the refusal count: the first full run on
+        # `main` put `WeakRef.prototype`'s two members in the backlog because a give-up still
+        # looked like a refusal to the caller, and two members of a thousand is small enough that
+        # nobody would have caught it by reading.
+        return lines, f"not probed: {refusal}"
+
+    def _attempt(
+        self, source: str, *, native: bool, node: bool, tag: str
+    ) -> tuple[list[str], str | None, bool]:
+        suffix = ".cjs" if node else ".js"
+        path = self.workdir / f"{tag}{suffix}"
+        path.write_text(source)
+        argv = [str(self.kiln), "--one-shot"]
+        if node:
+            argv.append("--node")
+        argv.append("run")
+        if native:
+            argv.append("--native")
+        argv.append(str(path))
+        if native:
+            self.native_runs += 1
+        try:
+            proc = subprocess.run(
+                argv,
+                cwd=self.root,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+        except subprocess.TimeoutExpired:
+            # A timed-out run is not a measurement. Say so rather than filing its partial output.
+            return [], f"TIMEOUT after {self.timeout}s", False
+        finally:
+            if os.environ.get("KILN_INVENTORY_KEEP"):
+                print(f"  kept {path}: {' '.join(argv)}", file=sys.stderr)
+            else:
+                path.unlink(missing_ok=True)
+        lines: list[str] = []
+        refusal: str | None = None
+        for line in (proc.stdout + proc.stderr).splitlines():
+            match = REFUSAL.match(line)
+            if match is not None and refusal is None:
+                refusal = re.sub(r" module=\S+", "", match.group(1))
+                continue
+            lines.append(line)
+        if refusal is not None and refusal.startswith(NOT_A_REFUSAL):
+            # A `kiln: native ...` line that is this tool's own scratch going missing under it.
+            # Fail the attempt so it is retried, and keep the text so a run that never recovers is
+            # named rather than filed as backlog.
+            return lines, refusal, False
+        # Completion is the sentinel, not the exit status. A `.cjs` entry run through the Node
+        # adapter exits non-zero after printing every line it was asked for --- both engines do,
+        # so it is the harness and not the backend --- and treating that as a failed run retried
+        # every `node:` namespace three times and then filed twenty-five complete measurements as
+        # errors. The program says when it finished; believe the program.
+        if refusal is not None or SENTINEL in lines:
+            return [line for line in lines if line != SENTINEL], refusal, True
+        tail = " / ".join((proc.stdout + proc.stderr).splitlines()[-2:]) or "no output"
+        return lines, f"exit {proc.returncode}: {tail}", False
+
+
+# --------------------------------------------------------------------------------------------
+# Stage 1: ask the interpreter what its surface is, and what every member of it answers.
+# --------------------------------------------------------------------------------------------
+
+# The walk. Receivers are collected by identity so an alias (`global` is `globalThis`) and a
+# shared parent (every typed array's prototype inherits from the same `%TypedArray%.prototype`)
+# are probed once rather than once per name that reaches them.
+#
+# A `^` suffix on a key means "the object this one inherits from". That is how the shared
+# prototypes get inventoried at all: `%TypedArray%.prototype` carries every typed-array method and
+# is not reachable by any name on the global object, so `Uint8Array.prototype` looks like it has
+# two members until you follow the chain.
+COLLECT = """
+%(describe)s
+var keys = [];
+var vals = [];
+function push(key, v) {
+  if (v === null || (typeof v !== "object" && typeof v !== "function")) return;
+  for (var i = 0; i < vals.length; i++) { if (vals[i] === v) return; }
+  keys.push(key); vals.push(v);
+}
+function wellKnown(sym) {
+  var names = Object.getOwnPropertyNames(Symbol);
+  for (var i = 0; i < names.length; i++) {
+    var candidate;
+    try { candidate = Symbol[names[i]]; } catch (e) { continue; }
+    if (typeof candidate === "symbol" && candidate === sym) return names[i];
+  }
+  return null;
+}
+function report(key, v) {
+  var own;
+  try { own = Object.getOwnPropertyNames(v); } catch (e) { return; }
+  var syms = [];
+  try { syms = Object.getOwnPropertySymbols(v); } catch (e) { syms = []; }
+  for (var s = 0; s < syms.length; s++) {
+    var wk = wellKnown(syms[s]);
+    if (wk !== null) own.push("@@" + wk);
+  }
+  own = own.sort();
+  for (var j = 0; j < own.length; j++) {
+    var n = own[j];
+    var mv;
+    try {
+      mv = n.indexOf("@@") === 0 ? v[Symbol[n.slice(2)]] : v[n];
+    } catch (e) { console.log("M\\t" + key + "\\t" + n + "\\tthrows"); continue; }
+    console.log("M\\t" + key + "\\t" + n + "\\t" + kilnDescribe(mv));
+  }
+}
+"""
+
+ENUMERATE_GLOBALS = """
+%(collect)s
+var hostHook = %(hook)s;
+var globals = Object.getOwnPropertyNames(globalThis).filter(function (n) {
+  return n.indexOf(hostHook) !== 0;
+}).sort();
+push("globalThis", globalThis);
+for (var i = 0; i < globals.length; i++) {
+  try { push(globals[i], globalThis[globals[i]]); } catch (e) {}
+}
+for (var i2 = 0; i2 < globals.length; i2++) {
+  var g = globals[i2];
+  try {
+    var c = globalThis[g];
+    if (typeof c === "function") push(g + ".prototype", c.prototype);
+  } catch (e) {}
+}
+var direct = keys.length;
+for (var i3 = 0; i3 < direct; i3++) {
+  try { push(keys[i3] + "^", Object.getPrototypeOf(vals[i3])); } catch (e) {}
+}
+for (var i4 = 0; i4 < keys.length; i4++) report(keys[i4], vals[i4]);
+console.log("#END");
+"""
+
+# `require` takes a literal here on purpose: the module graph is resolved ahead of time, so a
+# specifier held in a variable is not a module reference and the host answers "Cannot find
+# module". Ninety seconds went into learning that; the loop is unrolled in Python instead.
+ENUMERATE_NAMESPACES = """
+%(collect)s
+%(requires)s
+for (var i = 0; i < keys.length; i++) report(keys[i], vals[i]);
+console.log("#END");
+"""
+
+
+def enumerate_interpreter(runner: Runner) -> dict[str, Receiver]:
+    receivers: dict[str, Receiver] = {}
+
+    def receiver_for(key: str, needs_node: bool) -> Receiver:
+        if key in receivers:
+            return receivers[key]
+        kind, expr = receiver_expression(key)
+        receivers[key] = Receiver(key, kind, expr, needs_node)
+        return receivers[key]
+
+    def ingest(lines: list[str], needs_node: bool) -> None:
+        for line in lines:
+            parts = line.split("\t")
+            if len(parts) != 4 or parts[0] != "M":
+                continue
+            _, key, name, value = parts
+            rec = receiver_for(key, needs_node)
+            rec.names.append(name)
+            rec.interpreted[name] = value
+
+    collect = COLLECT % {"describe": DESCRIBE}
+    source = ENUMERATE_GLOBALS % {"collect": collect, "hook": js_string(HOST_HOOK_PREFIX)}
+    lines, refusal = runner.run(source, native=False, node=False, tag="enumerate-globals")
+    if refusal is not None:
+        sys.exit(f"the interpreter could not enumerate its own globals: {refusal}")
+    ingest(lines, False)
+
+    requires = "\n".join(
+        f"try {{ push({js_string(spec)}, require({js_string(spec)})); }} catch (e) "
+        f'{{ console.log("U\\t" + {js_string(spec)} + "\\t" + String(e)); }}'
+        for spec in NODE_SPECIFIERS
+    )
+    source = ENUMERATE_NAMESPACES % {"collect": collect, "requires": requires}
+    lines, refusal = runner.run(source, native=False, node=True, tag="enumerate-namespaces")
+    if refusal is not None:
+        sys.exit(f"the interpreter could not enumerate the node namespaces: {refusal}")
+    for line in lines:
+        parts = line.split("\t")
+        if parts[0] == "U" and len(parts) >= 3:
+            receiver_for(parts[1], True).unreachable = f"interpreter: {parts[2]}"
+    ingest(lines, True)
+
+    for rec in receivers.values():
+        rec.names = sorted(set(rec.names))
+    return receivers
+
+
+# --------------------------------------------------------------------------------------------
+# Stage 2: put every name to the native backend, in rounds.
+# --------------------------------------------------------------------------------------------
+
+PUBLISHED = """
+console.log("P\\t" + Object.getOwnPropertyNames(%(expr)s).sort().join(","));
+console.log("#END");
+"""
+
+
+def probe_published(runner: Runner, rec: Receiver) -> None:
+    """What native says its own surface is.
+
+    ADR 0043 made `Object.getOwnPropertyNames` answer on a built-in constructor rather than refuse,
+    and it turns out to answer on the prototypes and the `node:` namespaces too. That is cheap and
+    it is a measurement in its own right: a name native publishes that the interpreter does not is
+    an *invented* member, which no per-name read would ever have found because nothing would think
+    to ask for it.
+    """
+    source = PUBLISHED % {"expr": rec.expr}
+    lines, refusal = runner.run(
+        source, native=True, node=rec.needs_node, tag=f"published-{safe_tag(rec.key)}"
+    )
+    for line in lines:
+        if line.startswith("P\t"):
+            rec.native_names = sorted(n for n in line[2:].split(",") if n)
+            return
+    # Measured, not assumed: `Object.getOwnPropertyNames` answers on the fifteen built-ins ADR 0043
+    # put on the table and on the prototypes and namespaces, and refuses on the rest. Where it
+    # refuses the backend cannot describe itself, so an invented member on that receiver is
+    # invisible to this tool and the report says so.
+    rec.native_names = None
+    rec.self_description = refusal or "no answer"
+
+
+def safe_tag(key: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "-", key)
+
+
+def probe_values(runner: Runner, rec: Receiver, max_rounds: int) -> None:
+    """Read every name the interpreter publishes, in as many rounds as there are refusals.
+
+    Each round prints one line per name until the backend refuses. Everything printed is an
+    answer; the refusal names what it refused, and the next round asks for the rest. This is the
+    only shape that works, because a refusal is not catchable and takes the process with it.
+    """
+    pending = list(rec.names)
+    if rec.native_names:
+        # Ask for what native publishes first. Those reads answer, so one round harvests all of
+        # them and the rounds that follow are spent only on names that are actually missing.
+        published = set(rec.native_names)
+        pending.sort(key=lambda n: (n not in published, n))
+    rounds = 0
+    while pending and rounds < max_rounds:
+        rounds += 1
+        source = build_read_program(rec.expr, pending)
+        lines, refusal = runner.run(
+            source, native=True, node=rec.needs_node, tag=f"read-{safe_tag(rec.key)}-{rounds}"
+        )
+        for line in lines:
+            parts = line.split("\t")
+            if len(parts) == 3 and parts[0] == "A":
+                rec.native[parts[1]] = parts[2]
+            elif len(parts) >= 2 and parts[0] == "R":
+                rec.unreachable = f"native: receiver is {parts[1]}"
+                return
+        remaining = [n for n in pending if n not in rec.native]
+        if refusal is None:
+            pending = remaining
+            break
+        if not remaining:
+            break
+        if "operation=" in refusal:
+            # A refusal at an instruction. Everything before it printed, so the member is either
+            # named in the diagnostic or is simply the first one that did not print --- `@@` reads
+            # lower to `GetComputed`, which refuses without saying what it refused.
+            named = REFUSED_MEMBER.search(refusal)
+            culprit = (
+                named.group(1)
+                if named is not None and named.group(1) in remaining
+                else remaining[0]
+            )
+        else:
+            # A refusal *before* emission, which is a different animal: nothing ran, so how far
+            # the output got says nothing about which member caused it. `globalThis.ShadowRealm`
+            # is one of these, and taking the first pending name would have blamed
+            # `globalThis.AbortController` for it.
+            culprit = emission_culprit(runner, rec, remaining, refusal)
+            if culprit is None:
+                # The receiver itself cannot be emitted --- an unmaterialized `node:` builtin, or
+                # a facility the backend has no representation for. Every member is refused, and
+                # for one reason rather than N.
+                for name in remaining:
+                    rec.refused.setdefault(name, refusal)
+                rec.unreachable = f"native: {refusal}"
+                return
+        rec.refused[culprit] = refusal
+        pending = [n for n in remaining if n != culprit]
+        continue
+    if pending and rounds >= max_rounds:
+        for name in pending:
+            rec.refused.setdefault(name, "not probed: round budget exhausted")
+    return
+
+
+def emission_culprit(
+    runner: Runner, rec: Receiver, remaining: list[str], refusal: str
+) -> str | None:
+    """Which member stopped the program from being emitted at all, if it is one member.
+
+    Cheapest first: emission diagnostics name the facility they cannot emit, and that spelling is
+    usually the member's own (`host realm facility ShadowRealm`). Failing that, ask whether the
+    receiver alone can be emitted --- if it cannot, no member is to blame and the answer is None.
+    Failing *that*, bisect, which costs a logarithmic number of compiles rather than one per name.
+    """
+    for name in remaining:
+        if name in refusal:
+            return name
+    _, bare_refusal = runner.run(
+        build_read_program(rec.expr, []),
+        native=True,
+        node=rec.needs_node,
+        tag=f"bare-{safe_tag(rec.key)}",
+    )
+    if bare_refusal is not None:
+        return None
+    lo = remaining
+    while len(lo) > 1:
+        half = lo[: len(lo) // 2]
+        _, half_refusal = runner.run(
+            build_read_program(rec.expr, half),
+            native=True,
+            node=rec.needs_node,
+            tag=f"bisect-{safe_tag(rec.key)}-{len(lo)}",
+        )
+        lo = half if half_refusal is not None else lo[len(lo) // 2 :]
+    return lo[0] if lo else None
+
+
+def build_read_program(expr: str, names: list[str]) -> str:
+    out = [DESCRIBE]
+    out.append("var recv;")
+    out.append(f"try {{ recv = {expr}; }} catch (e) {{ recv = undefined; }}")
+    out.append('if (recv === undefined || recv === null) { console.log("R\\t" + kilnDescribe(recv)); }')
+    out.append("else {")
+    for name in names:
+        access = member_access("recv", name)
+        literal = js_string(name)
+        out.append(
+            f"  try {{ console.log(\"A\\t\" + {literal} + \"\\t\" + kilnDescribe({access})); }}"
+            f" catch (e) {{ console.log(\"A\\t\" + {literal} + \"\\tthrows\"); }}"
+        )
+    out.append("}")
+    out.append('console.log("#END");')
+    return "\n".join(out)
+
+
+# --------------------------------------------------------------------------------------------
+# Disk discipline. A run that hits ENOSPC is not a measurement.
+# --------------------------------------------------------------------------------------------
+
+RECLAIMABLE = ["generated-c", "native-object", "linked-artifact"]
+
+
+def guard_disk(root: Path, floor_gib: float, stop_gib: float, always: bool = False) -> None:
+    """Give back the build scratch this tool just made.
+
+    Every round is a program no other program is ever byte-identical to, so nothing in
+    `.kiln/cache` written by this tool is ever read again --- the content-addressed cache cannot
+    hit on a unique input. Holding gigabytes of it for the length of a run buys nothing and takes
+    space away from whoever else is on this volume, so the default is to hand it back after each
+    receiver rather than to wait for a floor. The floor stays as the hard stop: below it the tool
+    reclaims and, if that is still not enough, refuses to keep going, because a run that ends in
+    ENOSPC is not a measurement.
+    """
+    free = shutil.disk_usage("/").free / (1 << 30)
+    if free >= floor_gib and not always:
+        return
+    # Every native compile leaves a C file, an object and a linked artifact behind, and this tool
+    # produces one per round. They are content-addressed scratch and regenerate; the runtime
+    # library is left alone because rebuilding it is the expensive half.
+    cache = root / ".kiln" / "cache"
+    for name in RECLAIMABLE:
+        shutil.rmtree(cache / name, ignore_errors=True)
+    free = shutil.disk_usage("/").free / (1 << 30)
+    if not always:
+        print(f"  reclaimed native build scratch; {free:.1f} GiB free", file=sys.stderr)
+    if free < stop_gib:
+        sys.exit(
+            f"only {free:.1f} GiB free after handing back every byte this run made: stopping "
+            "rather than filing a measurement that ended in ENOSPC. The space is somebody "
+            "else's to reclaim; never `mbx gc` on their behalf."
+        )
+
+
+# --------------------------------------------------------------------------------------------
+# Stage 3: classify and report.
+# --------------------------------------------------------------------------------------------
+
+
+def classify(rec: Receiver) -> dict[str, list[tuple[str, str, str]]]:
+    out: dict[str, list[tuple[str, str, str]]] = {
+        "diverged": [],
+        "refused": [],
+        "implemented": [],
+        "invented": [],
+        "unmeasured": [],
+    }
+    # A receiver that reads `undefined` natively is not a receiver that refuses. Every member on
+    # it would throw `undefined is not an object` at run time, which is the wrong-answer cascade
+    # and not the honest stop, so they are counted with the divergence that caused them rather
+    # than swelling the backlog with sixteen rows nobody can act on separately.
+    absent_receiver = (rec.unreachable or "").startswith("native: receiver is")
+    for name in rec.names:
+        want = rec.interpreted.get(name, "?")
+        if absent_receiver and name not in rec.native and name not in rec.refused:
+            out["diverged"].append((name, want, f"unreachable, {rec.unreachable[8:]}"))
+        elif name in rec.refused:
+            reason = rec.refused[name]
+            out["unmeasured" if reason.startswith("not probed") else "refused"].append(
+                (name, want, reason)
+            )
+        elif name in rec.native:
+            got = rec.native[name]
+            if got == want:
+                out["implemented"].append((name, want, got))
+            else:
+                out["diverged"].append((name, want, got))
+        else:
+            out["refused"].append((name, want, "not reached"))
+    if rec.native_names is not None:
+        for name in rec.native_names:
+            if name not in rec.interpreted:
+                out["invented"].append((name, "absent", rec.native.get(name, "published")))
+    return out
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--kiln", default="target/release/kiln")
+    parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--timeout", type=int, default=180)
+    parser.add_argument("--max-rounds", type=int, default=64)
+    parser.add_argument("--disk-floor-gib", type=float, default=4.0)
+    parser.add_argument("--disk-stop-gib", type=float, default=1.5)
+    parser.add_argument("--out", default=".scratch/native-real-libraries")
+    # The measurement and the prose are separated on purpose: rewording the report, or adding a
+    # cut of the same numbers, must never cost another hundred native compiles.
+    parser.add_argument("--stage", choices=["enumerate", "report", "all"], default="all")
+    parser.add_argument("--only", default=None, help="probe only receivers matching this substring")
+    args = parser.parse_args()
+
+    # A slice must never overwrite the whole inventory. `--only WeakRef` once replaced a
+    # 591-compile report with a four-member one, and there is no backup of a measurement.
+    stem = "native-surface-inventory" + (".partial" if args.only else "")
+
+    root = Path(__file__).resolve().parent.parent
+    kiln = (root / args.kiln).resolve()
+    if not kiln.exists():
+        sys.exit(f"no kiln binary at {kiln}: build it with `mbx build --release -p kiln-cli`")
+    outdir = root / args.out
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    if args.stage == "report":
+        saved = json.loads((outdir / f"{stem}.json").read_text())
+        receivers = {}
+        for key, row in saved["receivers"].items():
+            rec = Receiver(key, row["kind"], row["expr"], key.startswith("node:"))
+            rec.interpreted = row["interpreted"]
+            rec.names = sorted(row["interpreted"])
+            rec.native = row["native"]
+            rec.refused = row["refused"]
+            rec.native_names = row["native_names"]
+            rec.self_description = row.get("self_description")
+            rec.unreachable = row["unreachable"]
+            receivers[key] = rec
+        runner = Runner(kiln, root, root, args.timeout)
+        runner.errors = saved.get("errors", [])
+        runner.native_runs = saved.get("native_runs", 0)
+        (outdir / f"{stem}.md").write_text(
+            render(receivers, sorted(receivers), runner)
+        )
+        print(f"re-rendered {outdir / (stem + '.md')}", file=sys.stderr)
+        return 0
+
+    with tempfile.TemporaryDirectory(dir=str(root / ".scratch"), prefix="surface-") as tmp:
+        runner = Runner(kiln, root, Path(tmp), args.timeout)
+        print("enumerating the interpreter's surface ...", file=sys.stderr)
+        receivers = enumerate_interpreter(runner)
+        order = sorted(receivers)
+        if args.only:
+            order = [k for k in order if args.only in k]
+        members = sum(len(receivers[k].names) for k in order)
+        print(f"  {len(order)} receivers, {members} members", file=sys.stderr)
+        if args.stage == "enumerate":
+            for key in order:
+                print(f"{key}\t{len(receivers[key].names)}")
+            return 0
+
+        todo = [receivers[k] for k in order if receivers[k].unreachable is None]
+        print(f"asking native what it publishes ({len(todo)} runs) ...", file=sys.stderr)
+        guard_disk(root, args.disk_floor_gib, args.disk_stop_gib)
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            list(pool.map(lambda r: probe_published(runner, r), todo))
+
+        print("reading every member natively, in rounds ...", file=sys.stderr)
+        done = [0]
+
+        def probe(rec: Receiver) -> None:
+            probe_values(runner, rec, args.max_rounds)
+            done[0] += 1
+            print(
+                f"  [{done[0]}/{len(todo)}] {rec.key}: "
+                f"{len(rec.native)} answered, {len(rec.refused)} refused",
+                file=sys.stderr,
+            )
+            guard_disk(root, args.disk_floor_gib, args.disk_stop_gib, always=True)
+
+        with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+            list(pool.map(probe, todo))
+
+    data = {
+        key: {
+            "kind": receivers[key].kind,
+            "expr": receivers[key].expr,
+            "unreachable": receivers[key].unreachable,
+            "interpreted": receivers[key].interpreted,
+            "native": receivers[key].native,
+            "refused": receivers[key].refused,
+            "native_names": receivers[key].native_names,
+            "self_description": receivers[key].self_description,
+        }
+        for key in order
+    }
+    (outdir / f"{stem}.json").write_text(
+        json.dumps(
+            {"receivers": data, "errors": runner.errors, "native_runs": runner.native_runs},
+            indent=1,
+            sort_keys=True,
+        )
+    )
+    (outdir / f"{stem}.md").write_text(render(receivers, order, runner))
+    print(
+        f"wrote {outdir / (stem + '.md')} ({runner.native_runs} native runs)",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def describe_tree() -> str:
+    """The commit this was measured at, and whether the tree was dirty.
+
+    A number taken from a tree something else is writing is a clock reading rather than a
+    measurement, and this repository has a day in `NOTES.md` to prove it. Saying which commit and
+    whether it was clean is what makes the report re-checkable a week later.
+    """
+    try:
+        head = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True
+        ).stdout.strip()
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--", "crates"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (subprocess.CalledProcessError, OSError):
+        return "an unknown commit"
+    return head + (" with uncommitted engine changes under crates/" if dirty else ", crates/ clean")
+
+
+def render(receivers: dict[str, Receiver], order: list[str], runner: Runner) -> str:
+    per = {key: classify(receivers[key]) for key in order}
+    classes = ("diverged", "refused", "implemented", "invented", "unmeasured")
+    totals = {k: sum(len(per[key][k]) for key in order) for k in classes}
+    members = sum(len(receivers[key].names) for key in order)
+
+    lines: list[str] = []
+    add = lines.append
+    add("# What the native backend does not implement")
+    add("")
+    add(
+        "Generated by `scripts/native-surface-inventory.py`. Re-run it after a backend change and "
+        "diff this file. Nothing here is hand-written and no built-in is named in the tool: both "
+        "engines were asked."
+    )
+    add("")
+    add(f"Measured at `{describe_tree()}`.")
+    add("")
+    add("## Headline")
+    add("")
+    add("| Class | Members | Share |")
+    add("| --- | ---: | ---: |")
+    for name, label in (
+        ("diverged", "**diverged** (native answered, and answered differently)"),
+        ("refused", "refused by name (honest backlog)"),
+        ("implemented", "implemented (the two engines agree)"),
+    ):
+        share = 100.0 * totals[name] / members if members else 0.0
+        add(f"| {label} | {totals[name]} | {share:.1f}% |")
+    if totals["unmeasured"]:
+        add(f"| *unmeasured* — a run that failed for a reason that was not a refusal | {totals['unmeasured']} | |")
+    add(f"| *(memo)* invented — published natively, absent in the interpreter | {totals['invented']} | |")
+    add(f"| **total** | {members} | |")
+    add("")
+    add(
+        f"{len(order)} receivers: the global object, every built-in's statics, every built-in "
+        f"prototype, the object each of those inherits from, and the `node:` namespaces. "
+        f"{runner.native_runs} native compiles."
+    )
+    add("")
+    add(
+        "A receiver key is the path the walk took. `Array.prototype` is what it says; a trailing "
+        "`^` means *the object this one inherits from*, which is the only way the shared "
+        "prototypes get inventoried --- every typed array's own prototype has two members and the "
+        "thirty-five that matter live one link up, on an object no name on the global object "
+        "reaches. `node:` receivers were probed with `--node`; everything else without it."
+    )
+    add("")
+
+    add("## What to do first")
+    add("")
+    add(
+        "Generated from the counts below, not from anybody's sense of priority. Divergence "
+        "outranks refusal at every size, because a refusal stops a program at the cause and a "
+        "wrong answer does not stop it at all."
+    )
+    add("")
+    worst_diverged = sorted(
+        (k for k in order if per[k]["diverged"]), key=lambda k: (-len(per[k]["diverged"]), k)
+    )[:5]
+    worst_refused = sorted(
+        (k for k in order if per[k]["refused"]), key=lambda k: (-len(per[k]["refused"]), k)
+    )[:5]
+    for key in worst_diverged:
+        n = len(per[key]["diverged"])
+        add(f"1. **`{key}` — {n} wrong answers** out of {len(receivers[key].names)} members.")
+    for key in worst_refused:
+        n = len(per[key]["refused"])
+        add(f"1. `{key}` — {n} refusals out of {len(receivers[key].names)} members.")
+    if not worst_diverged and not worst_refused:
+        add("Nothing is missing.")
+    add("")
+
+    add("## Diverged — a wrong answer, not a stop")
+    add("")
+    add(
+        "These are the ones that cost money. The backend answers, so nothing stops; a member that "
+        "reads `undefined` where the interpreter has a function is exactly what `typeof x === "
+        '"undefined"` feature-detection walks past.'
+    )
+    add("")
+    add("| Receiver | Member | Interpreter | Native |")
+    add("| --- | --- | --- | --- |")
+    rows = []
+    for key in order:
+        for name, want, got in per[key]["diverged"]:
+            rows.append((key, name, want, got))
+    for key, name, want, got in sorted(rows, key=lambda r: (r[0], r[1])):
+        add(f"| `{key}` | `{name}` | {want} | **{got}** |")
+    if not rows:
+        add("| *(none)* | | | |")
+    add("")
+
+    if totals["invented"]:
+        add("## Invented — published natively, absent in the interpreter")
+        add("")
+        add(
+            "A name in `Object.getOwnPropertyNames` that the interpreter does not have. No per-name "
+            "read would have found these, because nothing would have thought to ask."
+        )
+        add("")
+        add("| Receiver | Member |")
+        add("| --- | --- |")
+        for key in order:
+            for name, _, _ in per[key]["invented"]:
+                add(f"| `{key}` | `{name}` |")
+        add("")
+
+    add("## Where the gap is concentrated")
+    add("")
+    add("Receivers with anything missing, worst first. `missing` is diverged plus refused.")
+    add("")
+    add("| Receiver | Kind | Members | Diverged | Refused | Implemented | Missing |")
+    add("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+    ranked = sorted(
+        order,
+        key=lambda k: (
+            -(len(per[k]["diverged"]) + len(per[k]["refused"])),
+            -len(per[k]["diverged"]),
+            k,
+        ),
+    )
+    for key in ranked:
+        d, r, i = len(per[key]["diverged"]), len(per[key]["refused"]), len(per[key]["implemented"])
+        if d + r == 0:
+            continue
+        add(
+            f"| `{key}` | {receivers[key].kind} | {len(receivers[key].names)} | {d} | {r} | {i} | "
+            f"{d + r} |"
+        )
+    add("")
+
+    add("## The same member missing everywhere")
+    add("")
+    add(
+        "A name missing from many receivers at once is one decision, not many gaps, and it is the "
+        "cheapest thing to close. Members missing from three or more receivers:"
+    )
+    add("")
+    add("| Member | Receivers missing it | Of which diverged |")
+    add("| --- | ---: | ---: |")
+    across: dict[str, list[str]] = {}
+    across_diverged: dict[str, int] = {}
+    for key in order:
+        for name, _, _ in per[key]["refused"]:
+            across.setdefault(name, []).append(key)
+        for name, _, _ in per[key]["diverged"]:
+            across.setdefault(name, []).append(key)
+            across_diverged[name] = across_diverged.get(name, 0) + 1
+    ranked_members = sorted(across.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    for name, keys in ranked_members:
+        if len(keys) < 3:
+            continue
+        add(f"| `{name}` | {len(keys)} | {across_diverged.get(name, 0)} |")
+    add("")
+    missing_total = totals["diverged"] + totals["refused"]
+    top4 = sum(len(keys) for _, keys in ranked_members[:4])
+    if missing_total:
+        add(
+            f"The four names at the top of that table are {top4} of the {missing_total} missing "
+            f"members, which is {100.0 * top4 / missing_total:.0f}% of everything this inventory "
+            "found. They are what every callable and every constructor has, so they are one "
+            "decision about what a built-in *is* rather than a hundred and twenty-eight separate "
+            "omissions --- and the ordering follows: nothing else on this page buys as much."
+        )
+        add("")
+
+    add("## Fully implemented receivers")
+    add("")
+    whole = [
+        k
+        for k in order
+        if not per[k]["diverged"] and not per[k]["refused"] and not per[k]["unmeasured"] and receivers[k].names
+    ]
+    add(", ".join(f"`{k}`" for k in whole) if whole else "*(none)*")
+    add("")
+
+    unreachable = [k for k in order if receivers[k].unreachable]
+    if unreachable:
+        add("## Receivers the probe could not reach")
+        add("")
+        for key in unreachable:
+            add(f"- `{key}` — {receivers[key].unreachable}")
+        add("")
+
+    mute = [k for k in order if receivers[k].self_description]
+    add("## What this cannot see")
+    add("")
+    add(
+        "- **A function is only ever `function`.** The description both engines print is `typeof` "
+        "plus, for a primitive, its value. It deliberately does not read `.name` or `.length` off "
+        "the value to tell two functions apart, because those are members this very inventory "
+        "finds missing on dozens of receivers --- the scaffolding would report its own gap and "
+        "call it the member's. Two different functions therefore compare equal, and so do two "
+        "different objects. A member that is present, callable, and *wrong* is outside this "
+        "inventory; `conformance/native` is where that is caught."
+    )
+    add(
+        "- **One level of nesting.** Globals, their statics, their prototypes, the object each of "
+        "those inherits from, and the `node:` namespaces. A namespace inside a namespace "
+        "(`path.posix`) is measured as one member, not walked."
+    )
+    add(
+        "- **Symbol-keyed members only where they are well known.** A symbol is reported as "
+        "`@@name` when it is a property of `Symbol`; a registered or private symbol has no "
+        "spelling this probe can put to the other engine."
+    )
+    add(
+        f"- **{len(mute)} receivers cannot describe themselves natively.** "
+        "`Object.getOwnPropertyNames` answers on the built-ins ADR 0043 put on the shared table, "
+        "on the prototypes and on the namespaces, and refuses elsewhere. On those receivers an "
+        "*invented* member --- one native publishes and the interpreter does not --- is invisible, "
+        "because nothing would have thought to ask for it by name."
+    )
+    add(
+        "- **Instances are not probed.** Everything here is read off a constructor, a prototype or "
+        "a namespace. A member that resolves differently on a live receiver than on the prototype "
+        "it came from is not something this method can reach."
+    )
+    add("")
+
+    if runner.errors:
+        add("## Runs that were not measurements")
+        add("")
+        add("Each of these failed three times for a reason that was not a refusal, so it is named")
+        add("rather than counted. Its receiver's numbers above are incomplete.")
+        add("")
+        for err in runner.errors:
+            add(f"- `{err}`")
+        add("")
+
+    add("## Every gap, by receiver")
+    add("")
+    for key in ranked:
+        d, r = per[key]["diverged"], per[key]["refused"]
+        if not d and not r and not per[key]["unmeasured"]:
+            continue
+        add(f"### `{key}`")
+        add("")
+        if d:
+            add("Diverged:")
+            add("")
+            for name, want, got in d:
+                add(f"- `{name}` — interpreter `{want}`, native `{got}`")
+            add("")
+        if r:
+            add("Refused: " + ", ".join(f"`{name}`" for name, _, _ in r))
+            add("")
+            reasons = {reason for _, _, reason in r}
+            if len(reasons) == 1 and len(r) > 1:
+                # One reason behind every name is one decision, and saying so is the difference
+                # between a backlog of twenty-four items and a backlog of one.
+                add(f"All for one reason: `{reasons.pop()}`")
+                add("")
+        u = per[key]["unmeasured"]
+        if u:
+            add("Unmeasured: " + ", ".join(f"`{name}`" for name, _, _ in u))
+            add("")
+    return "\n".join(lines) + "\n"
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
