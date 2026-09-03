@@ -394,6 +394,11 @@ typedef struct kiln_generator {
      * instead, and this is what lets the answer be given: before it, the re-entrant call clobbered
      * the frame and the process ended with an exit code and no words. */
     int running;
+    kiln_value *queue_promises;
+    kiln_value *queue_sent;
+    size_t queue_count;
+    size_t queue_capacity;
+    int queue_executing;
 } kiln_generator;
 
 /* The parts a civil date is made of. The realm has one zone and it is UTC (ADR 0015), so there
@@ -460,6 +465,7 @@ typedef struct kiln_promise {
     kiln_reaction *reactions;
     size_t count;
     size_t capacity;
+    kiln_value properties;
 } kiln_promise;
 
 #define KILN_C99_PENDING 0

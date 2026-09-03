@@ -1498,6 +1498,7 @@ expected_stdout = "bundle\n"
             "server/s04-fastify",
             "server/s05-express",
             "server/s06-response-framing",
+            "server/s07-vite-dev-server",
         ]
         .into_iter()
         .map(TestId::new)
