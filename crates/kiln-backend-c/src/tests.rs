@@ -297,20 +297,18 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
     let wrapper = format!(
         r#"
 static int calls = 0;
-static int listener(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                    kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                    kiln_value *thrown, kiln_generator *frame) {{
-    (void)host; (void)upvalues; (void)receiver; (void)depth; (void)thrown; (void)frame;
+static int listener(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                    const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)receiver_ptr;
     if (argc != 1 || args[0].tag != KILN_VALUE_NUMBER) return 91;
     calls = calls * 10 + (int)kiln_c99_as_number(args[0]);
     *result = kiln_c99_undefined();
     return KILN_C99_OK;
 }}
-static int child_constructor(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                             kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                             kiln_value *thrown, kiln_generator *frame) {{
-    (void)host; (void)upvalues; (void)args; (void)argc; (void)depth; (void)thrown; (void)frame;
-    *result = receiver;
+static int child_constructor(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                             const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)args; (void)argc;
+    *result = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
     return KILN_C99_OK;
 }}
 int main(void) {{
@@ -391,11 +389,10 @@ fn executable_runtime_readable_has_a_checked_native_prototype_graph() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
-static int readable_child(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                          kiln_value *thrown, kiln_generator *frame) {
-    (void)host; (void)upvalues; (void)args; (void)argc; (void)depth; (void)thrown; (void)frame;
-    *result = receiver;
+static int readable_child(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                          const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)args; (void)argc;
+    *result = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
     return KILN_C99_OK;
 }
 int main(void) {
@@ -1088,13 +1085,15 @@ fn structural_instruction_refusals_always_name_their_owner() {
         .next()
         .expect("instruction emitter end");
     let templates = instruction_emitter
+        .split("match instruction {")
+        .nth(1)
+        .expect("instruction match")
         .split("let refusal_target =")
         .next()
         .expect("instruction templates");
     assert!(
         !templates
             .lines()
-            .skip(35)
             .any(|line| line.contains("return KILN_C99_CONTROL_ERROR;")),
         "instruction templates must route structural refusals through direct_refusal"
     );
@@ -1171,12 +1170,10 @@ fn unowned_function_refusal_names_its_generated_source_and_function() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("diagnostic source probe emits");
     let wrapper = r#"
-static int refuses_before_instruction(kiln_host *host, kiln_value *result,
-                                      kiln_value *upvalues, kiln_value receiver,
-                                      const kiln_value *args, size_t argc, int depth,
-                                      kiln_value *thrown, kiln_generator *frame) {
-    (void)host; (void)result; (void)upvalues; (void)receiver; (void)args;
-    (void)argc; (void)depth; (void)thrown; (void)frame;
+static int refuses_before_instruction(kiln_call_context *ctx, kiln_value *result,
+                                      kiln_value *upvalues, const kiln_value *receiver_ptr,
+                                      const kiln_value *args, size_t argc) {
+    (void)ctx; (void)result; (void)upvalues; (void)receiver_ptr; (void)args; (void)argc;
     return KILN_C99_CONTROL_ERROR;
 }
 int main(void) {
@@ -4340,10 +4337,9 @@ fn executable_node_support_facades_are_deterministic_and_callback_driven() {
     ))
     .expect("support facade probe emits");
     let wrapper = r#"
-static int callback(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                    kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                    kiln_value *thrown, kiln_generator *frame) {
-    (void)host; (void)upvalues; (void)receiver; (void)depth; (void)thrown; (void)frame;
+static int callback(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                    const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)receiver_ptr;
     if (argc == 2 && args[0].tag == KILN_VALUE_NULL && args[1].tag == KILN_VALUE_ARRAY &&
         kiln_c99_array_of(args[1])->count == 2) {
         *result = kiln_c99_boolean(1);

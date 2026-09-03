@@ -94,9 +94,15 @@ extern int kiln_realm_gc_mark_roots(void *heap);
  * interpreter uses, so both engines print `[Function 3]` for the same function. */
 struct kiln_closure;
 struct kiln_generator;
-typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                            kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                            kiln_value *thrown, struct kiln_generator *frame);
+typedef struct kiln_call_context {
+    kiln_host *host;
+    kiln_value *thrown;
+    struct kiln_generator *frame;
+    int depth;
+} kiln_call_context;
+
+typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                            const kiln_value *receiver, const kiln_value *args, size_t argc);
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* An arrow captures `new.target` where it was written, for the same reason it captures

@@ -24,6 +24,14 @@ extern int kiln_c99_internal_status(const char *converted_by);
     return kiln_c99_refuse_named((lacked), (subject), (subject_len))
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
+#define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define KILN_LIKELY(x) (x)
+#define KILN_UNLIKELY(x) (x)
+#endif
+
 /* Emitted variable declarations */
 extern int kiln_c99_keys_check_mode;
 extern kiln_value kiln_c99_new_target;
