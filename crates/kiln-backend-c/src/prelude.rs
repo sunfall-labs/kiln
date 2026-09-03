@@ -2215,7 +2215,20 @@ int kiln_c99_internal_status(const char *converted_by);
 macro_rules! header_rest {
     () => {
         concat!(
-            r#"/* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
+            r#"static inline void kiln_c99_reset_diagnostics(void) {
+    kiln_c99_diagnostic_site = NULL;
+    kiln_c99_diagnostic_operation = NULL;
+    kiln_c99_diagnostic_instruction = 0;
+    kiln_c99_diagnostic_depth = 0;
+    kiln_c99_diagnostic_method = 0;
+    kiln_c99_diagnostic_receiver_tag = 0;
+    kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
+    kiln_c99_diagnostic_function = NULL;
+    kiln_c99_diagnostic_function_len = 0;
+}
+
+/* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
  *
  * A refusal says "the language puts a member here and this backend has not built it" and stops
  * the program at the cause. This says the opposite: "the language puts nothing here", whose
