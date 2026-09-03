@@ -1527,8 +1527,10 @@ mod tests {
         assert_eq!(toolchain.identity().version, "0.14.0");
         assert_eq!(toolchain.identity().target, "aarch64-macos");
 
-        // The version probe is followed by `zig cc -dumpmachine`; the latter is the target
-        // query understood by Zig's C driver rather than a shell-expanded command.
+        // The version probe is followed by `zig cc [-target <host>] -dumpmachine`; the latter is
+        // the target query understood by Zig's C driver rather than a shell-expanded command.
+        // The `-target` is present exactly where `zig_host_target` says the default is wrong, and
+        // the probe has to carry it or it would report a triple nothing is built with.
         let runner_impl = Arc::new(FakeRunner::new(
             [
                 ProcessOutput::success("0.14.0\n", ""),
@@ -1539,10 +1541,18 @@ mod tests {
         let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
         let _ = Toolchain::from_compiler_with_runner("/opt/zig", runner).expect("probe");
         let commands = runner_impl.commands();
-        assert_eq!(
-            commands[1].args,
-            [OsString::from("cc"), OsString::from("-dumpmachine")]
-        );
+        let mut expected_probe = zig_command_prefix();
+        expected_probe.push(OsString::from("-dumpmachine"));
+        assert_eq!(commands[1].args, expected_probe);
+        assert_eq!(commands[1].args.first(), Some(&OsString::from("cc")));
+        // On a glibc Linux host the default really is wrong, so the target has to be named.
+        if cfg!(all(target_os = "linux", target_env = "gnu")) {
+            assert!(
+                commands[1].args.contains(&OsString::from("-target")),
+                "a glibc host must ask zig for glibc: {:?}",
+                commands[1].args
+            );
+        }
         assert_eq!(
             commands[1]
                 .environment
