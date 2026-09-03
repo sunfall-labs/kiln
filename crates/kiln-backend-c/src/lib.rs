@@ -1289,13 +1289,13 @@ fn render_fast_numeric_function(
         "static double {symbol}_fn_{func_idx}_fast({params}) {{"
     )
     .unwrap();
-    let max_stack = proto.code.len() * 2 + 16;
+    let heights = validation::compute_stack_heights(&proto.code);
+    let max_stack = heights.iter().copied().max().unwrap_or(0) + 4;
     writeln!(output, "    double stack[{max_stack}];").unwrap();
     let locals = (proto.local_count as usize)
         .max(proto.parameter_count as usize)
         .max(1);
     writeln!(output, "    double locals[{locals}];").unwrap();
-    writeln!(output, "    size_t sp = 0;").unwrap();
     for i in 0..proto.parameter_count as usize {
         writeln!(output, "    locals[{i}] = arg{i};").unwrap();
     }
@@ -1303,126 +1303,191 @@ fn render_fast_numeric_function(
         writeln!(output, "    locals[{i}] = 0.0;").unwrap();
     }
     for (pos, inst) in proto.code.iter().enumerate() {
+        let sp = heights[pos];
         writeln!(output, "kiln_fast_label_{pos}:;").unwrap();
         match inst {
             Instruction::LoadLocal(slot) => {
-                writeln!(output, "    stack[sp++] = locals[{slot}];").unwrap();
+                writeln!(output, "    stack[{sp}] = locals[{slot}];").unwrap();
             }
             Instruction::StoreLocal(slot) => {
-                writeln!(output, "    locals[{slot}] = stack[--sp];").unwrap();
+                let val_idx = sp.saturating_sub(1);
+                writeln!(output, "    locals[{slot}] = stack[{val_idx}];").unwrap();
             }
-            Instruction::Pop => {
-                output.push_str("    --sp;\n");
-            }
+            Instruction::Pop => {}
             Instruction::Dup => {
-                output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n");
+                let src_idx = sp.saturating_sub(1);
+                writeln!(output, "    stack[{sp}] = stack[{src_idx}];").unwrap();
             }
             Instruction::Const(c) => match program.constants.get(*c as usize) {
                 Some(Constant::Number(bits)) => {
                     writeln!(
                         output,
-                        "    stack[sp++] = kiln_fast_to_double(UINT64_C({bits}));"
+                        "    stack[{sp}] = kiln_fast_to_double(UINT64_C({bits}));"
                     )
                     .unwrap();
                 }
                 Some(Constant::Undefined | Constant::Null) => {
-                    output.push_str("    stack[sp++] = 0.0;\n");
+                    writeln!(output, "    stack[{sp}] = 0.0;").unwrap();
                 }
                 _ => {}
             },
-            Instruction::Binary(op) => match op {
-                BinaryOp::Add => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a + b; }\n");
+            Instruction::Binary(op) => {
+                let a_idx = sp.saturating_sub(2);
+                let b_idx = sp.saturating_sub(1);
+                match op {
+                    BinaryOp::Add => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = stack[{a_idx}] + stack[{b_idx}];"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::Subtract => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = stack[{a_idx}] - stack[{b_idx}];"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::Multiply => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = stack[{a_idx}] * stack[{b_idx}];"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::Divide => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = stack[{a_idx}] / stack[{b_idx}];"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::Remainder => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = fmod(stack[{a_idx}], stack[{b_idx}]);"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::LessThan => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = (stack[{a_idx}] < stack[{b_idx}]) ? 1.0 : 0.0;"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::LessThanOrEqual => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = (stack[{a_idx}] <= stack[{b_idx}]) ? 1.0 : 0.0;"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::GreaterThan => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = (stack[{a_idx}] > stack[{b_idx}]) ? 1.0 : 0.0;"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::GreaterThanOrEqual => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = (stack[{a_idx}] >= stack[{b_idx}]) ? 1.0 : 0.0;"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::LooseEqual | BinaryOp::StrictEqual => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = (stack[{a_idx}] == stack[{b_idx}]) ? 1.0 : 0.0;"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::LooseNotEqual | BinaryOp::StrictNotEqual => {
+                        writeln!(
+                            output,
+                            "    stack[{a_idx}] = (stack[{a_idx}] != stack[{b_idx}]) ? 1.0 : 0.0;"
+                        )
+                        .unwrap();
+                    }
+                    BinaryOp::BitwiseAnd => {
+                        writeln!(output, "    stack[{a_idx}] = (double)((int32_t)stack[{a_idx}] & (int32_t)stack[{b_idx}]);").unwrap();
+                    }
+                    BinaryOp::BitwiseOr => {
+                        writeln!(output, "    stack[{a_idx}] = (double)((int32_t)stack[{a_idx}] | (int32_t)stack[{b_idx}]);").unwrap();
+                    }
+                    BinaryOp::BitwiseXor => {
+                        writeln!(output, "    stack[{a_idx}] = (double)((int32_t)stack[{a_idx}] ^ (int32_t)stack[{b_idx}]);").unwrap();
+                    }
+                    BinaryOp::ShiftLeft => {
+                        writeln!(output, "    stack[{a_idx}] = (double)((int32_t)stack[{a_idx}] << ((uint32_t)stack[{b_idx}] & 31));").unwrap();
+                    }
+                    BinaryOp::ShiftRight => {
+                        writeln!(output, "    stack[{a_idx}] = (double)((int32_t)stack[{a_idx}] >> ((uint32_t)stack[{b_idx}] & 31));").unwrap();
+                    }
+                    BinaryOp::UnsignedShiftRight => {
+                        writeln!(output, "    stack[{a_idx}] = (double)((uint32_t)stack[{a_idx}] >> ((uint32_t)stack[{b_idx}] & 31));").unwrap();
+                    }
+                    _ => {}
                 }
-                BinaryOp::Subtract => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a - b; }\n");
+            }
+            Instruction::Unary(op) => {
+                let val_idx = sp.saturating_sub(1);
+                match op {
+                    UnaryOp::Negate => {
+                        writeln!(output, "    stack[{val_idx}] = -stack[{val_idx}];").unwrap()
+                    }
+                    UnaryOp::Plus | UnaryOp::ToNumeric => {}
+                    UnaryOp::BitwiseNot => {
+                        writeln!(
+                            output,
+                            "    stack[{val_idx}] = (double)(~(int32_t)stack[{val_idx}]);"
+                        )
+                        .unwrap();
+                    }
+                    UnaryOp::Increment => writeln!(output, "    stack[{val_idx}] += 1.0;").unwrap(),
+                    UnaryOp::Decrement => writeln!(output, "    stack[{val_idx}] -= 1.0;").unwrap(),
+                    _ => {}
                 }
-                BinaryOp::Multiply => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a * b; }\n");
-                }
-                BinaryOp::Divide => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a / b; }\n");
-                }
-                BinaryOp::Remainder => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = fmod(a, b); }\n");
-                }
-                BinaryOp::LessThan => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a < b) ? 1.0 : 0.0; }\n");
-                }
-                BinaryOp::LessThanOrEqual => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a <= b) ? 1.0 : 0.0; }\n");
-                }
-                BinaryOp::GreaterThan => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a > b) ? 1.0 : 0.0; }\n");
-                }
-                BinaryOp::GreaterThanOrEqual => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a >= b) ? 1.0 : 0.0; }\n");
-                }
-                BinaryOp::LooseEqual | BinaryOp::StrictEqual => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a == b) ? 1.0 : 0.0; }\n");
-                }
-                BinaryOp::LooseNotEqual | BinaryOp::StrictNotEqual => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a != b) ? 1.0 : 0.0; }\n");
-                }
-                BinaryOp::BitwiseAnd => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a & (int32_t)b); }\n");
-                }
-                BinaryOp::BitwiseOr => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a | (int32_t)b); }\n");
-                }
-                BinaryOp::BitwiseXor => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a ^ (int32_t)b); }\n");
-                }
-                BinaryOp::ShiftLeft => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a << ((uint32_t)b & 31)); }\n");
-                }
-                BinaryOp::ShiftRight => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a >> ((uint32_t)b & 31)); }\n");
-                }
-                BinaryOp::UnsignedShiftRight => {
-                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((uint32_t)a >> ((uint32_t)b & 31)); }\n");
-                }
-                _ => {}
-            },
-            Instruction::Unary(op) => match op {
-                UnaryOp::Negate => output.push_str("    stack[sp - 1] = -stack[sp - 1];\n"),
-                UnaryOp::Plus | UnaryOp::ToNumeric => {}
-                UnaryOp::BitwiseNot => {
-                    output.push_str("    stack[sp - 1] = (double)(~(int32_t)stack[sp - 1]);\n")
-                }
-                UnaryOp::Increment => output.push_str("    stack[sp - 1] += 1.0;\n"),
-                UnaryOp::Decrement => output.push_str("    stack[sp - 1] -= 1.0;\n"),
-                _ => {}
-            },
+            }
             Instruction::Jump(target) => {
                 writeln!(output, "    goto kiln_fast_label_{target};").unwrap();
             }
             Instruction::JumpIfFalse(target) => {
-                writeln!(output, "    {{ double cond = stack[--sp]; if (isnan(cond) || cond == 0.0) goto kiln_fast_label_{target}; }}").unwrap();
+                let cond_idx = sp.saturating_sub(1);
+                writeln!(
+                    output,
+                    "    if (isnan(stack[{cond_idx}]) || stack[{cond_idx}] == 0.0) goto kiln_fast_label_{target};"
+                )
+                .unwrap();
             }
             Instruction::JumpIfTruthy(target) => {
-                writeln!(output, "    {{ double cond = stack[--sp]; if (!isnan(cond) && cond != 0.0) goto kiln_fast_label_{target}; }}").unwrap();
+                let cond_idx = sp.saturating_sub(1);
+                writeln!(
+                    output,
+                    "    if (!isnan(stack[{cond_idx}]) && stack[{cond_idx}] != 0.0) goto kiln_fast_label_{target};"
+                )
+                .unwrap();
             }
             Instruction::Return => {
-                output.push_str("    return stack[--sp];\n");
+                let ret_idx = sp.saturating_sub(1);
+                writeln!(output, "    return stack[{ret_idx}];").unwrap();
             }
             Instruction::LoadUpvalue(_) => {
-                output.push_str("    stack[sp++] = 0.0;\n");
+                writeln!(output, "    stack[{sp}] = 0.0;").unwrap();
             }
             Instruction::Call { argc } => {
                 let count = *argc as usize;
-                output.push_str("    {\n");
-                for i in (0..count).rev() {
-                    writeln!(output, "        double arg_{i} = stack[--sp];").unwrap();
-                }
-                output.push_str("        --sp;\n");
+                let dest_idx = sp.saturating_sub(count + 1);
                 let call_args_str = (0..count)
-                    .map(|i| format!("arg_{i}"))
+                    .map(|i| format!("stack[{}]", sp.saturating_sub(count) + i))
                     .collect::<Vec<_>>()
                     .join(", ");
                 writeln!(
                     output,
-                    "        stack[sp++] = {symbol}_fn_{func_idx}_fast({call_args_str});\n    }}"
+                    "    stack[{dest_idx}] = {symbol}_fn_{func_idx}_fast({call_args_str});"
                 )
                 .unwrap();
             }
