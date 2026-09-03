@@ -1431,14 +1431,17 @@ int main(void) {
         assert!(run.stdout.is_empty());
         assert_eq!(
             String::from_utf8(run.stderr).expect("UTF-8 stderr"),
-            "native backend refusal\n".to_owned()
-                + "native backend refusal: module=node:http instruction=7 method=240 receiver_tag=18\n"
-                + "out of memory\n"
-                + "call depth exceeded\n"
-                + "a binding was read before it was initialised\n"
-                + "the host refused an operation\n"
-                + "an argument was not valid\n"
-                + "the program stopped with status -99\n"
+            // Every line carries the `kiln: ` prefix, because this stream also carries the
+            // program's own `console.error` output now and the prefix is what tells the two
+            // apart. It is written where the words are, not by prefixing the whole stream.
+            "kiln: native backend refusal\n".to_owned()
+                + "kiln: native backend refusal: module=node:http instruction=7 method=240 receiver_tag=18\n"
+                + "kiln: out of memory\n"
+                + "kiln: call depth exceeded\n"
+                + "kiln: a binding was read before it was initialised\n"
+                + "kiln: the host refused an operation\n"
+                + "kiln: an argument was not valid\n"
+                + "kiln: the program stopped with status -99\n"
         );
         let _ = std::fs::remove_dir_all(root);
     }
@@ -1604,7 +1607,7 @@ int main(void) {
     kiln_cli_report_failure_in(KILN_C99_UNINITIALIZED_ERROR, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_HOST_ERROR, value, NULL);
     kiln_cli_report_failure_in(KILN_C99_INVALID_ARGUMENT, value, NULL);
-    kiln_cli_report_failure(-99, value);
+    kiln_cli_report_failure_in(-99, value, NULL);
     return 0;
 }
 "#;
