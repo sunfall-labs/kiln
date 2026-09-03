@@ -5622,16 +5622,25 @@ static int kiln_c99_invoke_string_method(kiln_value *result, uint64_t code, kiln
     }
     case KILN_C99_METHOD_REPEAT: {
         double times = argc > 0 ? kiln_c99_as_number(args[0]) : 0.0;
-        kiln_text repeated = {NULL, 0, 0};
         if (!(times >= 0.0) || !isfinite(times)) {
             status = kiln_c99_refuse("String.prototype.repeat was given a count that is "
                                      "negative or not finite");
         } else {
-            size_t remaining = (size_t)times;
-            while (remaining-- > 0 && status == KILN_C99_OK) {
-                status = kiln_c99_text_append(&repeated, receiver.ptr, receiver.len);
+            size_t count_times = (size_t)times;
+            size_t total_len = count_times * receiver.len;
+            if (total_len == 0 || receiver.len == 0) {
+                *result = kiln_c99_copy_text("", 0);
+            } else {
+                char *buf = kiln_c99_gc_alloc_text(total_len);
+                if (buf == NULL) {
+                    status = KILN_C99_OUT_OF_MEMORY;
+                } else {
+                    for (size_t k = 0; k < count_times; ++k) {
+                        memcpy(buf + k * receiver.len, receiver.ptr, receiver.len);
+                    }
+                    *result = kiln_c99_value(KILN_VALUE_STRING, 0, buf, total_len);
+                }
             }
-            *result = kiln_c99_text_value(&repeated);
         }
         break;
     }
