@@ -3922,3 +3922,70 @@ fn every_surface_member_is_named_for_its_key() {
         wrong.join("\n")
     );
 }
+
+/// Every `"@@..."` literal in this crate is a key `is_reserved` recognises.
+///
+/// `is_reserved` used to be the prefix test `key.starts_with("@@")`, which is a guess about what a
+/// program would never write -- and it is wrong. `symbol-observable`, which redux and rxjs depend
+/// on, stores its hook under the literal string `"@@observable"`, and that property vanished from
+/// `Object.keys` and `getOwnPropertyNames` while staying readable by name.
+///
+/// The replacement is an exact list, and an exact list drifts. This reads the crate's own source
+/// and fails if a slot was added without being listed, because the failure it prevents is the
+/// opposite one: an internal slot that starts appearing in a program's `Object.keys`.
+#[test]
+fn every_internal_slot_is_reserved() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut unlisted = Vec::new();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(&root).expect("read the crate source directory") {
+        let path = entry.expect("read a source entry").path();
+        if path.extension().is_none_or(|extension| extension != "rs") {
+            continue;
+        }
+        // This file's own literals are about the check rather than keys the VM writes.
+        if path.file_name().is_some_and(|name| name == "tests.rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).expect("read a source file");
+        for line in text.lines() {
+            // Prose, not code. The documentation for this very rule quotes `"@@observable"` as
+            // the key that must *not* be reserved, so a scan that reads comments would fail on
+            // the explanation of why it exists.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            for (offset, _) in line.match_indices("\"@@") {
+                let rest = &line[offset + 1..];
+                let Some(end) = rest.find('"') else { continue };
+                let key = &rest[..end];
+                // `RESERVED_KEY_PREFIX` itself: the prefix, not a key written under it.
+                if key == "@@" {
+                    continue;
+                }
+                // A key built by `format!` appears here as its prefix -- `@@symbol:` and
+                // `@@private:` are both in `INTERNAL_PREFIXES`, so they answer true as written.
+                checked += 1;
+                if !kiln_interpreter_is_reserved(key) {
+                    unlisted.push(format!("{} in {}", key, path.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        checked > 40,
+        "expected to find the crate's internal keys, found {checked}"
+    );
+    unlisted.sort();
+    unlisted.dedup();
+    assert!(
+        unlisted.is_empty(),
+        "these internal keys are not recognised by `symbol::is_reserved`, so they would appear \
+         in a program's `Object.keys`: {unlisted:#?}"
+    );
+}
+
+/// `symbol::is_reserved` is crate-private; this is the one place a test needs it by name.
+fn kiln_interpreter_is_reserved(key: &str) -> bool {
+    crate::symbol::is_reserved(key)
+}

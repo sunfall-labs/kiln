@@ -15347,7 +15347,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if matches!(source, Value::Proxy(_)) {
                     let mut items = Vec::new();
                     for key in self.own_keys(&source, instruction)? {
-                        if key.starts_with(RESERVED_KEY_PREFIX) {
+                        if symbol::is_reserved(&key) {
                             continue;
                         }
                         items.push(match native {
@@ -15364,7 +15364,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let mut items = Vec::new();
                 for (key, property) in own_properties(&self.intrinsics, &source) {
-                    if key.starts_with(RESERVED_KEY_PREFIX) {
+                    if symbol::is_reserved(&key) {
                         continue;
                     }
                     let value = match property {
@@ -15525,9 +15525,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let keys = self.own_keys(&target, instruction)?;
                 Ok(Value::Array(ArrayData::new(
                     keys.into_iter()
-                        .filter(|key| {
-                            !key.starts_with(RESERVED_KEY_PREFIX) && !key.starts_with("@@")
-                        })
+                        .filter(|key| !symbol::is_reserved(key))
                         .map(Value::String)
                         .collect(),
                 )))
@@ -15639,7 +15637,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let keys = self.own_keys(&target, instruction)?;
                 Ok(Value::Array(ArrayData::new(
                     keys.into_iter()
-                        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                        .filter(|key| !symbol::is_reserved(key))
                         .map(Value::String)
                         .collect(),
                 )))
@@ -20558,7 +20556,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             let own = if matches!(level, Value::Proxy(_)) {
                 self.own_keys(&level, current)?
                     .into_iter()
-                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                    .filter(|key| !symbol::is_reserved(key))
                     .collect()
             } else {
                 own_property_keys(&self.intrinsics, &level)
@@ -30312,9 +30310,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Proxy(_) => self.own_keys(target, instruction)?,
             _ => own_property_keys_with_symbols(&self.intrinsics, target),
         };
-        let (reserved, named): (Vec<String>, Vec<String>) = keys
-            .into_iter()
-            .partition(|key| key.starts_with(RESERVED_KEY_PREFIX));
+        let (reserved, named): (Vec<String>, Vec<String>) =
+            keys.into_iter().partition(|key| symbol::is_reserved(key));
         let mut reflected: Vec<Value> = named.into_iter().map(Value::String).collect();
         reflected.extend(
             reserved
@@ -33224,7 +33221,7 @@ fn json_stringify(
             for (key, property) in entries {
                 // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
                 // own enumerable string property, so it is not part of the object's JSON.
-                if key.starts_with(RESERVED_KEY_PREFIX) {
+                if symbol::is_reserved(&key) {
                     continue;
                 }
                 let property = match property {
@@ -33979,7 +33976,7 @@ fn call_native(
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
-                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                    .filter(|key| !symbol::is_reserved(key))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
                 Some(Value::Bound(bound)) => bound
@@ -33987,7 +33984,7 @@ fn call_native(
                     .borrow()
                     .entries()
                     .map(|(key, _)| key)
-                    .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                    .filter(|key| !symbol::is_reserved(key))
                     .map(|key| Value::String(key.to_owned()))
                     .collect(),
                 // `entries` rather than `keys`: this reports what is *enumerated*, where
@@ -34001,7 +33998,7 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .filter(|key| !symbol::is_reserved(key))
                             .map(|key| Value::String(key.to_owned())),
                     )
                     .collect(),
@@ -34035,7 +34032,7 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .filter(|key| !symbol::is_reserved(key))
                             .map(|key| Value::String(key.to_owned())),
                     )
                     .collect(),
@@ -34048,7 +34045,7 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .filter(|key| !symbol::is_reserved(key))
                             .map(|key| Value::String(key.to_owned())),
                     )
                     .collect(),
@@ -34058,7 +34055,7 @@ fn call_native(
                             .borrow()
                             .entries()
                             .map(|(key, _)| key)
-                            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+                            .filter(|key| !symbol::is_reserved(key))
                             .map(|key| Value::String(key.to_owned()))
                             .collect()
                     })
@@ -38954,7 +38951,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
                 .properties
                 .borrow()
                 .entries()
-                .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
+                .filter(|(key, _)| !symbol::is_reserved(key))
                 .map(|(key, property)| {
                     let shown = match property {
                         Property::Value(value) => inspect_nested(value, depth + 1, guard.seen),
@@ -39048,7 +39045,7 @@ fn inspect_object(object: &ObjectData, depth: usize, seen: &mut Vec<usize>) -> S
         .entries()
         // Reserved keys are the VM's own and symbol-keyed properties; node shows the latter as
         // `[Symbol(x)]: v`, which needs a key-to-symbol map this VM does not keep.
-        .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
+        .filter(|(key, _)| !symbol::is_reserved(key))
         .map(|(key, property)| {
             let shown = match property {
                 Property::Value(value) => inspect_nested(value, depth + 1, seen),
@@ -42384,7 +42381,7 @@ impl Intrinsics {
         };
         keys.retain(|key| !slots.removed.iter().any(|name| name == key));
         for key in slots.held.keys() {
-            if !key.starts_with(RESERVED_KEY_PREFIX) && !keys.iter().any(|listed| listed == key) {
+            if !symbol::is_reserved(key) && !keys.iter().any(|listed| listed == key) {
                 keys.push(key.to_owned());
             }
         }
@@ -42406,7 +42403,7 @@ impl Intrinsics {
         slots
             .held
             .entries()
-            .filter(|(key, _)| !key.starts_with(RESERVED_KEY_PREFIX))
+            .filter(|(key, _)| !symbol::is_reserved(key))
             .map(|(key, property)| (key.to_owned(), property.clone()))
             .collect()
     }
@@ -42894,7 +42891,7 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
 fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     let from_object = |data: &ObjectData| -> Vec<String> {
         data.keys()
-            .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX))
+            .filter(|key| !symbol::is_reserved(key))
             .map(str::to_owned)
             .collect()
     };
@@ -43181,7 +43178,7 @@ fn is_symbol_key(key: &str) -> bool {
 fn own_property_keys_with_symbols(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
     own_property_keys_including_symbols(intrinsics, target)
         .into_iter()
-        .filter(|key| !key.starts_with(RESERVED_KEY_PREFIX) || is_symbol_key(key))
+        .filter(|key| !symbol::is_reserved(key) || is_symbol_key(key))
         .collect()
 }
 
