@@ -97,6 +97,8 @@ extern uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
 extern kiln_value kiln_c99_builtin(uint64_t code);
 extern int kiln_c99_is_callable(kiln_value value);
 extern int kiln_c99_is_reference(kiln_value value);
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint, kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_has_intrinsic_text(kiln_value value);
 extern int kiln_c99_crosses_boundary(kiln_value value);
 extern kiln_value kiln_c99_hole(void);
@@ -172,6 +174,7 @@ extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
 extern uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 extern uint64_t kiln_c99_string_method(const char *key, size_t key_len);
 extern int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp, int depth, kiln_value *thrown);
 extern int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp, int depth, kiln_value *thrown);
 extern int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, size_t argc, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);
 extern int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);
