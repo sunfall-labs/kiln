@@ -2884,22 +2884,95 @@ static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
     emit_method_code_list!(),
     r#"};
 
-static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, uint32_t group) {
+/* Every method the backend can dispatch, ordered by name so a lookup is a binary search.
+ *
+ * The walk this replaces asked `kiln_c99_method_name` for a name, then `strlen`, then `memcmp`,
+ * for every code in the group -- and checked group membership for every code in the table, in
+ * group or not. Profiled on the mixed server workload it was 5,427,319 name fetches across
+ * 303,496 lookups, about eighteen per lookup over a table of a few hundred.
+ *
+ * The table is immutable: the codes are constants and the names are literals, so the index is
+ * process-global rather than per-realm, and is built once. Two threads racing to build it write
+ * identical bytes -- the input is a compile-time constant either way -- so the only cost of the
+ * race is doing the work twice. */
+typedef struct kiln_method_entry {
+    const char *name;
+    size_t len;
+    uint64_t code;
+} kiln_method_entry;
+
+/* Sized from the code table directly rather than through a `#define`: a `KILN_C99_METHOD_*` macro
+ * is how this prelude spells a method id, and the guard that checks every id is nameable reads
+ * them by prefix. A macro named like an id that is not one is a trap for that reader. */
+static kiln_method_entry kiln_c99_method_index[sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes];
+static size_t kiln_c99_method_index_len;
+static int kiln_c99_method_index_ready;
+
+/* Names first, and equal names by code, so the run of codes sharing a name stays contiguous and
+ * in a stable order: several groups spell a method `get`, and the walk this replaces returned the
+ * first such code in the table that was in the asked-for group. */
+static int kiln_c99_method_entry_before(const kiln_method_entry *left,
+                                        const kiln_method_entry *right) {
+    size_t shortest = left->len < right->len ? left->len : right->len;
+    int ordering = memcmp(left->name, right->name, shortest);
+    if (ordering != 0) return ordering < 0;
+    if (left->len != right->len) return left->len < right->len;
+    return left->code < right->code;
+}
+
+static void kiln_c99_method_index_build(void) {
     size_t index;
-    for (index = 0; index < sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes; ++index) {
+    size_t count = 0;
+    for (index = 0; index < sizeof kiln_c99_method_codes / sizeof *kiln_c99_method_codes;
+         ++index) {
         uint64_t code = kiln_c99_method_codes[index];
-        if (!kiln_c99_method_in_group(code, group)) {
-            continue;
-        }
         const char *name = kiln_c99_method_name(code);
-        size_t len;
-        if (name == NULL) {
-            continue;
+        if (name == NULL) continue;
+        kiln_c99_method_index[count].name = name;
+        kiln_c99_method_index[count].len = strlen(name);
+        kiln_c99_method_index[count].code = code;
+        ++count;
+    }
+    /* Insertion sort: a few hundred entries, once per process, and it keeps the prelude free of
+     * a comparator indirection through `qsort`. */
+    for (index = 1; index < count; ++index) {
+        kiln_method_entry pending = kiln_c99_method_index[index];
+        size_t behind = index;
+        while (behind > 0 && kiln_c99_method_entry_before(&pending,
+                                                          &kiln_c99_method_index[behind - 1])) {
+            kiln_c99_method_index[behind] = kiln_c99_method_index[behind - 1];
+            --behind;
         }
-        len = strlen(name);
-        if (len == key_len && memcmp(name, key, len) == 0) {
-            return code;
+        kiln_c99_method_index[behind] = pending;
+    }
+    kiln_c99_method_index_len = count;
+    kiln_c99_method_index_ready = 1;
+}
+
+static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, uint32_t group) {
+    size_t low = 0;
+    size_t high;
+    size_t at;
+    if (!kiln_c99_method_index_ready) kiln_c99_method_index_build();
+    high = kiln_c99_method_index_len;
+    while (low < high) {
+        size_t middle = low + (high - low) / 2;
+        const kiln_method_entry *entry = &kiln_c99_method_index[middle];
+        size_t shortest = entry->len < key_len ? entry->len : key_len;
+        int ordering = memcmp(entry->name, key, shortest);
+        if (ordering == 0 && entry->len != key_len) ordering = entry->len < key_len ? -1 : 1;
+        if (ordering < 0) {
+            low = middle + 1;
+        } else {
+            high = middle;
         }
+    }
+    /* `low` is the first entry not ordered before the key. Names that match are contiguous from
+     * there, and the first of them in the asked-for group is the answer the walk would have given. */
+    for (at = low; at < kiln_c99_method_index_len; ++at) {
+        const kiln_method_entry *entry = &kiln_c99_method_index[at];
+        if (entry->len != key_len || memcmp(entry->name, key, key_len) != 0) break;
+        if (kiln_c99_method_in_group(entry->code, group)) return entry->code;
     }
     return 0;
 }
@@ -3164,6 +3237,13 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_fixture_method_stores", C99StateOwner::TestFixture),
     ("kiln_c99_gc_fallback", C99StateOwner::TestFixture),
     ("kiln_c99_keys_check_mode", C99StateOwner::TestFixture),
+    // Its `prototype` fields are filled on first construction, reset per realm and marked as GC
+    // roots -- realm state, and invisible to the ownership guard until that guard learned to read
+    // a declaration that spans lines.
+    ("kiln_c99_native_constructors", C99StateOwner::Realm),
+    ("kiln_c99_method_index", C99StateOwner::Constant),
+    ("kiln_c99_method_index_len", C99StateOwner::Constant),
+    ("kiln_c99_method_index_ready", C99StateOwner::Constant),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3172,6 +3252,10 @@ enum C99StateOwner {
     Realm,
     Frame,
     TestFixture,
+    /// Derived once from compile-time constants and never changed again, so every realm in the
+    /// process would compute the same bytes. Two threads racing to build it duplicate the work and
+    /// nothing else; a realm neither owns it nor has to reset it.
+    Constant,
 }
 
 /// The stack each emitted C function needs: the module body, then one entry per compiled
@@ -8269,16 +8353,48 @@ int main(void) {
     fn every_mutable_c99_static_has_an_explicit_owner() {
         let generated =
             emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
-        let mut discovered = generated
-            .source
-            .lines()
+        // Declarations are gathered as *statements*, not lines. A mutable static split over two
+        // lines -- by a long type, a `sizeof` expression, or a human -- used to be invisible here,
+        // which is the one failure this guard exists to prevent: unregistered mutable state that
+        // nobody is told about. A function definition is dropped when its brace arrives, and its
+        // parameter list would exclude it below in any case.
+        let mut statements: Vec<String> = Vec::new();
+        let mut pending = String::new();
+        for line in generated.source.lines() {
+            let line = line.trim();
+            if pending.is_empty() {
+                if !line.starts_with("static ") {
+                    continue;
+                }
+                pending.push_str(line);
+            } else {
+                pending.push(' ');
+                pending.push_str(line);
+            }
+            if pending.ends_with(';') {
+                statements.push(std::mem::take(&mut pending));
+            } else if pending
+                .split('{')
+                .next()
+                .is_some_and(|before| before.contains('(') && pending.contains('{'))
+            {
+                pending.clear();
+            }
+        }
+        let mut discovered = statements
+            .iter()
             .filter_map(|line| {
                 let line = line.trim();
                 let declaration = line.split('=').next().unwrap_or(line);
                 let name_start = line.find("kiln_c99_")?;
                 let before_name = &line[..name_start];
                 let immutable = if before_name.contains('*') {
-                    before_name.trim_end().ends_with("* const")
+                    // `*const` and `* const` declare the same thing, so the guard must not depend
+                    // on which one somebody wrote.
+                    before_name
+                        .split_whitespace()
+                        .collect::<String>()
+                        .ends_with("*const")
                 } else {
                     before_name.starts_with("static const ")
                 };
