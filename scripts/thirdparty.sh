@@ -62,28 +62,72 @@ missing=0
 diverged=0
 DIVERGENCES=()
 
-for probe in "$BUNDLES"/probes/*.mjs; do
-	name="$(basename "$probe" .mjs)"
-	bundle="$BUNDLES/$name.bundle.js"
-	if [[ ! -f $bundle ]]; then
-		missing=$((missing + 1))
-		continue
+JOBS="${KILN_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+if (( JOBS > 16 )); then
+	JOBS=16
+elif (( JOBS < 1 )); then
+	JOBS=1
+fi
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-thirdparty-results.XXXXXXXX")"
+cleanup() {
+	if [[ ${BASHPID:-$$} -eq $$ ]]; then
+		rm -rf "$WORK_DIR"
 	fi
-	adapter=""
+}
+trap cleanup EXIT
+
+run_interpreted() {
+	trap - EXIT
+	local probe="$1"
+	local name
+	name="$(basename "$probe" .mjs)"
+	local bundle="$BUNDLES/$name.bundle.js"
+	if [[ ! -f $bundle ]]; then
+		touch "$WORK_DIR/$name.interp_missing"
+		return 0
+	fi
+	local adapter=""
 	if [[ $NODE_PLATFORM == *" $name "* ]]; then
 		adapter="--node"
 	fi
-	# Same TZ discipline as the differential harness: kiln's realm is always UTC (ADR 0015) and
-	# node takes its zone from the environment, so the two are only comparable under TZ=UTC.
+	local expected
 	expected="$(TZ=UTC node "$bundle" 2>&1 || true)"
+	local actual
 	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>&1 || true)"
 	if [[ $actual == "$expected" ]]; then
-		matched=$((matched + 1))
+		touch "$WORK_DIR/$name.interp_matched"
 	else
+		{
+			printf '%s\n' "    node: $(printf '%s' "$expected" | head -3 | tr '\n' '|')"
+			printf '%s\n' "    kiln: $(printf '%s' "$actual" | head -3 | tr '\n' '|')"
+		} > "$WORK_DIR/$name.interp_diverged"
+	fi
+}
+
+running=0
+for probe in "$BUNDLES"/probes/*.mjs; do
+	run_interpreted "$probe" &
+	running=$((running + 1))
+	if (( running >= JOBS )); then
+		wait -n
+		running=$((running - 1))
+	fi
+done
+wait
+
+for probe in "$BUNDLES"/probes/*.mjs; do
+	name="$(basename "$probe" .mjs)"
+	if [[ -f "$WORK_DIR/$name.interp_missing" ]]; then
+		missing=$((missing + 1))
+	elif [[ -f "$WORK_DIR/$name.interp_matched" ]]; then
+		matched=$((matched + 1))
+	elif [[ -f "$WORK_DIR/$name.interp_diverged" ]]; then
 		diverged=$((diverged + 1))
 		DIVERGENCES+=("  $name")
-		DIVERGENCES+=("    node: $(printf '%s' "$expected" | head -3 | tr '\n' '|')")
-		DIVERGENCES+=("    kiln: $(printf '%s' "$actual" | head -3 | tr '\n' '|')")
+		while IFS= read -r line; do
+			DIVERGENCES+=("$line")
+		done < "$WORK_DIR/$name.interp_diverged"
 	fi
 done
 
@@ -114,32 +158,61 @@ native_diverged=0
 REFUSALS=()
 NATIVE_DIVERGENCES=()
 
-for probe in "$BUNDLES"/probes/*.mjs; do
+run_native() {
+	trap - EXIT
+	local probe="$1"
+	local name
 	name="$(basename "$probe" .mjs)"
-	bundle="$BUNDLES/$name.bundle.js"
+	local bundle="$BUNDLES/$name.bundle.js"
 	if [[ ! -f $bundle ]]; then
-		continue
+		return 0
 	fi
-	adapter=""
+	local adapter=""
 	if [[ $NODE_PLATFORM == *" $name "* ]]; then
 		adapter="--node"
 	fi
+	local expected
 	expected="$(TZ=UTC node "$bundle" 2>&1 || true)"
+	local actual
 	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>&1 || true)"
 	if [[ $actual == "$expected" ]]; then
-		native_matched=$((native_matched + 1))
-	# A refusal names itself, and the name is the whole value of the outcome: it says which member
-	# of which builtin the backend has not been given yet, which is the next thing to implement.
-	# Matching on the marker rather than on the exit status keeps a library that legitimately
-	# prints the word "refusal" from being miscounted.
+		touch "$WORK_DIR/$name.native_matched"
 	elif [[ $actual == *"native backend refusal"* || $actual == *"unsupported native emission:"* ]]; then
-		native_refused=$((native_refused + 1))
-		REFUSALS+=("  $(printf '%-14s %s' "$name" "$(printf '%s' "$actual" | grep -oE '(operation=[^ ]+( detail=[^=]*)?|unsupported native emission: .*)' | head -1)")")
+		local refusal_summary
+		refusal_summary="$(printf '%-14s %s' "$name" "$(printf '%s' "$actual" | grep -oE '(operation=[^ ]+( detail=[^=]*)?|unsupported native emission: .*)' | head -1)")"
+		printf '%s\n' "$refusal_summary" > "$WORK_DIR/$name.native_refused"
 	else
+		{
+			printf '%s\n' "    node:   $(printf '%s' "$expected" | head -3 | tr '\n' '|')"
+			printf '%s\n' "    native: $(printf '%s' "$actual" | head -3 | tr '\n' '|')"
+		} > "$WORK_DIR/$name.native_diverged"
+	fi
+}
+
+running=0
+for probe in "$BUNDLES"/probes/*.mjs; do
+	run_native "$probe" &
+	running=$((running + 1))
+	if (( running >= JOBS )); then
+		wait -n
+		running=$((running - 1))
+	fi
+done
+wait
+
+for probe in "$BUNDLES"/probes/*.mjs; do
+	name="$(basename "$probe" .mjs)"
+	if [[ -f "$WORK_DIR/$name.native_matched" ]]; then
+		native_matched=$((native_matched + 1))
+	elif [[ -f "$WORK_DIR/$name.native_refused" ]]; then
+		native_refused=$((native_refused + 1))
+		REFUSALS+=("  $(<"$WORK_DIR/$name.native_refused")")
+	elif [[ -f "$WORK_DIR/$name.native_diverged" ]]; then
 		native_diverged=$((native_diverged + 1))
 		NATIVE_DIVERGENCES+=("  $name")
-		NATIVE_DIVERGENCES+=("    node:   $(printf '%s' "$expected" | head -3 | tr '\n' '|')")
-		NATIVE_DIVERGENCES+=("    native: $(printf '%s' "$actual" | head -3 | tr '\n' '|')")
+		while IFS= read -r line; do
+			NATIVE_DIVERGENCES+=("$line")
+		done < "$WORK_DIR/$name.native_diverged"
 	fi
 done
 
