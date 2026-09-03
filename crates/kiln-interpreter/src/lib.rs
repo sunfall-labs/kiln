@@ -11690,6 +11690,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     }
                     let arguments = self.stack.split_off(self.stack.len() - argc);
                     let callee = self.pop(current)?;
+                    // `new` never asked whether its callee could be constructed, so an arrow, a
+                    // generator and an async function were all constructible -- each answering a
+                    // fresh object where the language throws. `is_constructor` has always known
+                    // the answer for a closure; nothing consulted it here.
+                    //
+                    // Deliberately closures only. For a built-in, `is_constructor` answers "owns
+                    // a prototype", and that under-reports: `URL` and the Node HTTP server are
+                    // both constructors it says no to. Checking them here turned three node
+                    // corpus cases, two server ones and one regress case into
+                    // `URL is not a constructor` -- a wrong answer traded for a worse one. The
+                    // built-in table is incomplete and fixing it is its own job; until then this
+                    // asks only where the answer is known to be right.
+                    if matches!(callee, Value::Function(_)) && !is_constructor(&callee) {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!("{} is not a constructor", callee.to_display_string()),
+                            current,
+                        )?;
+                        continue;
+                    }
                     let constructed = self.construct(callee, arguments, current);
                     if self.catchable(constructed, current)?.is_none() {
                         continue;
@@ -28358,7 +28378,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     function_property(&self.intrinsics, name, value_realm(target))
                 }),
             },
-            Value::Function(closure) if name == "prototype" => prototype_object(closure),
+            // Gated on the same predicate as the descriptor, or the two disagree: a function
+            // whose `hasOwnProperty("prototype")` is false must not answer an object when the
+            // property is read by name. That split is what an earlier version of this produced.
+            Value::Function(closure) if name == "prototype" && has_prototype_property(closure) => {
+                prototype_object(closure)
+            }
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
             Value::Array(items) if name == "length" => Value::Number(items.borrow().len() as f64),
@@ -41749,12 +41774,25 @@ fn identity_property(target: &Value, key: &str) -> Option<Value> {
 /// An arrow has none: it cannot be constructed, so there is no object for instances to link to
 /// and the specification gives it no slot. Listing one anyway would put a key in
 /// `Object.getOwnPropertyNames` that reading it has to invent.
+/// Whether this function carries the own `prototype` property that `new` would use.
+///
+/// Not every callable does. An arrow has never had one here; an *async* function should not
+/// either, and did -- `(async function () {}).hasOwnProperty("prototype")` answered true where
+/// every other engine answers false. An async generator is the exception that looks like a
+/// contradiction: it keeps a `prototype`, because that object is what its generator instances
+/// inherit from, not something `new` reaches.
+///
+/// A *method* -- shorthand, class, static, getter or setter -- should also have none, and still
+/// does. That one cannot be decided from the proto: nothing on it records that a function was
+/// written as a method, so it needs either a new field in the bytecode both engines read or a
+/// runtime mark set by `DefineMethod`, and the C backend has to learn whichever it is. Recorded
+/// in `.scratch/method-prototype/` rather than guessed at from the flags that exist.
 fn has_prototype_property(closure: &Closure) -> bool {
     closure
         .program
         .functions
         .get(closure.function as usize)
-        .is_some_and(|proto| !proto.arrow)
+        .is_some_and(|proto| !proto.arrow && (!proto.asynchronous || proto.async_generator))
 }
 
 /// The attributes every function's own `name` and `length` carry.
