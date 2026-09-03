@@ -412,6 +412,13 @@ pub fn build(
     })
 }
 
+/// Status reported for a native run whose process never chose one, because a signal ended it.
+///
+/// The shell's own convention: 128 is the base it adds a signal number to, so a caller that reads
+/// exit codes for a living already reads anything at or above it as "ended by a signal" rather
+/// than as a number the program returned.
+const SIGNALLED_EXIT_CODE: i32 = 128;
+
 /// Build and execute one source file through the native backend from one command-entry snapshot.
 pub fn native_run(
     backend: &mut dyn Backend,
@@ -460,14 +467,27 @@ pub fn native_run(
             }
         }
     };
-    let notes = project_notes;
+    let mut notes = project_notes;
+    // A missing status is not a program that failed. `None` has one meaning on this wire: the
+    // process never chose a status because a signal ended it, so there is no exit code to
+    // forward. `unwrap_or(1)` reported that as the program failing, and -- because nothing said
+    // otherwise -- as failing silently; `unwrap_or(0)` would call a killed process a success,
+    // which is worse. Neither is true, so say the true thing instead of inventing a status: a
+    // note naming what happened, and 128, which is the shell's convention for "died on a signal"
+    // and reads as a status no `process.exit()` in the program chose. The signal number would
+    // make it 128 + N, exactly as a shell reports it, but the number is not on this wire.
+    if summary.exit_code.is_none() {
+        notes.push(
+            "the native program was ended by a signal, so it reported no exit status".to_owned(),
+        );
+    }
     Ok(Output {
         text: summary.stdout,
         // Verbatim, and not trimmed into a note: this is the program's standard error, so a
         // caller redirecting the two streams separately gets exactly what the program wrote.
         error_text: summary.stderr,
         notes,
-        exit_code: summary.exit_code.unwrap_or(1),
+        exit_code: summary.exit_code.unwrap_or(SIGNALLED_EXIT_CODE),
         revision: None,
         value: summary.scalar_value,
         source_view: Some(source_view),

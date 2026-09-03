@@ -10,11 +10,18 @@
 #
 # THE THREE OUTCOMES, and only one is a failure:
 #
-#   match     both engines printed the same bytes.
+#   match     both engines printed the same bytes *and* exited with the same status.
 #   refused   the backend said which instruction it does not implement yet. Not a failure: the
 #             native surface is deliberately growing, and each refusal names itself, so the list
 #             below is a work queue rather than a defect report.
-#   DIVERGES  both ran to completion and printed different bytes. That is a compiler bug.
+#   DIVERGES  both ran to completion and disagreed -- on the bytes, or on the exit status. That
+#             is a compiler bug.
+#
+# THE EXIT STATUS IS PART OF THE ANSWER. This compared output alone for a long time, and a
+# successful CommonJS program that printed the right bytes and then exited 1 was a *match* to it
+# for weeks -- while anything running that program from a shell, a Makefile or CI saw a failure.
+# A program is a pair of things: what it wrote and what it returned. Comparing half of that is
+# how the half nobody compares goes wrong.
 #
 # A probe that the *interpreter* cannot run is a failure either way: this corpus is not the place
 # to discover that, and a probe nobody can run measures nothing.
@@ -69,11 +76,14 @@ run_probe() {
 		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.failed"
 		return 0
 	fi
+	# Zero by construction: a nonzero interpreter took the branch above and is already a failure.
+	# Named anyway, because the comparison below is between the two engines and reads as one.
+	local interpreted_status=0
 
-	local native
-	native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1 || true)"
+	local native native_status=0
+	native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1)" || native_status=$?
 
-	if [[ $native == "$interpreted" ]]; then
+	if [[ $native == "$interpreted" ]] && ((native_status == interpreted_status)); then
 		touch "$WORK_DIR/$name.matched"
 		return 0
 	fi
@@ -91,8 +101,11 @@ run_probe() {
 	fi
 
 	{
-		printf '%s\n' "  interpreter: $(printf '%s' "$interpreted" | head -5)"
-		printf '%s\n' "  native:      $(printf '%s' "$native" | head -5)"
+		printf '%s\n' "  interpreter: $(printf '%s' "$interpreted" | head -5) [exit $interpreted_status]"
+		printf '%s\n' "  native:      $(printf '%s' "$native" | head -5) [exit $native_status]"
+		if [[ $native == "$interpreted" ]]; then
+			printf '%s\n' "  the bytes agree; only the exit status differs"
+		fi
 	} > "$WORK_DIR/$name.diverged"
 }
 
@@ -147,7 +160,7 @@ fi
 
 if ((diverged > 0)); then
 	kiln_say ""
-	kiln_say "DIVERGED - the two engines ran the same bytecode and printed different bytes:"
+	kiln_say "DIVERGED - the two engines ran the same bytecode and did not agree:"
 	printf '%s\n' "${DIVERGENCES[@]}" | while IFS= read -r line; do kiln_say "$line"; done
 	kiln_say ""
 	kiln_say "One of the two is wrong. The bytecode is the same, so nothing else can explain it."

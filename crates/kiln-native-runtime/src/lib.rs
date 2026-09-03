@@ -577,9 +577,40 @@ int kiln_cli_write_result_file(const char *path, kiln_value value) {
     return status;
 }
 
+/* Whether the result file can carry this value at all.
+ *
+ * The boundary carries five scalar tags and nothing else, and a module's completion value is
+ * under no obligation to be one of them: a CommonJS entry completes with its `module.exports`,
+ * which is an object in every module that does not assign a scalar to it. So every successful
+ * `--node` run handed an object to a writer that understands only scalars, the writer said
+ * `KILN_C99_INVALID_ARGUMENT`, and the launcher turned that into `exit 1` -- a program that had
+ * printed exactly the right bytes and had nothing at all to say on stderr.
+ *
+ * Declining to write it is right; charging it to the *program's* exit status was not. An
+ * unrepresentable result is an absent result, which is precisely what the `Option<HostValue>` on
+ * the reading side of this file already models. */
+static int kiln_cli_result_representable(kiln_value value) {
+    switch (value.tag) {
+    case KILN_VALUE_UNDEFINED:
+    case KILN_VALUE_NULL:
+    case KILN_VALUE_BOOLEAN:
+    case KILN_VALUE_NUMBER:
+    case KILN_VALUE_STRING:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 int kiln_cli_write_result(kiln_value value) {
     const char *path = getenv("KILN_NATIVE_RESULT_PATH_V1");
     if (path == NULL || path[0] == '\0') {
+        return KILN_C99_OK;
+    }
+    /* No file at all, rather than an empty or partial one: the reader reads an absent file as
+     * "this run finished and produced no scalar result", and a half-written one as a decode
+     * failure, which is the report the program does not deserve. */
+    if (!kiln_cli_result_representable(value)) {
         return KILN_C99_OK;
     }
     return kiln_cli_write_result_file(path, value);
