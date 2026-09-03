@@ -1043,10 +1043,9 @@ static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
 static int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_t code,
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
 static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t code,
+#define KILN_C99_NODE_PATH_NORMALIZE 3u
 #define KILN_C99_NODE_PATH_RELATIVE 4u
 static int kiln_c99_node_path_answer(uint32_t part, const uint8_t *first, uint64_t first_len,
-static int kiln_c99_posix_normalize(kiln_text *out, const char *path, size_t len) {
-done:
 static int kiln_c99_node_path(kiln_value *result, uint64_t code,
 done:
 static kiln_value kiln_c99_undefined(void) {
