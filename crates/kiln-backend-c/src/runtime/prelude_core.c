@@ -11470,6 +11470,9 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             case KILN_C99_METHOD_COLLECTION_CLEAR:
                 collection->count = 0;
                 collection->live = 0;
+                if (collection->hash_table != NULL && collection->hash_capacity > 0) {
+                    memset(collection->hash_table, 0xff, collection->hash_capacity * sizeof(int32_t));
+                }
                 *result = kiln_c99_undefined();
                 return KILN_C99_OK;
             case KILN_C99_METHOD_COLLECTION_FOR_EACH: {
@@ -17623,6 +17626,8 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
         return KILN_C99_OUT_OF_MEMORY;
     }
     collection->entries = NULL;
+    collection->hash_table = NULL;
+    collection->hash_capacity = 0;
     collection->count = 0;
     collection->live = 0;
     collection->capacity = 0;
@@ -17633,9 +17638,80 @@ static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
     return KILN_C99_OK;
 }
 
+static uint64_t kiln_c99_hash_u64(uint64_t x) {
+    x ^= x >> 30;
+    x *= UINT64_C(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x *= UINT64_C(0x94d049bb133111eb);
+    x ^= x >> 31;
+    return x;
+}
+
+static uint64_t kiln_c99_hash_value(kiln_value val) {
+    if (val.tag == KILN_VALUE_NUMBER) {
+        double d;
+        memcpy(&d, &val.bits, sizeof(d));
+        if (isnan(d)) return UINT64_C(0x7ff8000000000000);
+        if (d == 0.0) return 0;
+        return kiln_c99_hash_u64(val.bits);
+    }
+    if (val.tag == KILN_VALUE_STRING) {
+        uint64_t h = UINT64_C(14695981039346656037);
+        size_t i;
+        for (i = 0; i < val.len; ++i) {
+            h ^= (unsigned char)val.ptr[i];
+            h *= UINT64_C(1099511628211);
+        }
+        return h;
+    }
+    return kiln_c99_hash_u64(((uint64_t)val.tag << 48) ^ val.bits);
+}
+
+static int kiln_c99_collection_rehash(kiln_collection *collection, size_t new_cap) {
+    int32_t *new_table = (int32_t *)malloc(new_cap * sizeof(int32_t));
+    if (new_table == NULL) return KILN_C99_OUT_OF_MEMORY;
+    memset(new_table, 0xff, new_cap * sizeof(int32_t));
+    size_t mask = new_cap - 1;
+    size_t i;
+    for (i = 0; i < collection->count; ++i) {
+        if (collection->entries[i].dead) continue;
+        uint64_t h = kiln_c99_hash_value(collection->entries[i].key);
+        size_t idx = (size_t)(h & mask);
+        while (new_table[idx] != -1) {
+            idx = (idx + 1) & mask;
+        }
+        new_table[idx] = (int32_t)i;
+    }
+    free(collection->hash_table);
+    collection->hash_table = new_table;
+    collection->hash_capacity = new_cap;
+    return KILN_C99_OK;
+}
+
 /* The index of a key, or -1. SameValueZero, which is what a collection compares with: NaN finds
  * itself, where `===` never would, and that is why `new Set([NaN, NaN]).size` is 1. */
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
+    if (collection->count == 0) {
+        return -1.0;
+    }
+    if (collection->hash_table != NULL && collection->hash_capacity > 0) {
+        size_t mask = collection->hash_capacity - 1;
+        uint64_t h = kiln_c99_hash_value(key);
+        size_t idx = (size_t)(h & mask);
+        size_t probes = 0;
+        while (collection->hash_table[idx] != -1 && probes < collection->hash_capacity) {
+            int32_t entry_idx = collection->hash_table[idx];
+            if (entry_idx >= 0 && (size_t)entry_idx < collection->count) {
+                if (!collection->entries[entry_idx].dead &&
+                    kiln_c99_same_value_zero(collection->entries[entry_idx].key, key)) {
+                    return (double)entry_idx;
+                }
+            }
+            idx = (idx + 1) & mask;
+            probes++;
+        }
+        return -1.0;
+    }
     size_t index;
     for (index = 0; index < collection->count; ++index) {
         if (collection->entries[index].dead) {
@@ -17663,11 +17739,33 @@ static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value
     if (status != KILN_C99_OK) {
         return status;
     }
-    collection->entries[collection->count].key = key;
-    collection->entries[collection->count].value = value;
-    collection->entries[collection->count].dead = 0;
+    size_t new_idx = collection->count;
+    collection->entries[new_idx].key = key;
+    collection->entries[new_idx].value = value;
+    collection->entries[new_idx].dead = 0;
     collection->count += 1;
     collection->live += 1;
+
+    if (collection->count >= 8) {
+        if (collection->hash_table == NULL || collection->count * 2 >= collection->hash_capacity) {
+            size_t new_cap = collection->hash_capacity == 0 ? 16 : collection->hash_capacity * 2;
+            while (new_cap <= collection->count * 2) new_cap *= 2;
+            status = kiln_c99_collection_rehash(collection, new_cap);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            size_t mask = collection->hash_capacity - 1;
+            uint64_t h = kiln_c99_hash_value(key);
+            size_t idx = (size_t)(h & mask);
+            while (collection->hash_table[idx] != -1) {
+                int32_t e = collection->hash_table[idx];
+                if (e >= 0 && (size_t)e < collection->count && collection->entries[e].dead) {
+                    break;
+                }
+                idx = (idx + 1) & mask;
+            }
+            collection->hash_table[idx] = (int32_t)new_idx;
+        }
+    }
     return KILN_C99_OK;
 }
 

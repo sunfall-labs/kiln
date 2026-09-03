@@ -2240,6 +2240,7 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         break;
     case KILN_GC_COLLECTION:
         free(((kiln_collection *)payload)->entries);
+        free(((kiln_collection *)payload)->hash_table);
         break;
     case KILN_GC_TYPED_BUFFER:
         free(((kiln_typed_buffer *)payload)->bytes);
@@ -3495,11 +3496,11 @@ static int kiln_c99_typed_order(double left, double right) {
 
 /* Doubling, so building an object or an array one member at a time stays linear overall. */
 static int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size) {
-    size_t grown = *capacity == 0 ? 4 : *capacity;
-    void *moved;
     if (needed <= *capacity) {
         return KILN_C99_OK;
     }
+    size_t grown = *capacity == 0 ? (item_size == 1 ? 64 : 8) : *capacity;
+    void *moved;
     while (grown < needed) {
         if (grown > ((size_t)-1) / 2 / item_size) {
             return KILN_C99_OUT_OF_MEMORY;

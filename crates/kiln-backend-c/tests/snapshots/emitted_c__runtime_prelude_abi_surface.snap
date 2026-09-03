@@ -1611,6 +1611,9 @@ static kiln_proxy *kiln_c99_proxy_of(kiln_value value) {
 static kiln_value kiln_c99_proxy_inner(kiln_value value) {
 static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
 static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
+static uint64_t kiln_c99_hash_u64(uint64_t x) {
+static uint64_t kiln_c99_hash_value(kiln_value val) {
+static int kiln_c99_collection_rehash(kiln_collection *collection, size_t new_cap) {
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
