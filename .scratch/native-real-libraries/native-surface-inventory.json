@@ -1,0 +1,4493 @@
+{
+ "errors": [],
+ "native_runs": 558,
+ "receivers": {
+  "AbortController": {
+   "expr": "globalThis.AbortController",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"AbortController\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"anonymous\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=anonymous receiver_tag=8"
+   },
+   "self_description": "cache failed: corrupt cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/runtime-library/42/42dede4106400ecf50f992fd3f41c4b5a23aa0fdb5d036f653f68d2f042fe1c1: same cache key already contains a different payload",
+   "unreachable": null
+  },
+  "AbortSignal": {
+   "expr": "globalThis.AbortSignal",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"AbortSignal\""
+   },
+   "kind": "static",
+   "native": {
+    "length": "undefined",
+    "name": "string \"anonymous\""
+   },
+   "native_names": null,
+   "refused": {},
+   "self_description": "cache failed: corrupt cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/runtime-library/42/42dede4106400ecf50f992fd3f41c4b5a23aa0fdb5d036f653f68d2f042fe1c1: same cache key already contains a different payload",
+   "unreachable": null
+  },
+  "AggregateError": {
+   "expr": "globalThis.AggregateError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"AggregateError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"AggregateError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=AggregateError receiver_tag=8"
+   },
+   "self_description": "cache failed: corrupt cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/runtime-library/42/42dede4106400ecf50f992fd3f41c4b5a23aa0fdb5d036f653f68d2f042fe1c1: same cache key already contains a different payload",
+   "unreachable": null
+  },
+  "AggregateError.prototype": {
+   "expr": "globalThis.AggregateError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"AggregateError\""
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=AggregateError receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=AggregateError receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Array": {
+   "expr": "globalThis.Array",
+   "interpreted": {
+    "@@species": "function",
+    "from": "function",
+    "fromAsync": "function",
+    "isArray": "function",
+    "length": "number 1",
+    "name": "string \"Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "@@species": "function",
+    "from": "function",
+    "isArray": "function",
+    "length": "undefined",
+    "name": "string \"Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": [
+    "from",
+    "isArray",
+    "name",
+    "of",
+    "prototype"
+   ],
+   "refused": {
+    "fromAsync": "refusal: instruction=185 operation=GetProperty(fromAsync) detail=GetProperty lookup refused function=Array receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Array.prototype": {
+   "expr": "globalThis.Array.prototype",
+   "interpreted": {
+    "at": "function",
+    "concat": "function",
+    "constructor": "function",
+    "copyWithin": "function",
+    "entries": "function",
+    "every": "function",
+    "fill": "function",
+    "filter": "function",
+    "find": "function",
+    "findIndex": "function",
+    "findLast": "function",
+    "findLastIndex": "function",
+    "flat": "function",
+    "flatMap": "function",
+    "forEach": "function",
+    "includes": "function",
+    "indexOf": "function",
+    "join": "function",
+    "keys": "function",
+    "lastIndexOf": "function",
+    "map": "function",
+    "pop": "function",
+    "push": "function",
+    "reduce": "function",
+    "reduceRight": "function",
+    "reverse": "function",
+    "shift": "function",
+    "slice": "function",
+    "some": "function",
+    "sort": "function",
+    "splice": "function",
+    "toReversed": "function",
+    "toSorted": "function",
+    "toSpliced": "function",
+    "toString": "function",
+    "unshift": "function",
+    "values": "function",
+    "with": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "at": "function",
+    "concat": "function",
+    "constructor": "function",
+    "copyWithin": "function",
+    "entries": "function",
+    "every": "function",
+    "fill": "function",
+    "filter": "function",
+    "find": "function",
+    "findIndex": "function",
+    "findLast": "function",
+    "findLastIndex": "function",
+    "flat": "function",
+    "flatMap": "function",
+    "forEach": "function",
+    "includes": "function",
+    "indexOf": "function",
+    "join": "function",
+    "keys": "function",
+    "lastIndexOf": "function",
+    "map": "function",
+    "pop": "function",
+    "push": "function",
+    "reduce": "function",
+    "reduceRight": "function",
+    "reverse": "function",
+    "shift": "function",
+    "slice": "function",
+    "some": "function",
+    "sort": "function",
+    "splice": "function",
+    "toReversed": "function",
+    "toSorted": "function",
+    "toSpliced": "function",
+    "toString": "function",
+    "unshift": "function",
+    "with": "function"
+   },
+   "native_names": [
+    "at",
+    "concat",
+    "constructor",
+    "copyWithin",
+    "entries",
+    "every",
+    "fill",
+    "filter",
+    "find",
+    "findIndex",
+    "findLast",
+    "findLastIndex",
+    "flat",
+    "flatMap",
+    "forEach",
+    "includes",
+    "indexOf",
+    "join",
+    "keys",
+    "lastIndexOf",
+    "map",
+    "pop",
+    "push",
+    "reduce",
+    "reduceRight",
+    "reverse",
+    "shift",
+    "slice",
+    "some",
+    "sort",
+    "splice",
+    "toLocaleString",
+    "toString",
+    "unshift"
+   ],
+   "refused": {
+    "values": "refusal: instruction=874 operation=GetProperty(values) detail=GetProperty lookup refused function=Array receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "ArrayBuffer": {
+   "expr": "globalThis.ArrayBuffer",
+   "interpreted": {
+    "isView": "function",
+    "length": "number 1",
+    "name": "string \"ArrayBuffer\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "isView": "function",
+    "length": "undefined",
+    "name": "string \"ArrayBuffer\"",
+    "prototype": "undefined"
+   },
+   "native_names": [
+    "isView",
+    "name"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "ArrayBuffer.prototype": {
+   "expr": "globalThis.ArrayBuffer.prototype",
+   "interpreted": {
+    "byteLength": "throws",
+    "constructor": "function",
+    "detached": "throws",
+    "immutable": "throws",
+    "maxByteLength": "throws",
+    "resizable": "throws",
+    "resize": "function",
+    "slice": "function",
+    "sliceToImmutable": "function",
+    "transfer": "function",
+    "transferToFixedLength": "function",
+    "transferToImmutable": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": [],
+   "refused": {},
+   "self_description": null,
+   "unreachable": "native: receiver is undefined"
+  },
+  "AsyncDisposableStack": {
+   "expr": "globalThis.AsyncDisposableStack",
+   "interpreted": {
+    "length": "number 0",
+    "name": "string \"AsyncDisposableStack\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"AsyncDisposableStack\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "AsyncDisposableStack.prototype": {
+   "expr": "globalThis.AsyncDisposableStack.prototype",
+   "interpreted": {
+    "adopt": "function",
+    "constructor": "function",
+    "defer": "function",
+    "disposeAsync": "function",
+    "disposed": "throws",
+    "move": "function",
+    "use": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "adopt": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+    "defer": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+    "disposeAsync": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+    "disposed": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+    "move": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+    "use": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+   "unreachable": null
+  },
+  "Atomics": {
+   "expr": "globalThis.Atomics",
+   "interpreted": {
+    "@@toStringTag": "string \"Atomics\"",
+    "add": "function",
+    "and": "function",
+    "compareExchange": "function",
+    "exchange": "function",
+    "isLockFree": "function",
+    "load": "function",
+    "notify": "function",
+    "or": "function",
+    "pause": "function",
+    "store": "function",
+    "sub": "function",
+    "wait": "function",
+    "waitAsync": "function",
+    "xor": "function"
+   },
+   "kind": "static",
+   "native": {
+    "@@toStringTag": "undefined",
+    "add": "function",
+    "and": "function",
+    "compareExchange": "function",
+    "exchange": "function",
+    "isLockFree": "function",
+    "load": "function",
+    "notify": "function",
+    "or": "function",
+    "pause": "function",
+    "store": "function",
+    "sub": "function",
+    "wait": "function",
+    "waitAsync": "function",
+    "xor": "function"
+   },
+   "native_names": [
+    "add",
+    "and",
+    "compareExchange",
+    "exchange",
+    "isLockFree",
+    "load",
+    "notify",
+    "or",
+    "pause",
+    "store",
+    "sub",
+    "wait",
+    "waitAsync",
+    "xor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "BigInt": {
+   "expr": "globalThis.BigInt",
+   "interpreted": {
+    "asIntN": "function",
+    "asUintN": "function",
+    "length": "number 1",
+    "name": "string \"BigInt\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"BigInt\""
+   },
+   "native_names": null,
+   "refused": {
+    "asIntN": "refusal: instruction=45 operation=GetProperty(asIntN) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+    "asUintN": "refusal: instruction=45 operation=GetProperty(asUintN) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "BigInt.prototype": {
+   "expr": "globalThis.BigInt.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "toLocaleString": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+    "toLocaleString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+    "toString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+    "valueOf": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+   "unreachable": null
+  },
+  "BigInt64Array": {
+   "expr": "globalThis.BigInt64Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"BigInt64Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"BigInt64Array\""
+   },
+   "native_names": null,
+   "refused": {
+    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "from": "refusal: instruction=45 operation=GetProperty(from) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "of": "refusal: instruction=68 operation=GetProperty(of) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "BigInt64Array.prototype": {
+   "expr": "globalThis.BigInt64Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+   "unreachable": null
+  },
+  "BigInt64Array.prototype^": {
+   "expr": "Object.getPrototypeOf(globalThis.BigInt64Array.prototype)",
+   "interpreted": {
+    "at": "function",
+    "buffer": "throws",
+    "byteLength": "throws",
+    "byteOffset": "throws",
+    "constructor": "function",
+    "copyWithin": "function",
+    "entries": "function",
+    "every": "function",
+    "fill": "function",
+    "filter": "function",
+    "find": "function",
+    "findIndex": "function",
+    "findLast": "function",
+    "findLastIndex": "function",
+    "forEach": "function",
+    "includes": "function",
+    "indexOf": "function",
+    "join": "function",
+    "keys": "function",
+    "lastIndexOf": "function",
+    "length": "throws",
+    "map": "function",
+    "reduce": "function",
+    "reduceRight": "function",
+    "reverse": "function",
+    "set": "function",
+    "slice": "function",
+    "some": "function",
+    "sort": "function",
+    "subarray": "function",
+    "toReversed": "function",
+    "toSorted": "function",
+    "toString": "function",
+    "values": "function",
+    "with": "function"
+   },
+   "kind": "inherited",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "at": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "buffer": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "byteLength": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "byteOffset": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "constructor": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "copyWithin": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "entries": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "every": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "fill": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "filter": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "find": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "findIndex": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "findLast": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "findLastIndex": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "forEach": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "includes": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "indexOf": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "join": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "keys": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "lastIndexOf": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "length": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "map": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "reduce": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "reduceRight": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "reverse": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "set": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "slice": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "some": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "sort": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "subarray": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "toReversed": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "toSorted": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "toString": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "values": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+    "with": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=5 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+   "unreachable": null
+  },
+  "BigInt64Array^": {
+   "expr": "Object.getPrototypeOf(globalThis.BigInt64Array)",
+   "interpreted": {
+    "@@species": "function",
+    "length": "number 0",
+    "name": "string \"intrinsic\"",
+    "prototype": "object"
+   },
+   "kind": "inherited",
+   "native": {
+    "@@species": "undefined"
+   },
+   "native_names": [
+    "apply",
+    "bind",
+    "call",
+    "constructor"
+   ],
+   "refused": {
+    "length": "refusal: instruction=72 operation=GetProperty(length) detail=GetProperty lookup refused function=Function receiver_tag=8",
+    "name": "refusal: instruction=47 operation=GetProperty(name) detail=GetProperty lookup refused function=Function receiver_tag=8",
+    "prototype": "refusal: instruction=47 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Function receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "BigUint64Array": {
+   "expr": "globalThis.BigUint64Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"BigUint64Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"BigUint64Array\""
+   },
+   "native_names": null,
+   "refused": {
+    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
+    "from": "refusal: instruction=45 operation=GetProperty(from) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
+    "of": "refusal: instruction=68 operation=GetProperty(of) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "BigUint64Array.prototype": {
+   "expr": "globalThis.BigUint64Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
+   "unreachable": null
+  },
+  "Boolean": {
+   "expr": "globalThis.Boolean",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"Boolean\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"Boolean\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Boolean.prototype": {
+   "expr": "globalThis.Boolean.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "toLocaleString": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
+    "toLocaleString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
+    "toString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
+    "valueOf": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
+   "unreachable": null
+  },
+  "Buffer": {
+   "expr": "globalThis.Buffer",
+   "interpreted": {
+    "alloc": "function",
+    "allocUnsafe": "function",
+    "allocUnsafeSlow": "function",
+    "byteLength": "function",
+    "concat": "function",
+    "constants": "object",
+    "from": "function",
+    "isBuffer": "function",
+    "length": "number 1",
+    "name": "string \"nodeBufferGlobal\""
+   },
+   "kind": "static",
+   "native": {
+    "alloc": "function",
+    "allocUnsafe": "function",
+    "allocUnsafeSlow": "function",
+    "byteLength": "function",
+    "concat": "function",
+    "from": "function",
+    "isBuffer": "function",
+    "length": "undefined",
+    "name": "string \"Buffer\""
+   },
+   "native_names": [
+    "alloc",
+    "allocUnsafe",
+    "allocUnsafeSlow",
+    "byteLength",
+    "concat",
+    "from",
+    "isBuffer",
+    "name"
+   ],
+   "refused": {
+    "constants": "refusal: instruction=229 operation=GetProperty(constants) detail=GetProperty lookup refused function=Buffer receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "DataView": {
+   "expr": "globalThis.DataView",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"DataView\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"DataView\"",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=DataView receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "DataView.prototype": {
+   "expr": "globalThis.DataView.prototype",
+   "interpreted": {
+    "buffer": "throws",
+    "byteLength": "throws",
+    "byteOffset": "throws",
+    "constructor": "function",
+    "getBigInt64": "function",
+    "getBigUint64": "function",
+    "getFloat32": "function",
+    "getFloat64": "function",
+    "getInt16": "function",
+    "getInt32": "function",
+    "getInt8": "function",
+    "getUint16": "function",
+    "getUint32": "function",
+    "getUint8": "function",
+    "setBigInt64": "function",
+    "setBigUint64": "function",
+    "setFloat32": "function",
+    "setFloat64": "function",
+    "setInt16": "function",
+    "setInt32": "function",
+    "setInt8": "function",
+    "setUint16": "function",
+    "setUint32": "function",
+    "setUint8": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "getBigInt64": "function",
+    "getBigUint64": "function",
+    "getFloat32": "function",
+    "getFloat64": "function",
+    "getInt16": "function",
+    "getInt32": "function",
+    "getInt8": "function",
+    "getUint16": "function",
+    "getUint32": "function",
+    "getUint8": "function",
+    "setBigInt64": "function",
+    "setBigUint64": "function",
+    "setFloat32": "function",
+    "setFloat64": "function",
+    "setInt16": "function",
+    "setInt32": "function",
+    "setInt8": "function",
+    "setUint16": "function",
+    "setUint32": "function",
+    "setUint8": "function"
+   },
+   "native_names": [
+    "constructor",
+    "getBigInt64",
+    "getBigUint64",
+    "getFloat32",
+    "getFloat64",
+    "getInt16",
+    "getInt32",
+    "getInt8",
+    "getUint16",
+    "getUint32",
+    "getUint8",
+    "setBigInt64",
+    "setBigUint64",
+    "setFloat32",
+    "setFloat64",
+    "setInt16",
+    "setInt32",
+    "setInt8",
+    "setUint16",
+    "setUint32",
+    "setUint8"
+   ],
+   "refused": {
+    "buffer": "refusal: instruction=529 operation=GetProperty(buffer) detail=GetProperty lookup refused function=DataView receiver_tag=8",
+    "byteLength": "refusal: instruction=46 operation=GetProperty(byteLength) detail=GetProperty lookup refused function=DataView receiver_tag=8",
+    "byteOffset": "refusal: instruction=46 operation=GetProperty(byteOffset) detail=GetProperty lookup refused function=DataView receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Date": {
+   "expr": "globalThis.Date",
+   "interpreted": {
+    "UTC": "function",
+    "length": "number 7",
+    "name": "string \"Date\"",
+    "now": "function",
+    "parse": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "UTC": "function",
+    "length": "undefined",
+    "name": "string \"Date\"",
+    "now": "function",
+    "parse": "function",
+    "prototype": "object"
+   },
+   "native_names": [
+    "UTC",
+    "name",
+    "now",
+    "parse",
+    "prototype"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Date.prototype": {
+   "expr": "globalThis.Date.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "getDate": "function",
+    "getDay": "function",
+    "getFullYear": "function",
+    "getHours": "function",
+    "getMilliseconds": "function",
+    "getMinutes": "function",
+    "getMonth": "function",
+    "getSeconds": "function",
+    "getTime": "function",
+    "getTimezoneOffset": "function",
+    "getUTCDate": "function",
+    "getUTCDay": "function",
+    "getUTCFullYear": "function",
+    "getUTCHours": "function",
+    "getUTCMilliseconds": "function",
+    "getUTCMinutes": "function",
+    "getUTCMonth": "function",
+    "getUTCSeconds": "function",
+    "getYear": "function",
+    "setDate": "function",
+    "setFullYear": "function",
+    "setHours": "function",
+    "setMilliseconds": "function",
+    "setMinutes": "function",
+    "setMonth": "function",
+    "setSeconds": "function",
+    "setTime": "function",
+    "setUTCDate": "function",
+    "setUTCFullYear": "function",
+    "setUTCHours": "function",
+    "setUTCMilliseconds": "function",
+    "setUTCMinutes": "function",
+    "setUTCMonth": "function",
+    "setUTCSeconds": "function",
+    "setYear": "function",
+    "toDateString": "function",
+    "toGMTString": "function",
+    "toISOString": "function",
+    "toJSON": "function",
+    "toLocaleDateString": "function",
+    "toLocaleString": "function",
+    "toLocaleTimeString": "function",
+    "toString": "function",
+    "toTimeString": "function",
+    "toUTCString": "function",
+    "valueOf": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "getDate": "function",
+    "getDay": "function",
+    "getFullYear": "function",
+    "getHours": "function",
+    "getMilliseconds": "function",
+    "getMinutes": "function",
+    "getMonth": "function",
+    "getSeconds": "function",
+    "getTime": "function",
+    "getTimezoneOffset": "function",
+    "toISOString": "function",
+    "toJSON": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "native_names": [
+    "constructor",
+    "getDate",
+    "getDay",
+    "getFullYear",
+    "getHours",
+    "getMilliseconds",
+    "getMinutes",
+    "getMonth",
+    "getSeconds",
+    "getTime",
+    "getTimezoneOffset",
+    "toISOString",
+    "toJSON",
+    "toString"
+   ],
+   "refused": {
+    "getUTCDate": "refusal: instruction=368 operation=GetProperty(getUTCDate) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getUTCDay": "refusal: instruction=46 operation=GetProperty(getUTCDay) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getUTCFullYear": "refusal: instruction=46 operation=GetProperty(getUTCFullYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getUTCHours": "refusal: instruction=46 operation=GetProperty(getUTCHours) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getUTCMilliseconds": "refusal: instruction=46 operation=GetProperty(getUTCMilliseconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getUTCMinutes": "refusal: instruction=46 operation=GetProperty(getUTCMinutes) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getUTCMonth": "refusal: instruction=46 operation=GetProperty(getUTCMonth) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getUTCSeconds": "refusal: instruction=46 operation=GetProperty(getUTCSeconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "getYear": "refusal: instruction=46 operation=GetProperty(getYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setDate": "refusal: instruction=46 operation=GetProperty(setDate) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setFullYear": "refusal: instruction=46 operation=GetProperty(setFullYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setHours": "refusal: instruction=46 operation=GetProperty(setHours) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setMilliseconds": "refusal: instruction=46 operation=GetProperty(setMilliseconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setMinutes": "refusal: instruction=46 operation=GetProperty(setMinutes) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setMonth": "refusal: instruction=46 operation=GetProperty(setMonth) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setSeconds": "refusal: instruction=46 operation=GetProperty(setSeconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setTime": "refusal: instruction=46 operation=GetProperty(setTime) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setUTCDate": "refusal: instruction=46 operation=GetProperty(setUTCDate) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setUTCFullYear": "refusal: instruction=46 operation=GetProperty(setUTCFullYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setUTCHours": "refusal: instruction=46 operation=GetProperty(setUTCHours) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setUTCMilliseconds": "refusal: instruction=46 operation=GetProperty(setUTCMilliseconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setUTCMinutes": "refusal: instruction=46 operation=GetProperty(setUTCMinutes) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setUTCMonth": "refusal: instruction=46 operation=GetProperty(setUTCMonth) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setUTCSeconds": "refusal: instruction=46 operation=GetProperty(setUTCSeconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "setYear": "refusal: instruction=46 operation=GetProperty(setYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "toDateString": "refusal: instruction=46 operation=GetProperty(toDateString) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "toGMTString": "refusal: instruction=46 operation=GetProperty(toGMTString) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "toLocaleDateString": "refusal: instruction=46 operation=GetProperty(toLocaleDateString) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "toLocaleString": "refusal: instruction=46 operation=GetProperty(toLocaleString) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "toLocaleTimeString": "refusal: instruction=46 operation=GetProperty(toLocaleTimeString) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "toTimeString": "refusal: instruction=46 operation=GetProperty(toTimeString) detail=GetProperty lookup refused function=Date receiver_tag=8",
+    "toUTCString": "refusal: instruction=46 operation=GetProperty(toUTCString) detail=GetProperty lookup refused function=Date receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "DisposableStack": {
+   "expr": "globalThis.DisposableStack",
+   "interpreted": {
+    "length": "number 0",
+    "name": "string \"DisposableStack\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"DisposableStack\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "DisposableStack.prototype": {
+   "expr": "globalThis.DisposableStack.prototype",
+   "interpreted": {
+    "adopt": "function",
+    "constructor": "function",
+    "defer": "function",
+    "dispose": "function",
+    "disposed": "throws",
+    "move": "function",
+    "use": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "adopt": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+    "defer": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+    "dispose": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+    "disposed": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+    "move": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+    "use": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+   "unreachable": null
+  },
+  "Error": {
+   "expr": "globalThis.Error",
+   "interpreted": {
+    "captureStackTrace": "function",
+    "isError": "function",
+    "length": "number 1",
+    "name": "string \"Error\""
+   },
+   "kind": "static",
+   "native": {
+    "captureStackTrace": "function",
+    "length": "undefined",
+    "name": "string \"Error\""
+   },
+   "native_names": [
+    "captureStackTrace",
+    "name",
+    "prototype"
+   ],
+   "refused": {
+    "isError": "refusal: instruction=91 operation=GetProperty(isError) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Error.prototype": {
+   "expr": "globalThis.Error.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"Error\"",
+    "toString": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "toString": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "message": "refusal: instruction=92 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "EvalError": {
+   "expr": "globalThis.EvalError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"EvalError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"EvalError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=EvalError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "EvalError.prototype": {
+   "expr": "globalThis.EvalError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"EvalError\""
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "FinalizationRegistry": {
+   "expr": "globalThis.FinalizationRegistry",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"FinalizationRegistry\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"FinalizationRegistry\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "FinalizationRegistry.prototype": {
+   "expr": "globalThis.FinalizationRegistry.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "register": "function",
+    "unregister": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
+    "register": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
+    "unregister": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
+   "unreachable": null
+  },
+  "Float16Array": {
+   "expr": "globalThis.Float16Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Float16Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"Float16Array\""
+   },
+   "native_names": null,
+   "refused": {
+    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
+    "from": "refusal: instruction=45 operation=GetProperty(from) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
+    "of": "refusal: instruction=68 operation=GetProperty(of) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Float16Array.prototype": {
+   "expr": "globalThis.Float16Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
+   "unreachable": null
+  },
+  "Float32Array": {
+   "expr": "globalThis.Float32Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Float32Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "from": "function",
+    "name": "string \"Float32Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Float32Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Float32Array.prototype": {
+   "expr": "globalThis.Float32Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Float64Array": {
+   "expr": "globalThis.Float64Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Float64Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "from": "function",
+    "name": "string \"Float64Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Float64Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Float64Array.prototype": {
+   "expr": "globalThis.Float64Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 8",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Function": {
+   "expr": "globalThis.Function",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"Function\"",
+    "prototype": "function"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"Function\"",
+    "prototype": "function"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Function receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Function.prototype": {
+   "expr": "globalThis.Function.prototype",
+   "interpreted": {
+    "apply": "function",
+    "arguments": "undefined",
+    "bind": "function",
+    "call": "function",
+    "caller": "undefined",
+    "constructor": "function",
+    "toString": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "apply": "function",
+    "bind": "function",
+    "call": "function",
+    "constructor": "function",
+    "toString": "function"
+   },
+   "native_names": [
+    "apply",
+    "bind",
+    "call",
+    "constructor"
+   ],
+   "refused": {
+    "arguments": "refusal: instruction=138 operation=GetProperty(arguments) detail=GetProperty lookup refused function=Function receiver_tag=8",
+    "caller": "refusal: instruction=46 operation=GetProperty(caller) detail=GetProperty lookup refused function=Function receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Int16Array": {
+   "expr": "globalThis.Int16Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Int16Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "from": "function",
+    "name": "string \"Int16Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Int16Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Int16Array.prototype": {
+   "expr": "globalThis.Int16Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Int32Array": {
+   "expr": "globalThis.Int32Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Int32Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "from": "function",
+    "name": "string \"Int32Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Int32Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Int32Array.prototype": {
+   "expr": "globalThis.Int32Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Int8Array": {
+   "expr": "globalThis.Int8Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Int8Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "from": "function",
+    "name": "string \"Int8Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Int8Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Int8Array.prototype": {
+   "expr": "globalThis.Int8Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Iterator": {
+   "expr": "globalThis.Iterator",
+   "interpreted": {
+    "concat": "function",
+    "from": "function",
+    "length": "number 0",
+    "name": "string \"Iterator\"",
+    "prototype": "object",
+    "zip": "function",
+    "zipKeyed": "function"
+   },
+   "kind": "static",
+   "native": {
+    "from": "function",
+    "length": "undefined",
+    "name": "string \"Iterator\"",
+    "prototype": "object"
+   },
+   "native_names": [
+    "from",
+    "name",
+    "prototype"
+   ],
+   "refused": {
+    "concat": "refusal: instruction=114 operation=GetProperty(concat) detail=GetProperty lookup refused function=Iterator receiver_tag=8",
+    "zip": "refusal: instruction=68 operation=GetProperty(zip) detail=GetProperty lookup refused function=Iterator receiver_tag=8",
+    "zipKeyed": "refusal: instruction=45 operation=GetProperty(zipKeyed) detail=GetProperty lookup refused function=Iterator receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Iterator.prototype": {
+   "expr": "globalThis.Iterator.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "drop": "function",
+    "every": "function",
+    "filter": "function",
+    "find": "function",
+    "flatMap": "function",
+    "forEach": "function",
+    "map": "function",
+    "reduce": "function",
+    "some": "function",
+    "take": "function",
+    "toArray": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "drop": "function",
+    "every": "function",
+    "filter": "function",
+    "find": "function",
+    "flatMap": "function",
+    "forEach": "function",
+    "map": "function",
+    "reduce": "function",
+    "some": "function",
+    "take": "function",
+    "toArray": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "JSON": {
+   "expr": "globalThis.JSON",
+   "interpreted": {
+    "@@toStringTag": "string \"JSON\"",
+    "isRawJSON": "function",
+    "parse": "function",
+    "rawJSON": "function",
+    "stringify": "function"
+   },
+   "kind": "static",
+   "native": {
+    "@@toStringTag": "string \"JSON\"",
+    "parse": "function",
+    "stringify": "function"
+   },
+   "native_names": [
+    "parse",
+    "stringify"
+   ],
+   "refused": {
+    "isRawJSON": "refusal: instruction=116 operation=GetProperty(isRawJSON) detail=GetProperty lookup refused function=JSON receiver_tag=8",
+    "rawJSON": "refusal: instruction=45 operation=GetProperty(rawJSON) detail=GetProperty lookup refused function=JSON receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Map": {
+   "expr": "globalThis.Map",
+   "interpreted": {
+    "groupBy": "function",
+    "length": "number 0",
+    "name": "string \"Map\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"Map\"",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "groupBy": "refusal: instruction=45 operation=GetProperty(groupBy) detail=GetProperty lookup refused function=Map receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Map receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Map.prototype": {
+   "expr": "globalThis.Map.prototype",
+   "interpreted": {
+    "clear": "function",
+    "constructor": "function",
+    "delete": "function",
+    "entries": "function",
+    "forEach": "function",
+    "get": "function",
+    "getOrInsert": "function",
+    "getOrInsertComputed": "function",
+    "has": "function",
+    "keys": "function",
+    "set": "function",
+    "size": "throws",
+    "values": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "clear": "function",
+    "constructor": "function",
+    "delete": "function",
+    "entries": "function",
+    "forEach": "function",
+    "get": "function",
+    "has": "function",
+    "keys": "function",
+    "set": "function",
+    "values": "function"
+   },
+   "native_names": [
+    "add",
+    "clear",
+    "constructor",
+    "delete",
+    "entries",
+    "forEach",
+    "get",
+    "has",
+    "keys",
+    "set",
+    "values"
+   ],
+   "refused": {
+    "getOrInsert": "refusal: instruction=276 operation=GetProperty(getOrInsert) detail=GetProperty lookup refused function=Map receiver_tag=8",
+    "getOrInsertComputed": "refusal: instruction=46 operation=GetProperty(getOrInsertComputed) detail=GetProperty lookup refused function=Map receiver_tag=8",
+    "size": "refusal: instruction=46 operation=GetProperty(size) detail=GetProperty lookup refused function=Map receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Math": {
+   "expr": "globalThis.Math",
+   "interpreted": {
+    "@@toStringTag": "string \"Math\"",
+    "E": "number 2.718281828459045",
+    "LN10": "number 2.302585092994046",
+    "LN2": "number 0.6931471805599453",
+    "LOG10E": "number 0.4342944819032518",
+    "LOG2E": "number 1.4426950408889634",
+    "PI": "number 3.141592653589793",
+    "SQRT1_2": "number 0.7071067811865476",
+    "SQRT2": "number 1.4142135623730951",
+    "abs": "function",
+    "acos": "function",
+    "acosh": "function",
+    "asin": "function",
+    "asinh": "function",
+    "atan": "function",
+    "atan2": "function",
+    "atanh": "function",
+    "cbrt": "function",
+    "ceil": "function",
+    "clz32": "function",
+    "cos": "function",
+    "cosh": "function",
+    "exp": "function",
+    "expm1": "function",
+    "f16round": "function",
+    "floor": "function",
+    "fround": "function",
+    "hypot": "function",
+    "imul": "function",
+    "log": "function",
+    "log10": "function",
+    "log1p": "function",
+    "log2": "function",
+    "max": "function",
+    "min": "function",
+    "pow": "function",
+    "random": "function",
+    "round": "function",
+    "sign": "function",
+    "sin": "function",
+    "sinh": "function",
+    "sqrt": "function",
+    "tan": "function",
+    "tanh": "function",
+    "trunc": "function"
+   },
+   "kind": "static",
+   "native": {
+    "@@toStringTag": "string \"Math\"",
+    "E": "number 2.718281828459045",
+    "LN10": "number 2.302585092994046",
+    "LN2": "number 0.6931471805599453",
+    "LOG10E": "number 0.4342944819032518",
+    "LOG2E": "number 1.4426950408889634",
+    "PI": "number 3.141592653589793",
+    "SQRT1_2": "number 0.7071067811865476",
+    "SQRT2": "number 1.4142135623730951",
+    "abs": "function",
+    "acos": "function",
+    "acosh": "function",
+    "asin": "function",
+    "asinh": "function",
+    "atan": "function",
+    "atan2": "function",
+    "atanh": "function",
+    "cbrt": "function",
+    "ceil": "function",
+    "clz32": "function",
+    "cos": "function",
+    "cosh": "function",
+    "exp": "function",
+    "expm1": "function",
+    "floor": "function",
+    "fround": "function",
+    "hypot": "function",
+    "imul": "function",
+    "log": "function",
+    "log10": "function",
+    "log1p": "function",
+    "log2": "function",
+    "max": "function",
+    "min": "function",
+    "pow": "function",
+    "random": "function",
+    "round": "function",
+    "sign": "function",
+    "sin": "function",
+    "sinh": "function",
+    "sqrt": "function",
+    "tan": "function",
+    "tanh": "function",
+    "trunc": "function"
+   },
+   "native_names": [
+    "E",
+    "LN10",
+    "LN2",
+    "LOG10E",
+    "LOG2E",
+    "PI",
+    "SQRT1_2",
+    "SQRT2",
+    "abs",
+    "acos",
+    "acosh",
+    "asin",
+    "asinh",
+    "atan",
+    "atan2",
+    "atanh",
+    "cbrt",
+    "ceil",
+    "clz32",
+    "cos",
+    "cosh",
+    "exp",
+    "expm1",
+    "floor",
+    "fround",
+    "hypot",
+    "imul",
+    "log",
+    "log10",
+    "log1p",
+    "log2",
+    "max",
+    "min",
+    "pow",
+    "random",
+    "round",
+    "sign",
+    "sin",
+    "sinh",
+    "sqrt",
+    "tan",
+    "tanh",
+    "trunc"
+   ],
+   "refused": {
+    "f16round": "refusal: instruction=1059 operation=GetProperty(f16round) detail=GetProperty lookup refused function=Math receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Number": {
+   "expr": "globalThis.Number",
+   "interpreted": {
+    "EPSILON": "number 2.220446049250313e-16",
+    "MAX_SAFE_INTEGER": "number 9007199254740991",
+    "MAX_VALUE": "number 1.7976931348623157e+308",
+    "MIN_SAFE_INTEGER": "number -9007199254740991",
+    "MIN_VALUE": "number 5e-324",
+    "NEGATIVE_INFINITY": "number -Infinity",
+    "NaN": "number NaN",
+    "POSITIVE_INFINITY": "number Infinity",
+    "isFinite": "function",
+    "isInteger": "function",
+    "isNaN": "function",
+    "isSafeInteger": "function",
+    "length": "number 1",
+    "name": "string \"Number\"",
+    "parseFloat": "function",
+    "parseInt": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "EPSILON": "number 2.220446049250313e-16",
+    "MAX_SAFE_INTEGER": "number 9007199254740991",
+    "MAX_VALUE": "number 1.7976931348623157e+308",
+    "MIN_SAFE_INTEGER": "number -9007199254740991",
+    "MIN_VALUE": "number 5e-324",
+    "NEGATIVE_INFINITY": "number -Infinity",
+    "NaN": "number NaN",
+    "POSITIVE_INFINITY": "number Infinity",
+    "isFinite": "function",
+    "isInteger": "function",
+    "isNaN": "function",
+    "isSafeInteger": "function",
+    "length": "undefined",
+    "name": "string \"Number\"",
+    "parseFloat": "function",
+    "parseInt": "function",
+    "prototype": "object"
+   },
+   "native_names": [
+    "EPSILON",
+    "MAX_SAFE_INTEGER",
+    "MAX_VALUE",
+    "MIN_SAFE_INTEGER",
+    "MIN_VALUE",
+    "NEGATIVE_INFINITY",
+    "NaN",
+    "POSITIVE_INFINITY",
+    "isFinite",
+    "isInteger",
+    "isNaN",
+    "isSafeInteger",
+    "name",
+    "parseFloat",
+    "parseInt",
+    "prototype"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Number.prototype": {
+   "expr": "globalThis.Number.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "toExponential": "function",
+    "toFixed": "function",
+    "toPrecision": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "toFixed": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "native_names": [
+    "constructor",
+    "toFixed",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "toExponential": "refusal: instruction=138 operation=GetProperty(toExponential) detail=GetProperty lookup refused function=Number receiver_tag=8",
+    "toPrecision": "refusal: instruction=46 operation=GetProperty(toPrecision) detail=GetProperty lookup refused function=Number receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Object": {
+   "expr": "globalThis.Object",
+   "interpreted": {
+    "assign": "function",
+    "create": "function",
+    "defineProperties": "function",
+    "defineProperty": "function",
+    "entries": "function",
+    "freeze": "function",
+    "fromEntries": "function",
+    "getOwnPropertyDescriptor": "function",
+    "getOwnPropertyDescriptors": "function",
+    "getOwnPropertyNames": "function",
+    "getOwnPropertySymbols": "function",
+    "getPrototypeOf": "function",
+    "groupBy": "function",
+    "hasOwn": "function",
+    "is": "function",
+    "isExtensible": "function",
+    "isFrozen": "function",
+    "isSealed": "function",
+    "keys": "function",
+    "length": "number 1",
+    "name": "string \"Object\"",
+    "preventExtensions": "function",
+    "prototype": "object",
+    "seal": "function",
+    "setPrototypeOf": "function",
+    "values": "function"
+   },
+   "kind": "static",
+   "native": {
+    "assign": "function",
+    "create": "function",
+    "defineProperties": "function",
+    "defineProperty": "function",
+    "entries": "function",
+    "freeze": "function",
+    "fromEntries": "function",
+    "getOwnPropertyDescriptor": "function",
+    "getOwnPropertyDescriptors": "function",
+    "getOwnPropertyNames": "function",
+    "getOwnPropertySymbols": "function",
+    "getPrototypeOf": "function",
+    "hasOwn": "function",
+    "is": "function",
+    "isExtensible": "function",
+    "isFrozen": "function",
+    "keys": "function",
+    "length": "undefined",
+    "name": "string \"Object\"",
+    "preventExtensions": "function",
+    "prototype": "object",
+    "setPrototypeOf": "function",
+    "values": "function"
+   },
+   "native_names": [
+    "assign",
+    "create",
+    "defineProperties",
+    "defineProperty",
+    "entries",
+    "freeze",
+    "fromEntries",
+    "getOwnPropertyDescriptor",
+    "getOwnPropertyDescriptors",
+    "getOwnPropertyNames",
+    "getOwnPropertySymbols",
+    "getPrototypeOf",
+    "hasOwn",
+    "is",
+    "isExtensible",
+    "isFrozen",
+    "keys",
+    "name",
+    "preventExtensions",
+    "prototype",
+    "setPrototypeOf",
+    "values"
+   ],
+   "refused": {
+    "groupBy": "refusal: instruction=551 operation=GetProperty(groupBy) detail=GetProperty lookup refused function=Object receiver_tag=8",
+    "isSealed": "refusal: instruction=45 operation=GetProperty(isSealed) detail=GetProperty lookup refused function=Object receiver_tag=8",
+    "seal": "refusal: instruction=68 operation=GetProperty(seal) detail=GetProperty lookup refused function=Object receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Object.prototype": {
+   "expr": "globalThis.Object.prototype",
+   "interpreted": {
+    "__defineGetter__": "function",
+    "__defineSetter__": "function",
+    "__lookupGetter__": "function",
+    "__lookupSetter__": "function",
+    "__proto__": "undefined",
+    "constructor": "function",
+    "hasOwnProperty": "function",
+    "isPrototypeOf": "function",
+    "propertyIsEnumerable": "function",
+    "toLocaleString": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "hasOwnProperty": "function",
+    "isPrototypeOf": "function",
+    "propertyIsEnumerable": "function",
+    "toLocaleString": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "isPrototypeOf",
+    "propertyIsEnumerable",
+    "toLocaleString",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "__defineGetter__": "refusal: instruction=207 operation=GetProperty(__defineGetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
+    "__defineSetter__": "refusal: instruction=46 operation=GetProperty(__defineSetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
+    "__lookupGetter__": "refusal: instruction=46 operation=GetProperty(__lookupGetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
+    "__lookupSetter__": "refusal: instruction=46 operation=GetProperty(__lookupSetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
+    "__proto__": "refusal: instruction=46 operation=GetProperty(__proto__) detail=GetProperty lookup refused function=Object receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Promise": {
+   "expr": "globalThis.Promise",
+   "interpreted": {
+    "all": "function",
+    "allSettled": "function",
+    "any": "function",
+    "length": "number 1",
+    "name": "string \"Promise\"",
+    "prototype": "object",
+    "race": "function",
+    "reject": "function",
+    "resolve": "function",
+    "try": "function",
+    "withResolvers": "function"
+   },
+   "kind": "static",
+   "native": {
+    "all": "function",
+    "allSettled": "function",
+    "any": "function",
+    "length": "undefined",
+    "name": "string \"Promise\"",
+    "prototype": "object",
+    "race": "function",
+    "reject": "function",
+    "resolve": "function",
+    "withResolvers": "function"
+   },
+   "native_names": [
+    "all",
+    "allSettled",
+    "any",
+    "name",
+    "prototype",
+    "race",
+    "reject",
+    "resolve",
+    "withResolvers"
+   ],
+   "refused": {
+    "try": "refusal: instruction=275 operation=GetProperty(try) detail=GetProperty lookup refused function=Promise receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Promise.prototype": {
+   "expr": "globalThis.Promise.prototype",
+   "interpreted": {
+    "catch": "function",
+    "constructor": "function",
+    "finally": "function",
+    "then": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "catch": "function",
+    "constructor": "function",
+    "finally": "function",
+    "then": "function"
+   },
+   "native_names": [
+    "catch",
+    "constructor",
+    "finally",
+    "then"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Proxy": {
+   "expr": "globalThis.Proxy",
+   "interpreted": {
+    "length": "number 2",
+    "name": "string \"Proxy\"",
+    "revocable": "function"
+   },
+   "kind": "static",
+   "native": {
+    "length": "undefined",
+    "name": "string \"Proxy\"",
+    "revocable": "function"
+   },
+   "native_names": [
+    "name",
+    "revocable"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "RangeError": {
+   "expr": "globalThis.RangeError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"RangeError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"RangeError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=RangeError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "RangeError.prototype": {
+   "expr": "globalThis.RangeError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"RangeError\""
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "ReferenceError": {
+   "expr": "globalThis.ReferenceError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"ReferenceError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"ReferenceError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=ReferenceError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "ReferenceError.prototype": {
+   "expr": "globalThis.ReferenceError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"ReferenceError\""
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Reflect": {
+   "expr": "globalThis.Reflect",
+   "interpreted": {
+    "@@toStringTag": "string \"Reflect\"",
+    "apply": "function",
+    "construct": "function",
+    "defineProperty": "function",
+    "deleteProperty": "function",
+    "get": "function",
+    "getOwnPropertyDescriptor": "function",
+    "getPrototypeOf": "function",
+    "has": "function",
+    "isExtensible": "function",
+    "ownKeys": "function",
+    "preventExtensions": "function",
+    "set": "function",
+    "setPrototypeOf": "function"
+   },
+   "kind": "static",
+   "native": {
+    "@@toStringTag": "string \"Reflect\"",
+    "apply": "function",
+    "construct": "function",
+    "deleteProperty": "function",
+    "get": "function",
+    "getOwnPropertyDescriptor": "function",
+    "has": "function",
+    "ownKeys": "function",
+    "set": "function"
+   },
+   "native_names": [
+    "apply",
+    "construct",
+    "deleteProperty",
+    "get",
+    "getOwnPropertyDescriptor",
+    "has",
+    "ownKeys",
+    "set"
+   ],
+   "refused": {
+    "defineProperty": "refusal: instruction=254 operation=GetProperty(defineProperty) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
+    "getPrototypeOf": "refusal: instruction=45 operation=GetProperty(getPrototypeOf) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
+    "isExtensible": "refusal: instruction=45 operation=GetProperty(isExtensible) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
+    "preventExtensions": "refusal: instruction=45 operation=GetProperty(preventExtensions) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
+    "setPrototypeOf": "refusal: instruction=45 operation=GetProperty(setPrototypeOf) detail=GetProperty lookup refused function=Reflect receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "RegExp": {
+   "expr": "globalThis.RegExp",
+   "interpreted": {
+    "escape": "function",
+    "length": "number 2",
+    "name": "string \"RegExp\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"RegExp\"",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "escape": "refusal: instruction=45 operation=GetProperty(escape) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=RegExp receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "RegExp.prototype": {
+   "expr": "globalThis.RegExp.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "dotAll": "undefined",
+    "exec": "function",
+    "flags": "string \"\"",
+    "global": "undefined",
+    "hasIndices": "undefined",
+    "ignoreCase": "undefined",
+    "multiline": "undefined",
+    "source": "string \"(?:)\"",
+    "sticky": "undefined",
+    "test": "function",
+    "toString": "function",
+    "unicode": "undefined",
+    "unicodeSets": "undefined"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "exec": "function",
+    "test": "function",
+    "toString": "function"
+   },
+   "native_names": [
+    "constructor",
+    "exec",
+    "test",
+    "toString"
+   ],
+   "refused": {
+    "dotAll": "refusal: instruction=138 operation=GetProperty(dotAll) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "flags": "refusal: instruction=46 operation=GetProperty(flags) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "global": "refusal: instruction=46 operation=GetProperty(global) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "hasIndices": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/linked-artifact/8b/8bb76d93c3be50453a75d376b22db6c7d9e96de784dd6578abc857e8b794db7b: No such file or directory (os error 2)",
+    "ignoreCase": "refusal: instruction=46 operation=GetProperty(ignoreCase) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "multiline": "refusal: instruction=46 operation=GetProperty(multiline) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "source": "refusal: instruction=46 operation=GetProperty(source) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "sticky": "refusal: instruction=46 operation=GetProperty(sticky) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "unicode": "refusal: instruction=46 operation=GetProperty(unicode) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
+    "unicodeSets": "refusal: instruction=46 operation=GetProperty(unicodeSets) detail=GetProperty lookup refused function=RegExp receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "Set": {
+   "expr": "globalThis.Set",
+   "interpreted": {
+    "length": "number 0",
+    "name": "string \"Set\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"Set\"",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Set receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Set.prototype": {
+   "expr": "globalThis.Set.prototype",
+   "interpreted": {
+    "add": "function",
+    "clear": "function",
+    "constructor": "function",
+    "delete": "function",
+    "difference": "function",
+    "entries": "function",
+    "forEach": "function",
+    "has": "function",
+    "intersection": "function",
+    "isDisjointFrom": "function",
+    "isSubsetOf": "function",
+    "isSupersetOf": "function",
+    "keys": "function",
+    "size": "throws",
+    "symmetricDifference": "function",
+    "union": "function",
+    "values": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "add": "function",
+    "clear": "function",
+    "constructor": "function",
+    "delete": "function",
+    "entries": "function",
+    "forEach": "function",
+    "has": "function",
+    "keys": "function",
+    "values": "function"
+   },
+   "native_names": [
+    "add",
+    "clear",
+    "constructor",
+    "delete",
+    "entries",
+    "forEach",
+    "get",
+    "has",
+    "keys",
+    "set",
+    "values"
+   ],
+   "refused": {
+    "difference": "refusal: instruction=253 operation=GetProperty(difference) detail=GetProperty lookup refused function=Set receiver_tag=8",
+    "intersection": "refusal: instruction=46 operation=GetProperty(intersection) detail=GetProperty lookup refused function=Set receiver_tag=8",
+    "isDisjointFrom": "refusal: instruction=46 operation=GetProperty(isDisjointFrom) detail=GetProperty lookup refused function=Set receiver_tag=8",
+    "isSubsetOf": "refusal: instruction=46 operation=GetProperty(isSubsetOf) detail=GetProperty lookup refused function=Set receiver_tag=8",
+    "isSupersetOf": "refusal: instruction=46 operation=GetProperty(isSupersetOf) detail=GetProperty lookup refused function=Set receiver_tag=8",
+    "size": "refusal: instruction=46 operation=GetProperty(size) detail=GetProperty lookup refused function=Set receiver_tag=8",
+    "symmetricDifference": "refusal: instruction=46 operation=GetProperty(symmetricDifference) detail=GetProperty lookup refused function=Set receiver_tag=8",
+    "union": "refusal: instruction=46 operation=GetProperty(union) detail=GetProperty lookup refused function=Set receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "ShadowRealm": {
+   "expr": "globalThis.ShadowRealm",
+   "interpreted": {
+    "length": "number 0",
+    "name": "string \"ShadowRealm\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "length": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8",
+    "name": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8",
+    "prototype": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8"
+   },
+   "self_description": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 3",
+   "unreachable": "native: emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8"
+  },
+  "ShadowRealm.prototype": {
+   "expr": "globalThis.ShadowRealm.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "evaluate": "function",
+    "importValue": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "constructor": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8",
+    "evaluate": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8",
+    "importValue": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8"
+   },
+   "self_description": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 3",
+   "unreachable": "native: emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 8"
+  },
+  "SharedArrayBuffer": {
+   "expr": "globalThis.SharedArrayBuffer",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"SharedArrayBuffer\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"SharedArrayBuffer\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "SharedArrayBuffer.prototype": {
+   "expr": "globalThis.SharedArrayBuffer.prototype",
+   "interpreted": {
+    "byteLength": "throws",
+    "constructor": "function",
+    "grow": "function",
+    "growable": "throws",
+    "maxByteLength": "throws",
+    "slice": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "byteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+    "grow": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+    "growable": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+    "maxByteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+    "slice": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+   "unreachable": null
+  },
+  "String": {
+   "expr": "globalThis.String",
+   "interpreted": {
+    "fromCharCode": "function",
+    "fromCodePoint": "function",
+    "length": "number 1",
+    "name": "string \"String\"",
+    "prototype": "object",
+    "raw": "function"
+   },
+   "kind": "static",
+   "native": {
+    "fromCharCode": "function",
+    "length": "undefined",
+    "name": "string \"String\"",
+    "prototype": "object",
+    "raw": "function"
+   },
+   "native_names": [
+    "fromCharCode",
+    "name",
+    "prototype",
+    "raw"
+   ],
+   "refused": {
+    "fromCodePoint": "refusal: instruction=137 operation=GetProperty(fromCodePoint) detail=GetProperty lookup refused function=String receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "String.prototype": {
+   "expr": "globalThis.String.prototype",
+   "interpreted": {
+    "anchor": "function",
+    "at": "function",
+    "big": "function",
+    "blink": "function",
+    "bold": "function",
+    "charAt": "function",
+    "charCodeAt": "function",
+    "codePointAt": "function",
+    "concat": "function",
+    "constructor": "function",
+    "endsWith": "function",
+    "fixed": "function",
+    "fontcolor": "function",
+    "fontsize": "function",
+    "includes": "function",
+    "indexOf": "function",
+    "italics": "function",
+    "lastIndexOf": "function",
+    "link": "function",
+    "localeCompare": "function",
+    "match": "function",
+    "matchAll": "function",
+    "normalize": "function",
+    "padEnd": "function",
+    "padStart": "function",
+    "repeat": "function",
+    "replace": "function",
+    "replaceAll": "function",
+    "search": "function",
+    "slice": "function",
+    "small": "function",
+    "split": "function",
+    "startsWith": "function",
+    "strike": "function",
+    "sub": "function",
+    "substr": "function",
+    "substring": "function",
+    "sup": "function",
+    "toLocaleLowerCase": "function",
+    "toLocaleString": "function",
+    "toLocaleUpperCase": "function",
+    "toLowerCase": "function",
+    "toString": "function",
+    "toUpperCase": "function",
+    "trim": "function",
+    "trimEnd": "function",
+    "trimLeft": "function",
+    "trimRight": "function",
+    "trimStart": "function",
+    "valueOf": "function",
+    "values": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "at": "function",
+    "charAt": "function",
+    "charCodeAt": "function",
+    "codePointAt": "function",
+    "concat": "function",
+    "constructor": "function",
+    "endsWith": "function",
+    "includes": "function",
+    "indexOf": "function",
+    "lastIndexOf": "function",
+    "localeCompare": "function",
+    "match": "function",
+    "matchAll": "function",
+    "normalize": "function",
+    "padEnd": "function",
+    "padStart": "function",
+    "repeat": "function",
+    "replace": "function",
+    "replaceAll": "function",
+    "search": "function",
+    "slice": "function",
+    "split": "function",
+    "startsWith": "function",
+    "substr": "function",
+    "substring": "function",
+    "toLocaleString": "undefined",
+    "toLowerCase": "function",
+    "toString": "function",
+    "toUpperCase": "function",
+    "trim": "function",
+    "trimEnd": "function",
+    "trimStart": "function",
+    "valueOf": "function",
+    "values": "undefined"
+   },
+   "native_names": [
+    "at",
+    "charAt",
+    "charCodeAt",
+    "codePointAt",
+    "concat",
+    "constructor",
+    "endsWith",
+    "includes",
+    "indexOf",
+    "lastIndexOf",
+    "localeCompare",
+    "match",
+    "matchAll",
+    "normalize",
+    "padEnd",
+    "padStart",
+    "repeat",
+    "replace",
+    "replaceAll",
+    "search",
+    "slice",
+    "split",
+    "startsWith",
+    "substr",
+    "substring",
+    "toLowerCase",
+    "toString",
+    "toUpperCase",
+    "trim",
+    "trimEnd",
+    "trimStart",
+    "valueOf"
+   ],
+   "refused": {
+    "anchor": "refusal: instruction=782 operation=GetProperty(anchor) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "big": "refusal: instruction=46 operation=GetProperty(big) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "blink": "refusal: instruction=46 operation=GetProperty(blink) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "bold": "refusal: instruction=46 operation=GetProperty(bold) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "fixed": "refusal: instruction=46 operation=GetProperty(fixed) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "fontcolor": "refusal: instruction=46 operation=GetProperty(fontcolor) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "fontsize": "refusal: instruction=46 operation=GetProperty(fontsize) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "italics": "refusal: instruction=46 operation=GetProperty(italics) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "link": "refusal: instruction=46 operation=GetProperty(link) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "small": "refusal: instruction=46 operation=GetProperty(small) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "strike": "refusal: instruction=46 operation=GetProperty(strike) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "sub": "refusal: instruction=46 operation=GetProperty(sub) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "sup": "refusal: instruction=46 operation=GetProperty(sup) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "toLocaleLowerCase": "refusal: instruction=46 operation=GetProperty(toLocaleLowerCase) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "toLocaleUpperCase": "refusal: instruction=69 operation=GetProperty(toLocaleUpperCase) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "trimLeft": "refusal: instruction=46 operation=GetProperty(trimLeft) detail=GetProperty lookup refused function=String receiver_tag=8",
+    "trimRight": "refusal: instruction=46 operation=GetProperty(trimRight) detail=GetProperty lookup refused function=String receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "SuppressedError": {
+   "expr": "globalThis.SuppressedError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"SuppressedError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"SuppressedError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "SuppressedError.prototype": {
+   "expr": "globalThis.SuppressedError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"SuppressedError\""
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8",
+    "message": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8",
+    "name": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8",
+   "unreachable": null
+  },
+  "Symbol": {
+   "expr": "globalThis.Symbol",
+   "interpreted": {
+    "asyncIterator": "symbol",
+    "for": "function",
+    "hasInstance": "symbol",
+    "isConcatSpreadable": "symbol",
+    "iterator": "symbol",
+    "keyFor": "function",
+    "length": "number 0",
+    "match": "symbol",
+    "matchAll": "symbol",
+    "name": "string \"Symbol\"",
+    "prototype": "object",
+    "replace": "symbol",
+    "search": "symbol",
+    "species": "symbol",
+    "split": "symbol",
+    "toPrimitive": "symbol",
+    "toStringTag": "symbol",
+    "unscopables": "symbol"
+   },
+   "kind": "static",
+   "native": {
+    "asyncIterator": "symbol",
+    "for": "function",
+    "hasInstance": "symbol",
+    "isConcatSpreadable": "symbol",
+    "iterator": "symbol",
+    "keyFor": "function",
+    "length": "undefined",
+    "match": "symbol",
+    "matchAll": "symbol",
+    "name": "string \"Symbol\"",
+    "prototype": "undefined",
+    "replace": "symbol",
+    "search": "symbol",
+    "species": "symbol",
+    "split": "symbol",
+    "toPrimitive": "symbol",
+    "toStringTag": "symbol",
+    "unscopables": "symbol"
+   },
+   "native_names": [
+    "asyncIterator",
+    "for",
+    "hasInstance",
+    "isConcatSpreadable",
+    "iterator",
+    "keyFor",
+    "match",
+    "matchAll",
+    "name",
+    "replace",
+    "search",
+    "species",
+    "split",
+    "toPrimitive",
+    "toStringTag",
+    "unscopables"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Symbol.prototype": {
+   "expr": "globalThis.Symbol.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "toLocaleString": "function",
+    "toString": "function",
+    "valueOf": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": [],
+   "refused": {},
+   "self_description": null,
+   "unreachable": "native: receiver is undefined"
+  },
+  "SyntaxError": {
+   "expr": "globalThis.SyntaxError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"SyntaxError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"SyntaxError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=SyntaxError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "SyntaxError.prototype": {
+   "expr": "globalThis.SyntaxError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"SyntaxError\""
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "TextDecoder": {
+   "expr": "globalThis.TextDecoder",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"TextDecoder\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"TextDecoder\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=TextDecoder receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "TextEncoder": {
+   "expr": "globalThis.TextEncoder",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"TextEncoder\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"anonymous\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=anonymous receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "TypeError": {
+   "expr": "globalThis.TypeError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"TypeError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"TypeError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=TypeError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "TypeError.prototype": {
+   "expr": "globalThis.TypeError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"TypeError\""
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "URIError": {
+   "expr": "globalThis.URIError",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"URIError\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"URIError\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=URIError receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "URIError.prototype": {
+   "expr": "globalThis.URIError.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "message": "string \"\"",
+    "name": "string \"URIError\""
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor",
+    "hasOwnProperty",
+    "toString",
+    "valueOf"
+   ],
+   "refused": {
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "URL": {
+   "expr": "globalThis.URL",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"Url\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"URL\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=URL receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Uint16Array": {
+   "expr": "globalThis.Uint16Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Uint16Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "from": "function",
+    "name": "string \"Uint16Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint16Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Uint16Array.prototype": {
+   "expr": "globalThis.Uint16Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 2",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Uint32Array": {
+   "expr": "globalThis.Uint32Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Uint32Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "from": "function",
+    "name": "string \"Uint32Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint32Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Uint32Array.prototype": {
+   "expr": "globalThis.Uint32Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 4",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Uint8Array": {
+   "expr": "globalThis.Uint8Array",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "from": "function",
+    "fromBase64": "function",
+    "fromHex": "function",
+    "length": "number 3",
+    "name": "string \"Uint8Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "from": "function",
+    "name": "string \"Uint8Array\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "fromBase64": "refusal: instruction=91 operation=GetProperty(fromBase64) detail=GetProperty lookup refused function=Uint8Array receiver_tag=8",
+    "fromHex": "refusal: instruction=45 operation=GetProperty(fromHex) detail=GetProperty lookup refused function=Uint8Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint8Array receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Uint8Array.prototype": {
+   "expr": "globalThis.Uint8Array.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "constructor": "function",
+    "setFromBase64": "function",
+    "setFromHex": "function",
+    "toBase64": "function",
+    "toHex": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "constructor": "function",
+    "setFromBase64": "undefined",
+    "setFromHex": "undefined",
+    "toBase64": "undefined",
+    "toHex": "undefined"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "Uint8ClampedArray": {
+   "expr": "globalThis.Uint8ClampedArray",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "from": "function",
+    "length": "number 3",
+    "name": "string \"Uint8ClampedArray\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "from": "function",
+    "name": "string \"Uint8ClampedArray\"",
+    "of": "function",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint8ClampedArray receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "Uint8ClampedArray.prototype": {
+   "expr": "globalThis.Uint8ClampedArray.prototype",
+   "interpreted": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "constructor": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "BYTES_PER_ELEMENT": "number 1",
+    "constructor": "function"
+   },
+   "native_names": [
+    "constructor"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "WeakMap": {
+   "expr": "globalThis.WeakMap",
+   "interpreted": {
+    "length": "number 0",
+    "name": "string \"WeakMap\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"WeakMap\"",
+    "prototype": "object"
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=WeakMap receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "WeakMap.prototype": {
+   "expr": "globalThis.WeakMap.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "delete": "function",
+    "get": "function",
+    "getOrInsert": "function",
+    "getOrInsertComputed": "function",
+    "has": "function",
+    "set": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "constructor": "function",
+    "delete": "function",
+    "get": "function",
+    "has": "function",
+    "set": "function"
+   },
+   "native_names": [
+    "add",
+    "constructor",
+    "delete",
+    "get",
+    "has",
+    "set"
+   ],
+   "refused": {
+    "getOrInsert": "refusal: instruction=161 operation=GetProperty(getOrInsert) detail=GetProperty lookup refused function=WeakMap receiver_tag=8",
+    "getOrInsertComputed": "refusal: instruction=46 operation=GetProperty(getOrInsertComputed) detail=GetProperty lookup refused function=WeakMap receiver_tag=8"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "WeakRef": {
+   "expr": "globalThis.WeakRef",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"WeakRef\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"WeakRef\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=WeakRef receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=WeakRef receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "WeakRef.prototype": {
+   "expr": "globalThis.WeakRef.prototype",
+   "interpreted": {
+    "constructor": "function",
+    "deref": "function"
+   },
+   "kind": "prototype",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "constructor": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/48/48679765afccd92f1acb1c4e5558d8b448a47acb8b126a059008ca896246a7a7: No such file or directory (os error 2)",
+    "deref": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/48/48679765afccd92f1acb1c4e5558d8b448a47acb8b126a059008ca896246a7a7: No such file or directory (os error 2)"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=WeakRef receiver_tag=8",
+   "unreachable": "native: cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/48/48679765afccd92f1acb1c4e5558d8b448a47acb8b126a059008ca896246a7a7: No such file or directory (os error 2)"
+  },
+  "WeakSet": {
+   "expr": "globalThis.WeakSet",
+   "interpreted": {
+    "length": "number 0",
+    "name": "string \"WeakSet\"",
+    "prototype": "object"
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"WeakSet\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=WeakSet receiver_tag=8",
+    "prototype": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/native-object/68/6800b304dff9c83c4830428b0efecba451300e24fdf352c955e8dc9feb8d279e: No such file or directory (os error 2)"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "WeakSet.prototype": {
+   "expr": "globalThis.WeakSet.prototype",
+   "interpreted": {
+    "add": "function",
+    "constructor": "function",
+    "delete": "function",
+    "has": "function"
+   },
+   "kind": "prototype",
+   "native": {
+    "add": "function",
+    "constructor": "function",
+    "delete": "function",
+    "has": "function"
+   },
+   "native_names": [
+    "add",
+    "constructor",
+    "delete",
+    "get",
+    "has",
+    "set"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "clearImmediate": {
+   "expr": "globalThis.clearImmediate",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"clearImmediate\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "clearInterval": {
+   "expr": "globalThis.clearInterval",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"clearInterval\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"clearInterval\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "clearTimeout": {
+   "expr": "globalThis.clearTimeout",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"clearTimeout\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"clearTimeout\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "console": {
+   "expr": "globalThis.console",
+   "interpreted": {
+    "error": "function",
+    "info": "function",
+    "log": "function",
+    "warn": "function"
+   },
+   "kind": "static",
+   "native": {
+    "error": "function",
+    "info": "function",
+    "log": "function",
+    "warn": "function"
+   },
+   "native_names": [
+    "error",
+    "info",
+    "log",
+    "warn"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "decodeURI": {
+   "expr": "globalThis.decodeURI",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"decodeURI\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"decodeURI\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "decodeURIComponent": {
+   "expr": "globalThis.decodeURIComponent",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"decodeURIComponent\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"decodeURIComponent\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "encodeURI": {
+   "expr": "globalThis.encodeURI",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"encodeURI\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"encodeURI\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/da/da8861a2b645b6ea9528d601e20b5b20b9a80b836d2b2ea3ce912a7c5cd3d177: No such file or directory (os error 2)"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "encodeURIComponent": {
+   "expr": "globalThis.encodeURIComponent",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"encodeURIComponent\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"encodeURIComponent\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "escape": {
+   "expr": "globalThis.escape",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"escape\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"escape\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "eval": {
+   "expr": "globalThis.eval",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"eval\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"eval\""
+   },
+   "native_names": null,
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=eval receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "unreachable": null
+  },
+  "globalThis": {
+   "expr": "globalThis",
+   "interpreted": {
+    "$262AgentBroadcast": "function",
+    "$262AgentGetReport": "function",
+    "$262AgentLeaving": "function",
+    "$262AgentMonotonicNow": "function",
+    "$262AgentReceiveBroadcast": "function",
+    "$262AgentReport": "function",
+    "$262AgentSleep": "function",
+    "$262AgentStart": "function",
+    "$262CreateRealm": "function",
+    "$262EvalScript": "function",
+    "AbortController": "function",
+    "AbortSignal": "function",
+    "AggregateError": "function",
+    "Array": "function",
+    "ArrayBuffer": "function",
+    "AsyncDisposableStack": "function",
+    "Atomics": "object",
+    "BigInt": "function",
+    "BigInt64Array": "function",
+    "BigUint64Array": "function",
+    "Boolean": "function",
+    "Buffer": "function",
+    "DataView": "function",
+    "Date": "function",
+    "DisposableStack": "function",
+    "Error": "function",
+    "EvalError": "function",
+    "FinalizationRegistry": "function",
+    "Float16Array": "function",
+    "Float32Array": "function",
+    "Float64Array": "function",
+    "Function": "function",
+    "Infinity": "number Infinity",
+    "Int16Array": "function",
+    "Int32Array": "function",
+    "Int8Array": "function",
+    "Intl": "object",
+    "Iterator": "function",
+    "JSON": "object",
+    "Map": "function",
+    "Math": "object",
+    "NaN": "number NaN",
+    "Number": "function",
+    "Object": "function",
+    "Promise": "function",
+    "Proxy": "function",
+    "RangeError": "function",
+    "ReferenceError": "function",
+    "Reflect": "object",
+    "RegExp": "function",
+    "Set": "function",
+    "ShadowRealm": "function",
+    "SharedArrayBuffer": "function",
+    "String": "function",
+    "SuppressedError": "function",
+    "Symbol": "function",
+    "SyntaxError": "function",
+    "Temporal": "object",
+    "TextDecoder": "function",
+    "TextEncoder": "function",
+    "TypeError": "function",
+    "URIError": "function",
+    "URL": "function",
+    "Uint16Array": "function",
+    "Uint32Array": "function",
+    "Uint8Array": "function",
+    "Uint8ClampedArray": "function",
+    "WeakMap": "function",
+    "WeakRef": "function",
+    "WeakSet": "function",
+    "clearImmediate": "function",
+    "clearInterval": "function",
+    "clearTimeout": "function",
+    "console": "object",
+    "decodeURI": "function",
+    "decodeURIComponent": "function",
+    "encodeURI": "function",
+    "encodeURIComponent": "function",
+    "escape": "function",
+    "eval": "function",
+    "global": "object",
+    "globalThis": "object",
+    "isFinite": "function",
+    "isNaN": "function",
+    "parseFloat": "function",
+    "parseInt": "function",
+    "performance": "function",
+    "queueMicrotask": "function",
+    "setImmediate": "function",
+    "setInterval": "function",
+    "setTimeout": "function",
+    "undefined": "undefined",
+    "unescape": "function"
+   },
+   "kind": "global",
+   "native": {
+    "AbortController": "function",
+    "AbortSignal": "function",
+    "AggregateError": "function",
+    "Array": "function",
+    "ArrayBuffer": "function",
+    "AsyncDisposableStack": "function",
+    "Atomics": "object",
+    "BigInt": "function",
+    "BigInt64Array": "function",
+    "BigUint64Array": "function",
+    "Boolean": "function",
+    "Buffer": "function",
+    "DataView": "function",
+    "Date": "function",
+    "DisposableStack": "function",
+    "Error": "function",
+    "EvalError": "function",
+    "FinalizationRegistry": "function",
+    "Float16Array": "function",
+    "Float32Array": "function",
+    "Float64Array": "function",
+    "Function": "function",
+    "Infinity": "number Infinity",
+    "Int16Array": "function",
+    "Int32Array": "function",
+    "Int8Array": "function",
+    "Intl": "object",
+    "Iterator": "function",
+    "JSON": "object",
+    "Map": "function",
+    "Math": "object",
+    "NaN": "number NaN",
+    "Number": "function",
+    "Object": "function",
+    "Promise": "function",
+    "Proxy": "function",
+    "RangeError": "function",
+    "ReferenceError": "function",
+    "Reflect": "object",
+    "RegExp": "function",
+    "Set": "function",
+    "SharedArrayBuffer": "function",
+    "String": "function",
+    "SuppressedError": "function",
+    "Symbol": "function",
+    "SyntaxError": "function",
+    "Temporal": "object",
+    "TextDecoder": "function",
+    "TextEncoder": "function",
+    "TypeError": "function",
+    "URIError": "function",
+    "URL": "function",
+    "Uint16Array": "function",
+    "Uint32Array": "function",
+    "Uint8Array": "function",
+    "Uint8ClampedArray": "function",
+    "WeakMap": "function",
+    "WeakRef": "function",
+    "WeakSet": "function",
+    "clearImmediate": "function",
+    "clearInterval": "function",
+    "clearTimeout": "function",
+    "console": "object",
+    "decodeURI": "function",
+    "decodeURIComponent": "function",
+    "encodeURI": "function",
+    "encodeURIComponent": "function",
+    "escape": "function",
+    "eval": "function",
+    "global": "object",
+    "globalThis": "object",
+    "isFinite": "function",
+    "isNaN": "function",
+    "parseFloat": "function",
+    "parseInt": "function",
+    "performance": "function",
+    "queueMicrotask": "function",
+    "setImmediate": "function",
+    "setInterval": "function",
+    "setTimeout": "function",
+    "undefined": "undefined",
+    "unescape": "function"
+   },
+   "native_names": [
+    "AbortController",
+    "AbortSignal",
+    "AggregateError",
+    "Array",
+    "ArrayBuffer",
+    "AsyncDisposableStack",
+    "Atomics",
+    "BigInt",
+    "BigInt64Array",
+    "BigUint64Array",
+    "Boolean",
+    "Buffer",
+    "DataView",
+    "Date",
+    "DisposableStack",
+    "Error",
+    "EvalError",
+    "FinalizationRegistry",
+    "Float16Array",
+    "Float32Array",
+    "Float64Array",
+    "Function",
+    "Infinity",
+    "Int16Array",
+    "Int32Array",
+    "Int8Array",
+    "Intl",
+    "Iterator",
+    "JSON",
+    "Map",
+    "Math",
+    "NaN",
+    "Number",
+    "Object",
+    "Promise",
+    "Proxy",
+    "RangeError",
+    "ReferenceError",
+    "Reflect",
+    "RegExp",
+    "Set",
+    "ShadowRealm",
+    "SharedArrayBuffer",
+    "String",
+    "SuppressedError",
+    "Symbol",
+    "SyntaxError",
+    "Temporal",
+    "TextDecoder",
+    "TextEncoder",
+    "TypeError",
+    "URIError",
+    "URL",
+    "Uint16Array",
+    "Uint32Array",
+    "Uint8Array",
+    "Uint8ClampedArray",
+    "WeakMap",
+    "WeakRef",
+    "WeakSet",
+    "clearImmediate",
+    "clearInterval",
+    "clearTimeout",
+    "console",
+    "decodeURI",
+    "decodeURIComponent",
+    "encodeURI",
+    "encodeURIComponent",
+    "escape",
+    "eval",
+    "global",
+    "globalThis",
+    "isFinite",
+    "isNaN",
+    "parseFloat",
+    "parseInt",
+    "performance",
+    "queueMicrotask",
+    "setImmediate",
+    "setInterval",
+    "setTimeout",
+    "undefined",
+    "unescape"
+   ],
+   "refused": {
+    "$262AgentBroadcast": "emission failed: unsupported native emission: host realm facility $262AgentBroadcast at instruction 1930",
+    "$262AgentGetReport": "emission failed: unsupported native emission: host realm facility $262AgentGetReport at instruction 1930",
+    "$262AgentLeaving": "emission failed: unsupported native emission: host realm facility $262AgentLeaving at instruction 1930",
+    "$262AgentMonotonicNow": "emission failed: unsupported native emission: host realm facility $262AgentMonotonicNow at instruction 1930",
+    "$262AgentReceiveBroadcast": "emission failed: unsupported native emission: host realm facility $262AgentReceiveBroadcast at instruction 1930",
+    "$262AgentReport": "emission failed: unsupported native emission: host realm facility $262AgentReport at instruction 1930",
+    "$262AgentSleep": "emission failed: unsupported native emission: host realm facility $262AgentSleep at instruction 1930",
+    "$262AgentStart": "emission failed: unsupported native emission: host realm facility $262AgentStart at instruction 1930",
+    "$262CreateRealm": "emission failed: unsupported native emission: host realm facility $262CreateRealm at instruction 1930",
+    "$262EvalScript": "emission failed: unsupported native emission: host realm facility $262EvalScript at instruction 1930",
+    "ShadowRealm": "emission failed: unsupported native emission: host realm facility ShadowRealm at instruction 987"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "isFinite": {
+   "expr": "globalThis.isFinite",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"isFinite\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"isFinite\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "isNaN": {
+   "expr": "globalThis.isNaN",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"isNaN\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"isNaN\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:assert": {
+   "expr": "require(\"node:assert\")",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"nodeAssertOk\""
+   },
+   "kind": "namespace",
+   "native": {
+    "name": "string \"\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=49 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:async_hooks": {
+   "expr": "require(\"node:async_hooks\")",
+   "interpreted": {
+    "AsyncLocalStorage": "function",
+    "AsyncResource": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "AsyncLocalStorage": "function",
+    "AsyncResource": "function"
+   },
+   "native_names": [
+    "AsyncLocalStorage",
+    "AsyncResource",
+    "default"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:buffer": {
+   "expr": "require(\"node:buffer\")",
+   "interpreted": {
+    "alloc": "function",
+    "allocUnsafe": "function",
+    "allocUnsafeSlow": "function",
+    "byteLength": "function",
+    "concat": "function",
+    "constants": "object",
+    "from": "function",
+    "isBuffer": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "alloc": "undefined",
+    "allocUnsafe": "undefined",
+    "allocUnsafeSlow": "undefined",
+    "byteLength": "undefined",
+    "concat": "undefined",
+    "constants": "object",
+    "from": "undefined",
+    "isBuffer": "undefined"
+   },
+   "native_names": [
+    "Buffer",
+    "constants",
+    "default"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:crypto": {
+   "expr": "require(\"node:crypto\")",
+   "interpreted": {
+    "createHash": "function",
+    "randomUUID": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "createHash": "function",
+    "randomUUID": "function"
+   },
+   "native_names": [
+    "createHash",
+    "default",
+    "randomUUID"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:diagnostics_channel": {
+   "expr": "require(\"node:diagnostics_channel\")",
+   "interpreted": {
+    "channel": "function",
+    "hasSubscribers": "boolean false",
+    "tracingChannel": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "channel": "function",
+    "hasSubscribers": "boolean false",
+    "tracingChannel": "function"
+   },
+   "native_names": [
+    "channel",
+    "default",
+    "hasSubscribers",
+    "tracingChannel"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:dns": {
+   "expr": "require(\"node:dns\")",
+   "interpreted": {
+    "lookup": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "lookup": "function"
+   },
+   "native_names": [
+    "default",
+    "lookup"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:events": {
+   "expr": "require(\"node:events\")",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"nodeEventEmitter\"",
+    "prototype": "object"
+   },
+   "kind": "namespace",
+   "native": {
+    "name": "string \"\"",
+    "prototype": "object"
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=49 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:fs": {
+   "expr": "require(\"node:fs\")",
+   "interpreted": {
+    "accessSync": "function",
+    "appendFileSync": "function",
+    "closeSync": "function",
+    "copyFileSync": "function",
+    "existsSync": "function",
+    "lstatSync": "function",
+    "mkdirSync": "function",
+    "openSync": "function",
+    "promises": "object",
+    "readFileSync": "function",
+    "readSync": "function",
+    "readdirSync": "function",
+    "readlinkSync": "function",
+    "realpathSync": "function",
+    "renameSync": "function",
+    "rmSync": "function",
+    "statSync": "function",
+    "unlinkSync": "function",
+    "writeFileSync": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "accessSync": "function",
+    "appendFileSync": "function",
+    "closeSync": "function",
+    "copyFileSync": "function",
+    "existsSync": "function",
+    "lstatSync": "function",
+    "mkdirSync": "function",
+    "openSync": "function",
+    "promises": "object",
+    "readFileSync": "function",
+    "readSync": "function",
+    "readdirSync": "function",
+    "readlinkSync": "function",
+    "realpathSync": "function",
+    "renameSync": "function",
+    "rmSync": "function",
+    "statSync": "function",
+    "unlinkSync": "function",
+    "writeFileSync": "function"
+   },
+   "native_names": [
+    "accessSync",
+    "appendFileSync",
+    "closeSync",
+    "copyFileSync",
+    "default",
+    "existsSync",
+    "lstatSync",
+    "mkdirSync",
+    "openSync",
+    "promises",
+    "readFileSync",
+    "readSync",
+    "readdirSync",
+    "readlinkSync",
+    "realpathSync",
+    "renameSync",
+    "rmSync",
+    "statSync",
+    "unlinkSync",
+    "writeFileSync"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:fs/promises": {
+   "expr": "require(\"node:fs/promises\")",
+   "interpreted": {
+    "readFile": "function",
+    "stat": "function",
+    "writeFile": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "readFile": "function",
+    "stat": "function",
+    "writeFile": "function"
+   },
+   "native_names": [
+    "readFile",
+    "stat",
+    "writeFile"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:http": {
+   "expr": "require(\"node:http\")",
+   "interpreted": {
+    "IncomingMessage": "function",
+    "METHODS": "object",
+    "Server": "function",
+    "ServerResponse": "function",
+    "createServer": "function",
+    "get": "function",
+    "request": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "IncomingMessage": "function",
+    "METHODS": "function",
+    "Server": "function",
+    "ServerResponse": "function",
+    "createServer": "function",
+    "get": "function",
+    "request": "function"
+   },
+   "native_names": [
+    "IncomingMessage",
+    "METHODS",
+    "Server",
+    "ServerResponse",
+    "createServer",
+    "default",
+    "get",
+    "request"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:http2": {
+   "expr": "require(\"node:http2\")",
+   "interpreted": {
+    "createSecureServer": "function",
+    "createServer": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "createSecureServer": "function",
+    "createServer": "function"
+   },
+   "native_names": [
+    "createSecureServer",
+    "createServer",
+    "default"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:https": {
+   "expr": "require(\"node:https\")",
+   "interpreted": {
+    "createServer": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "createServer": "function"
+   },
+   "native_names": [
+    "createServer",
+    "default"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:module": {
+   "expr": "require(\"node:module\")",
+   "interpreted": {
+    "createRequire": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "createRequire": "function"
+   },
+   "native_names": [
+    "createRequire",
+    "default"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:net": {
+   "expr": "require(\"node:net\")",
+   "interpreted": {
+    "connect": "function",
+    "createConnection": "function",
+    "createServer": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "connect": "function",
+    "createConnection": "function",
+    "createServer": "function"
+   },
+   "native_names": [
+    "connect",
+    "createConnection",
+    "createServer",
+    "default"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:os": {
+   "expr": "require(\"node:os\")",
+   "interpreted": {
+    "EOL": "string \"\\n\"",
+    "arch": "function",
+    "availableParallelism": "function",
+    "cpus": "function",
+    "devNull": "string \"/dev/null\"",
+    "endianness": "function",
+    "freemem": "function",
+    "homedir": "function",
+    "hostname": "function",
+    "loadavg": "function",
+    "machine": "function",
+    "networkInterfaces": "function",
+    "platform": "function",
+    "release": "function",
+    "tmpdir": "function",
+    "totalmem": "function",
+    "type": "function",
+    "uptime": "function",
+    "userInfo": "function",
+    "version": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "EOL": "string \"\\n\"",
+    "arch": "function",
+    "availableParallelism": "function",
+    "cpus": "function",
+    "devNull": "string \"/dev/null\"",
+    "endianness": "function",
+    "freemem": "function",
+    "homedir": "function",
+    "hostname": "function",
+    "loadavg": "function",
+    "machine": "function",
+    "networkInterfaces": "function",
+    "platform": "function",
+    "release": "function",
+    "tmpdir": "function",
+    "totalmem": "function",
+    "type": "function",
+    "uptime": "function",
+    "userInfo": "function",
+    "version": "function"
+   },
+   "native_names": [
+    "EOL",
+    "arch",
+    "availableParallelism",
+    "cpus",
+    "default",
+    "devNull",
+    "endianness",
+    "freemem",
+    "homedir",
+    "hostname",
+    "loadavg",
+    "machine",
+    "networkInterfaces",
+    "platform",
+    "release",
+    "tmpdir",
+    "totalmem",
+    "type",
+    "uptime",
+    "userInfo",
+    "version"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:path": {
+   "expr": "require(\"node:path\")",
+   "interpreted": {
+    "basename": "function",
+    "delimiter": "string \":\"",
+    "dirname": "function",
+    "extname": "function",
+    "format": "function",
+    "isAbsolute": "function",
+    "join": "function",
+    "normalize": "function",
+    "parse": "function",
+    "posix": "object",
+    "relative": "function",
+    "resolve": "function",
+    "sep": "string \"/\""
+   },
+   "kind": "namespace",
+   "native": {
+    "basename": "function",
+    "delimiter": "string \":\"",
+    "dirname": "function",
+    "extname": "function",
+    "format": "function",
+    "isAbsolute": "function",
+    "join": "function",
+    "normalize": "function",
+    "parse": "function",
+    "posix": "object",
+    "relative": "function",
+    "resolve": "function",
+    "sep": "string \"/\""
+   },
+   "native_names": [
+    "basename",
+    "default",
+    "delimiter",
+    "dirname",
+    "extname",
+    "format",
+    "isAbsolute",
+    "join",
+    "normalize",
+    "parse",
+    "posix",
+    "relative",
+    "resolve",
+    "sep"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:perf_hooks": {
+   "expr": "require(\"node:perf_hooks\")",
+   "interpreted": {
+    "performance": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "performance": "object"
+   },
+   "native_names": [
+    "default",
+    "performance"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:querystring": {
+   "expr": "require(\"node:querystring\")",
+   "interpreted": {
+    "decode": "function",
+    "default": "object",
+    "parse": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "decode": "function",
+    "default": "object",
+    "parse": "function"
+   },
+   "native_names": [
+    "decode",
+    "default",
+    "parse"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:stream": {
+   "expr": "require(\"node:stream\")",
+   "interpreted": {
+    "Readable": "function",
+    "Writable": "function",
+    "addAbortSignal": "function",
+    "finished": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "Readable": "function",
+    "Writable": "function",
+    "addAbortSignal": "function",
+    "finished": "function"
+   },
+   "native_names": [
+    "Readable",
+    "Writable",
+    "addAbortSignal",
+    "default",
+    "finished"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:string_decoder": {
+   "expr": "require(\"node:string_decoder\")",
+   "interpreted": {
+    "StringDecoder": "function"
+   },
+   "kind": "namespace",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "StringDecoder": "Node execution does not yet materialize the `node:string_decoder` builtin"
+   },
+   "self_description": "Node execution does not yet materialize the `node:string_decoder` builtin",
+   "unreachable": "native: Node execution does not yet materialize the `node:string_decoder` builtin"
+  },
+  "node:tty": {
+   "expr": "require(\"node:tty\")",
+   "interpreted": {
+    "isatty": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "isatty": "function"
+   },
+   "native_names": [
+    "default",
+    "isatty"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:url": {
+   "expr": "require(\"node:url\")",
+   "interpreted": {
+    "URL": "function",
+    "default": "object",
+    "fileURLToPath": "function",
+    "parse": "function",
+    "pathToFileURL": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "URL": "function",
+    "default": "object",
+    "fileURLToPath": "function",
+    "parse": "function",
+    "pathToFileURL": "function"
+   },
+   "native_names": [
+    "URL",
+    "default",
+    "fileURLToPath",
+    "parse",
+    "pathToFileURL"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:util": {
+   "expr": "require(\"node:util\")",
+   "interpreted": {
+    "TextDecoder": "function",
+    "TextEncoder": "function",
+    "debuglog": "function",
+    "deprecate": "function",
+    "format": "function",
+    "inherits": "function",
+    "inspect": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "TextDecoder": "function",
+    "TextEncoder": "function",
+    "debuglog": "function",
+    "deprecate": "function",
+    "format": "function",
+    "inherits": "function",
+    "inspect": "function"
+   },
+   "native_names": [
+    "TextDecoder",
+    "TextEncoder",
+    "debuglog",
+    "default",
+    "deprecate",
+    "format",
+    "inherits",
+    "inspect"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:worker_threads": {
+   "expr": "require(\"node:worker_threads\")",
+   "interpreted": {
+    "Worker": "function"
+   },
+   "kind": "namespace",
+   "native": {
+    "Worker": "function"
+   },
+   "native_names": [
+    "Worker",
+    "default"
+   ],
+   "refused": {},
+   "self_description": null,
+   "unreachable": null
+  },
+  "node:zlib": {
+   "expr": "require(\"node:zlib\")",
+   "interpreted": {
+    "createBrotliDecompress": "function",
+    "createGunzip": "function",
+    "createInflate": "function"
+   },
+   "kind": "namespace",
+   "native": {},
+   "native_names": null,
+   "refused": {
+    "createBrotliDecompress": "Node execution does not yet materialize the `node:zlib` builtin",
+    "createGunzip": "Node execution does not yet materialize the `node:zlib` builtin",
+    "createInflate": "Node execution does not yet materialize the `node:zlib` builtin"
+   },
+   "self_description": "Node execution does not yet materialize the `node:zlib` builtin",
+   "unreachable": "native: Node execution does not yet materialize the `node:zlib` builtin"
+  },
+  "parseFloat": {
+   "expr": "globalThis.parseFloat",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"parseFloat\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"parseFloat\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "parseInt": {
+   "expr": "globalThis.parseInt",
+   "interpreted": {
+    "length": "number 2",
+    "name": "string \"parseInt\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"parseInt\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "queueMicrotask": {
+   "expr": "globalThis.queueMicrotask",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"queueMicrotask\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"queueMicrotask\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "setImmediate": {
+   "expr": "globalThis.setImmediate",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"setImmediate\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "setInterval": {
+   "expr": "globalThis.setInterval",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"setInterval\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"setInterval\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "setTimeout": {
+   "expr": "globalThis.setTimeout",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"setTimeout\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"setTimeout\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  },
+  "unescape": {
+   "expr": "globalThis.unescape",
+   "interpreted": {
+    "length": "number 1",
+    "name": "string \"unescape\""
+   },
+   "kind": "static",
+   "native": {
+    "name": "string \"unescape\""
+   },
+   "native_names": [],
+   "refused": {
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+   },
+   "self_description": null,
+   "unreachable": null
+  }
+ }
+}
