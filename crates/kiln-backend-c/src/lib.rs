@@ -953,7 +953,14 @@ fn abstract_interpret(
     (known_numbers, observed_return)
 }
 
-fn infer_program_types(program: &Program) -> (Vec<HashSet<usize>>, HashSet<usize>) {
+#[allow(clippy::type_complexity)]
+fn infer_program_types(
+    program: &Program,
+) -> (
+    Vec<HashSet<usize>>,
+    HashSet<usize>,
+    Vec<(Vec<ValType>, ValType)>,
+) {
     let mut signatures: Vec<(Vec<ValType>, ValType)> = program
         .functions
         .iter()
@@ -1045,7 +1052,7 @@ fn infer_program_types(program: &Program) -> (Vec<HashSet<usize>>, HashSet<usize
         func_known.push(k);
     }
 
-    (func_known, module_known)
+    (func_known, module_known, signatures)
 }
 
 fn compute_guarded_loads_and_slots(code: &[Instruction]) -> (HashSet<usize>, HashSet<u32>) {
@@ -1121,6 +1128,288 @@ static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
     );
 }
 
+fn can_emit_fast_numeric(proto: &FunctionProto, _func_idx: usize, program: &Program) -> bool {
+    if proto.parameter_count == 0 || proto.parameter_count > 4 {
+        return false;
+    }
+    if proto.generator || binds_at_call(proto) {
+        return false;
+    }
+    for inst in &proto.code {
+        match inst {
+            Instruction::LoadLocal(_)
+            | Instruction::StoreLocal(_)
+            | Instruction::Pop
+            | Instruction::Dup
+            | Instruction::Return
+            | Instruction::Jump(_)
+            | Instruction::JumpIfFalse(_)
+            | Instruction::JumpIfTruthy(_) => {}
+            Instruction::Const(c) => match program.constants.get(*c as usize) {
+                Some(Constant::Number(_) | Constant::Undefined | Constant::Null) => {}
+                _ => return false,
+            },
+            Instruction::Binary(
+                BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::Divide
+                | BinaryOp::Remainder
+                | BinaryOp::LessThan
+                | BinaryOp::LessThanOrEqual
+                | BinaryOp::GreaterThan
+                | BinaryOp::GreaterThanOrEqual
+                | BinaryOp::LooseEqual
+                | BinaryOp::LooseNotEqual
+                | BinaryOp::StrictEqual
+                | BinaryOp::StrictNotEqual
+                | BinaryOp::BitwiseAnd
+                | BinaryOp::BitwiseOr
+                | BinaryOp::BitwiseXor
+                | BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRight
+                | BinaryOp::UnsignedShiftRight,
+            ) => {}
+            Instruction::Unary(
+                UnaryOp::Negate
+                | UnaryOp::Plus
+                | UnaryOp::ToNumeric
+                | UnaryOp::BitwiseNot
+                | UnaryOp::Increment
+                | UnaryOp::Decrement,
+            ) => {}
+            Instruction::Call { argc } => {
+                if *argc as usize != proto.parameter_count as usize {
+                    return false;
+                }
+            }
+            Instruction::LoadUpvalue(_) => {}
+            _ => return false,
+        }
+    }
+
+    // Verify that every LoadUpvalue is strictly consumed as a callee in Call
+    let mut sim_stack: Vec<bool> = Vec::new(); // true = Callee, false = Number
+    for inst in &proto.code {
+        match inst {
+            Instruction::LoadLocal(_)
+            | Instruction::Pop
+            | Instruction::Dup
+            | Instruction::Const(_) => {
+                sim_stack.push(false);
+            }
+            Instruction::StoreLocal(_) => {
+                sim_stack.pop();
+            }
+            Instruction::Binary(_) => {
+                let right = sim_stack.pop().unwrap_or(false);
+                let left = sim_stack.pop().unwrap_or(false);
+                if left || right {
+                    return false;
+                }
+                sim_stack.push(false);
+            }
+            Instruction::Unary(_) => {
+                let op = sim_stack.pop().unwrap_or(false);
+                if op {
+                    return false;
+                }
+                sim_stack.push(false);
+            }
+            Instruction::Call { argc } => {
+                let count = *argc as usize;
+                for _ in 0..count {
+                    if sim_stack.pop().unwrap_or(false) {
+                        return false;
+                    }
+                }
+                let callee = sim_stack.pop().unwrap_or(false);
+                if !callee {
+                    return false;
+                }
+                sim_stack.push(false);
+            }
+            Instruction::LoadUpvalue(_) => {
+                sim_stack.push(true);
+            }
+            Instruction::Return => {
+                let ret = sim_stack.pop().unwrap_or(false);
+                if ret {
+                    return false;
+                }
+            }
+            Instruction::JumpIfFalse(_) | Instruction::JumpIfTruthy(_) => {
+                let cond = sim_stack.pop().unwrap_or(false);
+                if cond {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    true
+}
+
+fn render_fast_numeric_function(
+    output: &mut String,
+    program: &Program,
+    proto: &FunctionProto,
+    func_idx: usize,
+    symbol: &str,
+) {
+    let params = (0..proto.parameter_count)
+        .map(|i| format!("double arg{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    writeln!(
+        output,
+        "static double {symbol}_fn_{func_idx}_fast({params}) {{"
+    )
+    .unwrap();
+    let max_stack = proto.code.len() * 2 + 16;
+    writeln!(output, "    double stack[{max_stack}];").unwrap();
+    let locals = (proto.local_count as usize)
+        .max(proto.parameter_count as usize)
+        .max(1);
+    writeln!(output, "    double locals[{locals}];").unwrap();
+    writeln!(output, "    size_t sp = 0;").unwrap();
+    for i in 0..proto.parameter_count as usize {
+        writeln!(output, "    locals[{i}] = arg{i};").unwrap();
+    }
+    for i in proto.parameter_count as usize..locals {
+        writeln!(output, "    locals[{i}] = 0.0;").unwrap();
+    }
+    for (pos, inst) in proto.code.iter().enumerate() {
+        writeln!(output, "kiln_fast_label_{pos}:;").unwrap();
+        match inst {
+            Instruction::LoadLocal(slot) => {
+                writeln!(output, "    stack[sp++] = locals[{slot}];").unwrap();
+            }
+            Instruction::StoreLocal(slot) => {
+                writeln!(output, "    locals[{slot}] = stack[--sp];").unwrap();
+            }
+            Instruction::Pop => {
+                output.push_str("    --sp;\n");
+            }
+            Instruction::Dup => {
+                output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n");
+            }
+            Instruction::Const(c) => match program.constants.get(*c as usize) {
+                Some(Constant::Number(bits)) => {
+                    writeln!(
+                        output,
+                        "    stack[sp++] = kiln_fast_to_double(UINT64_C({bits}));"
+                    )
+                    .unwrap();
+                }
+                Some(Constant::Undefined | Constant::Null) => {
+                    output.push_str("    stack[sp++] = 0.0;\n");
+                }
+                _ => {}
+            },
+            Instruction::Binary(op) => match op {
+                BinaryOp::Add => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a + b; }\n");
+                }
+                BinaryOp::Subtract => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a - b; }\n");
+                }
+                BinaryOp::Multiply => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a * b; }\n");
+                }
+                BinaryOp::Divide => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = a / b; }\n");
+                }
+                BinaryOp::Remainder => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = fmod(a, b); }\n");
+                }
+                BinaryOp::LessThan => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a < b) ? 1.0 : 0.0; }\n");
+                }
+                BinaryOp::LessThanOrEqual => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a <= b) ? 1.0 : 0.0; }\n");
+                }
+                BinaryOp::GreaterThan => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a > b) ? 1.0 : 0.0; }\n");
+                }
+                BinaryOp::GreaterThanOrEqual => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a >= b) ? 1.0 : 0.0; }\n");
+                }
+                BinaryOp::LooseEqual | BinaryOp::StrictEqual => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a == b) ? 1.0 : 0.0; }\n");
+                }
+                BinaryOp::LooseNotEqual | BinaryOp::StrictNotEqual => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (a != b) ? 1.0 : 0.0; }\n");
+                }
+                BinaryOp::BitwiseAnd => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a & (int32_t)b); }\n");
+                }
+                BinaryOp::BitwiseOr => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a | (int32_t)b); }\n");
+                }
+                BinaryOp::BitwiseXor => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a ^ (int32_t)b); }\n");
+                }
+                BinaryOp::ShiftLeft => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a << ((uint32_t)b & 31)); }\n");
+                }
+                BinaryOp::ShiftRight => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((int32_t)a >> ((uint32_t)b & 31)); }\n");
+                }
+                BinaryOp::UnsignedShiftRight => {
+                    output.push_str("    { double b = stack[--sp]; double a = stack[--sp]; stack[sp++] = (double)((uint32_t)a >> ((uint32_t)b & 31)); }\n");
+                }
+                _ => {}
+            },
+            Instruction::Unary(op) => match op {
+                UnaryOp::Negate => output.push_str("    stack[sp - 1] = -stack[sp - 1];\n"),
+                UnaryOp::Plus | UnaryOp::ToNumeric => {}
+                UnaryOp::BitwiseNot => {
+                    output.push_str("    stack[sp - 1] = (double)(~(int32_t)stack[sp - 1]);\n")
+                }
+                UnaryOp::Increment => output.push_str("    stack[sp - 1] += 1.0;\n"),
+                UnaryOp::Decrement => output.push_str("    stack[sp - 1] -= 1.0;\n"),
+                _ => {}
+            },
+            Instruction::Jump(target) => {
+                writeln!(output, "    goto kiln_fast_label_{target};").unwrap();
+            }
+            Instruction::JumpIfFalse(target) => {
+                writeln!(output, "    {{ double cond = stack[--sp]; if (isnan(cond) || cond == 0.0) goto kiln_fast_label_{target}; }}").unwrap();
+            }
+            Instruction::JumpIfTruthy(target) => {
+                writeln!(output, "    {{ double cond = stack[--sp]; if (!isnan(cond) && cond != 0.0) goto kiln_fast_label_{target}; }}").unwrap();
+            }
+            Instruction::Return => {
+                output.push_str("    return stack[--sp];\n");
+            }
+            Instruction::LoadUpvalue(_) => {
+                output.push_str("    stack[sp++] = 0.0;\n");
+            }
+            Instruction::Call { argc } => {
+                let count = *argc as usize;
+                output.push_str("    {\n");
+                for i in (0..count).rev() {
+                    writeln!(output, "        double arg_{i} = stack[--sp];").unwrap();
+                }
+                output.push_str("        --sp;\n");
+                let call_args_str = (0..count)
+                    .map(|i| format!("arg_{i}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                writeln!(
+                    output,
+                    "        stack[sp++] = {symbol}_fn_{func_idx}_fast({call_args_str});\n    }}"
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+    }
+    output.push_str("    return 0.0;\n}\n");
+}
+
 /// Emit one C function per compiled body, forward-declared so a closure made before a body is
 /// rendered can still point at it.
 fn render_functions(
@@ -1131,13 +1420,29 @@ fn render_functions(
     diagnostic_site: &str,
     strict_functions: &[bool],
 ) {
-    let (func_known_numbers, _) = infer_program_types(program);
+    let (func_known_numbers, _, _signatures) = infer_program_types(program);
+    let mut has_fast = vec![false; program.functions.len()];
+    for (index, proto) in program.functions.iter().enumerate() {
+        if can_emit_fast_numeric(proto, index, program) {
+            has_fast[index] = true;
+            let params = (0..proto.parameter_count)
+                .map(|i| format!("double arg{i}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(output, "static double {symbol}_fn_{index}_fast({params});").unwrap();
+        }
+    }
     for index in 0..program.functions.len() {
         writeln!(
             output,
             "static int {symbol}_fn_{index}(kiln_host *host, kiln_value *result, kiln_value *upvalues, kiln_value receiver, const kiln_value *args, size_t argc, int depth, kiln_value *thrown, kiln_generator *frame);"
         )
         .unwrap();
+    }
+    for (index, proto) in program.functions.iter().enumerate() {
+        if has_fast[index] {
+            render_fast_numeric_function(output, program, proto, index, symbol);
+        }
     }
     for (index, proto) in program.functions.iter().enumerate() {
         if let Some(name) = &proto.name {
@@ -1172,6 +1477,7 @@ fn render_functions(
             diagnostic_site,
             strict_functions,
             func_known_numbers.get(index).cloned().unwrap_or_default(),
+            has_fast[index],
         );
     }
 }
@@ -1252,6 +1558,7 @@ fn render_function(
     diagnostic_site: &str,
     strict_functions: &[bool],
     known_number_binaries: HashSet<usize>,
+    has_fast: bool,
 ) {
     let max_stack = frame_stacks[index];
     let locals = usize::try_from(proto.local_count).unwrap().max(1);
@@ -1350,6 +1657,22 @@ fn render_function(
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown; (void)frame;\n");
         output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
+        if has_fast {
+            let param_conds = (0..proto.parameter_count as usize)
+                .map(|i| format!("args[{i}].tag == KILN_VALUE_NUMBER"))
+                .collect::<Vec<_>>()
+                .join(" && ");
+            let param_args = (0..proto.parameter_count as usize)
+                .map(|i| format!("kiln_fast_to_double(args[{i}].bits)"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                output,
+                "    if (KILN_LIKELY(argc >= (size_t){} && {param_conds})) {{\n        *result = kiln_fast_number({symbol}_fn_{index}_fast({param_args}));\n        return KILN_C99_OK;\n    }}",
+                proto.parameter_count
+            )
+            .unwrap();
+        }
         if proto.parameter_count == 0 {
             output.push_str("    (void)args; (void)argc;\n");
             if locals > 0 {
