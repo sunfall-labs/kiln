@@ -413,8 +413,8 @@ impl BuildProfile {
         match self {
             Self::NativeDev => &["-O0"],
             Self::NativeCheck => &["-O0", "-g", "-fsanitize=undefined"],
-            Self::NativeRelease => &["-O3"],
-            Self::NativeProfile => &["-O3", "-pg"],
+            Self::NativeRelease => &["-O3", "-ffp-contract=fast", "-march=native"],
+            Self::NativeProfile => &["-O3", "-ffp-contract=fast", "-march=native", "-pg"],
         }
     }
 

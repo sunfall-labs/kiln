@@ -1155,6 +1155,7 @@ fn can_emit_fast_numeric(proto: &FunctionProto, _func_idx: usize, program: &Prog
         match inst {
             Instruction::LoadLocal(_)
             | Instruction::StoreLocal(_)
+            | Instruction::MarkUninitialized(_)
             | Instruction::Pop
             | Instruction::Dup
             | Instruction::Return
@@ -1313,6 +1314,7 @@ fn render_fast_numeric_function(
                 let val_idx = sp.saturating_sub(1);
                 writeln!(output, "    locals[{slot}] = stack[{val_idx}];").unwrap();
             }
+            Instruction::MarkUninitialized(_) => {}
             Instruction::Pop => {}
             Instruction::Dup => {
                 let src_idx = sp.saturating_sub(1);
