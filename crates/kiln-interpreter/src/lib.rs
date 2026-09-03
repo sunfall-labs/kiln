@@ -29127,12 +29127,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Shared by `Object.assign` and object spread because the two copy the same set: the
     /// spread was reading the store directly, found none, and produced `{}` from a proxy that
     /// `Object.assign` beside it copied correctly.
-    fn proxy_own_enumerable(
+    /// Walk a proxy source's own enumerable properties, handing each to `visit` as soon as it is
+    /// read.
+    ///
+    /// The visit happens inside the walk rather than after it because `Object.assign` writes
+    /// through this and the order is observable. `CopyDataProperties` reads and writes one key
+    /// at a time -- `[[GetOwnProperty]]`, `[[Get]]`, `Set` -- so a proxy source feeding a proxy
+    /// target sees `desc:b, get:b, set:b, desc:a, get:a, set:a`. Collecting every value first and
+    /// writing them afterwards produced `desc:b, get:b, desc:a, get:a, set:b, set:a`, which is
+    /// the same properties in the same order and still the wrong trace: a handler that decides
+    /// what to return from a later `get` based on an earlier `set` observes the difference.
+    fn for_each_proxy_own_enumerable(
         &mut self,
         source: &Value,
         instruction: usize,
-    ) -> Result<Vec<(String, Value)>, ExecutionError> {
-        let mut copied = Vec::new();
+        mut visit: impl FnMut(&mut Self, String, Value) -> Result<(), ExecutionError>,
+    ) -> Result<(), ExecutionError> {
         for key in self.own_keys(source, instruction)? {
             let descriptor =
                 self.proxy_descriptor(source, &Value::String(key.clone()), instruction)?;
@@ -29147,8 +29157,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // answer a read with something its descriptor did not mention, and a spread copies
             // what a read produces.
             let value = self.read_property(source, &key, instruction)?;
-            copied.push((key, value));
+            visit(self, key, value)?;
         }
+        Ok(())
+    }
+
+    /// The same walk, collected.  An object spread builds a fresh object with no traps on it, so
+    /// nothing can observe when the writes happen relative to the reads.
+    fn proxy_own_enumerable(
+        &mut self,
+        source: &Value,
+        instruction: usize,
+    ) -> Result<Vec<(String, Value)>, ExecutionError> {
+        let mut copied = Vec::new();
+        self.for_each_proxy_own_enumerable(source, instruction, |_, key, value| {
+            copied.push((key, value));
+            Ok(())
+        })?;
         Ok(copied)
     }
 
@@ -29171,9 +29196,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 continue;
             }
             if matches!(source, Value::Proxy(_)) {
-                for (key, value) in self.proxy_own_enumerable(source, instruction)? {
-                    self.set_computed(&target, &Value::String(key), value, instruction)?;
-                }
+                self.for_each_proxy_own_enumerable(source, instruction, |this, key, value| {
+                    this.set_computed(&target, &Value::String(key), value, instruction)
+                        .map(|_| ())
+                })?;
             } else {
                 for (key, property) in own_properties(&self.intrinsics, source) {
                     let value = match property {
