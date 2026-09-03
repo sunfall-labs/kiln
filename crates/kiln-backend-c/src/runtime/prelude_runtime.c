@@ -2816,8 +2816,7 @@ static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t 
         return status;
     }
     if (code == KILN_C99_METHOD_NODE_DIAGNOSTICS_PUBLISH) {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member read: diagnostics_channel publish answers undefined", out);
     }
     if (code == KILN_C99_METHOD_NODE_DIAGNOSTICS_RUN_STORES) {
         kiln_value callback = argc > 1 ? args[1] : kiln_c99_undefined();
@@ -2839,8 +2838,7 @@ static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_NODE_UTIL_NOOP) {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member read: the util no-op answers undefined", out);
     }
     if (code == KILN_C99_METHOD_NODE_UTIL_DEPRECATE) {
         *out = argc > 0 ? args[0] : kiln_c99_undefined();
@@ -5640,6 +5638,15 @@ static int kiln_c99_atomics_object(kiln_value *out) {
         status = kiln_c99_define_method(
             *atomics, names[index], strlen(names[index]),
             kiln_c99_method(KILN_C99_METHOD_ATOMICS_UNAVAILABLE));
+    /* `Atomics[Symbol.toStringTag]` is a string, not a shared-memory operation, so nothing about
+     * the missing `SharedArrayBuffer` stops this backend from answering it -- and it read
+     * `undefined` here against the interpreter's "Atomics", which is what
+     * `Object.prototype.toString.call(Atomics)` reads and what a `@@toStringTag` sniff branches
+     * on. The backlog row that says Atomics refuses by name is about the fourteen operations
+     * above; this is the one member of the surface that is only a name. */
+    if (status == KILN_C99_OK)
+        status = kiln_c99_define_method(*atomics, "@@toStringTag", 13,
+                                        kiln_c99_copy_text("Atomics", 7));
     if (status != KILN_C99_OK) return status;
     *out = *atomics;
     return KILN_C99_OK;

@@ -44553,7 +44553,13 @@ fn intrinsic_tabulated_property_names(target: &Value) -> &'static [&'static str]
             const MEMBERS: &[&str] = kiln_builtin_surface::members("Iterator");
             MEMBERS
         }
-        Value::Native(Native::NodeBuffer | Native::NodeBufferGlobal, _) => {
+        // The *global* `Buffer` alone. `node:buffer` is both this module and that constructor
+        // here, and answering the constructor's list for it published eight names where the
+        // shared ABI declares ten -- so the two engines disagreed about what
+        // `Object.keys(require("node:buffer"))` is, and `Buffer` and `default` were names the
+        // native projection published and this one did not. The namespace falls through to the
+        // Node ABI arm below, which is the list both engines bind.
+        Value::Native(Native::NodeBufferGlobal, _) => {
             const MEMBERS: &[&str] = kiln_builtin_surface::members("Buffer");
             MEMBERS
         }

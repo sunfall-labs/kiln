@@ -44,6 +44,7 @@ static int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
+#define KILN_C99_ABSENT(why, out)      \
 #define KILN_C99_MAX_CALL_DEPTH 256
 enum kiln_value_tag {
 KILN_VALUE_UNDEFINED = 0,
@@ -1333,7 +1334,8 @@ static int kiln_c99_is_date_member(const char *key, size_t key_len) {
 static int kiln_c99_is_collection_member(const kiln_collection *collection, const char *key,
 static int kiln_c99_is_string_member(const char *key, size_t key_len) {
 static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len) {
-static int kiln_c99_is_typed_array_member(const char *key, size_t key_len) {
+static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t key_len) {
+static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
 static int kiln_c99_is_data_view_member(const char *key, size_t key_len) {
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
 #define KILN_C99_MEMBER_METHOD 1

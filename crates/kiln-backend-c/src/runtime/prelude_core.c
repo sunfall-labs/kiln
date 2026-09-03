@@ -118,6 +118,16 @@ static uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
             return code;
         }
     }
+    /* The prototype object answers `@@iterator` with the same function an *instance* of it hands
+     * out. It did not, and a `@@` key that no receiver answers is turned into `undefined` one
+     * frame up rather than refused -- so `Array.prototype[Symbol.iterator]` read `undefined` here
+     * against the interpreter's function, silently, which is how a polyfill decides the realm has
+     * no iteration protocol and installs its own. */
+    if ((builtin == KILN_C99_BUILTIN_ARRAY_PROTOTYPE ||
+         builtin == KILN_C99_BUILTIN_STRING_PROTOTYPE) &&
+        kiln_c99_same_name(key, key_len, "@@iterator")) {
+        return KILN_C99_METHOD_ARRAY_VALUES;
+    }
     /* Every prototype that has one shares the generic `toLocaleString`, which invokes the
      * receiver's own `toString` -- so an array's answer is its join, which is what the
      * interpreter gives. A bundled `mobx` reads `Array.prototype.toLocaleString` by name. */
@@ -1883,8 +1893,9 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
     if (callable.tag == KILN_VALUE_FUNCTION) {
         kiln_closure *closure = kiln_c99_closure_of(callable);
         if (closure->properties.tag != KILN_VALUE_OBJECT && !create) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
+                            "answer",
+                            out);
         }
         return kiln_c99_function_store(callable, out);
     }
@@ -1892,8 +1903,9 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
         kiln_bound *bound = (kiln_bound *)(uintptr_t)callable.bits;
         if (bound->properties.tag != KILN_VALUE_OBJECT) {
             if (!create) {
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("a bound callable with no property store, so it has no own member "
+                                "to answer",
+                                out);
             }
             if (kiln_c99_new_object(&bound->properties) != KILN_C99_OK)
                 return KILN_C99_OUT_OF_MEMORY;
@@ -1915,8 +1927,7 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
             }
         }
         if (!create) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("a callable the fixture registry has no store for", out);
         }
         entry = (kiln_method_store *)kiln_c99_gc_alloc(KILN_GC_METHOD_STORE, sizeof *entry);
         if (entry == NULL) return KILN_C99_OUT_OF_MEMORY;
@@ -1942,8 +1953,7 @@ static int kiln_c99_callable_store(kiln_value callable, kiln_value *out, int cre
             return KILN_C99_OK;
         }
         if (!create) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("a callable the realm registry has no store for", out);
         }
     }
     /* Publication transfers the winning candidate and destructor to the realm. */
@@ -2075,8 +2085,9 @@ static int kiln_c99_get_with_receiver(kiln_host *host, kiln_value target, kiln_v
                     break;
                 }
                 if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
-                    *out = kiln_c99_undefined();
-                    return KILN_C99_OK;
+                    KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
+                                    "definition",
+                                    out);
                 }
                 return kiln_c99_call(host, out, object->properties[index].getter, receiver, NULL,
                                      0, depth, thrown);
@@ -2596,8 +2607,9 @@ static int kiln_c99_store_get(kiln_host *host, kiln_value target, const char *ke
                 return KILN_C99_OK;
             }
             if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
+                                "definition",
+                                out);
             }
             return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
                                  depth, thrown);
@@ -2655,8 +2667,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 /* Reading an accessor is a call, and the receiver is the object the read
                  * started from -- not the one the accessor was found on. */
                 if (object->properties[index].getter.tag == KILN_VALUE_UNDEFINED) {
-                    *out = kiln_c99_undefined();
-                    return KILN_C99_OK;
+                    KILN_C99_ABSENT("an accessor with no getter, whose read is undefined by "
+                                    "definition",
+                                    out);
                 }
                 return kiln_c99_call(host, out, object->properties[index].getter, target, NULL, 0,
                                      depth, thrown);
@@ -2751,8 +2764,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             return kiln_c99_invoke_method(host, out, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF,
                                           kiln_c99_undefined(), &target, 1, depth, thrown);
         }
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("a name an ordinary object does not own, which is what the language "
+                        "answers",
+                        out);
     }
     case KILN_VALUE_FUNCTION: {
         kiln_closure *closure = kiln_c99_closure_of(target);
@@ -2817,8 +2831,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
         }
         if (closure->properties.tag != KILN_VALUE_OBJECT) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("a callable with no property store, so it has no own member to "
+                            "answer",
+                            out);
         }
         return kiln_c99_get(host, closure->properties, key, key_len, out, depth, thrown);
     }
@@ -2842,8 +2857,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         case 4:
             /* The property exists and its answer is `undefined` -- `weekOfYear` in a calendar with
              * no week numbering. Not the same as having no such property. */
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("a Temporal field the calendar leaves empty, which is a value and not "
+                            "a missing member",
+                            out);
         case 2:
         case 5: {
             /* Two shapes, one buffer. Shape 2 is text the language shows as a string; shape 5 is
@@ -2929,8 +2945,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * "unsupported Temporal member" -- a refusal for a conversion the value plainly has, one
          * step after the missing text case stopped it reading `undefined`. */
         if (key_len >= 2 && key[0] == '@' && key[1] == '@') {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("a well-known symbol this Temporal type does not carry", out);
         }
         /* A name that exists in the language and is not wired says which. Reading `undefined`
          * would surface three frames away as "not a function". */
@@ -2992,8 +3007,12 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_ARRAY_BUFFER);
             return KILN_C99_OK;
         }
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        if (kiln_c99_is_array_buffer_member(key, key_len)) {
+            KILN_C99_REFUSE("an ArrayBuffer.prototype member this backend has not implemented");
+        }
+        KILN_C99_ABSENT("not a member of ArrayBuffer.prototype; kiln_c99_is_array_buffer_member "
+                        "holds the ones that are",
+                        out);
     case KILN_VALUE_DATA_VIEW: {
         kiln_data_view *view = kiln_c99_data_view_of(target);
         if (kiln_c99_same_name(key, key_len, "buffer")) {
@@ -3097,7 +3116,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                                   ? KILN_C99_METHOD_ARRAY_VALUES
                                   : kiln_c99_typed_prototype_method(key, key_len);
             if (method == 0) {
-                if (kiln_c99_is_typed_array_member(key, key_len)) {
+                if (kiln_c99_is_typed_array_member(view->kind == KILN_TYPED_UINT8, key, key_len)) {
                     /* A real member this backend has not grown yet. `undefined` would be a
                      * silent wrong answer -- the program would call it and get a TypeError
                      * naming the wrong thing -- so this refuses and joins the backlog. */
@@ -3170,8 +3189,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * only for a name the language actually puts on `Array.prototype`. Anything else is
          * absent, and absent is undefined. */
         if (!kiln_c99_is_array_member(key, key_len)) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("not a member of Array.prototype; kiln_c99_is_array_member holds the "
+                            "ones that are",
+                            out);
         }
         KILN_C99_REFUSE("an Array.prototype member this backend has not implemented");
     }
@@ -3193,8 +3213,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * wrapper prototype does not contain is absent, not a backend refusal. Keeping that
          * distinction here makes named and computed access share one semantic seam and lets
          * optional chaining compose with arbitrary primitive-valued fields. */
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member of the wrapper prototype this primitive boxes to", out);
     case KILN_VALUE_STRING: {
         uint64_t code;
         if (kiln_c99_same_name(key, key_len, "constructor")) {
@@ -3227,8 +3246,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         }
         /* Not an index, not `length`, not a member: the property is absent, and absent has an
          * answer. */
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member of String.prototype; kiln_c99_is_string_member holds the "
+                        "ones that are",
+                        out);
     }
     case KILN_VALUE_PROMISE: {
         uint64_t code;
@@ -3300,8 +3320,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * it says so here -- but only for a name the language actually puts on this
              * collection's prototype. Anything else is absent, and absent is undefined. */
             if (!kiln_c99_is_collection_member(collection, key, key_len)) {
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("not a member of this collection's prototype; "
+                                "kiln_c99_is_collection_member holds the ones that are",
+                                out);
             }
             KILN_C99_REFUSE("a collection prototype member this backend has not implemented");
         }
@@ -3362,8 +3383,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
         /* Same split as the array above: a member this backend lacks refuses by name, and a name
          * that is not a member at all is undefined. */
         if (!kiln_c99_is_date_member(key, key_len)) {
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("not a member of Date.prototype; kiln_c99_is_date_member holds the "
+                            "ones that are",
+                            out);
         }
         KILN_C99_REFUSE("a Date.prototype member this backend has not implemented");
     }
@@ -3539,8 +3561,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             }
             /* A name the namespace does not have is `undefined`, as it is on any object -- the
              * refusal below is for the ones that *do* exist and are not wired yet. */
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("not a member of the Temporal namespace", out);
         }
         if (target.bits == KILN_C99_BUILTIN_TEMPORAL_NOW) {
             /* `Temporal.Now` reads the realm's clock, which ADR 0015 makes virtual, UTC, and
@@ -3566,8 +3587,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OK;
                 }
             }
-            *out = kiln_c99_undefined();
-            return KILN_C99_OK;
+            KILN_C99_ABSENT("not a member of Temporal.Now", out);
         }
         {
             int32_t constructed = kiln_c99_temporal_kind_of_builtin(target.bits);
@@ -3627,8 +3647,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                     return kiln_c99_temporal_unsupported(thrown, owner == NULL ? "Temporal" : owner,
                                                          key, key_len);
                 }
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("not a static of this Temporal type", out);
             }
         }
         {
@@ -3646,6 +3665,16 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 }
                 method = kiln_c99_typed_prototype_method(key, key_len);
                 if (method == 0) {
+                    /* The same question the *instance* read asks two hundred lines above, and it
+                     * was missing here: a real member of the prototype that this backend has not
+                     * built read as `undefined` off the prototype object while refusing off an
+                     * instance. `Uint8Array.prototype.toSorted` is one, and a library that patches
+                     * or feature-detects a method reads it off the prototype, which is the half
+                     * that was answering wrongly. */
+                    if (kiln_c99_is_typed_array_member(concrete && typed_kind == KILN_TYPED_UINT8,
+                                                       key, key_len)) {
+                        KILN_C99_REFUSE("a typed-array member this backend has not implemented");
+                    }
                     method = kiln_c99_same_name(key, key_len, "isPrototypeOf")
                                  ? KILN_C99_METHOD_IS_PROTOTYPE_OF
                              : kiln_c99_same_name(key, key_len, "propertyIsEnumerable")
@@ -3812,6 +3841,36 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                 }
             }
         }
+        /* THE THREE NAMES THE SHARED SURFACE DELIBERATELY DOES NOT LIST.
+         *
+         * `length`, `name` and `prototype` belong to every callable rather than to any particular
+         * built-in, so `kiln_builtin_surface::SURFACE` leaves them out and each engine answers
+         * them from its own knowledge of what a function is (ADR 0043). The consequence here was
+         * not intended: the rule below -- "a name this table has no row for is `undefined`" --
+         * was answering for them too, so `Array.length`, `ArrayBuffer.prototype` and
+         * `Symbol.prototype` read `undefined` against the interpreter's number and objects. That
+         * is the silent wrong answer ADR 0042 forbids, and it was invisible to
+         * `assert_surface_is_covered` precisely because the three are outside the shared table.
+         *
+         * `name` is answered above for every non-namespace built-in. `prototype` is answered
+         * above for every built-in this backend has a prototype object for. What reaches here is
+         * a built-in whose prototype this backend does not model -- `ArrayBuffer` and `Symbol`
+         * are the two -- and a `length` this backend has no arity for.
+         *
+         * WHY THESE REFUSE RATHER THAN ANSWER. A `prototype` here would have to be a new
+         * prototype built-in with no method table behind it, which would publish nothing and
+         * answer `undefined` for each of its own members -- twelve silent wrong answers on
+         * `ArrayBuffer.prototype` and four on `Symbol.prototype`, in place of the one that is
+         * here now. `length` is a built-in function's arity, which lives in neither table; a
+         * guess is a wrong answer and nothing in this repository feature-detects on it. Both are
+         * work with an owner, and until somebody does it a refusal names the member and stops the
+         * program at the cause. */
+        if (!kiln_c99_is_namespace(target.bits) &&
+            (kiln_c99_same_name(key, key_len, "length") ||
+             kiln_c99_same_name(key, key_len, "prototype"))) {
+            KILN_C99_REFUSE("a built-in callable's own `length` or `prototype`, which this "
+                            "backend does not model for this built-in");
+        }
         {
             /* An absent name on a table-driven built-in is `undefined`, exactly as it is on an
              * object the program built: `Object.nope` is not a gap here, it is what the language
@@ -3825,8 +3884,9 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             int owned = 0;
             (void)kiln_c99_builtin_member(target.bits, key, key_len, &owned);
             if (owned && !kiln_c99_backlog_names(kiln_c99_builtin_name(target.bits), key, key_len)) {
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("not a member of this built-in; BUILTIN_SURFACE and "
+                                "BUILTIN_SURFACE_BACKLOG hold every one that is",
+                                out);
             }
             /* The prototype tables are not table-driven (ADR 0043 leaves them on the method-code
              * ranges), but two of them have a member list already, written for the receivers
@@ -3835,13 +3895,15 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
              * `Array.prototype` one at a time, which is how a library patches methods. */
             if (target.bits == KILN_C99_BUILTIN_ARRAY_PROTOTYPE &&
                 !kiln_c99_is_array_member(key, key_len)) {
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("not a member of Array.prototype; kiln_c99_is_array_member holds "
+                                "the ones that are",
+                                out);
             }
             if (target.bits == KILN_C99_BUILTIN_STRING_PROTOTYPE &&
                 !kiln_c99_is_string_member(key, key_len)) {
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("not a member of String.prototype; kiln_c99_is_string_member holds "
+                                "the ones that are",
+                                out);
             }
         }
         KILN_C99_REFUSE("a member the language puts on this built-in and this backend has not "
@@ -3871,8 +3933,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
             return KILN_C99_OK;
         }
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member of BigInt.prototype", out);
     case KILN_VALUE_NUMBER:
         if (kiln_c99_same_name(key, key_len, "constructor")) {
             *out = kiln_c99_builtin(KILN_C99_BUILTIN_NUMBER);
@@ -3898,8 +3959,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
             *out = kiln_c99_method(KILN_C99_METHOD_NUMBER_VALUE_OF);
             return KILN_C99_OK;
         }
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member of Number.prototype", out);
     default:
         /* A boolean or callable has no own properties here. */
         KILN_C99_REFUSE("own properties are not modelled on this value");
@@ -3924,8 +3984,7 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
                              const char *ikey, kiln_value *out, int depth, kiln_value *thrown) {
     int status;
     if (kiln_c99_is_node_hidden_key(key, key_len)) {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("a hidden runtime slot, which no program names", out);
     }
     if (target.tag == KILN_VALUE_PROXY) {
         /* Reading a proxy *is* a call, so it cannot go through the pure walk below. The trap
@@ -3942,8 +4001,16 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
          * of whatever refuses next, which is exactly the bug `kiln_c99_forget_handled_throw`
          * exists to stop one layer up. */
         kiln_c99_diagnostic_detail = NULL;
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        /* THIS IS A CATCH-ALL AND NOT A LIST, WHICH MAKES IT THE ONE ABSENCE HERE THAT CAN LIE.
+         * A symbol probe must not stop a program -- `kiln_c99_to_primitive` asks every reference
+         * for `@@toPrimitive` -- so a refusal on a `@@` key becomes `undefined`. A symbol the
+         * receiver really does own and this backend has not wired is swallowed with the probes:
+         * `Array.prototype[Symbol.iterator]` read `undefined` here for as long as anybody looked.
+         * The fix is always upstream, in the receiver that owns the symbol; what finds them is
+         * `scripts/native-surface-inventory.py --gate`. */
+        KILN_C99_ABSENT("a well-known symbol whose read reached a refusal, which a symbol probe "
+                        "must not turn into a stop",
+                        out);
     }
     return status;
 }
@@ -4091,8 +4158,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                  * undefined -- not the refusal an unknown ordinary name gets, which is there to
                  * catch a method this backend has not grown and which a symbol can never be. */
                 if (!kiln_c99_same_name(name.ptr, name.len, "@@iterator")) {
-                    *out = kiln_c99_undefined();
-                    return KILN_C99_OK;
+                    KILN_C99_ABSENT("a reserved slot nobody set on this object", out);
                 }
                 return kiln_c99_get(host, target, name.ptr, name.len, out, depth, thrown);
             }
@@ -4110,8 +4176,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
                         }
                     }
                 }
-                *out = kiln_c99_undefined();
-                return KILN_C99_OK;
+                KILN_C99_ABSENT("a reserved slot nobody set on this array", out);
             }
             return kiln_c99_get(host, target, key.tag == KILN_VALUE_STRING ? key.ptr : NULL,
                                 key.tag == KILN_VALUE_STRING ? key.len : 0, out, depth, thrown);
@@ -4140,8 +4205,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
             }
             position += 1;
         }
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("a string index past the end", out);
     }
     if (target.tag == KILN_VALUE_TYPED_ARRAY && index >= 0.0) {
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
@@ -4154,8 +4218,7 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
     }
     if (target.tag == KILN_VALUE_TYPED_ARRAY && key.tag == KILN_VALUE_STRING && key.len >= 2 &&
         key.ptr[0] == '@' && key.ptr[1] == '@') {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("a reserved slot a typed array does not carry", out);
     }
     {
         /* An object key is a string, whatever it was written as -- and a symbol's is the
@@ -17129,8 +17192,7 @@ static int kiln_c99_iso_string(kiln_value *out, double time) {
     kiln_date_parts parts = kiln_c99_date_parts(time);
     kiln_text text = {NULL, 0, 0};
     if (!parts.valid) {
-        *out = kiln_c99_undefined();
-        return KILN_C99_OK;
+        KILN_C99_ABSENT("not a member read: an instant with no ISO spelling", out);
     }
     /* A year outside four digits is written with a sign and six, which is the only shape that
      * stays unambiguous. */
