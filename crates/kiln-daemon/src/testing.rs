@@ -405,6 +405,32 @@ fn run_discovered(
     Ok(summary)
 }
 
+/// The pool a corpus runs on, or `None` when the OS would not give us its threads.
+///
+/// Rayon's own threads get Rust's 2 MiB default, and a test is a *program*: every other thread in
+/// this process that runs one -- the daemon's connection threads, the one-shot server -- asks for
+/// [`crate::SERVE_STACK_BYTES`] instead, because 2 MiB is not enough room for a compiler that
+/// recurses over its input or for a built-in that calls back into JavaScript.
+///
+/// The interpreter bounds that second recursion at `ExecutionLimits::max_native_depth` so it
+/// becomes a catchable `RangeError` rather than a dead process, and that bound is only as good as
+/// the room the frames have. Measured over `built-ins/Iterator/concat`, which recurses until the
+/// bound stops it: on a default Rayon thread 176 frames survived and 184 did not, against a
+/// declared limit of 192. The limit was therefore decorative on this pool alone -- the process
+/// aborted before the counter reached it -- and it took an unrelated refactor moving a frame by a
+/// few hundred bytes to turn a chunk of 1,192 passing tests into a SIGABRT.
+fn corpus_pool() -> Option<&'static rayon::ThreadPool> {
+    static POOL: std::sync::OnceLock<Option<rayon::ThreadPool>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .stack_size(crate::SERVE_STACK_BYTES)
+            .thread_name(|index| format!("kiln-corpus-{index}"))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
 /// Run every selected test, returning each one's variants in the caller's order.
 ///
 /// Rayon's indexed iterator steals uneven work while collecting results in selection order. Pure
@@ -416,20 +442,28 @@ fn execute(
     pending: &[(String, &ConformanceTest)],
     mode: RunMode,
 ) -> Result<Vec<Vec<VariantResult>>, String> {
-    match mode {
-        RunMode::Interpreter => pending
-            .par_iter()
-            .map(|(_, test)| {
-                with_interpreter_worker(|worker| test.run_with_interpreter_worker(worker))
-            })
-            .collect(),
-        RunMode::Parse | RunMode::Node => pending
-            .par_iter()
-            .map(|(_, test)| {
-                catch_unwind(AssertUnwindSafe(|| test.run(mode)))
-                    .map_err(|_| "conformance worker panicked".to_owned())
-            })
-            .collect(),
+    let run = || -> Result<Vec<Vec<VariantResult>>, String> {
+        match mode {
+            RunMode::Interpreter => pending
+                .par_iter()
+                .map(|(_, test)| {
+                    with_interpreter_worker(|worker| test.run_with_interpreter_worker(worker))
+                })
+                .collect(),
+            RunMode::Parse | RunMode::Node => pending
+                .par_iter()
+                .map(|(_, test)| {
+                    catch_unwind(AssertUnwindSafe(|| test.run(mode)))
+                        .map_err(|_| "conformance worker panicked".to_owned())
+                })
+                .collect(),
+        }
+    };
+    // Serially on this thread rather than on Rayon's own pool if the OS refused us one: a corpus
+    // that runs slowly is a result, and a corpus that does not run is not.
+    match corpus_pool() {
+        Some(pool) => pool.install(run),
+        None => run(),
     }
 }
 
