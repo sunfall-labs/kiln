@@ -7450,10 +7450,13 @@ server.listen(0, "127.0.0.1", () => console.log(server.address().port));
         let root = TestDirectory::new("kiln-native-result");
         let result_path = root.path.join("result.bin");
 
-        assert!(matches!(
-            decode_run_result(&result_path, true),
-            Err(NativeError::RunResult { .. })
-        ));
+        // An absent file after a successful run is `None`, not an error. The result carries only
+        // the five boundary scalar tags, and a module's completion value is under no obligation to
+        // be one of them -- a `--node` entry completes with its `module.exports`, an object. The
+        // launcher declines to write what it cannot represent, and declining is not failing: it
+        // used to charge that refusal to the program's exit status, so a program that printed
+        // correctly exited 1. Unrepresentable is absent, which is what the `Option` already meant.
+        assert_eq!(decode_run_result(&result_path, true).unwrap(), None);
         assert_eq!(decode_run_result(&result_path, false).unwrap(), None);
 
         fs::write(&result_path, b"not-a-result").expect("write malformed result");
