@@ -50,13 +50,19 @@ frontmatter, and several have a dedicated runner that knows flags `kiln test` wi
 
 | Corpus | Command |
 | --- | --- |
-| `conformance/guard`, `conformance/effect`, `conformance/regress` | `kiln test <dir>` |
+| `conformance/guard`, `conformance/effect` | `kiln test <dir>` |
+| `conformance/regress` | `kiln test conformance/regress --node` |
 | `conformance/node` | `kiln test conformance/node --node` |
 | `conformance/server` | `kiln test conformance/server --node` |
 | `conformance/native` | `scripts/native.sh` |
 | `conformance/differential` | `scripts/differential.sh` |
 | `conformance/thirdparty` | `scripts/thirdparty.sh` |
 | Test262 | `scripts/test262.sh` |
+
+`conformance/regress` is in the `--node` list for one test: `r08-node-async-context` builds a
+`util.TextEncoder` and an `AsyncLocalStorage`, so it needs the adapter like any other Node test.
+Without the flag it now says so -- it declares `requires_host = "node"` -- rather than failing with
+`require is not defined`, which named neither the cause nor the fix.
 
 `--node` installs the Tokio-owned Node adapter. Without it the Node and server corpora fail every
 test rather than skipping, which reads exactly like a broken engine — it has been reported as one.
