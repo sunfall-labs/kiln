@@ -11037,7 +11037,7 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     if (from < 0) {
                         piece = kiln_c99_undefined();
                     } else if (kiln_c99_string_is_ascii(subject)) {
-                        piece = kiln_c99_copy_text(subject.ptr + (size_t)from, (size_t)(to - from));
+                        piece = kiln_c99_value(KILN_VALUE_STRING, 0, subject.ptr + (size_t)from, (size_t)(to - from));
                     } else {
                         piece = kiln_c99_from_units(units + (size_t)from, (size_t)(to - from));
                     }
