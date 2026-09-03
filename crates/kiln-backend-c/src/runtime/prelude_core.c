@@ -524,8 +524,12 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
         kiln_c99_frame_argc = argc;
     }
     kiln_c99_diagnostic_active_depth = depth + 1;
-    status = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
-                           thrown, frame);
+    kiln_call_context ctx;
+    ctx.host = host;
+    ctx.thrown = thrown;
+    ctx.frame = frame;
+    ctx.depth = depth + 1;
+    status = closure->body(&ctx, result, closure->upvalues, &receiver, args, argc);
     if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
         kiln_c99_diagnostic_site = closure->diagnostic_source;
         kiln_c99_diagnostic_operation = "FunctionBody";
@@ -569,18 +573,6 @@ static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int dep
         "generated function body refused before an instruction owned the failure";
 }
 
-/* The call entry every emitted call site uses.
- *
- * A callee that cannot observe the frame context needs nothing published around it, so its whole
- * call is the body call plus a depth save -- small enough to inline, which removes a frame per
- * JavaScript call. Worth 1.25x on a recursive benchmark now that values are sixteen bytes,
- * against 1.11x when they were thirty-two and the frame moved more; the saving grew because what
- * the frame costs is mostly what it moves. Everything else tail-calls
- * `kiln_c99_invoke_closure_body`, which stays out of line because it covers `arguments`,
- * `new.target`, arrows and generators, and is far past the inliner's threshold. */
-/* `static inline` is a hint and the compiler declined it: measured 1.06x, against 1.25x when the
- * frame was forced away. The wrapper is a dozen instructions on the path that matters, so the
- * hint is made a requirement where the compiler supports saying so. */
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((always_inline))
 #endif
@@ -593,8 +585,12 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_value *result,
         int saved_depth = kiln_c99_diagnostic_active_depth;
         int quick;
         kiln_c99_diagnostic_active_depth = depth + 1;
-        quick = closure->body(host, result, closure->upvalues, receiver, args, argc, depth + 1,
-                              thrown, frame);
+        kiln_call_context ctx;
+        ctx.host = host;
+        ctx.thrown = thrown;
+        ctx.frame = frame;
+        ctx.depth = depth + 1;
+        quick = closure->body(&ctx, result, closure->upvalues, &receiver, args, argc);
         if (quick == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL) {
             kiln_c99_attribute_body_refusal(closure, depth);
         }
@@ -20484,9 +20480,8 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *out, kiln_value *thrown);
 
-static int kiln_c99_dynamic_body_trampoline(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                                            kiln_value receiver, const kiln_value *args, size_t argc,
-                                            int depth, kiln_value *thrown, struct kiln_generator *frame);
+static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                                            const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);
 
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
@@ -21603,9 +21598,13 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     return KILN_C99_OK;
 }
 
-static int kiln_c99_dynamic_body_trampoline(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                                            kiln_value receiver, const kiln_value *args, size_t argc,
-                                            int depth, kiln_value *thrown, struct kiln_generator *frame) {
+static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                                            const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+    kiln_host *host = ctx ? ctx->host : NULL;
+    kiln_value *thrown = ctx ? ctx->thrown : NULL;
+    struct kiln_generator *frame = ctx ? ctx->frame : NULL;
+    int depth = ctx ? ctx->depth : 0;
+    kiln_value receiver = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
     (void)frame;
     kiln_value params_val = upvalues[0];
     kiln_value body_val = upvalues[1];
@@ -23106,21 +23105,8 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
     kiln_value method;
     kiln_value call_result = kiln_c99_undefined();
     kiln_value self_value = stack[*sp - argc - 1];
-    kiln_value call_argbuf[KILN_C99_COERCED_INLINE + 1];
-    kiln_value *call_args = NULL;
+    const kiln_value *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
     int status;
-
-    if (argc > 0) {
-        if (argc <= KILN_C99_COERCED_INLINE) {
-            call_args = call_argbuf;
-        } else {
-            call_args = (kiln_value *)malloc(argc * sizeof *call_args);
-            if (call_args == NULL) return KILN_C99_OUT_OF_MEMORY;
-        }
-        for (size_t i = 0; i < argc; i++) {
-            call_args[i] = stack[*sp - argc + i];
-        }
-    }
 
     status = kiln_c99_get_site(host, self_value, key, key_len, &method, depth, thrown, site);
     if (status == KILN_C99_CONTROL_ERROR) {
@@ -23132,13 +23118,11 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
         kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
     }
     if (status != KILN_C99_OK) {
-        if (call_args != NULL && call_args != call_argbuf) free(call_args);
         return status;
     }
 
     status = kiln_c99_call(host, &call_result, method, self_value, call_args, argc, depth, thrown);
     if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
-        if (call_args != NULL && call_args != call_argbuf) free(call_args);
         *result = call_result;
         return status;
     }
@@ -23154,7 +23138,6 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
         kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
     }
 
-    if (call_args != NULL && call_args != call_argbuf) free(call_args);
     if (status != KILN_C99_OK) return status;
 
     *sp -= (argc + 1);
@@ -23168,21 +23151,8 @@ static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size
                             kiln_value *result) {
     kiln_value call_result = kiln_c99_undefined();
     kiln_value callee = stack[*sp - argc - 1];
-    kiln_value call_argbuf[KILN_C99_COERCED_INLINE + 1];
-    kiln_value *call_args = NULL;
+    const kiln_value *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
     int status;
-
-    if (argc > 0) {
-        if (argc <= KILN_C99_COERCED_INLINE) {
-            call_args = call_argbuf;
-        } else {
-            call_args = (kiln_value *)malloc(argc * sizeof *call_args);
-            if (call_args == NULL) return KILN_C99_OUT_OF_MEMORY;
-        }
-        for (size_t i = 0; i < argc; i++) {
-            call_args[i] = stack[*sp - argc + i];
-        }
-    }
 
     {
         kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL;
@@ -23192,8 +23162,6 @@ static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size
             status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, argc, depth, thrown);
         }
     }
-
-    if (call_args != NULL && call_args != call_argbuf) free(call_args);
 
     if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
         *result = call_result;
