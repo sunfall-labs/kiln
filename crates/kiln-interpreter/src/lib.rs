@@ -11702,10 +11702,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     // `URL is not a constructor` -- a wrong answer traded for a worse one. The
                     // built-in table is incomplete and fixing it is its own job; until then this
                     // asks only where the answer is known to be right.
-                    if matches!(callee, Value::Function(_)) && !is_constructor(&callee) {
+                    if !is_constructor(&callee) {
                         self.throw_error(
                             ErrorKind::Type,
-                            format!("{} is not a constructor", callee.to_display_string()),
+                            // The wording the existing `NotAConstructor` error already uses --
+                            // `a number`, not `5`. Two spellings of one failure would be a
+                            // difference a program can see for no reason.
+                            format!("a {} is not a constructor", callee.type_name()),
                             current,
                         )?;
                         continue;
@@ -41016,7 +41019,17 @@ fn native_is_constructor(native: Native) -> bool {
         // what a feature check reads.
         | Native::AbortSignalConstructor
         | Native::NodeStringDecoderConstructor
-        | Native::NodeAsyncResource => true,
+        | Native::NodeAsyncResource
+        // Three more the rule below cannot see, because they have no intrinsic prototype entry
+        // for it to find. Each is a real constructor, and saying otherwise is visible to a
+        // program: `Reflect.construct(URL, ["http://example.com"])` answered "URL is not a
+        // constructor", and `new http.Server()` the same. `Iterator` is the abstract base and
+        // *refuses* `new`, like `AbortSignal` above -- reported as a constructor so the refusal
+        // names the right reason.
+        | Native::UrlConstructor
+        | Native::IteratorConstructor
+        | Native::NodeHttpServer
+        | Native::NodeAsyncLocalStorage => true,
         // Each error kind's `prototype` is a per-realm object rather than a table, which the
         // marker alone cannot answer for.
         Native::Error(_) => true,
