@@ -81,9 +81,27 @@ impl DaemonClient {
         // Replaced rather than reported, because there is nothing for the user to decide: the
         // binary they just invoked is the one they meant to run.
         let mine = kiln_daemon::build_identity();
-        let (_, theirs) = client.handshake()?;
-        if mine != 0 && theirs != 0 && mine != theirs {
-            client.shutdown()?;
+        let stale = match client.handshake() {
+            Ok((_, theirs)) => mine != 0 && theirs != 0 && mine != theirs,
+            // A daemon speaking another protocol needs replacing for the same reason and with the
+            // same authority: the binary the user just invoked is the one they meant to run. It
+            // hangs up on a mismatched greeting, so stopping it takes a fresh connection carrying
+            // `Shutdown` and no greeting -- safe for that request alone, because it has no payload
+            // to disagree about and the daemon answers it without a prior `Ping`. `daemon stop`
+            // reaches the same conclusion the same way.
+            //
+            // Doing this here rather than only in `stop` is the difference between an ordinary
+            // version bump being invisible and every developer with a daemon up meeting an error
+            // telling them to go and restart it.
+            Err(Error::Protocol(_)) => true,
+            Err(other) => return Err(other),
+        };
+        if stale {
+            // Our own connection goes first, then the daemon, then a fresh one of this build.
+            // Stopping it is not optional: it holds the socket, so a replacement cannot bind and
+            // the next connect would find the same stale daemon again.
+            drop(client);
+            DaemonClient::connect(socket)?.shutdown()?;
             let child = spawn_daemon(socket)?;
             client = wait_for_daemon(socket, child)?;
         }
