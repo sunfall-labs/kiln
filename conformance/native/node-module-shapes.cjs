@@ -61,3 +61,33 @@ console.log(
   "performance inherits Object.prototype",
   Object.getPrototypeOf(perf.performance) === Object.prototype,
 );
+
+// `require("node:module")` and `require("node:stream")` are node's other two callable defaults:
+// the `Module` and `Stream` classes, `typeof` "function" in node v25.9.0 and in the interpreter.
+// The native backend built a namespace object for both, so the same bytecode read "object" here
+// and "function" there -- and `typeof require("node:module") === "function"` is how a bundle
+// decides it may call `createRequire` off it.
+//
+// Only `typeof` is printed, and the omission is the point: `.name` is "Module" and "Stream" in
+// node, `undefined` in the interpreter and the empty string here, so printing it would assert a
+// disagreement neither engine has closed rather than the one this probe exists for. The members
+// below are printed instead, because a callable that answers nothing would type-check and still
+// be a placeholder.
+const nodeModule = require("node:module");
+const stream = require("node:stream");
+
+console.log("node:module", typeof nodeModule, typeof nodeModule.createRequire);
+console.log(
+  "node:stream",
+  typeof stream,
+  typeof stream.Readable,
+  typeof stream.Writable,
+  typeof stream.addAbortSignal,
+  typeof stream.finished,
+);
+
+// The class really constructs one: `new Readable()` off the callable default is the read a stream
+// consumer makes, and a name on a value that does nothing would be a prettier wrong answer.
+const readable = new stream.Readable();
+readable.push("chunk");
+console.log("readable read", readable.read());
