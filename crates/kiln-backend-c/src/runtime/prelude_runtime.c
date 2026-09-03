@@ -2731,14 +2731,24 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
         }
         status = kiln_c99_typed_alloc(out, KILN_TYPED_UINT8, total);
         if (status != KILN_C99_OK) return status;
-        for (at = 0; at < items->count; ++at) {
-            kiln_typed_array *view = kiln_c99_typed_array_of(items->elements[at]);
-            size_t index;
-            for (index = 0; index < view->length; ++index)
-                kiln_c99_typed_set(kiln_c99_typed_array_of(*out), written++,
-                                   kiln_c99_typed_get(view, index));
+        {
+            kiln_typed_array *dest = kiln_c99_typed_array_of(*out);
+            uint8_t *dest_bytes = (uint8_t *)dest->buffer->bytes + dest->byte_offset;
+            for (at = 0; at < items->count; ++at) {
+                kiln_typed_array *view = kiln_c99_typed_array_of(items->elements[at]);
+                if (view->kind == KILN_TYPED_UINT8 && view->length > 0) {
+                    const uint8_t *src_bytes = (const uint8_t *)view->buffer->bytes + view->byte_offset;
+                    memcpy(dest_bytes + written, src_bytes, view->length);
+                    written += view->length;
+                } else {
+                    size_t index;
+                    for (index = 0; index < view->length; ++index)
+                        kiln_c99_typed_set(dest, written++,
+                                           kiln_c99_typed_get(view, index));
+                }
+            }
+            dest->is_buffer = 1;
         }
-        kiln_c99_typed_array_of(*out)->is_buffer = 1;
         return KILN_C99_OK;
     }
     if (code == KILN_C99_METHOD_BUFFER_TO_STRING) {
