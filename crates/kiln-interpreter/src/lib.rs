@@ -50,7 +50,6 @@ use std::sync::Arc;
 /// prototypes and a loader, so the handful the conformance corpus needs first live here.
 mod symbol;
 pub use symbol::*;
-pub(crate) use symbol::*;
 
 /// Node's public HTTP method catalogue. Kept here as semantic data rather than sourced from
 /// Hyper: Hyper parses method tokens, while this list is a JavaScript compatibility contract.
@@ -237,7 +236,6 @@ pub enum OsFact {
 
 mod native;
 pub use native::*;
-pub(crate) use native::*;
 
 /// An ordinary object: string-keyed properties in insertion order.
 ///
