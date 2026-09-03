@@ -65,30 +65,76 @@ diverged=0
 declare -a REFUSALS=()
 declare -a DIVERGENCES=()
 
-for probe in "$PROBES"/*.js; do
+JOBS="${KILN_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+if (( JOBS > 16 )); then
+	JOBS=16
+elif (( JOBS < 1 )); then
+	JOBS=1
+fi
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-diff-results.XXXXXXXX")"
+cleanup() {
+	if [[ ${BASHPID:-$$} -eq $$ ]]; then
+		rm -rf "$WORK_DIR"
+	fi
+}
+trap cleanup EXIT
+
+run_probe() {
+	trap - EXIT
+	local probe="$1"
+	local name
 	name="$(basename -- "$probe" .js)"
-	# TZ pinned so the reference implementation is in the same zone this realm is.
+
+	local expected
 	expected="$(TZ=UTC node "$probe" 2>&1 || true)"
-	# --one-shot so a stale daemon can never answer for a build that no longer exists.
-	kiln_status=0
+
+	local actual
+	local kiln_status=0
 	actual="$("$KILN" --one-shot run "$probe" 2>&1)" || kiln_status=$?
 
 	if [[ $actual == "$expected" ]]; then
-		matched=$((matched + 1))
-		continue
+		touch "$WORK_DIR/$name.matched"
+		return 0
 	fi
+
 	if ((kiln_status != 0)) && [[ $actual == kiln:* || $actual == *$'\n'kiln:* ]]; then
-		# A runtime error may follow stdout produced before the failing instruction. Look for the
-		# diagnostic at the start of any line, or strict-mode failures in otherwise matching probes
-		# are misreported as silent divergences. The first diagnostic line carries the reason; the
-		# path prefix in it is noise here.
-		REFUSALS+=("$name	$(printf '%s\n' "$actual" | sed -n '/^kiln:/ { s/^kiln: [^:]*: //; p; q; }')")
-		continue
+		local reason
+		reason="$(printf '%s\n' "$actual" | sed -n '/^kiln:/ { s/^kiln: [^:]*: //; p; q; }')"
+		printf '%s\n' "$reason" > "$WORK_DIR/$name.refused"
+		return 0
 	fi
-	diverged=$((diverged + 1))
-	DIVERGENCES+=("$name")
-	DIVERGENCES+=("  node: $(printf '%s' "$expected" | head -5)")
-	DIVERGENCES+=("  kiln: $(printf '%s' "$actual" | head -5)")
+
+	{
+		printf '%s\n' "  node: $(printf '%s' "$expected" | head -5)"
+		printf '%s\n' "  kiln: $(printf '%s' "$actual" | head -5)"
+	} > "$WORK_DIR/$name.diverged"
+}
+
+running=0
+for probe in "$PROBES"/*.js; do
+	run_probe "$probe" &
+	running=$((running + 1))
+	if (( running >= JOBS )); then
+		wait -n
+		running=$((running - 1))
+	fi
+done
+wait
+
+for probe in "$PROBES"/*.js; do
+	name="$(basename -- "$probe" .js)"
+	if [[ -f "$WORK_DIR/$name.matched" ]]; then
+		matched=$((matched + 1))
+	elif [[ -f "$WORK_DIR/$name.refused" ]]; then
+		REFUSALS+=("$name	$(<"$WORK_DIR/$name.refused")")
+	elif [[ -f "$WORK_DIR/$name.diverged" ]]; then
+		diverged=$((diverged + 1))
+		DIVERGENCES+=("$name")
+		while IFS= read -r line; do
+			DIVERGENCES+=("$line")
+		done < "$WORK_DIR/$name.diverged"
+	fi
 done
 
 kiln_say "differential: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged"

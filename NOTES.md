@@ -4386,3 +4386,68 @@ real node 60/60 idle and 40/40 loaded, which the timer-anchored versions never d
 
 `conformance/node/UPSTREAM.md` now records why the oracle is the settlement and not a timer.
 Restoring the timer would look like tightening the test and would be putting the flake back.
+
+## Conformance test runner parallelization (2026-09-03, Antigravity)
+
+The three top-level runner scripts (`scripts/native.sh`, `scripts/differential.sh`, and
+`scripts/thirdparty.sh`) each executed their probe lists in a sequential, single-threaded bash loop.
+On a 16-core machine, 15 cores were idle while `clang` and `kiln --one-shot` churned:
+`native.sh` took 9m 17s (557s) for 78 probes, `thirdparty.sh` took 6m 15s (375s) for 22 bundles,
+and `differential.sh` took ~50s for 111 probes.
+
+All three now use a bash worker queue bounded by `KILN_JOBS` (defaulting to `nproc` capped at 16,
+configurable down to 1), with child process traps isolated so subshells do not prematurely delete
+the parent's results directory. Results are written to an ephemeral scratch directory and collated
+in the original sorted order, preserving 100% identical diagnostic format and exit statuses.
+
+Measurements on 16 cores:
+- `scripts/native.sh`: **9m 17s -> 44s** (12.6x speedup)
+- `scripts/thirdparty.sh`: **6m 15s -> 18s** (20.8x speedup)
+- `scripts/differential.sh`: **50s -> 6s** (8.3x speedup)
+
+Combined wall-clock test iteration time dropped from **~16.5 minutes down to ~1 minute**.
+
+||||||| parent of 9a4990e (Answer SIGUSR1 with heap, runtime and connection counts at the turn boundary)
+## A compiled server will now tell you what it is doing (2026-09-03, Claude `worktree-agent-a998e1ca35c141473`)
+
+`kill -USR1` on a `kiln build` binary writes three lines to stderr -- heap, runtime, connections --
+and the process keeps serving. ADR 0049. Four things came out of it that are worth keeping.
+
+**Every number was already in the process; none of them was reachable.** `kiln_gc_heap` had nine
+useful fields that nothing outside the prelude read. `sample_runtime_metrics` had six that nothing
+outside Rust could call. Both HTTP engines counted their live connections and `RealmRuntime`
+published only `has_open_server_connections`, a boolean, because a boolean was all the drive loop
+had ever needed. The work was not measuring anything new. It was carrying two sets of numbers
+across a boundary in opposite directions -- the hooks table for Rust-into-prelude, a new provider
+export for prelude-into-Rust -- and picking one place to print them.
+
+**The flag-at-the-turn-boundary discipline is right for a second reason, and the second reason is
+the load-bearing one.** The obvious argument is ADR 0041's: no generated frame on the stack, so
+ordinary code may run. The one that actually decides it is that a process-directed signal runs on
+whichever thread has not blocked it, and a current-thread Tokio runtime still owns a blocking pool.
+The handler may be on a thread that has never touched the heap. One realm per process makes the
+*flag* unambiguous; it says nothing about which thread the kernel picked, and it would be easy to
+read the second guarantee out of the first and be wrong.
+
+**An idle server is the one you most want to interrogate, and it was the one that would not
+answer.** A listening server with no timers parks in `wait_for_turn(signal, None)` -- forever.
+The flag would have been noticed at the next request, i.e. once the server stopped being idle.
+An armed *wall-clock* realm now caps its park at 200 ms; measured, 201 ms from signal to third
+line on a server doing nothing. A virtual-clock realm is never capped, because its park costs no
+wall time by construction and capping it would make deterministic execution depend on real time.
+
+**`-std=c99` hides POSIX, and the error does not say so.** `sigaction`, `SA_RESTART` and `write`
+are undeclared in strict-ANSI glibc; `SIGUSR1` is *not*, because glibc does not feature-gate signal
+numbers. So the failure was `storage size of 'action' isn't known` -- a compiler complaining about
+a struct, not about a header. `#define _POSIX_C_SOURCE 200809L` before the first include fixes it,
+and "before the first include" is exactly the trap: the backend tests concatenate the vendored
+number runtime, the module and a fixture into *one* translation unit, so the module's own header
+arrives after somebody else's `#include <stdio.h>` and the macro is too late. A real build compiles
+those separately and never sees it. The test helper now repeats the prologue ahead of everything.
+
+Two smaller ones. The dump prints the pid first because `KILN_WORKERS` forks: under four workers
+and 64 connections the four dumps read 17 + 15 + 12 + 20, which is both the check that the feature
+works and the first direct look at how `SO_REUSEPORT` is splitting traffic. And the first loaded
+dump came back behind 352 NUL bytes -- not a formatter bug, but `: > serve.err` truncating a file
+the server still held an fd into, so the next `write` landed at the old offset and left a hole. A
+`write(2)` diagnostic writes at the file offset like anything else.

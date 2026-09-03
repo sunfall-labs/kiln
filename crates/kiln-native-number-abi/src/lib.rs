@@ -32,6 +32,7 @@ macro_rules! provider_abi_registry {
             (realm, kiln_realm_argv_count, realm_argv_count);
             (realm, kiln_realm_argv_at, realm_argv_at);
             (realm, kiln_realm_entropy_word, realm_entropy_word);
+            (realm, kiln_realm_runtime_report, realm_runtime_report);
             (realm, kiln_realm_gc_current_heap, realm_gc_current_heap);
             (realm, kiln_realm_gc_attach, realm_gc_attach);
             (realm, kiln_realm_gc_register_roots, realm_gc_register_roots);
@@ -112,7 +113,7 @@ macro_rules! provider_export_names {
 }
 
 /// Version of the private provider ABI represented by [`provider_abi_registry!`].
-pub const PROVIDER_ABI_VERSION: u32 = 28;
+pub const PROVIDER_ABI_VERSION: u32 = 29;
 
 /// Canonical ordered export names required in a packaged provider manifest.
 pub const PROVIDER_EXPORTS: &[&str] = provider_abi_registry!(provider_export_names);
@@ -123,12 +124,13 @@ mod tests {
 
     #[test]
     fn registry_has_the_packaged_contract_shape() {
-        // 28, and 85 exports: `kiln_node_path_part` and `kiln_node_path_relative` joined the
-        // contract when `node:path` stopped being implemented twice (ADR 0048). A shipped archive
-        // built before that does not export them, and the version is how a resolver knows to
+        // 29, and 86 exports: `kiln_realm_runtime_report` joined the contract when a compiled
+        // server learned to answer `SIGUSR1` with what it is doing, because the numbers it
+        // reports are Rust-private and the dump is assembled in the prelude. A shipped archive
+        // built before that does not export it, and the version is how a resolver knows to
         // rebuild rather than to fail at link time.
-        assert_eq!(PROVIDER_ABI_VERSION, 28);
-        assert_eq!(PROVIDER_EXPORTS.len(), 85);
+        assert_eq!(PROVIDER_ABI_VERSION, 29);
+        assert_eq!(PROVIDER_EXPORTS.len(), 86);
         assert_eq!(PROVIDER_EXPORTS.first(), Some(&"kiln_realm_create"));
         assert_eq!(PROVIDER_EXPORTS.last(), Some(&"kiln_temporal_last_error"));
     }
