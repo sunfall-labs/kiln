@@ -16719,10 +16719,25 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
      * is nowhere for one to have been put -- and asking would reach the array method table,
      * which reports an unknown name as an error rather than as absence. A Date is asked because
      * carrying one is the whole reason the step exists. */
-    if (value.tag == KILN_VALUE_OBJECT || value.tag == KILN_VALUE_DATE ||
-        value.tag == KILN_VALUE_TEMPORAL ||
+    int might_have_to_json = 0;
+    if (value.tag == KILN_VALUE_DATE || value.tag == KILN_VALUE_TEMPORAL ||
         (value.tag == KILN_VALUE_PROXY &&
          kiln_c99_proxy_inner(value).tag == KILN_VALUE_OBJECT)) {
+        might_have_to_json = 1;
+    } else if (value.tag == KILN_VALUE_OBJECT) {
+        kiln_object *obj = kiln_c99_object_of(value);
+        if (obj->prototype.tag != KILN_VALUE_UNDEFINED && obj->prototype.tag != KILN_VALUE_NULL) {
+            might_have_to_json = 1;
+        } else {
+            for (size_t p = 0; p < obj->count; ++p) {
+                if (obj->properties[p].key_len == 6 && memcmp(obj->properties[p].key, "toJSON", 6) == 0) {
+                    might_have_to_json = 1;
+                    break;
+                }
+            }
+        }
+    }
+    if (might_have_to_json) {
         kiln_value method;
         status = kiln_c99_get(host, value, "toJSON", 6, &method, depth, thrown);
         if (status != KILN_C99_OK) {
@@ -17913,43 +17928,6 @@ static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value
     collection->count += 1;
     collection->live += 1;
     return KILN_C99_OK;
-}
-
-static inline int kiln_c99_collection_method_set(kiln_value receiver, kiln_value key, kiln_value val, kiln_value *result) {
-    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
-    kiln_collection *col = kiln_c99_collection_of(receiver);
-    if (KILN_UNLIKELY(!col->is_map || col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
-    int status = kiln_c99_collection_put(receiver, key, val);
-    if (KILN_UNLIKELY(status != KILN_C99_OK)) return 0;
-    *result = receiver;
-    return 1;
-}
-
-static inline int kiln_c99_collection_method_get(kiln_value receiver, kiln_value key, kiln_value *result) {
-    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
-    kiln_collection *col = kiln_c99_collection_of(receiver);
-    if (KILN_UNLIKELY(!col->is_map || col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
-    double at = kiln_c99_collection_find(col, key);
-    *result = at < 0.0 ? kiln_c99_undefined() : col->entries[(size_t)at].value;
-    return 1;
-}
-
-static inline int kiln_c99_collection_method_has(kiln_value receiver, kiln_value key, kiln_value *result) {
-    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
-    kiln_collection *col = kiln_c99_collection_of(receiver);
-    if (KILN_UNLIKELY(col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
-    *result = kiln_c99_boolean(kiln_c99_collection_find(col, key) >= 0.0);
-    return 1;
-}
-
-static inline int kiln_c99_collection_method_add(kiln_value receiver, kiln_value key, kiln_value *result) {
-    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
-    kiln_collection *col = kiln_c99_collection_of(receiver);
-    if (KILN_UNLIKELY(col->is_map || col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
-    int status = kiln_c99_collection_put(receiver, key, key);
-    if (KILN_UNLIKELY(status != KILN_C99_OK)) return 0;
-    *result = receiver;
-    return 1;
 }
 
 /* An iterator over a snapshot array.

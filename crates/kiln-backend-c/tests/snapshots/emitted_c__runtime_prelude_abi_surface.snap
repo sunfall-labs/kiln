@@ -1093,7 +1093,7 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_PHASE_RESET 2
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 2u
-#define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
+#define KILN_GC_DEFAULT_FLOOR ((size_t)4 * 1024 * 1024)
 #define KILN_C99_INTROSPECT_ARMED 1
 #define KILN_C99_INTROSPECT_DUMPED 2
 #define KILN_GC_KIND_MASK ((uint32_t)0x3FFFFFFFu)
@@ -1619,10 +1619,6 @@ static int kiln_c99_collection_rehash(kiln_collection *collection, size_t new_ca
 static int kiln_c99_same_value_zero_fast(kiln_value left, kiln_value right) {
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
-static inline int kiln_c99_collection_method_set(kiln_value receiver, kiln_value key, kiln_value val, kiln_value *result) {
-static inline int kiln_c99_collection_method_get(kiln_value receiver, kiln_value key, kiln_value *result) {
-static inline int kiln_c99_collection_method_has(kiln_value receiver, kiln_value key, kiln_value *result) {
-static inline int kiln_c99_collection_method_add(kiln_value receiver, kiln_value key, kiln_value *result) {
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {
 static int kiln_c99_new_typed_iterator(kiln_value *out, kiln_value source, int part) {
 static kiln_value kiln_c99_iterator_state(kiln_value target, const char *key, size_t key_len) {

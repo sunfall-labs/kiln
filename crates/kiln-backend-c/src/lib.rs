@@ -3587,10 +3587,10 @@ fn emit_instruction(
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
             let fast_method = match (text.as_str(), argc) {
-                ("set", 2) => format!("if (kiln_c99_collection_method_set(self_value, call_argbuf[0], call_argbuf[1], &call_result)) goto kiln_method_done_{index}; "),
-                ("get", 1) => format!("if (kiln_c99_collection_method_get(self_value, call_argbuf[0], &call_result)) goto kiln_method_done_{index}; "),
-                ("has", 1) => format!("if (kiln_c99_collection_method_has(self_value, call_argbuf[0], &call_result)) goto kiln_method_done_{index}; "),
-                ("add", 1) => format!("if (kiln_c99_collection_method_add(self_value, call_argbuf[0], &call_result)) goto kiln_method_done_{index}; "),
+                ("set", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_SET, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
+                ("get", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_GET, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
+                ("has", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_HAS, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
+                ("add", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_ADD, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
                 ("exec", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_REGEXP)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_REGEXP_EXEC, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
                 _ => String::new(),
             };
@@ -3958,7 +3958,7 @@ fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
         // double is not exactly an integer, a zero divisor must reach `fmod` for NaN, and a zero
         // dividend must too, because `-0 % 3` is `-0` and integer division would answer `+0`.
         BinaryOp::Remainder => {
-            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_fast_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_fast_number(fmod(a, b)); }"
+            "int64_t ia = (int64_t)a; int64_t ib = (int64_t)b; if (KILN_LIKELY(a == (double)ia && b == (double)ib && ib != 0 && (ia != 0 || !signbit(a)) && ia > -9007199254740992LL && ia < 9007199254740992LL && ib != -1)) { answer = kiln_fast_number((double)(ia % ib)); } else { answer = kiln_fast_number(fmod(a, b)); }"
         }
         BinaryOp::StrictEqual => "answer = kiln_fast_boolean(a == b);",
         BinaryOp::StrictNotEqual => "answer = kiln_fast_boolean(a != b);",
