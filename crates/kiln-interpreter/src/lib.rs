@@ -1178,7 +1178,7 @@ fn own_property_state(
             .borrow()
             .get_own_property(key)
             .cloned()
-            .or_else(|| tabulated_property(target, key)),
+            .or_else(|| tabulated_property(intrinsics, target, key)),
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
@@ -1188,7 +1188,7 @@ fn own_property_state(
                 // Unreachable: `own_attributes` answered `None` for a removed property, so the
                 // `?` above already returned.
                 Overridden::Removed => None,
-                Overridden::Untouched => tabulated_property(target, key),
+                Overridden::Untouched => tabulated_property(intrinsics, target, key),
             }
         }
         // A string's characters, which are own properties of the primitive itself. Reached from
@@ -1207,7 +1207,7 @@ fn own_property_state(
 }
 
 /// What a built-in's own property held when the realm was built.
-fn tabulated_property(target: &Value, key: &str) -> Option<Property> {
+fn tabulated_property(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<Property> {
     let realm = value_realm(target);
     // An accessor is asked about first, because one of them is named `length`:
     // `%TypedArray%.prototype.length` is a getter over the view's element count, and reading it
@@ -1226,7 +1226,7 @@ fn tabulated_property(target: &Value, key: &str) -> Option<Property> {
         "length" => {
             intrinsic_identity(target).map(|(_, length)| Property::Value(Value::Number(length)))
         }
-        "prototype" => intrinsic_prototype(target).map(Property::Value),
+        "prototype" => intrinsic_prototype_in(intrinsics, target).map(Property::Value),
         _ => match target {
             Value::Native(native, _) => match native.property(key) {
                 Some(Value::Undefined) | None => None,
@@ -7021,14 +7021,6 @@ struct Vm<'host, H: HostOps + ?Sized> {
     /// mentioned `arguments` at all. Decided by the compiler, which is the only place the
     /// parameter list and the strictness are both in view.
     mapped_arguments: bool,
-    /// One prototype per error kind for this execution, created on first use.
-    ///
-    /// One object per run per kind, because `e instanceof TypeError` compares it by identity:
-    /// two prototypes would make errors from the same program fail to recognise each other. Each
-    /// subclass's prototype chains to `Error.prototype`, which is what makes a `TypeError` an
-    /// `Error` too. This is the smallest thing a realm is, and it is where a real realm object
-    /// will start.
-    error_prototypes: Vec<[Option<Value>; ErrorKind::ALL.len()]>,
     /// Which realm the running code belongs to, saved and restored with the frame.
     ///
     /// Not a property of the *value* being run but of the execution: an intrinsic minted while
@@ -7301,7 +7293,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             arguments_object: None,
             // The module body has no `arguments` at all, mapped or not.
             mapped_arguments: false,
-            error_prototypes: vec![[const { None }; ErrorKind::ALL.len()]],
             current_realm: RealmId::PRIMARY,
             async_context: AsyncContext::default(),
             this_value: Value::Undefined,
@@ -7453,12 +7444,8 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             .collect();
         for root in roots
             .into_iter()
-            .chain(
-                self.error_prototypes
-                    .iter_mut()
-                    .flat_map(|realm| realm.iter_mut().map(Option::take)),
-            )
             .flatten()
+            .chain(self.intrinsics.take_error_prototypes())
         {
             if let Value::Object(object) = root {
                 object.replace(ObjectData::default());
@@ -20383,33 +20370,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// not of the one the primary realm hands out, and one shared object would make both
     /// answers wrong at once.
     fn error_prototype_in(&mut self, kind: ErrorKind, realm: RealmId) -> Value {
-        let index = realm.0 as usize;
-        if let Some(prototype) = &self.error_prototypes[index][kind.index()] {
-            return prototype.clone();
-        }
-        let mut data = ObjectData::default();
-        // None of these is enumerated: they are the realm's furniture, not something a program
-        // put on the prototype, and `for (const k in e)` must not walk over them.
-        data.set_non_enumerable("name", Value::String(kind.name().to_owned()));
-        data.set_non_enumerable("message", Value::String(String::new()));
-        // `e.constructor.name` is how a program asks which kind it caught, and this is the link
-        // that answers it.
-        data.set_non_enumerable("constructor", Value::Native(Native::Error(kind), realm));
-        if matches!(kind, ErrorKind::Error) {
-            // Marks the chain for `String(e)`. A real `toString` would be invoked through the
-            // normal method path; this is the placeholder that keeps the observable behaviour
-            // right until built-ins can be written in JavaScript (design.md §5).
-            data.set_non_enumerable("toString", Value::Native(Native::ErrorToString, realm));
-        }
-        let prototype = Value::Object(Rc::new(RefCell::new(data)));
-        if !matches!(kind, ErrorKind::Error) {
-            let base = self.error_prototype_in(ErrorKind::Error, realm);
-            if let Value::Object(object) = &prototype {
-                object.borrow_mut().set_prototype(base);
-            }
-        }
-        self.error_prototypes[index][kind.index()] = Some(prototype.clone());
-        prototype
+        self.intrinsics.error_prototype(kind, realm)
     }
 
     /// Run an async function's body until it awaits or finishes.
@@ -23260,8 +23221,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
         })?);
         self.global_objects.push(None);
-        self.error_prototypes
-            .push([const { None }; ErrorKind::ALL.len()]);
+        self.intrinsics.add_realm();
         Ok(realm)
     }
 
@@ -27682,6 +27642,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // Deleted, so the read carries on *up* the chain rather than back into the
                 // table that still has the answer the program removed.
                 Overridden::Removed => native_inherited_property(&self.intrinsics, target, name),
+                // An error constructor's `prototype` is a per-realm object rather than a table
+                // entry, so `native.property` has nothing to answer with and the read used to
+                // walk on up to `Function.prototype` and come back `undefined`. Only the named
+                // spelling was ever right, and only because one instruction special-cased it:
+                // `Error["prototype"]` and `Reflect.get(Error, "prototype")` were both undefined
+                // while `Error.prototype` was an object.
+                Overridden::Untouched
+                    if matches!(native, Native::Error(_)) && name == "prototype" =>
+                {
+                    let Native::Error(kind) = native else {
+                        unreachable!("checked by the guard");
+                    };
+                    self.intrinsics.error_prototype(*kind, *realm)
+                }
                 Overridden::Untouched => {
                     match native.property(name).map(|found| in_realm(found, *realm)) {
                         Some(found) if !matches!(found, Value::Undefined) => found,
@@ -41519,15 +41493,94 @@ struct IntrinsicSlots {
 /// copied every property of every built-in on the chance that one is written would pay for the
 /// whole of it on every run. An entry appears only when a program actually touches a built-in,
 /// which for most programs is never.
-#[derive(Default)]
 struct Intrinsics {
     /// A linear scan rather than a map: this is empty for a program that leaves the built-ins
     /// alone and holds a handful of entries for one that does not, which is well below the size
     /// where hashing every lookup pays for itself.
     entries: RefCell<Vec<(IntrinsicKey, IntrinsicSlots)>>,
+    /// Each realm's nine error prototypes, indexed by realm and then by kind.
+    ///
+    /// Here rather than on the machine because `Error.prototype` is an own property of `Error`
+    /// and every path that reports own properties -- `getOwnPropertyDescriptor`,
+    /// `hasOwnProperty`, `getOwnPropertyNames`, a computed read -- reaches those tables with an
+    /// `&Intrinsics` and nothing else. Held on the machine, the object was reachable only from
+    /// the one instruction that spells `Error.prototype` in source, so `Error["prototype"]` was
+    /// `undefined` while `Error.prototype` was an object, and the descriptor every
+    /// `verifyNotConfigurable(Error, "prototype")` reads did not exist.
+    ///
+    /// Interior mutability for the same reason the entries have it: the prototype is built on
+    /// first use, and first use is now a `&self` read.
+    error_prototypes: RefCell<Vec<[Option<Value>; ErrorKind::ALL.len()]>>,
+}
+
+impl Default for Intrinsics {
+    /// One realm's worth of slots, because a machine always has the primary realm.
+    fn default() -> Self {
+        Self {
+            entries: RefCell::default(),
+            error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
+        }
+    }
 }
 
 impl Intrinsics {
+    /// `realm`'s prototype for one error kind, built on first use.
+    ///
+    /// Per realm rather than per execution, because `e instanceof TypeError` compares it by
+    /// identity: an error thrown by realm 1's built-in is an instance of *its* `TypeError` and
+    /// not of the one the primary realm hands out, and one shared object would make both
+    /// answers wrong at once.
+    ///
+    /// A subclass's prototype chains to `Error.prototype`, so `e instanceof Error` holds for
+    /// every kind and `toString` is inherited rather than copied.
+    fn error_prototype(&self, kind: ErrorKind, realm: RealmId) -> Value {
+        let index = realm.0 as usize;
+        if let Some(prototype) = &self.error_prototypes.borrow()[index][kind.index()] {
+            return prototype.clone();
+        }
+        let mut data = ObjectData::default();
+        // None of these is enumerated: they are the realm's furniture, not something a program
+        // put on the prototype, and `for (const k in e)` must not walk over them.
+        data.set_non_enumerable("name", Value::String(kind.name().to_owned()));
+        data.set_non_enumerable("message", Value::String(String::new()));
+        // `e.constructor.name` is how a program asks which kind it caught, and this is the link
+        // that answers it.
+        data.set_non_enumerable("constructor", Value::Native(Native::Error(kind), realm));
+        if matches!(kind, ErrorKind::Error) {
+            // Marks the chain for `String(e)`. A real `toString` would be invoked through the
+            // normal method path; this is the placeholder that keeps the observable behaviour
+            // right until built-ins can be written in JavaScript (design.md §5).
+            data.set_non_enumerable("toString", Value::Native(Native::ErrorToString, realm));
+        }
+        let prototype = Value::Object(Rc::new(RefCell::new(data)));
+        if !matches!(kind, ErrorKind::Error) {
+            // Recurses, so the borrow above has to be finished before this runs -- it is, and it
+            // has to stay that way: building `TypeError.prototype` builds `Error.prototype`.
+            let base = self.error_prototype(ErrorKind::Error, realm);
+            if let Value::Object(object) = &prototype {
+                object.borrow_mut().set_prototype(base);
+            }
+        }
+        self.error_prototypes.borrow_mut()[index][kind.index()] = Some(prototype.clone());
+        prototype
+    }
+
+    /// Make room for one more realm's error prototypes.
+    fn add_realm(&self) {
+        self.error_prototypes
+            .borrow_mut()
+            .push([const { None }; ErrorKind::ALL.len()]);
+    }
+
+    /// Every error prototype this store holds, taken out so the caller can break their cycles.
+    fn take_error_prototypes(&self) -> Vec<Value> {
+        self.error_prototypes
+            .borrow_mut()
+            .iter_mut()
+            .flat_map(|realm| realm.iter_mut().filter_map(Option::take))
+            .collect()
+    }
+
     /// What the store says about `key` on this built-in.
     fn overridden(&self, target: &Value, key: &str) -> Overridden {
         let Some(identity) = intrinsic_key(target) else {
@@ -42185,7 +42238,7 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
                 keys.push("length".to_owned());
                 keys.push("name".to_owned());
             }
-            if intrinsic_prototype(target).is_some() {
+            if intrinsic_prototype_in(intrinsics, target).is_some() {
                 keys.push("prototype".to_owned());
             }
             // The tabulated list is only ever these three: a table answers a name, it cannot
@@ -42520,7 +42573,7 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
             .properties
             .borrow()
             .get_own_attributes(key)
-            .or_else(|| tabulated_attributes(target, key)),
+            .or_else(|| tabulated_attributes(intrinsics, target, key)),
         Value::Array(items) if key == "length" => Some(Attributes {
             writable: items.length_writable.get(),
             enumerable: false,
@@ -42581,20 +42634,22 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
         | Value::Capability(..) => match intrinsics.overridden(target, key) {
             Overridden::Held(_, attributes) => Some(attributes),
             Overridden::Removed => None,
-            Overridden::Untouched => tabulated_attributes(target, key),
+            Overridden::Untouched => tabulated_attributes(intrinsics, target, key),
         },
         _ => None,
     }
 }
 
 /// The flags a built-in's own property was *created* with, before any program touched it.
-fn tabulated_attributes(target: &Value, key: &str) -> Option<Attributes> {
+fn tabulated_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<Attributes> {
     match key {
         "name" | "length" if intrinsic_identity(target).is_some() => Some(FUNCTION_IDENTITY),
         // A built-in constructor's `prototype` is locked on every axis: the realm's intrinsics
         // are reachable through it, and letting a program move one would leave every instance
         // already made pointing at the old object.
-        "prototype" if intrinsic_prototype(target).is_some() => Some(Attributes::NONE),
+        "prototype" if intrinsic_prototype_in(intrinsics, target).is_some() => {
+            Some(Attributes::NONE)
+        }
         _ => intrinsic_own_attributes(target, key),
     }
 }
@@ -42686,6 +42741,18 @@ fn intrinsic_prototype(target: &Value) -> Option<Value> {
         Some(Value::Undefined) | None => None,
         Some(prototype) => Some(prototype),
     }
+}
+
+/// [`intrinsic_prototype`], and the nine error constructors it cannot answer for.
+///
+/// Their prototypes are per-realm objects the store builds on demand rather than table entries,
+/// so a `&Value` alone cannot reach one -- which is exactly why `Error` reported no own
+/// `prototype` at all until this existed. Every caller here already holds the store.
+fn intrinsic_prototype_in(intrinsics: &Intrinsics, target: &Value) -> Option<Value> {
+    if let Value::Native(Native::Error(kind), realm) = target {
+        return Some(intrinsics.error_prototype(*kind, *realm));
+    }
+    intrinsic_prototype(target)
 }
 
 /// The flags a string's own index or `length` carries, or `None` for anything else.
