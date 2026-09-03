@@ -1,5 +1,5 @@
-
 use super::*;
+use kiln_hir::*;
 
 fn module(body: Vec<Statement>) -> Module {
     Module {

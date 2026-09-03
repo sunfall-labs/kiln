@@ -49,7 +49,7 @@ use rayon::prelude::*;
 static WORK_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MATERIALIZE_COUNTER: AtomicU64 = AtomicU64::new(0);
 static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceLock::new();
-static SHARED_PUBLICATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SHARED_PUBLICATION_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 const PRIVATE_ASYNC_ABI_VERSION: u32 = 6;
 const NATIVE_PRELUDE_VERSION: u32 = 2;
@@ -5551,9 +5551,7 @@ fn publish_shared_artifacts(
             second: loader.to_path_buf(),
         });
     }
-    let _process_lock = SHARED_PUBLICATION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _process_lock = SHARED_PUBLICATION_LOCK.lock();
     let _directory_lock = acquire_shared_publication_lock(output)?;
     materialize_immutable(loader, library)?;
     // Keep the old helper's compatibility-alias ordering for focused materialization tests. The
@@ -5578,9 +5576,7 @@ fn publish_shared_artifacts_with_symbols(
     }
     // `File` locking semantics differ for separately opened handles in one process, so keep an
     // explicit process lock as well as the cross-process directory lock.
-    let _process_lock = SHARED_PUBLICATION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _process_lock = SHARED_PUBLICATION_LOCK.lock();
     let _directory_lock = acquire_shared_publication_lock(output)?;
     shared_publication::publish_locked(
         output,

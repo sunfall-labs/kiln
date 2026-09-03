@@ -7403,9 +7403,28 @@ fn push_c_byte(output: &mut String, byte: u8) {
 }
 
 fn c_string(value: &str) -> String {
-    let mut output = String::from("\"");
-    for byte in value.bytes() {
-        push_c_byte(&mut output, byte);
+    let mut output = String::with_capacity(value.len() + 2);
+    output.push('"');
+    let bytes = value.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let remaining = &bytes[offset..];
+        let next_escape = remaining
+            .iter()
+            .position(|&b| b < 0x20 || b == b'"' || b == b'\\' || b > 0x7e);
+        match next_escape {
+            Some(pos) => {
+                if pos > 0 {
+                    output.push_str(&value[offset..offset + pos]);
+                }
+                push_c_byte(&mut output, remaining[pos]);
+                offset += pos + 1;
+            }
+            None => {
+                output.push_str(&value[offset..]);
+                break;
+            }
+        }
     }
     output.push('"');
     output
