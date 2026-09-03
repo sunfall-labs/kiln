@@ -44810,7 +44810,14 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     // `Object.keys(require("path"))` was 0 against node's 17 while every individual member read
     // correctly, so those shims produced empty objects and said nothing about it. This used to
     // name `node:buffer` alone, because that is the one module somebody had needed it for.
-    if node_builtin_specifier(*native).is_some()
+    //
+    // The global `Buffer` is here for the same reason and was not: node builds its statics by
+    // assignment, so `for (key in Buffer)` yields `isBuffer` and the rest, and `safer-buffer`
+    // rebuilds its export by copying exactly what that loop finds. Ours were own, readable and
+    // reported by `getOwnPropertyNames` -- but not enumerable, so the loop found nothing and
+    // `safer.Buffer.isBuffer` came out undefined. `iconv-lite` takes its Buffer from there, and
+    // express's body reader took the resulting TypeError, having already served a correct 200.
+    if (node_builtin_specifier(*native).is_some() || matches!(native, Native::NodeBufferGlobal))
         && intrinsic_static_property_names(target).contains(&key)
         && native.property(key).is_some()
     {
