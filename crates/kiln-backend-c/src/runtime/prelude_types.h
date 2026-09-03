@@ -323,6 +323,8 @@ typedef struct kiln_c99_site {
     /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
      * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
     uint32_t misses;
+    const void *proto_cache[2];
+    kiln_value method_cache[2];
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u

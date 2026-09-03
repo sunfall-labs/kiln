@@ -4169,6 +4169,17 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
     }
     {
         const kiln_object *object = kiln_c99_object_of(target);
+        if (object->prototype.tag == KILN_VALUE_OBJECT) {
+            const void *p = (const void *)kiln_c99_object_of(object->prototype);
+            if (p == site->proto_cache[0]) {
+                *out = site->method_cache[0];
+                return KILN_C99_OK;
+            }
+            if (p == site->proto_cache[1]) {
+                *out = site->method_cache[1];
+                return KILN_C99_OK;
+            }
+        }
         uint32_t own = site->own;
         if (own < object->count && object->properties[own].key == key) {
             if (!object->properties[own].accessor) {
@@ -4190,9 +4201,21 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
             }
         }
         status = kiln_c99_get_ikey(host, target, key, key_len, key, out, depth, thrown);
-        if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP &&
-            !kiln_c99_site_learn(site, object, key, key_len)) {
-            site->misses += 1;
+        if (status == KILN_C99_OK) {
+            if (object->prototype.tag == KILN_VALUE_OBJECT && out->tag == KILN_VALUE_FUNCTION) {
+                const void *p = (const void *)kiln_c99_object_of(object->prototype);
+                if (site->proto_cache[0] == NULL) {
+                    site->proto_cache[0] = p;
+                    site->method_cache[0] = *out;
+                } else if (site->proto_cache[1] == NULL && site->proto_cache[0] != p) {
+                    site->proto_cache[1] = p;
+                    site->method_cache[1] = *out;
+                }
+            }
+            if (site->misses < KILN_C99_SITE_GIVE_UP &&
+                !kiln_c99_site_learn(site, object, key, key_len)) {
+                site->misses += 1;
+            }
         }
         return status;
     }
