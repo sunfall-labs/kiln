@@ -1711,8 +1711,10 @@ typedef enum {
 typedef struct {
 typedef struct {
 static void kiln_dyn_token_free(kiln_dyn_token *tok) {
+static int kiln_dyn_is_ident_name(kiln_dyn_token_kind kind) {
 static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
 static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static int kiln_c99_dynamic_body_trampoline(kiln_host *host, kiln_value *result, kiln_value *upvalues,
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
@@ -1720,6 +1722,7 @@ static int kiln_dyn_eval_multiplicative(kiln_host *host, kiln_dyn_lexer *lex, ki
 static int kiln_dyn_eval_additive(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_relational(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_equality(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+static void kiln_dyn_skip_expr(kiln_dyn_lexer *lex, int stop_at_colon) {
 static int kiln_dyn_eval_logical_and(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_logical_or(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
 static int kiln_dyn_eval_ternary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
