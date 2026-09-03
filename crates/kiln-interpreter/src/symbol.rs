@@ -179,6 +179,77 @@ impl PartialEq for Symbol {
     }
 }
 
-/// Any string key beginning with this is the VM's own: a symbol-keyed property or an internal
-/// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
+/// The prefix the VM writes its own keys under: a symbol-keyed property, or an internal slot.
+/// `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
 pub(crate) const RESERVED_KEY_PREFIX: &str = "@@";
+
+/// The internal slots that are not symbol keys and do not carry one of the prefixes below.
+///
+/// Spelled out because the alternative -- "anything starting with `@@`" -- is a guess about what
+/// a *program* would never write, and it is wrong. `symbol-observable`, which redux and rxjs both
+/// depend on, stores its hook under the literal string `"@@observable"`, and that property then
+/// vanished from `Object.keys` and `getOwnPropertyNames` while remaining readable by name. A
+/// program's own data disappearing from enumeration is the kind of wrong answer that surfaces far
+/// from its cause.
+///
+/// `every_internal_slot_is_reserved` in `tests.rs` scans this crate for `"@@..."` literals and
+/// fails if one is missing from here, so a new slot cannot quietly start enumerating.
+const INTERNAL_SLOTS: [&str; 39] = [
+    "@@abort-listeners",
+    "@@asyncDisposeDone",
+    "@@asyncDisposeEntries",
+    "@@call-site-name",
+    "@@concat-index",
+    "@@concat-sources",
+    "@@disposeDone",
+    "@@disposeEntries",
+    "@@entries",
+    "@@finreg-callback",
+    "@@finreg-cells",
+    "@@helper-arg",
+    "@@helper-buffer",
+    "@@helper-counter",
+    "@@helper-done",
+    "@@helper-inner",
+    "@@helper-inner-next",
+    "@@helper-next",
+    "@@helper-partial",
+    "@@helper-source",
+    "@@index",
+    "@@iterated",
+    "@@map",
+    "@@matchall-global",
+    "@@matchall-regexp",
+    "@@matchall-subject",
+    "@@matchall-unicode",
+    "@@part",
+    "@@raw-json",
+    "@@size",
+    "@@trace",
+    "@@weak",
+    "@@weakref-target",
+    "@@zip-iters",
+    "@@zip-keyed",
+    "@@zip-keys",
+    "@@zip-mode",
+    "@@zip-open",
+    "@@zip-padding",
+];
+
+/// The families of internal key whose members are generated rather than listed: a unique symbol's
+/// serial, a private name's scope, and the two host-slot namespaces.
+const INTERNAL_PREFIXES: [&str; 4] = ["@@symbol:", "@@private:", "@@kiln:", "@@node:"];
+
+/// Whether `key` is one the VM wrote, rather than one a program did.
+///
+/// Exact rather than a prefix test -- see [`INTERNAL_SLOTS`] for what a prefix test cost.
+pub(crate) fn is_reserved(key: &str) -> bool {
+    if !key.starts_with(RESERVED_KEY_PREFIX) {
+        return false;
+    }
+    WellKnown::from_property_key(key).is_some()
+        || INTERNAL_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+        || INTERNAL_SLOTS.contains(&key)
+}
