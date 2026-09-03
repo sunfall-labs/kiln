@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::atomic::Ordering;
+use std::time::{SystemTime, UNIX_EPOCH};
 use kiln_ir::{
     BYTECODE_VERSION, Constant, ExportBinding, FunctionProto, HostOp, ImportBinding, Instruction,
     ModuleProgram,

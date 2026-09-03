@@ -1,5 +1,4 @@
 use super::*;
-use rayon::prelude::*;
 use std::path::Path;
 use std::process::Command;
 

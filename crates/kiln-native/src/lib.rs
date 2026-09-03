@@ -8,15 +8,14 @@ mod number_provider;
 pub mod shared_publication;
 
 use std::collections::BTreeSet;
-use std::fmt;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use kiln_artifact_cache::{
     ArtifactCache, ArtifactKey, ArtifactKind, Backend, BuildProfile as CacheProfile, CacheError,
@@ -25,7 +24,7 @@ use kiln_artifact_cache::{
 #[cfg(test)]
 use kiln_backend_c::emit_module_with_logical_path;
 use kiln_backend_c::{
-    C_ABI_VERSION, C_GENERATOR_VERSION, EmissionPolicy, EmissionStringPolicy, EmitError,
+    C_ABI_VERSION, C_GENERATOR_VERSION, EmissionPolicy, EmitError,
     emit_commonjs_module_with_logical_path_and_policy, emit_module_with_logical_path_and_policy,
     emit_runtime_module_with_logical_path, emit_with_policy,
 };
@@ -35,13 +34,12 @@ use kiln_ir::{ExportBinding, ModuleProgram, Program};
 use kiln_module_graph::{ModuleGraph, ModuleGraphError, ModuleSource, ResolvedExport};
 use kiln_native_runtime::{
     EMBEDDING_C_ABI_VERSION, EMBEDDING_HOST_ABI_VERSION, EMBEDDING_MODULE_API_VERSION,
-    NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, RuntimeSourceError, decode_native_result,
+    NATIVE_RESULT_PATH_ENV, NATIVE_RUNTIME_VERSION, decode_native_result,
     embedding_module_api_symbol, launcher_source, runtime_source,
 };
 pub use kiln_native_runtime::{embedding_header, embedding_module_header};
 use kiln_native_toolchain::{
-    BuildProfile as ToolchainProfile, CompileOptions, CompilerKind, LinkOptions, ToolIdentity,
-    Toolchain, ToolchainError,
+    CompileOptions, CompilerKind, LinkOptions, ToolIdentity, Toolchain, ToolchainError,
 };
 use number_provider::{NumberProvider, PROVIDER_ABI_VERSION, PROVIDER_SCHEMA_VERSION};
 use rayon::prelude::*;
@@ -73,6 +71,7 @@ mod options;
 mod report;
 
 pub use options::*;
+pub use paths::shared_library_header_path;
 pub use report::*;
 mod materialize;
 mod paths;

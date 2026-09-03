@@ -406,7 +406,6 @@ fn validate_logical_path(logical_path: &str) -> Result<(), EmitError> {
 
 mod prelude;
 pub use prelude::*;
-pub(crate) use prelude::*;
 
 mod validation;
 pub(crate) use validation::*;

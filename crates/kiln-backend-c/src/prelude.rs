@@ -1,5 +1,4 @@
 use super::*;
-use std::sync::OnceLock;
 
 #[derive(Clone, Copy)]
 struct MethodId {
