@@ -15483,6 +15483,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
                 let mut data = ObjectData::default();
                 for entry in self.drain_iterable(&source, instruction)? {
+                    // An entry that is not an object is a `TypeError`, not a row to skip:
+                    // `Object.fromEntries([1])` answered `{}`, so a caller that had built its
+                    // pairs wrongly got an empty object back and no indication of where.
+                    if !is_an_object(&entry) && !is_callable(&entry) {
+                        return Err(ExecutionError::TypeErrorMessage {
+                            message: format!(
+                                "iterator entry {} is not an object",
+                                entry.to_display_string()
+                            ),
+                        });
+                    }
                     // Both halves of an entry are ordinary `Get`s on whatever the iterator
                     // handed back, so an accessor at `0` or `1` runs and may throw.
                     let key = self.read_computed(&entry, &Value::Number(0.0), instruction)?;
