@@ -1748,9 +1748,7 @@ fn emit_instruction(
     // clear this state: when one calls another, the deepest failing body owns the refusal
     // provenance and every caller preserves it while unwinding.
     if matches!(site, ReturnSite::Entry { exports: None, .. }) {
-        output.push_str(
-            "    kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;\n",
-        );
+        output.push_str("    kiln_c99_reset_diagnostics();\n");
     }
     let before = output.len();
     let instruction_site = c_string(diagnostic_site);
@@ -1992,11 +1990,12 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if (kiln_c99_cell_of(locals[{local}])->tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    {{ int status = kiln_c99_op_load_cell(locals[{local}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
+            } else {
+                writeln!(output, "    stack[sp++] = *kiln_c99_cell_of(locals[{local}]);").unwrap();
             }
-            writeln!(output, "    stack[sp++] = *kiln_c99_cell_of(locals[{local}]);").unwrap();
         }
         Instruction::StoreCell(local) => {
             writeln!(output, "    *kiln_c99_cell_of(locals[{local}]) = stack[--sp];").unwrap();
@@ -2022,10 +2021,9 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    if (kiln_c99_cell_of(upvalues[{upvalue}])->tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_op_load_cell(upvalues[{upvalue}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
-            writeln!(output, "    stack[sp++] = *kiln_c99_cell_of(upvalues[{upvalue}]);").unwrap();
         }
         Instruction::StoreUpvalue(upvalue) => {
             writeln!(output, "    *kiln_c99_cell_of(upvalues[{upvalue}]) = stack[--sp];").unwrap();
@@ -2132,26 +2130,9 @@ fn emit_instruction(
         Instruction::Call { argc } => {
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
-            // The fast path below skips `kiln_c99_call` and invokes the body directly, which is
-            // only sound while it can supply the same receiver the dispatcher would have. It
-            // supplies two: an arrow's captured `this`, and `undefined` for everything else.
-            //
-            // `undefined` stopped being the whole of the second case when the dispatcher learned
-            // `OrdinaryCallBindThis` -- sloppy code never sees `undefined` as `this`, it sees the
-            // global object -- so a sloppy non-arrow function taking this path got `undefined`
-            // where the interpreter gave it `globalThis`, and a UMD header's `this || global`
-            // silently picked the wrong branch. Neither side was written wrong: the fast path
-            // replicated a tail that later grew a rule, and the two only met at a merge.
-            //
-            // So the guard names the condition rather than the rule: take the fast path only when
-            // the receiver it already knows how to supply is the right one. The substitution
-            // itself stays in `kiln_c99_call` and stays written once, because a rule with two
-            // implementations is what drifted here in the first place. Modules are strict, so
-            // this costs nothing outside CommonJS.
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
-                argc + 1
+                "    {{ int status = kiln_c99_op_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -2160,7 +2141,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if (locals[{local}].tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    {{ int status = kiln_c99_check_tdz(locals[{local}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
@@ -2227,7 +2208,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag; if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(target.bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_get_property(host, stack, &sp, {symbol}_key_{name}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 text.len()
             )
             .unwrap();
@@ -2237,10 +2218,9 @@ fn emit_instruction(
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
-            // The written value stays on the stack, which is what makes `a = b.c = d` work.
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value member = stack[--sp]; int status = kiln_c99_put_site(host, stack[sp - 1], {symbol}_key_{name}, {}, member, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_set_property(host, stack, &sp, {symbol}_key_{name}, {}, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 text.len()
             )
             .unwrap();
@@ -2252,7 +2232,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value member = stack[--sp]; int status = kiln_c99_put_site(host, stack[sp - 1], {symbol}_key_{name}, {}, member, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_set_property(host, stack, &sp, {symbol}_key_{name}, {}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 text.len(),
                 i32::from(*strict)
             )
@@ -2262,7 +2242,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = stack[sp - 1].tag; if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {{ const char *named = stack[sp - 1].tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(stack[sp - 1].bits) : NULL; if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {{ int written = named != NULL ? snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%s.%.*s\", named, (int)key.len, key.ptr) : snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%.*s\", (int)key.len, key.ptr); if (written > 0) {{ kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose; kiln_c99_diagnostic_function_len = (size_t)written < sizeof kiln_c99_diagnostic_compose ? (size_t)written : sizeof kiln_c99_diagnostic_compose - 1; }} }} else if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetComputed lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
+                "    {{ int status = kiln_c99_op_get_computed(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -2270,7 +2250,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed(host, stack[sp - 1], key, member, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}"
+                "    {{ int status = kiln_c99_op_set_computed(host, stack, &sp, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -2278,7 +2258,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_value key = stack[--sp]; int status = kiln_c99_set_computed_mode(host, stack[sp - 1], key, member, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ int status = kiln_c99_op_set_computed(host, stack, &sp, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 i32::from(*strict)
             )
             .unwrap();
@@ -2334,8 +2314,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; if (stack[sp - {argc} - 1].tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(stack[sp - {argc} - 1].bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
-                argc + 1
+                "    {{ int status = kiln_c99_op_new(host, stack, &sp, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -2600,9 +2579,8 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_site(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
-                text.len(),
-                argc + 1
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                text.len()
             )
             .unwrap();
         }

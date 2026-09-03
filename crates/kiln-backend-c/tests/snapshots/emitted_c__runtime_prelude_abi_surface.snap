@@ -44,6 +44,7 @@ static int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
+static inline void kiln_c99_reset_diagnostics(void) {
 #define KILN_C99_ABSENT(why, out)      \
 #define KILN_C99_MAX_CALL_DEPTH 256
 enum kiln_value_tag {
@@ -1758,4 +1759,13 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
+static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp,
+static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp,
+static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
+static int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,
+static int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp, kiln_value *thrown) {
+static int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown) {
+static int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp,
+static int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp,
 static void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase) {
