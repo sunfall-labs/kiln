@@ -38,6 +38,64 @@ diverged=0
 declare -a REFUSALS=()
 declare -a DIVERGENCES=()
 
+JOBS="${KILN_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+if (( JOBS > 16 )); then
+	JOBS=16
+elif (( JOBS < 1 )); then
+	JOBS=1
+fi
+
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/kiln-native-results.XXXXXXXX")"
+cleanup() {
+	if [[ ${BASHPID:-$$} -eq $$ ]]; then
+		rm -rf "$WORK_DIR"
+	fi
+}
+trap cleanup EXIT
+
+run_probe() {
+	trap - EXIT
+	local probe="$1"
+	local name
+	name="$(basename -- "$probe")"
+	local adapter=""
+	if [[ $name == *.cjs ]]; then
+		adapter="--node"
+	fi
+	name="${name%.*}"
+
+	local interpreted
+	if ! interpreted="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$probe" 2>&1)"; then
+		printf '%s\n' "$interpreted" > "$WORK_DIR/$name.failed"
+		return 0
+	fi
+
+	local native
+	native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1 || true)"
+
+	if [[ $native == "$interpreted" ]]; then
+		touch "$WORK_DIR/$name.matched"
+		return 0
+	fi
+
+	local refusal
+	refusal="$(printf '%s\n' "$native" | grep -m1 '^kiln: native ' || true)"
+	if [[ -n $refusal ]]; then
+		local reason
+		reason="$(printf '%s' "$refusal" | sed 's/^kiln: //; s/ module=[^ ]*//')"
+		if [[ $native != kiln:* ]]; then
+			reason="$reason (after $(printf '%s\n' "$native" | grep -c -v '^kiln: native ') line(s) of output)"
+		fi
+		printf '%s\n' "$reason" > "$WORK_DIR/$name.refused"
+		return 0
+	fi
+
+	{
+		printf '%s\n' "  interpreter: $(printf '%s' "$interpreted" | head -5)"
+		printf '%s\n' "  native:      $(printf '%s' "$native" | head -5)"
+	} > "$WORK_DIR/$name.diverged"
+}
+
 # A `.cjs` probe is here for one reason: it is the only way sloppy code reaches either engine.
 # `kiln run` compiles a `.ts` or `.js` entry as ESM, which is strict by definition, so every probe
 # in this corpus was strict and the whole sloppy half of the language was invisible to the one
@@ -46,47 +104,35 @@ declare -a DIVERGENCES=()
 # a `.cjs` entry as CommonJS, so those probes get `--node` -- on *both* sides, so the comparison
 # stays what it says it is.
 shopt -s nullglob
+running=0
+for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
+	run_probe "$probe" &
+	running=$((running + 1))
+	if (( running >= JOBS )); then
+		wait -n
+		running=$((running - 1))
+	fi
+done
+wait
+
 for probe in "$PROBES"/*.ts "$PROBES"/*.js "$PROBES"/*.cjs; do
 	name="$(basename -- "$probe")"
-	adapter=""
-	if [[ $name == *.cjs ]]; then
-		adapter="--node"
-	fi
 	name="${name%.*}"
-	# --one-shot so a stale daemon can never answer for a build that no longer exists.
-	if ! interpreted="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$probe" 2>&1)"; then
+	if [[ -f "$WORK_DIR/$name.failed" ]]; then
 		kiln_say "FAILED: the interpreter cannot run $name, so there is nothing to compare:"
-		kiln_say "$interpreted"
+		kiln_say "$(<"$WORK_DIR/$name.failed")"
 		exit 1
-	fi
-	native="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$probe" 2>&1 || true)"
-
-	if [[ $native == "$interpreted" ]]; then
+	elif [[ -f "$WORK_DIR/$name.matched" ]]; then
 		matched=$((matched + 1))
-		continue
+	elif [[ -f "$WORK_DIR/$name.refused" ]]; then
+		REFUSALS+=("$name	$(<"$WORK_DIR/$name.refused")")
+	elif [[ -f "$WORK_DIR/$name.diverged" ]]; then
+		diverged=$((diverged + 1))
+		DIVERGENCES+=("$name")
+		while IFS= read -r line; do
+			DIVERGENCES+=("$line")
+		done < "$WORK_DIR/$name.diverged"
 	fi
-	# A refusal is a refusal wherever it appears. It used to have to be on the *first* line,
-	# which quietly turned every probe that printed something before reaching an unimplemented
-	# operation into a reported divergence -- `conformance/native/temporal.ts` says in its own
-	# header that this is the trap, and then fell into it anyway when the backend stopped
-	# carrying one of the members it exercises. A divergence is the two engines disagreeing
-	# about an answer; a backend that stops and says which operation it lacks has not given one.
-	refusal="$(printf '%s\n' "$native" | grep -m1 '^kiln: native ' || true)"
-	if [[ -n $refusal ]]; then
-		reason="$(printf '%s' "$refusal" | sed 's/^kiln: //; s/ module=[^ ]*//')"
-		# Whether anything ran first is worth saying: a probe refused on its first operation is
-		# a missing feature, and one refused half way through is a missing feature plus a probe
-		# that is no longer measuring what it was written to measure.
-		if [[ $native != kiln:* ]]; then
-			reason="$reason (after $(printf '%s\n' "$native" | grep -c -v '^kiln: native ') line(s) of output)"
-		fi
-		REFUSALS+=("$name	$reason")
-		continue
-	fi
-	diverged=$((diverged + 1))
-	DIVERGENCES+=("$name")
-	DIVERGENCES+=("  interpreter: $(printf '%s' "$interpreted" | head -5)")
-	DIVERGENCES+=("  native:      $(printf '%s' "$native" | head -5)")
 done
 
 kiln_say "native: $matched matched, ${#REFUSALS[@]} refused, $diverged diverged"
