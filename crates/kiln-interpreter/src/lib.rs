@@ -7201,6 +7201,14 @@ struct Vm<'host, H: HostOps + ?Sized> {
     async_context: AsyncContext,
     /// The value delivered to a host handler, waiting to be collected by `call_catching`.
     caught: Option<Value>,
+    /// Whether the call being dispatched arrived through `%TypedArray%.prototype`.
+    ///
+    /// The two families share one implementation -- `Native::TypedArrayGeneric(name)` re-enters
+    /// the dispatch as the `Array.prototype` method of the same name -- and by then nothing can
+    /// tell them apart. One thing has to: a view's length is its [[ArrayLength]] slot when the
+    /// method is `%TypedArray%.prototype.every`, and the `length` *property* when the very same
+    /// implementation is reached as `Array.prototype.every.call(view)`. See `array_like_length`.
+    typed_array_method: bool,
     /// A rejection that reached the end of the run with nothing attached to it.
     unhandled: Option<Value>,
     module_suspension: Option<Rc<RefCell<ModuleSuspension>>>,
@@ -7408,6 +7416,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             http_runtime: None,
             commonjs_loader: None,
             caught: None,
+            typed_array_method: false,
             unhandled: None,
             module_suspension: None,
             module_completion: None,
@@ -21721,6 +21730,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         target: &Value,
         instruction: usize,
     ) -> Result<u64, ExecutionError> {
+        // A view's length is its [[ArrayLength]] slot, never a property. The `%TypedArray%`
+        // methods are specified over that slot precisely so a program cannot redirect them:
+        // `Object.defineProperty(sample, "length", { get() { return 0 } })` must not make
+        // `sample.every(f)` walk nothing, and must not call the getter at all. Reading `length`
+        // here did both -- one getter call, zero iterations, and a silent `true`.
+        // Only for a method reached *as* a `%TypedArray%.prototype` one. `Array.prototype`'s
+        // own generics are specified over `LengthOfArrayLike`, so `Array.prototype.every.call(
+        // view)` really does read the property, and answering from the slot there would be a
+        // different wrong answer in the other direction.
+        if self.typed_array_method
+            && let Value::TypedArray(view) = target
+        {
+            return Ok(view.len() as u64);
+        }
         let raw = self.read_property(target, "length", instruction)?;
         let number = self.as_number_argument(Some(&raw), instruction)?;
         Ok(Self::to_length(number))
@@ -28359,12 +28382,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             self.validate_typed_array(&receiver, name, brand_only)?;
             if let Native::TypedArrayGeneric(name) = native {
-                return self.invoke_dispatch(
-                    array_property(name),
-                    receiver,
-                    arguments,
-                    instruction,
-                );
+                let outer = std::mem::replace(&mut self.typed_array_method, true);
+                let dispatched =
+                    self.invoke_dispatch(array_property(name), receiver, arguments, instruction);
+                self.typed_array_method = outer;
+                return dispatched;
             }
         }
         match method {
