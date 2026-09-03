@@ -1064,6 +1064,7 @@ static uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 typedef struct kiln_json_frame {
 static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value value,
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
+static int kiln_c99_json_clone(kiln_value val, kiln_value *out);
 static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
@@ -1596,6 +1597,10 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader) {
 static int kiln_c99_json_literal(kiln_json_reader *reader, const char *word) {
 static int kiln_c99_json_string(kiln_json_reader *reader, kiln_value *out) {
+static int kiln_c99_json_clone_array(kiln_value array_val, kiln_value *out) {
+static int kiln_c99_json_clone_object(kiln_value obj_val, kiln_value *out) {
+static int kiln_c99_json_clone(kiln_value val, kiln_value *out) {
+static int kiln_c99_json_append_property(kiln_value target, const char *key, size_t key_len, kiln_value value) {
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
 static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out) {
 static void kiln_c99_civil_from_days(int64_t days, int64_t *year, int *month, int *day) {
