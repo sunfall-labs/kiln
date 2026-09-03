@@ -231,44 +231,11 @@ impl PartialEq for Symbol {
 /// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
 const RESERVED_KEY_PREFIX: &str = "@@";
 
-/// Node's public HTTP method catalogue. Kept here as semantic data rather than sourced from
-/// Hyper: Hyper parses method tokens, while this list is a JavaScript compatibility contract.
-const HTTP_METHODS: &[&str] = &[
-    "ACL",
-    "BIND",
-    "CHECKOUT",
-    "CONNECT",
-    "COPY",
-    "DELETE",
-    "GET",
-    "HEAD",
-    "LINK",
-    "LOCK",
-    "M-SEARCH",
-    "MERGE",
-    "MKACTIVITY",
-    "MKCALENDAR",
-    "MKCOL",
-    "MOVE",
-    "NOTIFY",
-    "OPTIONS",
-    "PATCH",
-    "POST",
-    "PROPFIND",
-    "PROPPATCH",
-    "PURGE",
-    "PUT",
-    "REBIND",
-    "REPORT",
-    "SEARCH",
-    "SOURCE",
-    "SUBSCRIBE",
-    "TRACE",
-    "UNBIND",
-    "UNLINK",
-    "UNLOCK",
-    "UNSUBSCRIBE",
-];
+// Node's public HTTP method catalogue, which both engines answer `http.METHODS` with. It lives in
+// `kiln-node-abi` rather than here because the native backend has to publish the same array, and a
+// second copy of thirty-four strings is a second thing that can fall out of step -- which is how
+// `typeof http.METHODS` came to differ between two runs of the same bytecode.
+use kiln_node_abi::HTTP_METHODS;
 
 /// The reservation a private name is stored under, ahead of its scope number and its spelling.
 ///
@@ -6293,6 +6260,13 @@ impl Value {
                 ),
                 _,
             )
+            // `performance` is a `Performance` object holding `now`, not something a program
+            // calls. node answers "object" for both `globalThis.performance` and
+            // `require("node:perf_hooks").performance`, and the native backend answers "object"
+            // too; this said "function", which is the answer a library's
+            // `typeof performance === "object"` guard walks past on its way to installing a shim
+            // it did not need -- and it made the same bytecode read two ways in the two engines.
+            | Self::Native(Native::Performance, _)
             | Self::Intl(_) => "object",
             // A Node builtin's default export is the same shape of thing, and the same
             // feature-detection depends on it: `typeof http === "object"` is how a library
@@ -6366,6 +6340,8 @@ impl Value {
             // `typeof Math === "object"` has to find one.
             Self::Native(Native::Math | Native::Json | Native::Reflect | Native::Atomics, _)
             | Self::Native(Native::Intl(intl::Op::Namespace | intl::Op::Prototype(_)), _)
+            // A diagnostic calls `performance` what `typeof` calls it, for the same reason.
+            | Self::Native(Native::Performance, _)
             | Self::Intl(_) => "object",
             // A Node builtin's default export is the same shape of thing, and the same
             // feature-detection depends on it: `typeof http === "object"` is how a library
@@ -45073,6 +45049,25 @@ fn native_js_name(native: &Native) -> String {
         // `SetTimeout` starts with a type name that is not its type: the derivation strips `Set`
         // -- the collection -- and answers `timeout`. A prefix that is a word in its own right is
         // the one thing a name derived from a variant cannot get right on its own.
+        // FOUR NAMES THE DERIVATION SPELLED OUT OF THE RUST VARIANT.
+        //
+        // These are not near-misses of capitalisation: each one handed a program the identifier
+        // this implementation happens to use. `Buffer.name` read "nodeBufferGlobal" and `URL.name`
+        // read "Url" -- node answers "Buffer" and "URL" -- and the two `node:` modules whose
+        // default export is callable answered "nodeAssertOk" and "nodeEventEmitter" where node
+        // answers "assert" and "EventEmitter". A name is what a program reads to tell one
+        // function from another, so an internal spelling in it is a wrong answer and not a
+        // cosmetic one; the native backend already gave three of the four the node answer, so
+        // this was also the two engines disagreeing.
+        //
+        // `NodeAssertOk` is one variant for `require("assert")`, `assert.ok` and `assert.strict`,
+        // which node makes three functions named "assert", "ok" and "strict". It is named for the
+        // value `require` returns, because that is the one a program reads; `assert.ok.name`
+        // reads "assert" here until the three become three variants.
+        Native::NodeBufferGlobal => "Buffer".to_owned(),
+        Native::UrlConstructor => "URL".to_owned(),
+        Native::NodeAssertOk => "assert".to_owned(),
+        Native::NodeEventEmitter => "EventEmitter".to_owned(),
         Native::SetTimeout => "setTimeout".to_owned(),
         Native::SetInterval => "setInterval".to_owned(),
         Native::SetImmediate => "setImmediate".to_owned(),
@@ -45106,6 +45101,12 @@ const fn namespace_name(native: &Native) -> Option<&'static str> {
         Native::Temporal(op) => temporal::namespace_name(*op),
         Native::Reflect => Some("Reflect"),
         Native::Atomics => Some("Atomics"),
+        // Lower-case because that is what the language calls it: `performance` is an object a
+        // program reads `now` from, not a constructor it names. Being here rather than in the
+        // callable arm is what makes `String(performance)` an object tag and stops
+        // `Object.getPrototypeOf(performance)` claiming `Function.prototype` -- the same two
+        // consequences `typeof` has, reaching the other two conversions.
+        Native::Performance => Some("performance"),
         _ => None,
     }
 }
