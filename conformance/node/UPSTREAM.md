@@ -20,6 +20,16 @@ extend the same upstream API slice with Node-shaped assertions needed to cover K
 Adapter boundary. They are derived compatibility probes rather than byte-for-byte upstream files;
 the manifest labels every exercised behavior so the supported surface is explicit.
 
+The two concurrency cases pin promise-job order, and they take their oracle from the settlement of
+the operations rather than from a `setTimeout(0)`. This is deliberate and must stay that way. A due
+timer does not wait for in-flight filesystem work in either engine — `RealmRuntime::next_turn`
+gives an *already queued* completion priority over the timer and an in-flight one none — and Node
+behaves the same: over 100 runs of the earlier timer-anchored form on node v22.23.2, both writes
+had landed by the timer 35 times, neither 58 times, and one of the two 7 times, dropping to 8 of 40
+under CPU load. What is ordered, and what these cases assert, is that the microtask checkpoint
+after the script drains before any filesystem completion, that both concurrent operations complete
+with their own bytes, and that a timer armed inside a completion callback is a later turn.
+
 Node mode's complete corpus currently runs through the bytecode interpreter selected by
 `kiln test --node`. Script cases use the direct program entrypoint; `.mjs` cases deliberately use
 the production Node resolver, typed builtin graph, linker, shared realm session, and Tokio Adapter.
