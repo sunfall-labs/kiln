@@ -490,6 +490,57 @@ const fn takes_arithmetic_options(kind: engine::Kind) -> bool {
     )
 }
 
+/// The `calendar` slot, which the specification narrows to a string and one kind of object.
+///
+/// Not `ToString`. A calendar is an identifier from a closed set, so `null`, `1n` and `19761118`
+/// are not calendars spelled wrong, they are the wrong *kind* of value, and the language says so
+/// with a `TypeError` before any parse runs. Converting first turned all ten of Test262's
+/// wrong-type cases into the engine's RangeError -- the same answer it gives for `"gregoryy"`,
+/// which is a different mistake.
+///
+/// The object the specification does accept is a `Temporal` value that carries a calendar, which
+/// stands for the calendar it carries. That is a fast path with a purpose: it reads the slot
+/// rather than the property, so a `calendar` getter the program defined is never run.
+fn calendar_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionError> {
+    match value {
+        None | Some(Value::Undefined) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::Temporal(built)) => match built.value().calendar_id() {
+            Some(calendar) => Ok(Some(calendar.to_owned())),
+            // A `PlainTime`, a `Duration` and an `Instant` carry no calendar, so none of the
+            // three can stand for one.
+            None => Err(type_error(&format!(
+                "a {} carries no calendar",
+                built.kind().tag()
+            ))),
+        },
+        Some(other) => Err(type_error(&format!(
+            "a {} is not a calendar identifier",
+            other.type_name()
+        ))),
+    }
+}
+
+/// The `timeZone` slot, narrowed the same way, with the one object the specification accepts.
+///
+/// A `ZonedDateTime` carries a zone and may stand for it; every other object, and every
+/// non-string primitive, is a `TypeError`. Only a string reaches the parser, which is what makes
+/// `Temporal.Now.plainDateISO("nowhere/at all")` a RangeError and
+/// `Temporal.Now.plainDateISO(null)` a TypeError rather than both the former.
+fn zone_argument(value: Option<&Value>) -> Result<Option<String>, ExecutionError> {
+    match value {
+        None | Some(Value::Undefined) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.clone())),
+        Some(Value::Temporal(built)) if built.kind() == engine::Kind::ZonedDateTime => {
+            Ok(built.value().time_zone_id())
+        }
+        Some(other) => Err(type_error(&format!(
+            "a {} is not a time zone identifier",
+            other.type_name()
+        ))),
+    }
+}
+
 /// An engine failure, already classified, becoming the error the program catches.
 fn thrown(error: engine::Error) -> ExecutionError {
     ExecutionError::TemporalFailure {
@@ -508,8 +559,14 @@ fn type_error(message: &str) -> ExecutionError {
     }
 }
 
-fn wrap(value: engine::TemporalValue) -> Value {
-    Value::Temporal(Rc::new(value))
+/// A calendar value becoming the object a program holds, with an empty property store beside
+/// it: a `Temporal` value is an ordinary object everywhere but the state, so it starts out able
+/// to take a property the way every other object can.
+pub(crate) fn wrap(value: engine::TemporalValue) -> Value {
+    Value::Temporal(Rc::new(crate::TemporalData {
+        value,
+        properties: std::cell::RefCell::new(crate::ObjectData::default()),
+    }))
 }
 
 /// The option names one operation reads, in the order it reads them.
@@ -627,7 +684,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         let built = match kind {
             engine::Kind::PlainDate => {
                 let (year, month, day) = (number(0, 0.0)?, number(1, 0.0)?, number(2, 0.0)?);
-                let calendar = self.temporal_calendar_argument(arguments.get(3), instruction)?;
+                let calendar = calendar_argument(arguments.get(3))?;
                 engine::plain_date(year, month, day, calendar.as_deref())
             }
             engine::Kind::PlainTime => engine::plain_time(
@@ -650,7 +707,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     number(7, 0.0)?,
                     number(8, 0.0)?,
                 ];
-                let calendar = self.temporal_calendar_argument(arguments.get(9), instruction)?;
+                let calendar = calendar_argument(arguments.get(9))?;
                 engine::plain_date_time(
                     fields[0],
                     fields[1],
@@ -666,7 +723,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             engine::Kind::PlainYearMonth => {
                 let (year, month) = (number(0, 0.0)?, number(1, 0.0)?);
-                let calendar = self.temporal_calendar_argument(arguments.get(2), instruction)?;
+                let calendar = calendar_argument(arguments.get(2))?;
                 let day = match arguments.get(3) {
                     None | Some(Value::Undefined) => None,
                     value => Some(self.as_number_argument(value, instruction)?),
@@ -675,7 +732,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             engine::Kind::PlainMonthDay => {
                 let (month, day) = (number(0, 0.0)?, number(1, 0.0)?);
-                let calendar = self.temporal_calendar_argument(arguments.get(2), instruction)?;
+                let calendar = calendar_argument(arguments.get(2))?;
                 let year = match arguments.get(3) {
                     None | Some(Value::Undefined) => None,
                     value => Some(self.as_number_argument(value, instruction)?),
@@ -710,11 +767,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             engine::Kind::ZonedDateTime => {
                 let nanoseconds = self.temporal_big_int_argument(arguments.first(), instruction)?;
-                let Some(zone) = self.temporal_string_argument(arguments.get(1), instruction)?
-                else {
+                let Some(zone) = zone_argument(arguments.get(1))? else {
                     return Err(type_error("a ZonedDateTime needs a time zone"));
                 };
-                let calendar = self.temporal_calendar_argument(arguments.get(2), instruction)?;
+                let calendar = calendar_argument(arguments.get(2))?;
                 engine::zoned_date_time(nanoseconds, &zone, calendar.as_deref())
             }
         };
@@ -743,7 +799,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             ))),
             Op::NowTimeZoneId => Ok(Value::String(engine::now::time_zone_id().to_owned())),
             Op::NowRead(kind) => {
-                let zone = self.temporal_string_argument(arguments.first(), instruction)?;
+                let zone = zone_argument(arguments.first())?;
                 // The realm's clock, not the host's: the same virtual instant `Date.now()` reads,
                 // which is what makes two reads with no timer between them agree (ADR 0015).
                 let epoch_nanoseconds = self.realm.now().as_nanos() as i128;
@@ -809,22 +865,22 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         field: &str,
         receiver: &Value,
     ) -> Result<Value, ExecutionError> {
-        let Value::Temporal(value) = receiver else {
+        let Value::Temporal(built) = receiver else {
             return Err(type_error(&format!(
                 "get {} called on a receiver that is not a {}",
                 field,
                 kind.tag()
             )));
         };
-        if value.kind() != kind {
+        if built.kind() != kind {
             return Err(type_error(&format!(
                 "get {} called on a {} rather than a {}",
                 field,
-                value.kind().tag(),
+                built.kind().tag(),
                 kind.tag()
             )));
         }
-        Ok(instance_property(value, field).unwrap_or(Value::Undefined))
+        Ok(instance_property(built.value(), field).unwrap_or(Value::Undefined))
     }
 
     fn temporal_method(
@@ -834,10 +890,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         arguments: &[Value],
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
-        let Value::Temporal(value) = receiver else {
+        let Value::Temporal(built) = receiver else {
             return Err(type_error("this is not a Temporal value"));
         };
-        let value = Rc::clone(value);
+        // The receiver's own reference is released before anything below runs: every argument
+        // here can be a getter, and a getter is ordinary code that may reach this same value.
+        let built = Rc::clone(built);
+        let value = built.value();
         let kind = value.kind();
         match method {
             // Every `Temporal` type refuses `valueOf`, and refusing is the point: `date1 < date2`
@@ -956,16 +1015,13 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             Method::Abs => value.abs().map(wrap).map_err(thrown),
             Method::StartOfDay => value.start_of_day().map(wrap).map_err(thrown),
             Method::WithCalendar => {
-                let Some(calendar) =
-                    self.temporal_string_argument(arguments.first(), instruction)?
-                else {
+                let Some(calendar) = calendar_argument(arguments.first())? else {
                     return Err(type_error("withCalendar needs a calendar"));
                 };
                 value.with_calendar(&calendar).map(wrap).map_err(thrown)
             }
             Method::WithTimeZone => {
-                let Some(zone) = self.temporal_string_argument(arguments.first(), instruction)?
-                else {
+                let Some(zone) = zone_argument(arguments.first())? else {
                     return Err(type_error("withTimeZone needs a time zone"));
                 };
                 value.with_time_zone(&zone).map(wrap).map_err(thrown)
@@ -991,7 +1047,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     Some(item) if crate::is_an_object(item) => {
                         let zone = match self.read_property(item, "timeZone", instruction)? {
                             Value::Undefined => None,
-                            other => self.temporal_string_argument(Some(&other), instruction)?,
+                            other => zone_argument(Some(&other))?,
                         };
                         let time = match self.read_property(item, "plainTime", instruction)? {
                             Value::Undefined => None,
@@ -1004,7 +1060,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                         };
                         (zone, time)
                     }
-                    other => (self.temporal_string_argument(other, instruction)?, None),
+                    other => (zone_argument(other)?, None),
                 };
                 let Some(zone) = zone else {
                     return Err(type_error("toZonedDateTime needs a time zone"));
@@ -1087,10 +1143,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         instruction: usize,
     ) -> Result<engine::TemporalValue, ExecutionError> {
         match value {
-            Value::Temporal(existing) if existing.kind() == kind => Ok((**existing).clone()),
+            Value::Temporal(existing) if existing.kind() == kind => Ok(existing.value().clone()),
             // A wider value narrows: a `PlainDateTime` is a `PlainDate` with a time attached, and
             // asking for the date is a projection rather than a conversion that can be wrong.
-            Value::Temporal(existing) => existing.to_kind(kind, None).map_err(thrown),
+            Value::Temporal(existing) => existing.value().to_kind(kind, None).map_err(thrown),
             Value::String(text) => {
                 if kind == engine::Kind::ZonedDateTime {
                     engine::parse_zoned_date_time(text, options).map_err(thrown)
@@ -1136,7 +1192,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                 "microsecond",
                 "nanosecond",
             ] {
-                if let Some(engine::Field::Number(number)) = existing.get(name) {
+                if let Some(engine::Field::Number(number)) = existing.value().get(name) {
                     set_time_field(&mut fields, name, number);
                 }
             }
@@ -1159,10 +1215,10 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             }
             match name {
                 "calendar" => {
-                    fields.calendar = self.temporal_string_argument(Some(&read), instruction)?
+                    fields.calendar = calendar_argument(Some(&read))?;
                 }
                 "timeZone" => {
-                    fields.time_zone = self.temporal_string_argument(Some(&read), instruction)?
+                    fields.time_zone = zone_argument(Some(&read))?;
                 }
                 "offset" => {
                     fields.offset = self.temporal_string_argument(Some(&read), instruction)?
@@ -1269,7 +1325,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     // whether a day is always 24 hours -- so it is coerced here rather than
                     // guessed at by the engine.
                     let anchor = match &read {
-                        Value::Temporal(existing) => (**existing).clone(),
+                        Value::Temporal(existing) => existing.value().clone(),
                         other => self.coerce_temporal(
                             engine::Kind::PlainDate,
                             other,
@@ -1318,15 +1374,6 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
             return Err(ExecutionError::SymbolIsNotAString);
         }
         Ok(Some(primitive.to_display_string()))
-    }
-
-    /// The `calendar` argument a constructor takes, which is a string or nothing at all.
-    fn temporal_calendar_argument(
-        &mut self,
-        value: Option<&Value>,
-        instruction: usize,
-    ) -> Result<Option<String>, ExecutionError> {
-        self.temporal_string_argument(value, instruction)
     }
 
     /// The `epochNanoseconds` a constructor takes, which is a `BigInt` and nothing else.

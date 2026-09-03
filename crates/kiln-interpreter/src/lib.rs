@@ -1030,6 +1030,7 @@ fn exotic_properties(target: &Value) -> Option<&RefCell<ObjectData>> {
         Value::DataView(view) => &view.properties,
         Value::RegExp(regexp) => &regexp.properties,
         Value::Date(date) => &date.properties,
+        Value::Temporal(built) => &built.properties,
         Value::Promise(promise) => &promise.properties,
         // A wrapped function is exotic in exactly one respect -- what calling it does -- and an
         // ordinary object in every other: it starts out holding the `name` and `length` copied
@@ -3709,6 +3710,42 @@ impl PartialEq for DateData {
     }
 }
 
+/// One of the eight `Temporal` types, and the ordinary properties a program hung beside it.
+///
+/// The store is here for the reason `Date`'s is, and the failure it fixes is the same one: a
+/// `Temporal` value is an ordinary object in every respect but the calendar state it carries, so
+/// `d.constructor = C` and `class D extends Temporal.Duration {}` are both ordinary property
+/// writes. While there was nowhere to put one, the first threw "cannot set a property on a
+/// Temporal.Duration" -- which is this engine reporting it had nowhere to write, not the language
+/// forbidding the write -- and `Object.defineProperty(date, "year", ...)` answered that it had
+/// recorded a definition it had in fact dropped.
+#[derive(Debug)]
+pub struct TemporalData {
+    /// The calendar value, which nothing here ever writes: every `Temporal` type is immutable and
+    /// an operation on one answers a new value rather than moving this one.
+    value: kiln_temporal::TemporalValue,
+    properties: RefCell<ObjectData>,
+}
+
+impl PartialEq for TemporalData {
+    /// Identity, like every other object: two values built from the same instant are two objects.
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
+
+impl TemporalData {
+    /// The calendar value behind the object, for the operations that are the engine's.
+    pub(crate) fn value(&self) -> &kiln_temporal::TemporalValue {
+        &self.value
+    }
+
+    /// Which of the eight types this is.
+    pub(crate) fn kind(&self) -> kiln_temporal::Kind {
+        self.value.kind()
+    }
+}
+
 /// A date at `time`, with an empty property store.
 fn new_date(time: f64) -> Value {
     Value::Date(Rc::new(DateData {
@@ -3761,7 +3798,7 @@ pub enum Value {
     /// confused with an ordinary object would answer field reads from the wrong place. Behind an
     /// `Rc` for identity, not for mutation -- every `Temporal` type is immutable, so nothing here
     /// ever writes through it.
-    Temporal(Rc<kiln_temporal::TemporalValue>),
+    Temporal(Rc<TemporalData>),
     /// A built `Intl` formatter, held opaquely by the linked internationalization engine.
     ///
     /// Its own value kind rather than an object with reserved slots, for the same reason
@@ -4179,7 +4216,7 @@ impl Value {
             Self::Promise(_) => "promise",
             Self::RegExp(_) => "regexp",
             Self::Date(_) => "date",
-            Self::Temporal(value) => value.kind().tag(),
+            Self::Temporal(built) => built.kind().tag(),
             Self::BigInt(_) => "bigint",
             Self::Settler(..) | Self::Capability(_) => "function",
             Self::Symbol(_) => "symbol",
@@ -4337,9 +4374,10 @@ impl Value {
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
             Self::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
             Self::Date(date) => date_to_string(date.time.get()),
-            Self::Temporal(value) => value
+            Self::Temporal(built) => built
+                .value()
                 .to_temporal_string(&kiln_temporal::Options::default())
-                .unwrap_or_else(|_| format!("[object {}]", value.kind().tag())),
+                .unwrap_or_else(|_| format!("[object {}]", built.kind().tag())),
             // `Intl.Locale` stringifies as its tag, which is what `toString` returns; the
             // formatters have no string form of their own and fall back to the object tag.
             Self::Intl(value) => match value.as_ref() {
@@ -27488,8 +27526,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // A `Temporal` value's fields and methods both come from its own table: `day` is a
             // question only the calendar engine can answer, and which methods exist depends on
             // which of the eight types this is.
-            Value::Temporal(value) => {
-                temporal::instance_property(value, name).unwrap_or(Value::Undefined)
+            Value::Temporal(built) => {
+                temporal::instance_property(built.value(), name).unwrap_or(Value::Undefined)
             }
             // A `DisposableStack` is an object carrying reserved state too, and `disposed` is
             // read straight off it. The accessor on the prototype is what
@@ -38315,9 +38353,10 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         Value::Date(date) => {
             iso_string(date.time.get()).unwrap_or_else(|| "Invalid Date".to_owned())
         }
-        Value::Temporal(value) => value
+        Value::Temporal(built) => built
+            .value()
             .to_temporal_string(&kiln_temporal::Options::default())
-            .unwrap_or_else(|_| format!("[object {}]", value.kind().tag())),
+            .unwrap_or_else(|_| format!("[object {}]", built.kind().tag())),
         // A console shows the literal's spelling, which is how it is told from a number.
         Value::BigInt(value) => format!("{value}n"),
         Value::Promise(promise) => match &promise.state.borrow().settled {
@@ -40730,7 +40769,7 @@ fn intrinsic_constructor(value: &Value) -> Option<Value> {
         // A `Temporal` value's constructor is the one of the eight its kind names, which is what
         // `date.constructor === Temporal.PlainDate` asks and what a library reaches for to build
         // another of the same type.
-        Value::Temporal(value) => Native::Temporal(temporal::Op::Constructor(value.kind())),
+        Value::Temporal(built) => Native::Temporal(temporal::Op::Constructor(built.kind())),
         Value::Date(_) => Native::DateConstructor,
         Value::RegExp(_) => Native::RegExpConstructor,
         Value::Promise(_) => Native::PromiseConstructor,
