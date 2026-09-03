@@ -38,8 +38,33 @@ pub enum Op {
     Prototype(engine::Kind),
     From(engine::Kind),
     Compare(engine::Kind),
-    /// `Temporal.PlainDate.from`'s counterpart for a `PlainMonthDay`/`PlainYearMonth` day slot.
-    Method(Method),
+    /// `Temporal.Instant.fromEpochMilliseconds` and `.fromEpochNanoseconds`: the two static
+    /// readers that take a number rather than a value to convert.
+    FromEpoch(Precision),
+    /// One prototype getter -- `duration.blank`, `date.dayOfWeek` -- named by the type that
+    /// publishes it and the field it reads.
+    ///
+    /// The name is carried rather than a variant per getter, because the field *table* is the
+    /// engine's: [`engine::Kind::fields`] says which names a type publishes and
+    /// `TemporalValue::get` answers them, so forty variants here would be a third copy of a list
+    /// that already exists twice.
+    Accessor(engine::Kind, &'static str),
+    /// One prototype method, named by the type that publishes it as well as by which method it
+    /// is.
+    ///
+    /// The receiver still decides what the method *does*; the kind is here because the language
+    /// gives two types' same-named methods different arities --
+    /// `Temporal.PlainMonthDay.prototype.toPlainDate` takes the year it is missing and
+    /// `Temporal.ZonedDateTime.prototype.toPlainDate` takes nothing -- so they are two functions
+    /// and not one.
+    Method(engine::Kind, Method),
+}
+
+/// Which of the two epoch readers `Op::FromEpoch` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Precision {
+    Milliseconds,
+    Nanoseconds,
 }
 
 /// A prototype method, dispatched on the receiver rather than on the constructor it came from.
@@ -89,7 +114,83 @@ pub fn js_name(op: Op) -> String {
         Op::Constructor(kind) | Op::Prototype(kind) => short_name(kind).to_owned(),
         Op::From(_) => "from".to_owned(),
         Op::Compare(_) => "compare".to_owned(),
-        Op::Method(method) => method_name(method).to_owned(),
+        Op::FromEpoch(Precision::Milliseconds) => "fromEpochMilliseconds".to_owned(),
+        Op::FromEpoch(Precision::Nanoseconds) => "fromEpochNanoseconds".to_owned(),
+        // An accessor is named for what it reads, prefixed with the half it is, exactly as
+        // `RegExp.prototype`'s are: that is what a stack trace through
+        // `Object.getOwnPropertyDescriptor(...).get` prints.
+        Op::Accessor(_, field) => format!("get {field}"),
+        Op::Method(_, method) => method_name(method).to_owned(),
+    }
+}
+
+/// The declared parameter count one `Temporal` built-in reports through `.length`.
+///
+/// Tabulated from the specification's own signatures, the way `Intl`'s is and for the
+/// same reason: the Rust side of every one of these takes a slice, so nothing about the
+/// implementation knows the number. `None` is not a callable at all -- the two namespaces and
+/// the eight prototypes are ordinary objects, and an object has no arity to report.
+///
+/// The kind is load-bearing in exactly two places, which is why [`Op::Method`] carries one:
+/// `toPlainDate` takes the field its receiver is missing (a year for a `PlainMonthDay`, a day
+/// for a `PlainYearMonth`) and takes nothing at all for the two types that already have both.
+pub const fn length(op: Op) -> Option<f64> {
+    use engine::Kind as K;
+    Some(match op {
+        // Not callable: `Temporal`, `Temporal.Now` and the eight `Temporal.X.prototype` objects.
+        // Reporting an arity for one put a `length` and a `name` on every prototype, which
+        // `Object.getOwnPropertyNames(Temporal.Duration.prototype)` then listed as its *only*
+        // two properties.
+        Op::Namespace | Op::Now | Op::Prototype(_) => return None,
+        // `new Temporal.PlainDate(y, m, d)` down to `new Temporal.Duration()`, whose ten
+        // components are all optional.
+        Op::Constructor(K::PlainDate | K::PlainDateTime) => 3.0,
+        Op::Constructor(K::PlainYearMonth | K::PlainMonthDay | K::ZonedDateTime) => 2.0,
+        Op::Constructor(K::Instant) => 1.0,
+        Op::Constructor(K::PlainTime | K::Duration) => 0.0,
+        Op::Compare(_) => 2.0,
+        Op::From(_) | Op::FromEpoch(_) => 1.0,
+        Op::NowRead(_) | Op::NowTimeZoneId => 0.0,
+        // A getter takes nothing, always.
+        Op::Accessor(..) => 0.0,
+        Op::Method(K::PlainMonthDay | K::PlainYearMonth, Method::ToPlainDate) => 1.0,
+        Op::Method(_, method) => method_length(method),
+    })
+}
+
+/// The arity of a prototype method that is the same whichever type publishes it.
+const fn method_length(method: Method) -> f64 {
+    match method {
+        // The readers and converters, which take no argument at all. `toString` is here because
+        // its options bag is optional and the specification declares no required parameter for
+        // it -- the same convention that makes `Array.prototype.toSorted.length` 1 and not 0.
+        Method::ToString
+        | Method::ToJson
+        | Method::ToLocaleString
+        | Method::ValueOf
+        | Method::Negated
+        | Method::Abs
+        | Method::StartOfDay
+        | Method::ToInstant
+        | Method::ToPlainDate
+        | Method::ToPlainTime
+        | Method::ToPlainDateTime
+        | Method::ToPlainYearMonth
+        | Method::ToPlainMonthDay
+        | Method::WithPlainTime => 0.0,
+        // Everything else takes the one thing it is named for: the bag, the duration, the other
+        // value, the options.
+        Method::With
+        | Method::Add
+        | Method::Subtract
+        | Method::Until
+        | Method::Since
+        | Method::Round
+        | Method::Equals
+        | Method::Total
+        | Method::WithCalendar
+        | Method::WithTimeZone
+        | Method::ToZonedDateTime => 1.0,
     }
 }
 
@@ -187,8 +288,15 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
         (Op::Constructor(kind), "compare") if kind != engine::Kind::PlainMonthDay => {
             Value::Native(Native::Temporal(Op::Compare(kind)), RealmId::PRIMARY)
         }
+        // The two epoch readers are static, and they were reaching the *instance* method table:
+        // `fromEpochMilliseconds` answered with `ZonedDateTime.prototype.toInstant`, which
+        // reported that name, that arity, and "this is not a Temporal value" when called.
         (Op::Constructor(engine::Kind::Instant), "fromEpochMilliseconds") => Value::Native(
-            Native::Temporal(Op::Method(Method::ToInstant)),
+            Native::Temporal(Op::FromEpoch(Precision::Milliseconds)),
+            RealmId::PRIMARY,
+        ),
+        (Op::Constructor(engine::Kind::Instant), "fromEpochNanoseconds") => Value::Native(
+            Native::Temporal(Op::FromEpoch(Precision::Nanoseconds)),
             RealmId::PRIMARY,
         ),
         (Op::Prototype(kind), "constructor") => {
@@ -200,7 +308,7 @@ pub fn static_property(op: Op, name: &str) -> Option<Value> {
             Value::String(kind.tag().to_owned())
         }
         (Op::Prototype(kind), _) => Value::Native(
-            Native::Temporal(Op::Method(prototype_method(kind, name)?)),
+            Native::Temporal(Op::Method(kind, prototype_method(kind, name)?)),
             RealmId::PRIMARY,
         ),
         _ => return None,
@@ -243,10 +351,20 @@ pub fn instance_property(value: &engine::TemporalValue, name: &str) -> Option<Va
             engine::Field::Undefined => Value::Undefined,
         });
     }
+    let kind = value.kind();
     Some(Value::Native(
-        Native::Temporal(Op::Method(prototype_method(value.kind(), name)?)),
+        Native::Temporal(Op::Method(kind, prototype_method(kind, name)?)),
         RealmId::PRIMARY,
     ))
+}
+
+/// The field one of the eight prototypes publishes a getter for, or `None` for a name it does not.
+///
+/// The `&'static str` is the entry from [`engine::Kind::fields`] rather than the caller's slice,
+/// which is what lets an `Op::Accessor` carry the name at all: a getter is a `Copy` marker, and a
+/// marker cannot own a `String`.
+pub fn prototype_accessor(kind: engine::Kind, name: &str) -> Option<&'static str> {
+    kind.fields().iter().copied().find(|field| *field == name)
 }
 
 /// Which methods each of the eight types answers to.
@@ -572,8 +690,52 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
                     .map(|order| Value::Number(f64::from(order)))
                     .map_err(thrown)
             }
-            Op::Method(method) => self.temporal_method(method, receiver, arguments, instruction),
+            Op::FromEpoch(Precision::Milliseconds) => {
+                let milliseconds = self.as_number_argument(arguments.first(), instruction)?;
+                engine::instant_from_epoch_milliseconds(milliseconds)
+                    .map(wrap)
+                    .map_err(thrown)
+            }
+            Op::FromEpoch(Precision::Nanoseconds) => {
+                let nanoseconds = self.temporal_big_int_argument(arguments.first(), instruction)?;
+                engine::instant(nanoseconds).map(wrap).map_err(thrown)
+            }
+            Op::Accessor(kind, field) => self.temporal_accessor(kind, field, receiver),
+            Op::Method(_, method) => self.temporal_method(method, receiver, arguments, instruction),
         }
+    }
+
+    /// One prototype getter, called on whatever receiver the program handed it.
+    ///
+    /// The brand check is the whole of the language's part here. A getter is a first-class value
+    /// -- `Object.getOwnPropertyDescriptor(Temporal.Duration.prototype, "blank").get` is a
+    /// function a program can keep and call on anything -- and the specification makes every one
+    /// of them a `TypeError` on a receiver that is not the type that published it, *including*
+    /// that type's own prototype. Reading the field off a `PlainDate` through a `Duration`'s
+    /// getter would otherwise answer `undefined`, which is the silent-wrong-answer shape rather
+    /// than a refusal.
+    fn temporal_accessor(
+        &mut self,
+        kind: engine::Kind,
+        field: &str,
+        receiver: &Value,
+    ) -> Result<Value, ExecutionError> {
+        let Value::Temporal(value) = receiver else {
+            return Err(type_error(&format!(
+                "get {} called on a receiver that is not a {}",
+                field,
+                kind.tag()
+            )));
+        };
+        if value.kind() != kind {
+            return Err(type_error(&format!(
+                "get {} called on a {} rather than a {}",
+                field,
+                value.kind().tag(),
+                kind.tag()
+            )));
+        }
+        Ok(instance_property(value, field).unwrap_or(Value::Undefined))
     }
 
     fn temporal_method(
