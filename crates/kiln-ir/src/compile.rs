@@ -1126,7 +1126,10 @@ impl Compiler {
     /// Inside a function body it cannot: `enclosing` is non-empty there, the slot index belongs
     /// to another frame's locals, and the value is the function's to return.
     fn completion_slot(&self) -> Option<u32> {
-        self.enclosing.is_empty().then_some(self.completion).flatten()
+        self.enclosing
+            .is_empty()
+            .then_some(self.completion)
+            .flatten()
     }
 
     /// `UpdateEmpty(stmtCompletion, undefined)`, which is how most statements end.
