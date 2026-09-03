@@ -65,6 +65,40 @@ static uint64_t kiln_c99_surface_method(uint64_t builtin, const char *key, size_
     return member != NULL && member->kind == KILN_C99_MEMBER_METHOD ? member->code : 0;
 }
 
+/* The name a table-driven method answers to, which is the member's own key in the row above.
+ *
+ * WHY THE ROW RATHER THAN A `case`. `X.member.name` must be `"member"`: node makes that true for
+ * every static on every built-in, and it is the string a decorator preserves, a stack trace
+ * prints and a container keys on. The name used to be written down twice -- once as the key here
+ * and once as a `case` in `kiln_c99_method_name` -- and fifteen rows had the key and no case, so
+ * `Symbol.for`, `ArrayBuffer.isView`, `Buffer.concat` and `AbortSignal.timeout` all reported the
+ * empty string. Nothing caught it, because a wrong name refuses nothing: the read succeeds and
+ * hands back a string, and only something comparing it to the key would ever know.
+ *
+ * Reading it out of the row makes the key the name, so a member that is reachable has a name by
+ * construction and the two can no longer disagree. The scan is linear, which is fine here and
+ * would not be on the read path: `kiln_c99_builtin_member` above is one pass for exactly that
+ * reason, and a name is read by tooling rather than in a loop.
+ *
+ * A code serving several members reports the first row that names it -- the canonical one. That
+ * is `Buffer.alloc` for the three `alloc` spellings, which node gives three functions and three
+ * names; `kiln_builtin_surface::NAME_IS_SHARED` is where that debt is written down, and it is
+ * what the guards in both engines read so an alias cannot be mistaken for a drift. */
+static const char *kiln_c99_surface_method_name(uint64_t code) {
+    size_t index;
+    /* Zero is "no method", which every miss in the lookup helpers returns; it names nothing. */
+    if (code == 0) {
+        return NULL;
+    }
+    for (index = 0; index < KILN_C99_SURFACE_MEMBER_COUNT; ++index) {
+        const kiln_builtin_member *member = &kiln_c99_builtin_members[index];
+        if (member->kind == KILN_C99_MEMBER_METHOD && (uint64_t)member->code == code) {
+            return member->name;
+        }
+    }
+    return NULL;
+}
+
 /* A member whose answer is a value rather than a call: `Math.PI`, `Number.MAX_VALUE`,
  * `Symbol.iterator`, `Array[Symbol.species]`.  Returns whether there was one.
  *

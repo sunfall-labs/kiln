@@ -1524,7 +1524,18 @@ pub struct BuiltinMember {
     pub owner: &'static str,
     /// The member's own name. A `@@` prefix means symbol-keyed, the same spelling the emitted C
     /// uses for a reserved store key.
+    ///
+    /// It is also the name the member *reports*: `Object.keys.name` is `"keys"`, and the emitted
+    /// `kiln_c99_surface_method_name` reads this very string rather than keeping a second copy in
+    /// a `case`. See `kiln_builtin_surface`'s "the key is the name".
     pub name: &'static str,
+    /// Which row kind this is, spelled as the declaration spells it: `code`, `num`, `text`,
+    /// `sym`, `ctor`.
+    pub kind: &'static str,
+    /// The declaration's argument, still parenthesised as `stringify!` on a token tree leaves it:
+    /// `"(KILN_C99_METHOD_OBJECT_KEYS)"`. Carried so a guard can join a row against the C it
+    /// generates without parsing the macro invocation back out of this file.
+    pub answers: &'static str,
 }
 
 macro_rules! builtin_member_row {
@@ -1598,7 +1609,12 @@ macro_rules! builtin_surface {
     ($(($builtin:ident, $owner:literal, $name:literal, $kind:tt $args:tt)),* $(,)?) => {
         /// Every member the emitted C answers for, by owner. See [`BuiltinMember`].
         pub const BUILTIN_SURFACE: &[BuiltinMember] = &[
-            $(BuiltinMember { owner: $owner, name: $name },)*
+            $(BuiltinMember {
+                owner: $owner,
+                name: $name,
+                kind: stringify!($kind),
+                answers: stringify!($args),
+            },)*
         ];
 
         macro_rules! emit_builtin_surface_rows {
