@@ -34340,6 +34340,31 @@ fn call_native(
                 }
                 receiver.clone()
             }
+            // A view reads its receiver directly rather than through the dense snapshot the
+            // walking methods get -- see the `validates_typed_array` list in `call_value` -- so
+            // without an arm of its own it fell to the `undefined` below. That is the silent
+            // shape twice over: `view.copyWithin(0, 3)` left every element exactly where it was
+            // *and* answered `undefined` instead of the view, so a caller that chained off it
+            // failed a step later naming `undefined` rather than the method that was wrong.
+            //
+            // Writing the view directly is also the only correct spelling. Two views over one
+            // buffer are the reason this method exists, and a snapshot taken here would be
+            // copied back over writes the overlap had already made.
+            Value::TypedArray(view) => {
+                let length = view.len();
+                let target = relative_index(arguments.first(), length, 0);
+                let start = relative_index(arguments.get(1), length, 0);
+                let end = relative_index(arguments.get(2), length, length);
+                // Read out before writing, for the same overlap reason as the array arm above.
+                let taken: Vec<Value> = (start..end)
+                    .take(length.saturating_sub(target))
+                    .filter_map(|index| view.get(index))
+                    .collect();
+                for (offset, value) in taken.into_iter().enumerate() {
+                    view.set(target + offset, &value)?;
+                }
+                receiver.clone()
+            }
             _ => Value::Undefined,
         },
         Native::ArrayFill => match receiver {
