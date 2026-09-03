@@ -1,12 +1,12 @@
 # `postcss` diverges natively: `require("path").dirname` is undefined
 
-Status: fixed as a divergence. `postcss` now refuses further on, for an unrelated reason.
+Status: resolved. `postcss` matches node byte for byte through both engines.
 
 > This file arrived on `main` carrying unresolved merge-conflict markers -- two sides of a merge
 > committed verbatim. Resolved here in favour of the diagnosis, which is the half this issue is
 > about. The other half was a `vue-reactivity` note that already has its own issue as 06.
 
-The only *wrong answer* left in the corpus, and therefore the most serious item here.
+It was the only *wrong answer* in the corpus, and therefore the most serious item here.
 
     node:   nodes 18|types atrule:4,comment:1,decl:9,rule:4|...
     native: uncaught TypeError: a undefined is not a function
