@@ -12455,7 +12455,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         Value::Native(native, realm) => {
                             let native = *native;
                             let realm = *realm;
-                            let arguments = self.take_arguments(argc, current)?;
+                            let mut arguments = self.take_arguments(argc, current)?;
+                            // `parseInt`'s radix converts with `ToInt32`, and that conversion is
+                            // the program's: a radix object's `valueOf` runs. The machine-free
+                            // implementation reads it with `as_number`, which cannot call one, so
+                            // `parseInt("ff", { valueOf: () => 16 })` answered NaN. A bare global
+                            // call arrives here rather than through `call_value`, which is why
+                            // the conversion has to be done at this dispatch too.
+                            if matches!(native, Native::ParseInt)
+                                && arguments.get(1).is_some_and(|radix| {
+                                    is_an_object(radix) && !is_callable(radix)
+                                })
+                            {
+                                let radix =
+                                    self.as_number_argument(arguments.get(1), current)?;
+                                arguments[1] = Value::Number(radix);
+                            }
                             let called = self.entering(realm, |vm| {
                                 vm.dispatch_native(native, &Value::Undefined, &arguments, current)
                             });
