@@ -33030,6 +33030,12 @@ fn call_native(
                 // The `arguments` object of a call. Ordinary in every other respect, so the
                 // brand is the only thing that separates it from the object it otherwise is.
                 Value::Object(object) if object.borrow().arguments_brand => "Arguments",
+                // `Object.prototype.toString.call(new TypeError("x"))` is `[object Error]` for
+                // every error kind, the brand being the [[ErrorData]] slot rather than the
+                // constructor. Answering `[object Object]` broke the oldest cross-realm type
+                // test there is -- `toString.call(e) === "[object Error]"` is how a library
+                // recognises an error it did not create, and `instanceof` cannot do it.
+                Value::Object(object) if object.borrow().error_brand => "Error",
                 Value::Boolean(_) => "Boolean",
                 Value::Number(_) => "Number",
                 Value::String(_) => "String",
@@ -33045,6 +33051,11 @@ fn call_native(
                     }
                 }
                 Value::DataView(_) => "DataView",
+                // Not a builtinTag: each of these reaches its tag through the
+                // `Symbol.toStringTag` its prototype carries, and lands in the same string.
+                Value::BigInt(_) => "BigInt",
+                Value::Symbol(_) => "Symbol",
+                Value::Generator(_) => "Generator",
                 // Every `Intl` prototype carries a `Symbol.toStringTag` of its own, so the tag is
                 // the qualified name rather than the bare `Object` a shape test would give.
                 Value::Intl(built) => built.service().tag(),
@@ -33061,6 +33072,10 @@ fn call_native(
                 | Value::Settler(..) | Value::Capability(..)
                 | Value::Bound(_)
                 | Value::Wrapped(_) => "Function",
+                // `IsArray` looks through a proxy, and this tag is built on `IsArray` rather
+                // than on the shape of the receiver -- so a proxy of an array reports `Array`,
+                // which is the whole reason a library may wrap one and still be recognised.
+                other if matches!(unwrap_proxy(other), Value::Array(_)) => "Array",
                 _ => "Object",
             }
         )),
