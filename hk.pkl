@@ -33,14 +33,8 @@ hooks {
     }
     ["pre-push"] {
         steps = new Mapping<String, Step> {
-            ["tests"] {
-                check = "mbx test -p kiln-cli -p kiln-daemon -p kiln-native -p kiln-backend-c -p kiln-interpreter --offline"
-            }
-            ["http_close_contract"] {
-                check = "bash scripts/check-http-close-contract.sh"
-            }
-            ["native_ffi"] {
-                check = "scripts/check-native-number-ffi.sh"
+            ["check"] {
+                check = "bash scripts/pre-push.sh"
             }
         }
     }
