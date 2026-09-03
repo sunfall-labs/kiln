@@ -16098,6 +16098,59 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             {
                 self.replace_with_pattern(receiver, arguments, native, instruction)
             }
+            // A string method whose argument the specification passes through `ToString`, given
+            // an object to convert.
+            //
+            // `ToString` on an object *calls* its `toString`, and the implementations of these
+            // ten live in the machine-free table, which has no machine to call it with -- it
+            // reads arguments through a helper that can only ask for the display spelling. So
+            // `"abc".indexOf({ toString: () => "b" })` answered -1, `split` did not split, and
+            // `concat` appended the literal text "[object Object]". Every one of them a plausible
+            // wrong answer in ordinary code rather than a failure.
+            //
+            // The conversion happens here, where there is a machine, and the pure implementation
+            // is then handed the string it always assumed it had. Which arguments convert is per
+            // method and not guessable: `split`'s second argument is a *length*, and `replace`'s
+            // second is a replacement that may be a function and must reach it uncalled.
+            Native::StringSplit
+            | Native::StringReplace
+            | Native::StringReplaceAll
+            | Native::StringIndexOf
+            | Native::StringLastIndexOf
+            | Native::StringIncludes
+            | Native::StringStartsWith
+            | Native::StringEndsWith
+            | Native::StringConcat
+            | Native::StringPadStart
+            | Native::StringPadEnd
+                if arguments.iter().enumerate().any(|(index, argument)| {
+                    (string_coerced_argument(native, index)
+                        || (matches!(native, Native::StringSplit) && index == 1))
+                        && is_an_object(argument)
+                        && !is_callable(argument)
+                        && !matches!(argument, Value::RegExp(_))
+                }) =>
+            {
+                let mut converted = Vec::with_capacity(arguments.len());
+                for (index, argument) in arguments.iter().enumerate() {
+                    let convertible = is_an_object(argument)
+                        && !is_callable(argument)
+                        && !matches!(argument, Value::RegExp(_));
+                    // `split`'s limit is the one argument in this set converted with `ToUint32`
+                    // rather than `ToString`, and it was not converted at all: a limit object
+                    // read as `NaN` truncated the answer to nothing.
+                    let numeric =
+                        convertible && matches!(native, Native::StringSplit) && index == 1;
+                    converted.push(if numeric {
+                        Value::Number(self.as_number_argument(Some(argument), instruction)?)
+                    } else if convertible && string_coerced_argument(native, index) {
+                        Value::String(self.as_text(argument, instruction)?)
+                    } else {
+                        argument.clone()
+                    });
+                }
+                return self.dispatch_native(native, receiver, &converted, instruction);
+            }
             Native::StringSplit if matches!(arguments.first(), Some(Value::RegExp(_))) => {
                 let Value::String(text) = receiver else {
                     return Ok(Value::Undefined);
@@ -39765,6 +39818,26 @@ fn restricted_property_error() -> ExecutionError {
         message: "'caller', 'callee', and 'arguments' properties may not be accessed on strict \
                   mode functions or the arguments objects for calls to them"
             .to_owned(),
+    }
+}
+
+/// Whether argument `index` of `native` is one the specification converts with `ToString`.
+///
+/// Spelled out per method because it is not uniform: `concat` converts every argument, `split`
+/// converts the separator but not the limit beside it, and `replace` converts the search value
+/// but must leave a replacement function alone for the call that follows.
+fn string_coerced_argument(native: Native, index: usize) -> bool {
+    match native {
+        Native::StringConcat => true,
+        Native::StringSplit
+        | Native::StringIndexOf
+        | Native::StringLastIndexOf
+        | Native::StringIncludes
+        | Native::StringStartsWith
+        | Native::StringEndsWith => index == 0,
+        Native::StringReplace | Native::StringReplaceAll => index <= 1,
+        Native::StringPadStart | Native::StringPadEnd => index == 1,
+        _ => false,
     }
 }
 
