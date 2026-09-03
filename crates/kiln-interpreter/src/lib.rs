@@ -41088,12 +41088,20 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
                 // nothing can ever change it.
                 None | Some(Value::Undefined) => {
                     let remaining = total - offset;
-                    if remaining % width != 0 {
-                        return Err(ExecutionError::InvalidArrayLength);
-                    }
+                    // A length-tracking view has no count to be wrong: its end follows the
+                    // buffer, and `length` is the floor of what fits. The exact-multiple rule
+                    // belongs to a *fixed* buffer, where a leftover byte would mean a view
+                    // addressing a partial element for ever. Applying it to both made
+                    // `new Int32Array(new ArrayBuffer(10, { maxByteLength: 20 }))` a RangeError
+                    // where every other engine answers a view of length two -- and a resizable
+                    // buffer is normally sized in bytes, so a non-multiple is the ordinary case
+                    // rather than the odd one.
                     if buffer.max_byte_length.is_some() {
                         None
                     } else {
+                        if remaining % width != 0 {
+                            return Err(ExecutionError::InvalidArrayLength);
+                        }
                         Some(remaining / width)
                     }
                 }
