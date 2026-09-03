@@ -6058,6 +6058,11 @@ impl Compiler {
     /// Both the object and the key are evaluated once, in that order, which is the order the
     /// language specifies and the one a reader assumes. A compound form has to re-read through
     /// the same pair rather than re-evaluating either, so both are duplicated on the stack.
+    ///
+    /// Evaluating the key once is not enough on its own: `ToPropertyKey` is the visible half,
+    /// and leaving it to `GetComputed` and `SetComputed` ran it twice. The compound form converts
+    /// once up front, which is what the specification's Reference Record memoises. The plain form
+    /// must not: there the key converts in `PutValue`, after the right-hand side has run.
     fn computed_assignment(
         &mut self,
         operator: AssignmentOperator,
@@ -6073,6 +6078,7 @@ impl Compiler {
         self.expression(property);
 
         if operator != AssignmentOperator::Assign {
+            self.code.push(Instruction::ToPropertyKey);
             self.code.push(Instruction::Dup2);
             self.code.push(Instruction::GetComputed);
             self.expression(value);
@@ -6117,7 +6123,12 @@ impl Compiler {
         match name {
             Some(name) => self.code.push(Instruction::GetProperty(name)),
             None => {
+                // The key converts once and the binding keeps the converted one, so the write
+                // below reads the same key the read did rather than running `toString` again.
                 self.load_hidden(&key_binding);
+                self.code.push(Instruction::ToPropertyKey);
+                self.code.push(Instruction::Dup);
+                self.store_hidden(&key_binding);
                 self.code.push(Instruction::GetComputed);
             }
         }
@@ -6220,7 +6231,12 @@ impl Compiler {
         match name {
             Some(name) => self.code.push(Instruction::GetProperty(name)),
             None => {
+                // The key converts once and the binding keeps the converted one, so the write
+                // below reads the same key the read did rather than running `toString` again.
                 self.load_hidden(&key_binding);
+                self.code.push(Instruction::ToPropertyKey);
+                self.code.push(Instruction::Dup);
+                self.store_hidden(&key_binding);
                 self.code.push(Instruction::GetComputed);
             }
         }

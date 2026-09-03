@@ -2697,6 +2697,14 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::ToPropertyKey => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ int status = kiln_c99_op_to_property_key(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
         Instruction::GetComputed => {
             let unwind = unwind_or_return(handlers, site);
             writeln!(
@@ -3786,6 +3794,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 word(&mut hash, u64::from(*count));
             }
             Instruction::GetComputed => byte(&mut hash, 29),
+            Instruction::ToPropertyKey => byte(&mut hash, 193),
             Instruction::SetComputed => byte(&mut hash, 30),
             Instruction::SetComputedStrict { strict } => {
                 byte(&mut hash, 68);
