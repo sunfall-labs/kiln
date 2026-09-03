@@ -53,7 +53,7 @@ pub use symbol::*;
 
 // Node's public HTTP method catalogue, which both engines answer `http.METHODS` with. It lives in
 // `kiln-node-abi` rather than here because the native backend has to publish the same array, and a
-// second copy of thirty-four strings is a second thing that can fall out of step -- which is how
+// second copy of that list is a second thing that can fall out of step -- which is how
 // `typeof http.METHODS` came to differ between two runs of the same bytecode.
 use kiln_node_abi::HTTP_METHODS;
 
@@ -3931,6 +3931,24 @@ fn node_builtin_specifier(native: Native) -> Option<&'static str> {
     })
 }
 
+/// The value one advertised export of a builtin names.
+///
+/// `default` is the exception and it is the load-bearing one: a builtin whose default *is* the
+/// module value -- `node:module`, `node:stream` -- carries no member of that name, so the
+/// namespace value itself is the answer. Both projections resolve through here so that the ESM
+/// binding and the CommonJS one cannot disagree about what `default` is; they did, and the
+/// CommonJS side read `None` and fell back to a namespace object nobody could call.
+fn node_builtin_export_value(namespace: Native, name: &str) -> Option<Value> {
+    if name == "default" {
+        return Some(
+            namespace
+                .property("default")
+                .unwrap_or(Value::Native(namespace, RealmId::PRIMARY)),
+        );
+    }
+    namespace.property(name)
+}
+
 pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
     let namespace = node_builtin_namespace(specifier)?;
     let Value::Native(namespace, _) = namespace else {
@@ -3943,15 +3961,8 @@ pub fn node_builtin_exports(specifier: &str) -> Option<Vec<(String, Value)>> {
             .map(|name| {
                 (
                     (*name).to_owned(),
-                    if *name == "default" {
-                        namespace
-                            .property("default")
-                            .unwrap_or(Value::Native(namespace, RealmId::PRIMARY))
-                    } else {
-                        namespace
-                            .property(name)
-                            .expect("every advertised builtin export has a native value")
-                    },
+                    node_builtin_export_value(namespace, name)
+                        .expect("every advertised builtin export has a native value"),
                 )
             })
             .collect(),
@@ -3975,7 +3986,7 @@ pub fn node_builtin_commonjs_value(specifier: &str) -> Option<Value> {
                 Some(Value::Native(native, RealmId::PRIMARY))
             }
             kiln_node_abi::CommonJsProjection::Callable { export, properties } => {
-                let callable = native.property(export)?;
+                let callable = node_builtin_export_value(native, export)?;
                 for (property, target) in properties {
                     let value = native.property(target)?;
                     if let Some(store) = prototype_slot(&callable) {
