@@ -17901,6 +17901,43 @@ static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value
     return KILN_C99_OK;
 }
 
+int kiln_c99_collection_method_set(kiln_value receiver, kiln_value key, kiln_value val, kiln_value *result) {
+    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
+    kiln_collection *col = kiln_c99_collection_of(receiver);
+    if (KILN_UNLIKELY(!col->is_map || col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
+    int status = kiln_c99_collection_put(receiver, key, val);
+    if (KILN_UNLIKELY(status != KILN_C99_OK)) return 0;
+    *result = receiver;
+    return 1;
+}
+
+int kiln_c99_collection_method_get(kiln_value receiver, kiln_value key, kiln_value *result) {
+    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
+    kiln_collection *col = kiln_c99_collection_of(receiver);
+    if (KILN_UNLIKELY(!col->is_map || col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
+    double at = kiln_c99_collection_find(col, key);
+    *result = at < 0.0 ? kiln_c99_undefined() : col->entries[(size_t)at].value;
+    return 1;
+}
+
+int kiln_c99_collection_method_has(kiln_value receiver, kiln_value key, kiln_value *result) {
+    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
+    kiln_collection *col = kiln_c99_collection_of(receiver);
+    if (KILN_UNLIKELY(col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
+    *result = kiln_c99_boolean(kiln_c99_collection_find(col, key) >= 0.0);
+    return 1;
+}
+
+int kiln_c99_collection_method_add(kiln_value receiver, kiln_value key, kiln_value *result) {
+    if (KILN_UNLIKELY(receiver.tag != KILN_VALUE_COLLECTION)) return 0;
+    kiln_collection *col = kiln_c99_collection_of(receiver);
+    if (KILN_UNLIKELY(col->is_map || col->properties.tag != KILN_VALUE_UNDEFINED)) return 0;
+    int status = kiln_c99_collection_put(receiver, key, key);
+    if (KILN_UNLIKELY(status != KILN_C99_OK)) return 0;
+    *result = receiver;
+    return 1;
+}
+
 /* An iterator over a snapshot array.
  *
  * `for...of` asks for an iterator and then drives `next`, so a collection's `@@iterator` cannot
