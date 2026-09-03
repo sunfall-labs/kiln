@@ -1151,7 +1151,7 @@ macro_rules! builtin_member_row {
             "    {",
             stringify!($builtin),
             ", KILN_C99_MEMBER_NUMBER, 0, ",
-            stringify!($value),
+            $value,
             ", \"",
             $name,
             "\", NULL},\n"
