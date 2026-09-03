@@ -2485,6 +2485,7 @@ static int kiln_c99_new_object(kiln_value *out) {
     object->not_extensible = 0;
     object->module_namespace = 0;
     object->arguments_brand = 0;
+    object->error_brand = 0;
     object->accessor_count = 0;
     object->read_only_seen = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);

@@ -12333,19 +12333,11 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
              * recognises an error it did not construct, across realms where `instanceof` cannot
              * answer. `[object Object]` was the answer before, in both engines; the interpreter
              * was fixed first and this is the other half. */
-            case KILN_VALUE_OBJECT: {
-                kiln_value error_kind;
-                if (kiln_c99_object_of(receiver)->arguments_brand) {
-                    tag = "Arguments";
-                } else if (kiln_c99_get(NULL, receiver, "@@error", 7, &error_kind, 0, NULL) ==
-                               KILN_C99_OK &&
-                           error_kind.tag == KILN_VALUE_NUMBER) {
-                    tag = "Error";
-                } else {
-                    tag = "Object";
-                }
+            case KILN_VALUE_OBJECT:
+                tag = kiln_c99_object_of(receiver)->arguments_brand ? "Arguments"
+                      : kiln_c99_object_of(receiver)->error_brand   ? "Error"
+                                                                    : "Object";
                 break;
-            }
             default: tag = "Object"; break;
             }
             if (kiln_c99_text_append_c(&built, "[object ") != KILN_C99_OK ||
@@ -18803,6 +18795,9 @@ static int kiln_c99_new_error(kiln_value *out, uint64_t kind, kiln_value message
     if (status != KILN_C99_OK) {
         return status;
     }
+    /* The [[ErrorData]] slot, set at the one place an error is built so that nothing a program
+     * does afterwards can add or remove it. */
+    kiln_c99_object_of(error)->error_brand = 1;
     if (kiln_c99_text_append_c(&stack, name) != KILN_C99_OK ||
         (text.len != 0 && (kiln_c99_text_append_c(&stack, ": ") != KILN_C99_OK ||
                            kiln_c99_text_append(&stack, text.ptr, text.len) != KILN_C99_OK))) {

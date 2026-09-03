@@ -289,6 +289,23 @@ typedef struct kiln_object {
      * exactly. A level that never held an accessor or a read-only data property has nothing
      * that could intercept a write from a descendant. */
     int read_only_seen;
+    /* An error, by the same rule as `arguments_brand`: the brand is not a property. It was
+     * `@@error` -- the reserved slot carrying the error's kind -- and a reserved key is hidden
+     * from `getOwnPropertyNames` but still reachable, so a program could read it (`e["@@error"]`
+     * answered the internal builtin code), `delete` it, and set it. All three were observable
+     * through `Object.prototype.toString`: a plain object with an `@@error` of its own reported
+     * `[object Error]`, and a real error that had been `delete`d reported `[object Object]`.
+     * `@@error` still carries the *kind*, which is a value and belongs in a property; what may
+     * not is the answer to "is this an error", which a type test asks and a program may attack.
+     *
+     * APPENDED, NOT PLACED BESIDE `arguments_brand` WHERE IT BELONGS. Inserting a field into the
+     * middle of this struct breaks the native backend: `#bump` and every other private member
+     * stops being found, because a private name is stored under a reserved key and looked up by
+     * interned-pointer identity. Appending is safe -- 32 bytes appended changes nothing -- so
+     * the fault is offsets shifting, not size. Reproduced with a bare `int` and no other change,
+     * with `.kiln/bin` and `.kiln/cache` cleared, in both debug and release. See the issue in
+     * `.scratch/native-object-layout/`. Move this up once that is fixed. */
+    int error_brand;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
