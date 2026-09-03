@@ -1034,6 +1034,17 @@ impl<H: RealmHostProvider> RealmRuntime<H> {
         self.state.http_server.open_connections() != 0
     }
 
+    /// How many server connections are open. The boolean above answers the drive's question;
+    /// this answers a person's, through the `SIGUSR1` dump.
+    pub fn open_server_connections(&self) -> usize {
+        self.state.http_server.open_connections()
+    }
+
+    /// How many client connections are open, likewise.
+    pub fn open_client_connections(&self) -> usize {
+        self.state.http_client.open_connections()
+    }
+
     /// The host's completion signal, for a drive that waits outside any borrow of this runtime.
     pub fn completion_signal(&self) -> Option<Rc<tokio::sync::Notify>> {
         self.state.host.completion_signal()

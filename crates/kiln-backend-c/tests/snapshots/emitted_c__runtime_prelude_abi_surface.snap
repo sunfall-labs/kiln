@@ -2,6 +2,9 @@
 source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: abi_surface(prelude)
 ---
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <ctype.h>
 #include <math.h>
 #include <stddef.h>
@@ -9,6 +12,10 @@ expression: abi_surface(prelude)
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__unix__) || defined(__APPLE__)
+#include <signal.h>
+#include <unistd.h>
+#endif
 #define KILN_NUMBER_FORMAT_VERSION 1
 #define KILN_NUMBER_PARSE_VERSION 1
 #define KILN_C99_OK 0
@@ -720,6 +727,7 @@ int kiln_realm_value_slot(uint32_t key, void **out_slot);
 int kiln_realm_argv_count(uint64_t *out_count);
 int kiln_realm_argv_at(uint64_t index, const uint8_t **out_bytes, uint64_t *out_len);
 int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word);
+int kiln_realm_runtime_report(uint64_t *out_fields, uint64_t capacity, uint64_t *out_count);
 int kiln_realm_now(double *out_milliseconds);
 int kiln_realm_now_nanoseconds(int64_t *out_high, uint64_t *out_low);
 int kiln_realm_queue_microtask(kiln_realm_work_fn run, kiln_realm_drop_fn drop, void *work);
@@ -1059,8 +1067,10 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
-#define KILN_GC_HOOKS_VERSION 1u
+#define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
+#define KILN_C99_INTROSPECT_ARMED 1
+#define KILN_C99_INTROSPECT_DUMPED 2
 #define KILN_GC_KIND_MASK ((uint32_t)0x3FFFFFFFu)
 #define KILN_GC_FLAG_ASCII_KNOWN ((uint32_t)0x80000000u)
 #define KILN_GC_FLAG_ASCII ((uint32_t)0x40000000u)
@@ -1090,6 +1100,26 @@ static kiln_gc_heap kiln_c99_gc_fallback;
 static void kiln_c99_gc_heap_init(kiln_gc_heap *heap) {
 static void kiln_c99_gc_trace_text(const char *text) { fputs(text, stderr); }
 static void kiln_c99_gc_trace_count(uint64_t count) {
+#define KILN_C99_RUNTIME_REPORT_FIELDS 9
+#if defined(__unix__) || defined(__APPLE__)
+static volatile sig_atomic_t kiln_c99_introspect_pending;
+static int kiln_c99_introspect_armed;
+static void kiln_c99_introspect_handler(int signal_number) {
+static int kiln_c99_introspect_arm(void) {
+typedef struct kiln_c99_introspect_line {
+static void kiln_c99_introspect_text(kiln_c99_introspect_line *line, const char *text) {
+static void kiln_c99_introspect_number(kiln_c99_introspect_line *line, uint64_t value) {
+static void kiln_c99_introspect_field(kiln_c99_introspect_line *line, const char *name,
+static void kiln_c99_introspect_begin(kiln_c99_introspect_line *line, const char *section) {
+static void kiln_c99_introspect_flush(kiln_c99_introspect_line *line) {
+static void kiln_c99_introspect_dump(kiln_gc_heap *heap) {
+static int kiln_c99_gc_hook_introspect(void *opaque) {
+#else
+static volatile int kiln_c99_introspect_pending;
+static int kiln_c99_introspect_armed;
+static int kiln_c99_introspect_arm(void) { return 0; }
+static int kiln_c99_gc_hook_introspect(void *opaque) {
+#endif
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
 static size_t kiln_c99_gc_hash(const void *pointer, size_t mask) {
 static int kiln_c99_gc_ptrset_grow(kiln_gc_ptrset *set, size_t wanted) {

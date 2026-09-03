@@ -152,6 +152,12 @@ macro_rules! provider_c_declaration {
     ($group:ident, $name:ident, realm_start_host_op) => {
         concat!("int ", stringify!($name), "(uint64_t realm, const kiln_async_host_op *operation, kiln_realm_completion_fn run, kiln_realm_drop_fn drop, void *work, uint64_t *out_request);\n")
     };
+    // The field order is the contract; it is spelled once in `kiln_realm_runtime_report`'s doc
+    // comment in the provider and read back by `kiln_c99_introspect_dump`. `capacity` in, count
+    // out, so a prelude built against a shorter report still understands the prefix it knows.
+    ($group:ident, $name:ident, realm_runtime_report) => {
+        concat!("int ", stringify!($name), "(uint64_t *out_fields, uint64_t capacity, uint64_t *out_count);\n")
+    };
     ($group:ident, $name:ident, realm_symbol_for) => {
         concat!("int ", stringify!($name), "(const uint8_t *key, uint64_t key_len, uint64_t *out_id);\n")
     };
@@ -2052,6 +2058,13 @@ pub fn builtin_surface_members(global: &str) -> Vec<&'static str> {
 
 const HEADER: &str = concat!(
     r#"/* Kiln C99 backend: deterministic scalar unit. */
+/* `sigaction`, `SA_RESTART` and `write` are POSIX, and `-std=c99` puts glibc in strict-ANSI mode
+ * where none of them is declared -- which shows up as `storage size of 'action' isn't known`, not
+ * as a missing header. A feature-test macro has to be asked for before the first include, so this
+ * is the first line of the unit. Darwin declares them without it and dislikes being narrowed. */
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <ctype.h>
 #include <math.h>
 #include <stddef.h>
@@ -2059,6 +2072,12 @@ const HEADER: &str = concat!(
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+/* The SIGUSR1 introspection dump. `signal.h` is C89 everywhere, but `sigaction`, `SIGUSR1` and
+ * `write` are POSIX, so a non-POSIX target compiles the same prelude with the dump inert. */
+#if defined(__unix__) || defined(__APPLE__)
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 /* C ABI version 1; HostOps ABI version 1. */
 #define KILN_NUMBER_FORMAT_VERSION 1
@@ -3543,6 +3562,8 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_method_index", C99StateOwner::Constant),
     ("kiln_c99_method_index_len", C99StateOwner::Constant),
     ("kiln_c99_method_index_ready", C99StateOwner::Constant),
+    ("kiln_c99_introspect_pending", C99StateOwner::Process),
+    ("kiln_c99_introspect_armed", C99StateOwner::Process),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3555,6 +3576,11 @@ enum C99StateOwner {
     /// process would compute the same bytes. Two threads racing to build it duplicate the work and
     /// nothing else; a realm neither owns it nor has to reset it.
     Constant,
+    /// Belongs to the process and its signal disposition rather than to any realm, and outlives
+    /// every realm the process makes. A realm must not reset it: the `SIGUSR1` handler installed
+    /// for the first realm is still installed for the second, and the flag it sets names a
+    /// request that has arrived, not a value some realm made.
+    Process,
 }
 
 /// The stack each emitted C function needs: the module body, then one entry per compiled
@@ -9246,6 +9272,16 @@ int kiln_realm_entropy_word(uint64_t seed, uint64_t *out_word) {
     *out_word = mixed ^ (mixed >> 31);
     return KILN_C99_OK;
 }
+/* The fixture has no Tokio runtime and no HTTP engine, so it reports nothing. The dump this
+ * feeds is unreachable here anyway: the fixture refuses to attach a heap, and the introspect
+ * hook declines on a fallback heap. */
+int kiln_realm_runtime_report(uint64_t *out_fields, uint64_t capacity, uint64_t *out_count) {
+    (void)out_fields;
+    (void)capacity;
+    if (out_count == NULL) return KILN_C99_INVALID_ARGUMENT;
+    *out_count = 0;
+    return KILN_C99_INVALID_ARGUMENT;
+}
 void *kiln_realm_gc_current_heap(void) { return NULL; }
 int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap) {
     /* The fixture has no realm heap: every unit collects nothing and keeps its fallback heap. */
@@ -9437,9 +9473,17 @@ int kiln_realm_http_response_end_active(uint64_t resource, uint64_t id,
 }
 "#;
 
+    /// A real build compiles the vendored number runtime and each emitted unit as separate
+    /// translation units, so every unit starts with `HEADER` and asks for POSIX visibility before
+    /// its first `#include`. These tests concatenate them instead, which puts the number
+    /// runtime's includes first and makes `HEADER`'s request arrive too late to be honoured. The
+    /// prologue is therefore repeated here, ahead of everything, so the one TU the tests build
+    /// sees what the many TUs a build produces each see.
     fn linked_source(module_source: &str, wrapper: &str) -> String {
         format!(
-            "{}\n{}\n{}\n{}\n{}",
+            "#if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)\n\
+             #define _POSIX_C_SOURCE 200809L\n\
+             #endif\n{}\n{}\n{}\n{}\n{}",
             kiln_native_number::runtime_source(),
             REGEXP_FIXTURE,
             module_source,
