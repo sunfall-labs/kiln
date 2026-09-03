@@ -1,4 +1,3 @@
-
 use super::*;
 use kiln_ir::{
     BYTECODE_VERSION, Constant, ExportBinding, FunctionProto, HostOp, ImportBinding, Instruction,
@@ -2032,9 +2031,7 @@ fn shared_publication_serializes_each_header_library_pair() {
     materialize(&header, b"old header", false).expect("publish old header");
     materialize(&output, b"old library", false).expect("publish old library");
 
-    let process_lock = SHARED_PUBLICATION_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let process_lock = SHARED_PUBLICATION_LOCK.lock();
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (finished_tx, finished_rx) = std::sync::mpsc::channel();
     let writer_output = output.clone();

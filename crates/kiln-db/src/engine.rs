@@ -15,7 +15,7 @@
 //! makes "the interface did not change" stop propagating, without anyone maintaining a second
 //! hash by hand and without the compiler having to know it is happening.
 
-use std::collections::HashMap;
+use ahash::AHashMap;
 
 use crate::{
     Compiled, CompiledModule, FileId, Frontend, Interface, Parsed, Project, QueryEngine, Revision,
@@ -102,7 +102,7 @@ struct FileState {
 pub struct MemoEngine {
     frontend: Frontend,
     files: Vec<FileState>,
-    by_path: HashMap<String, FileId>,
+    by_path: AHashMap<String, FileId>,
     project: Option<Memo<Project>>,
     /// Ticks when a source becomes active or inactive; read by `project()`.
     file_set_changed_at: Epoch,
@@ -120,7 +120,7 @@ impl MemoEngine {
         Self {
             frontend,
             files: Vec::new(),
-            by_path: HashMap::new(),
+            by_path: AHashMap::new(),
             project: None,
             file_set_changed_at: Epoch::default(),
             epoch: Epoch::default(),
