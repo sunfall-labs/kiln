@@ -3089,6 +3089,7 @@ mod realm {
     }
 
     #[cfg(test)]
+    #[allow(clippy::unwrap_used, clippy::expect_used)]
     mod tests {
         use std::error::Error;
         use std::sync::PoisonError;
@@ -6392,6 +6393,7 @@ mod bigint {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 

@@ -9,6 +9,7 @@ repository.workspace = true
 # used where equality has no full source value behind it; Oxc remains isolated in `frontend-oxc`.
 # See ADRs 0006 and 0010.
 [dependencies]
+ahash = { workspace = true }
 kiln-digest = { workspace = true }
 kiln-hir = { workspace = true }
 kiln-ir = { workspace = true }

@@ -700,26 +700,27 @@ mod tests {
             for _ in 0..16 {
                 tokio::task::yield_now().await;
             }
-            let events = recording.events.borrow();
-            let dispatched: Vec<_> = events.iter().map(|(kind, _, _, _)| *kind).collect();
-            assert_eq!(
-                dispatched,
-                vec![
-                    HttpEventKind::Finish,
-                    HttpEventKind::ResponseHead,
-                    HttpEventKind::ResponseData,
-                    HttpEventKind::ResponseEnd,
-                ],
-                "{events:?}"
-            );
-            assert_eq!(
-                events[1].3,
-                b"201 Created content-type\0text/plain\0content-length\x002\0".to_vec()
-            );
-            assert_eq!(events[2].3, b"ok".to_vec());
-            assert!(events[3].2, "a keep-alive response leaves the socket reusable");
-            assert_eq!(recording.checkpoints.get(), events.len());
-            drop(events);
+            {
+                let events = recording.events.borrow();
+                let dispatched: Vec<_> = events.iter().map(|(kind, _, _, _)| *kind).collect();
+                assert_eq!(
+                    dispatched,
+                    vec![
+                        HttpEventKind::Finish,
+                        HttpEventKind::ResponseHead,
+                        HttpEventKind::ResponseData,
+                        HttpEventKind::ResponseEnd,
+                    ],
+                    "{events:?}"
+                );
+                assert_eq!(
+                    events[1].3,
+                    b"201 Created content-type\0text/plain\0content-length\x002\0".to_vec()
+                );
+                assert_eq!(events[2].3, b"ok".to_vec());
+                assert!(events[3].2, "a keep-alive response leaves the socket reusable");
+                assert_eq!(recording.checkpoints.get(), events.len());
+            }
             assert_eq!(engine.requests_in_flight(), 0);
             assert_eq!(engine.open_connections(), 1, "the connection idles for reuse");
 

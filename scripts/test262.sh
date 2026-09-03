@@ -42,6 +42,7 @@ fi
 
 TEMP_ROOT=""
 OUTPUT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/kiln-test262-output.XXXXXXXX")"
+# shellcheck disable=SC2329
 cleanup() {
 	if [[ -n $TEMP_ROOT ]]; then
 		# The directory is private to this run and contains no repository data. Keep cleanup
@@ -62,7 +63,7 @@ die() {
 validate_checkout() {
 	local checkout="$1" head status
 	[[ -e $checkout/.git ]] || die "Test262 checkout has no .git directory: $checkout"
-	head="$(git -C "$checkout" rev-parse --verify HEAD^{commit} 2>/dev/null)" ||
+	head="$(git -C "$checkout" rev-parse --verify "HEAD^{commit}" 2>/dev/null)" ||
 		die "cannot resolve Test262 checkout HEAD: $checkout"
 	[[ $head == "$TEST262_COMMIT" ]] ||
 		die "Test262 checkout is $head, expected pinned commit $TEST262_COMMIT"

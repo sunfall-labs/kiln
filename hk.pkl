@@ -1,0 +1,41 @@
+amends "package://github.com/jdx/hk/releases/download/v1.57.0/hk@1.57.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v1.57.0/hk@1.57.0#/Builtins.pkl"
+// Using a coding agent? See https://hk.jdx.dev/agents
+
+local linters = new Mapping<String, Step> {
+    ["cargo_fmt"] = Builtins.cargo_fmt
+    ["shellcheck"] {
+        glob = "scripts/*.sh"
+        check = "shellcheck --external-sources {{ files }}"
+    }
+    ["clippy"] {
+        glob = "**/*.rs"
+        check = "mbx clippy --workspace --all-targets --locked -- -D warnings"
+    }
+    ["http_close_contract"] {
+        glob = "crates/kiln-runtime/**/*.rs"
+        check = "bash scripts/check-http-close-contract.sh"
+    }
+}
+
+hooks {
+    ["pre-commit"] {
+        fix = true
+        stash = "git"
+        steps = linters
+    }
+    ["fix"] {
+        fix = true
+        steps = linters
+    }
+    ["check"] {
+        steps = linters
+    }
+    ["pre-push"] {
+        steps = new Mapping<String, Step> {
+            ["check"] {
+                check = "bash scripts/pre-push.sh"
+            }
+        }
+    }
+}

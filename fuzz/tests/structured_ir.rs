@@ -61,7 +61,12 @@ const fn is_structural(error: &ExecutionError) -> bool {
 /// that made it.
 fn structural_complaint(program: &Program) -> Option<String> {
     let mut host = CaptureHost::new();
-    match execute_reclaiming(Rc::new(program.clone()), &mut host, LIMITS) {
+    match execute_reclaiming(
+        Rc::new(program.clone()),
+        &mut host,
+        LIMITS,
+        kiln_interpreter::ExecutionCapabilities::default(),
+    ) {
         Ok(_) => None,
         Err(error) if is_structural(&error) => Some(error.to_string()),
         Err(_) => None,
@@ -171,6 +176,7 @@ fn probe(program: Program) -> (bool, bool) {
             Rc::new(program),
             &mut host,
             kiln_interpreter::ExecutionLimits::default(),
+            kiln_interpreter::ExecutionCapabilities::default(),
         );
     }))
     .is_err();
@@ -193,6 +199,7 @@ fn probe(program: Program) -> (bool, bool) {
 #[test]
 fn a_cell_read_as_a_local_still_aborts_the_interpreter() {
     let (accepted, aborted) = probe(Program {
+        source: std::sync::Arc::from(""),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![Constant::Undefined],
         code: vec![
@@ -227,6 +234,7 @@ fn a_cell_read_as_a_local_still_aborts_the_interpreter() {
 #[test]
 fn an_array_hole_used_as_a_value_still_aborts_the_interpreter() {
     let (accepted, aborted) = probe(Program {
+        source: std::sync::Arc::from(""),
         version: kiln_ir::BYTECODE_VERSION,
         constants: vec![Constant::Undefined],
         code: vec![

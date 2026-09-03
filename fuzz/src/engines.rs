@@ -220,7 +220,12 @@ pub enum Interpreted {
 /// every function of every program allocated for the life of the run.
 pub fn interpret(program: &Program) -> Interpreted {
     let mut host = CaptureHost::new();
-    match execute_reclaiming(Rc::new(program.clone()), &mut host, SCREENING_LIMITS) {
+    match execute_reclaiming(
+        Rc::new(program.clone()),
+        &mut host,
+        SCREENING_LIMITS,
+        kiln_interpreter::ExecutionCapabilities::default(),
+    ) {
         Ok(_) => Interpreted::Completed(host.into_stdout()),
         Err(kiln_interpreter::ExecutionError::StepLimitExceeded { .. }) => Interpreted::OverBudget,
         Err(error) => Interpreted::Stopped {
@@ -299,10 +304,7 @@ impl Native {
             .builder
             .build(
                 program,
-                &NativeBuildOptions {
-                    output: executable.clone(),
-                    profile: self.profile,
-                },
+                &NativeBuildOptions::new(executable.clone(), self.profile),
             )
             .map_err(|error| classify_build_error(&error))?;
 
