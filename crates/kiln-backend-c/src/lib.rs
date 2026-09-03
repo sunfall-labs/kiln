@@ -1432,6 +1432,13 @@ method_ids! {
     // because the refusal does not need to be told which member it is: the instruction that
     // called it already carries the name, so this answers `CallMethod(readFileSync)`.
     (KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED, 482, Direct),
+    // `require("node:module")`, which node answers with the `Module` class rather than with a
+    // namespace. It gets a code of its own rather than borrowing the unmaterialized placeholder
+    // above: two values sharing a code are `===` in this runtime, and `require("node:module")`
+    // comparing equal to every unbuilt member of every other builtin would be a wrong answer
+    // bought to save a number. `node:stream` needs no code here because
+    // `KILN_C99_METHOD_NODE_STREAM` already is its callable.
+    (KILN_C99_METHOD_NODE_MODULE, 483, Direct),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -3451,6 +3458,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_ASSERT_OK),
     emit_method_define!(KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR),
     emit_method_define!(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
+    emit_method_define!(KILN_C99_METHOD_NODE_MODULE),
     emit_method_define!(KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH),
     emit_method_define!(KILN_C99_METHOD_NODE_URL_PARSE),
     emit_method_define!(KILN_C99_METHOD_NODE_URL_PATH_TO_FILE_URL),
