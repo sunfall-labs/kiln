@@ -667,6 +667,37 @@ impl fmt::Display for ToolchainError {
 
 impl std::error::Error for ToolchainError {}
 
+/// The `-target` `zig cc` needs to agree with the Rust side, or `None` to leave it alone.
+///
+/// `zig cc` defaults to musl on Linux. The private number provider is a Rust staticlib built for
+/// the *host* triple, which on an ordinary Linux box is glibc, so the two disagree about libc and
+/// the link fails with a target mismatch rather than a missing symbol. Zig can target glibc
+/// perfectly well -- being a cross compiler is the point of it -- it simply has to be told.
+///
+/// The host's ABI is known without probing anything: this crate is compiled for the same target
+/// the provider will be, so `cfg!` answers it. Zig spells a triple `arch-os-abi`, with no vendor
+/// field, which is why this is built rather than reused from Rust's own triple.
+///
+/// `None` everywhere else on purpose. On macOS zig's default is already the host, and on a musl
+/// host so is musl; forcing a triple there would replace a correct default with a guess.
+fn zig_host_target() -> Option<String> {
+    if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        Some(format!("{}-linux-gnu", std::env::consts::ARCH))
+    } else {
+        None
+    }
+}
+
+/// `zig cc`, plus the target when this host needs one named.
+fn zig_command_prefix() -> Vec<OsString> {
+    let mut prefix = vec![OsString::from("cc")];
+    if let Some(target) = zig_host_target() {
+        prefix.push(OsString::from("-target"));
+        prefix.push(OsString::from(target));
+    }
+    prefix
+}
+
 /// A configured, versioned C compiler driver.
 pub struct Toolchain {
     identity: ToolIdentity,
@@ -792,7 +823,13 @@ impl Toolchain {
         let target_probe = if kind == CompilerKind::Zig {
             CommandSpec::new(
                 path.clone(),
-                vec![OsString::from("cc"), OsString::from("-dumpmachine")],
+                {
+                    // Asked with the same `-target` it will be compiled with, or the probe would
+                    // report musl and everything downstream would key on a triple never used.
+                    let mut probe = zig_command_prefix();
+                    probe.push(OsString::from("-dumpmachine"));
+                    probe
+                },
                 None,
             )
             .with_environment_lock(
@@ -814,7 +851,7 @@ impl Toolchain {
             })
             .unwrap_or_else(|| "unknown".to_owned());
         let command_prefix = if kind == CompilerKind::Zig {
-            vec![OsString::from("cc")]
+            zig_command_prefix()
         } else {
             Vec::new()
         };
@@ -929,6 +966,17 @@ impl Toolchain {
         );
         for library in &options.libraries {
             args.push(OsString::from(format!("-l{library}")));
+        }
+        // The private number provider is a Rust staticlib, and Rust's panic machinery calls the
+        // unwinder: `_Unwind_RaiseException`, `_Unwind_Backtrace`, `rust_eh_personality` and the
+        // rest. `gcc` and `clang` link that implicitly, so nothing had to ask for it; `zig cc`
+        // links only what it is told, and the failure is thirteen undefined `_Unwind_*` symbols
+        // pointing into an archive that looks, from the message, like it is missing pieces.
+        //
+        // Zig ships the unwinder, so naming it is the whole fix. Last, after the archives that
+        // reference it, because a static link resolves left to right.
+        if self.identity.kind == CompilerKind::Zig {
+            args.push(OsString::from("-lunwind"));
         }
         args.extend(options.extra_args.iter().cloned());
         args.push(OsString::from("-o"));
