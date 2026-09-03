@@ -15935,12 +15935,31 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
     case KILN_VALUE_METHOD:
     case KILN_VALUE_BOUND:
     case KILN_VALUE_SETTLER:
-    case KILN_VALUE_COMMONJS_REQUIRE:
-        /* A callable the runtime supplies carries no property store at all, so `name` and
-         * `length` are the whole of what it owns and everything else is genuinely absent. */
+    case KILN_VALUE_COMMONJS_REQUIRE: {
+        /* `name` and `length` are derived from the callable rather than stored, and everything
+         * else a program hung on it lives in the store the same helper a read uses hands back --
+         * so the two cannot disagree about where a bound function keeps its properties. Reading
+         * `b.tag` and asking `Object.hasOwn(b, "tag")` were answering 1 and false, which is the
+         * silent shape: the value is plainly there and the question about it says no. */
+        kiln_value store;
+        int stored;
         *found = kiln_c99_same_name(name.ptr, name.len, "name") ||
                  kiln_c99_same_name(name.ptr, name.len, "length");
+        if (*found) {
+            return KILN_C99_OK;
+        }
+        stored = kiln_c99_callable_store(target, &store, 0);
+        if (stored != KILN_C99_OK) {
+            return stored;
+        }
+        if (store.tag == KILN_VALUE_OBJECT) {
+            kiln_object *held = kiln_c99_object_of(store);
+            for (index = 0; index < held->count && !*found; ++index) {
+                *found = kiln_c99_same_key(&held->properties[index], name.ptr, name.len);
+            }
+        }
         return KILN_C99_OK;
+    }
     case KILN_VALUE_TYPED_ARRAY: {
         int enumerable;
         kiln_c99_typed_own(target, name.ptr, name.len, found, &enumerable);
