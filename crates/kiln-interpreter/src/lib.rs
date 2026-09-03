@@ -19128,10 +19128,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Array-like: read by index up to `length`, which is the other half of what the
             // specification says and what makes `Array.from({ length: 2 })` two undefineds
             // rather than an error.
-            let length = match self.read_property(&source, "length", instruction)? {
-                Value::Number(length) if length >= 1.0 => length as usize,
-                _ => 0,
-            };
+            //
+            // `LengthOfArrayLike` is `ToLength(Get(items, "length"))`, so a length that is not
+            // already a number is coerced rather than read as zero -- `Array.from({length: "2"})`
+            // is two undefineds -- and one above `2**53-1` is clamped there. Matching on
+            // `Value::Number` and casting was wrong in both directions: `{length: "2"}` produced
+            // an empty array, and `{length: Infinity}` cast to `usize::MAX` and then *ran*,
+            // reaching 6 GB before anything stopped it. The refusal above `u32::MAX` is the
+            // `ArrayCreate` step's `RangeError`, which is what makes the infinite case an error a
+            // program can catch instead of an allocation the machine cannot survive.
+            let length = self.read_property(&source, "length", instruction)?;
+            let length = to_length(self.as_number_argument(Some(&length), instruction)?);
+            if length > u32::MAX as usize {
+                return Err(ExecutionError::InvalidArrayLength);
+            }
             let mut collected = Vec::with_capacity(length.min(1024));
             for index in 0..length {
                 let value =

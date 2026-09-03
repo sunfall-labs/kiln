@@ -13062,14 +13062,25 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             if (iterator_method.tag == KILN_VALUE_UNDEFINED ||
                 iterator_method.tag == KILN_VALUE_NULL) {
+                /* `LengthOfArrayLike` is `ToLength(Get(items, "length"))`, so a length that is
+                 * not already a number is coerced rather than read as zero, and one no array can
+                 * have is the `ArrayCreate` step's `RangeError`. Clamping `Infinity` to
+                 * `(size_t)-1` and then *running* was the other answer, and it reached 6 GB
+                 * before anything stopped it. The interpreter refuses at the same bound. */
                 kiln_value length_value;
+                double wanted;
                 size_t length = 0;
                 status = kiln_c99_get(host, source, "length", 6, &length_value, depth, thrown);
                 if (status != KILN_C99_OK) return status;
-                if (length_value.tag == KILN_VALUE_NUMBER &&
-                    kiln_c99_as_number(length_value) > 0.0) {
-                    double wanted = floor(kiln_c99_as_number(length_value));
-                    length = wanted > 9007199254740991.0 ? (size_t)-1 : (size_t)wanted;
+                status = kiln_c99_to_number_checked(host, length_value, &wanted, depth, thrown);
+                if (status != KILN_C99_OK) return status;
+                if (wanted > 0.0) {
+                    wanted = floor(wanted);
+                    if (wanted > 4294967295.0) {
+                        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                                    "Invalid array length");
+                    }
+                    length = (size_t)wanted;
                 }
                 for (index = 0; index < length; ++index) {
                     char key[32];
