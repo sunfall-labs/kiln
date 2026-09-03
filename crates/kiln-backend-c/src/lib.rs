@@ -3584,12 +3584,12 @@ fn emit_instruction(
             };
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
-            let fast_method = match text.as_str() {
-                "set" => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ kiln_collection *col = (kiln_collection *)(uintptr_t)self_value.bits; if (col->is_map && col->properties.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_SET, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} }} "),
-                "get" => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ kiln_collection *col = (kiln_collection *)(uintptr_t)self_value.bits; if (col->is_map && col->properties.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_GET, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} }} "),
-                "has" => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ kiln_collection *col = (kiln_collection *)(uintptr_t)self_value.bits; if (col->properties.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_HAS, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} }} "),
-                "add" => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ kiln_collection *col = (kiln_collection *)(uintptr_t)self_value.bits; if (!col->is_map && col->properties.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_ADD, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} }} "),
-                "exec" => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_REGEXP)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_REGEXP_EXEC, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
+            let fast_method = match (text.as_str(), argc) {
+                ("set", 2) => format!("if (kiln_c99_collection_method_set(self_value, call_argbuf[0], call_argbuf[1], &call_result)) goto kiln_method_done_{index}; "),
+                ("get", 1) => format!("if (kiln_c99_collection_method_get(self_value, call_argbuf[0], &call_result)) goto kiln_method_done_{index}; "),
+                ("has", 1) => format!("if (kiln_c99_collection_method_has(self_value, call_argbuf[0], &call_result)) goto kiln_method_done_{index}; "),
+                ("add", 1) => format!("if (kiln_c99_collection_method_add(self_value, call_argbuf[0], &call_result)) goto kiln_method_done_{index}; "),
+                ("exec", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_REGEXP)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_REGEXP_EXEC, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
                 _ => String::new(),
             };
             writeln!(
