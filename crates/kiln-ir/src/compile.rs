@@ -3431,6 +3431,58 @@ impl Compiler {
         self.patch_jump(not_null);
     }
 
+    /// `return v` from a *derived* constructor, which `[[Construct]]` does not simply hand back.
+    ///
+    /// An object is the override and wins outright. `undefined` yields `this` instead -- and
+    /// reading `this` is what makes returning before `super()` a ReferenceError, exactly as the
+    /// bare `return` above relies on. Anything else is a TypeError: the specification allows a
+    /// derived constructor to replace its instance with an object, not to answer a primitive.
+    /// `null` is a primitive here, which is why the `typeof` test alone will not do.
+    ///
+    /// Emitted rather than made an instruction, for the reason `this_binding` itself is a
+    /// binding: the C backend implements nothing new, so the two engines cannot disagree.
+    fn guard_derived_return(&mut self, binding: &str) {
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("function".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let callable = self.emit_jump(Instruction::JumpIfTruthy(0));
+
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("object".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let primitive = self.emit_jump(Instruction::JumpIfFalse(0));
+
+        // `typeof null` is "object", so null reaches here and falls through to the primitive
+        // handling below rather than counting as the object override.
+        self.code.push(Instruction::Dup);
+        self.push_constant(Constant::Null);
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let object_like = self.emit_jump(Instruction::JumpIfFalse(0));
+
+        self.patch_jump(primitive);
+        self.code.push(Instruction::Dup);
+        self.push_constant(Constant::Undefined);
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let refused = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.code.push(Instruction::Pop);
+        self.load_this_binding(binding);
+        let yielded_this = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(refused);
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "a derived constructor may only return an object or undefined".to_owned(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+
+        self.patch_jump(callable);
+        self.patch_jump(object_like);
+        self.patch_jump(yielded_this);
+    }
+
     /// `throw new TypeError("...")`, spelled in the instructions that already exist.
     fn emit_iterator_result_type_error(&mut self) {
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
@@ -5848,6 +5900,9 @@ impl Compiler {
                 .clone()
                 .expect("a deferred `this` has a binding to read");
             self.load_this_binding(&binding);
+        } else if let Some(binding) = self.this_binding.clone() {
+            // `return v` in a derived constructor, where the value is not simply handed back.
+            self.guard_derived_return(&binding);
         }
         self.code.push(Instruction::Return);
     }
