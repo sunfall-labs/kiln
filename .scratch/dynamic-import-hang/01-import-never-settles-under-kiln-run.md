@@ -1,38 +1,58 @@
-# `import()` never settles under `kiln run`
+# `import()` does not resolve under `kiln run`
 
-**Status:** open · **Severity:** high — silent, no diagnostic, no exit code
+**Status:** open · **Severity:** medium — reported, but the promise never settles
+
+**CORRECTION (same session).** This was first written as "silent, no diagnostic, exit 0". That
+was wrong, and the error was in the probe rather than in kiln. The probes piped output through
+`grep -v "^kiln:"`, which strips exactly the diagnostic line, and the `exit=0` beside them was
+`grep`'s status, not kiln's. Measured properly:
+
+    $ kiln run main.mjs; echo $?
+    A
+    B
+    kiln: ... unsupported dynamic import: no directory was recorded to resolve `import()` against
+    1
+
+So it fails loudly, names the cause, and exits non-zero. What remains true is that the promise
+never settles, so a `.then`/`.catch` handler on it never runs -- the module stops at the failure
+instead of reporting through the promise the way the specification does.
 
 ## Repro
 
-    // dep.mjs
-    export let x = 1;
-
     // main.mjs
     console.log("A");
-    import("./dep.mjs").then(m => console.log("then", m.x), e => console.log("rej", e));
+    import("./dep.mjs").then(m => console.log("then", m.x), e => console.log("rej", e.message));
     console.log("B");
 
-    $ kiln run main.mjs
+    $ kiln run main.mjs        # node prints A, B, then `then 1`
     A
-    B                      # node also prints `then 1`; exit status 0 either way
+    B
+    kiln: ... unsupported dynamic import: no directory was recorded to resolve `import()` against
 
-Neither handler runs. The same holds for `await import(...)` at top level and for `await`
-inside an async function -- the module simply stops at the await with no output, no error and
-exit 0. It happens whether or not the target was also imported statically, so it is not about
-discovering a module late.
+Neither handler runs, and the module stops there. The same holds for `await import(...)`.
 
-## Why it matters more than the row count suggests
+## The cause
 
-test262's `language/expressions/dynamic-import` is 1430/174, so the corpus harness resolves these
-fine -- this is the CLI's own module path. A promise that never settles is the worst shape a
-failure can take: the program does not stop, does not throw, and does not report anything, so a
-caller waits forever and a script exits successfully having done half its work.
+`ModuleLoader` is `fn(&str) -> Result<ModulePlan, ModuleLoadError>` and carries no referrer. The
+only implementation is `kiln-conformance`'s, which resolves against a thread-local base -- exact
+for Test262, where every fixture is a sibling of the test that imports it, and unset under `kiln
+run`, which is the message above.
 
-## Not investigated
+The type's own comment says the referrer-aware service object that replaces it "is part of the
+remaining module-realm kernel migration", and that a filesystem-backed loader "must not emulate
+one with ambient state". So the fix is that migration, not a thread-local in the CLI: faking a
+referrer would resolve a relative import from a nested module against the wrong directory, which
+trades a visible failure for a silent wrong answer.
 
-Found while probing module live bindings; the interpreter changes in this session do not touch the
-dynamic-import path, but that was reasoned rather than bisected. Worth confirming against an
-earlier build before assuming it is long-standing.
+## Two smaller things worth doing meanwhile
+
+* **Report through the promise.** `import()` hands back a promise and the specification reports
+  every failure through it. Both the no-loader and unsupported paths raise a machine error
+  instead, so `.catch` never runs. Rejecting would let a program handle it, and an unhandled one
+  is reported anyway.
+* **`ExecutionError::NoModuleLoader` looks unreachable** from the CLI, because the conformance
+  source compiler installs a loader for it. If a host really has none, that path has never been
+  exercised.
 
 ## Related, found in the same probe
 
