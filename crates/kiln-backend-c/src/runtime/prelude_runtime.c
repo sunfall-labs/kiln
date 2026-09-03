@@ -695,7 +695,7 @@ static int kiln_c99_node_stream(kiln_host *host, kiln_value *result, uint64_t co
         if (status == KILN_C99_OK) status = kiln_c99_node_event(host, &ignored, KILN_C99_METHOD_NODE_EVENT_EMIT, receiver, emit_args, 1, depth, thrown);
         *result = receiver; return status;
     }
-    return KILN_C99_CONTROL_ERROR;
+    KILN_C99_REFUSE("a stream method this backend has not implemented");
 }
 
 /* `node:path`'s algorithms live in Rust now, in the crate the interpreter links too: `dirname`
@@ -2703,7 +2703,7 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
                                   view->length);
         return out->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
     }
-    return KILN_C99_CONTROL_ERROR;
+    KILN_C99_REFUSE("a Buffer method this backend has not implemented");
 }
 
 static int kiln_c99_node_dns_lookup(kiln_host *host, kiln_value *out,
@@ -2827,7 +2827,7 @@ static int kiln_c99_node_diagnostics(kiln_host *host, kiln_value *out, uint64_t 
         return kiln_c99_call(host, out, callback, receiver, argc > 3 ? args + 3 : NULL,
                              argc > 3 ? argc - 3 : 0, depth, thrown);
     }
-    return KILN_C99_CONTROL_ERROR;
+    KILN_C99_REFUSE("a diagnostics_channel member this backend has not implemented");
 }
 
 static int kiln_c99_node_util(kiln_host *host, kiln_value *out, uint64_t code,
@@ -2934,7 +2934,7 @@ format_oom:
     }
     (void)host;
     (void)depth;
-    return KILN_C99_CONTROL_ERROR;
+    KILN_C99_REFUSE("a util member this backend has not implemented");
 }
 
 static int kiln_c99_new_array(kiln_value *out) {
@@ -3726,7 +3726,7 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
             target.tag == KILN_VALUE_SYMBOL) {
                 return strict ? kiln_c99_throw_cannot_set(thrown, target) : KILN_C99_OK;
         }
-        return KILN_C99_CONTROL_ERROR;
+        KILN_C99_REFUSE("a property write to a value whose store nothing enumerates");
     }
     object = kiln_c99_object_of(target);
     if (object->module_namespace) {
@@ -3878,7 +3878,7 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
     size_t index;
     int status;
     if (target.tag != KILN_VALUE_OBJECT) {
-        return KILN_C99_CONTROL_ERROR;
+        KILN_C99_REFUSE("an own-slot lookup on a value that is not an ordinary object");
     }
     object = kiln_c99_object_of(target);
     /* The one place a key is stored, so the one place interning has to be total (ADR 0047):
@@ -4677,7 +4677,8 @@ static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,
                                     "URLSearchParams.get called on an incompatible receiver");
     }
     status = kiln_c99_get(NULL, receiver, "@@url:query", 11, &query, 0, NULL);
-    if (status != KILN_C99_OK || query.tag != KILN_VALUE_STRING) return KILN_C99_CONTROL_ERROR;
+    if (status != KILN_C99_OK || query.tag != KILN_VALUE_STRING)
+        KILN_C99_REFUSE("URLSearchParams with no captured query string");
     while (at <= query.len) {
         size_t pair_end = at;
         size_t equal;
@@ -6088,7 +6089,7 @@ static int kiln_c99_bigint_constant(void **cache, const char *digits, size_t len
     if (*cache == NULL) {
         void *handle = NULL;
         if (kiln_bigint_parse((const unsigned char *)digits, len, 10, &handle) != 0) {
-            return KILN_C99_CONTROL_ERROR;
+            KILN_C99_REFUSE("a BigInt literal the provider would not parse");
         }
         *cache = handle;
     }
@@ -6502,10 +6503,10 @@ static int kiln_c99_symbol_for(kiln_value *out, kiln_value key) {
     uint64_t id;
     if (text.tag != KILN_VALUE_STRING) return KILN_C99_OUT_OF_MEMORY;
     if (kiln_realm_symbol_for((const uint8_t *)text.ptr, (uint64_t)text.len, &id) != KILN_C99_OK)
-        return KILN_C99_CONTROL_ERROR;
+        KILN_C99_REFUSE("the realm would not register this symbol key");
     if (kiln_realm_symbol_key_for(id, &registered_key, &registered_key_len) != KILN_C99_OK ||
         registered_key_len > SIZE_MAX)
-        return KILN_C99_CONTROL_ERROR;
+        KILN_C99_REFUSE("the realm would not answer with the symbol key it registered");
     symbol = (kiln_symbol *)kiln_c99_gc_alloc(KILN_GC_SYMBOL, sizeof *symbol);
     if (symbol == NULL) return KILN_C99_OUT_OF_MEMORY;
     /* Registry key bytes, like `Symbol()`'s, stay malloc-backed and outlive the realm's heap:

@@ -2036,6 +2036,177 @@ const fn assert_surface_is_covered(surface: &[BuiltinMember], backlog: &[Builtin
 
 const _: () = assert_surface_is_covered(BUILTIN_SURFACE, BUILTIN_SURFACE_BACKLOG);
 
+/// A prelude helper whose `KILN_C99_CONTROL_ERROR` is an *internal status* rather than a refusal.
+///
+/// The status is produced, handed to the caller named here, and converted there into something the
+/// program sees. Nothing is ever reported as a refusal, so there is nothing for a detail to name.
+struct InternalRefusal {
+    /// The prelude function holding the sites.
+    function: &'static str,
+    /// How many `KILN_C99_REFUSE_INTERNAL` sites it holds.
+    sites: usize,
+    /// Which caller converts the status, and into what.
+    converted_by: &'static str,
+}
+
+/// Every `KILN_C99_REFUSE_INTERNAL` in the emitted prelude, by the function that holds it.
+///
+/// This is the classification the inventory turns on, and it is deliberately small. `187 refusal
+/// sites` overstates the backlog, because `KILN_C99_CONTROL_ERROR` does double duty -- but only
+/// for the JSON reader, where it is measured rather than assumed: `JSON.parse` on `{bad`, `[1,`,
+/// `nope`, `{"a":}` and `""` throws a `SyntaxError` in both engines, so not one of the reader's
+/// exits is a gap a program can arrive at. Everything else in the prelude refuses to a program,
+/// including the sites that only a broken invariant reaches -- a detail costs nothing there and is
+/// exactly what is wanted on the day one fires.
+///
+/// A new one of these does not build until a row here says which caller converts it, which is the
+/// same ceremony `BUILTIN_SURFACE_BACKLOG` imposes and for the same reason: an exemption nobody
+/// has to justify is how a gate stops meaning anything.
+const REFUSAL_INTERNAL_STATUS: &[InternalRefusal] = &[
+    InternalRefusal {
+        function: "kiln_c99_json_string",
+        sites: 5,
+        converted_by: "kiln_c99_json_read, which hands it to JSON.parse's SyntaxError",
+    },
+    InternalRefusal {
+        function: "kiln_c99_json_read",
+        sites: 16,
+        converted_by: "JSON.parse, which turns it into a SyntaxError the program can catch",
+    },
+    InternalRefusal {
+        function: "kiln_c99_json_document",
+        sites: 1,
+        converted_by: "the same reader status, propagated to a data module's materialization",
+    },
+];
+
+const fn internal_refusal_sites(rows: &[InternalRefusal]) -> usize {
+    let mut total = 0;
+    let mut index = 0;
+    while index < rows.len() {
+        assert!(
+            !rows[index].converted_by.is_empty() && !rows[index].function.is_empty(),
+            "a REFUSAL_INTERNAL_STATUS row does not say which caller converts the status, which \
+             cannot be told from a refusal somebody forgot to name"
+        );
+        total += rows[index].sites;
+        index += 1;
+    }
+    total
+}
+
+const fn bytes_match_at(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
+    if at + needle.len() > bytes.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < needle.len() {
+        if bytes[at + index] != needle[index] {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+/// How far the scan may jump when a nine-byte window is not `KILN_C99_`.
+///
+/// Boyer-Moore-Horspool, and not for speed's sake: this runs in `const` evaluation over most of a
+/// megabyte of C, where a byte-at-a-time loop is not a scan but a compile-time budget. rustc's
+/// `long_running_const_eval` refuses one, and is right to. The table is the distance from the last
+/// window byte back to that byte's previous position in `KILN_C99_`, or the whole window when the
+/// needle does not contain it at all -- which is most of C.
+const fn refusal_scan_shift(window_end: u8) -> usize {
+    match window_end {
+        b'9' => 1,
+        b'C' => 3,
+        b'_' => 4,
+        b'N' => 5,
+        b'L' => 6,
+        b'I' => 7,
+        b'K' => 8,
+        _ => 9,
+    }
+}
+
+/// A refusal in the emitted prelude names what it lacked, or says which caller converts it.
+///
+/// THIS IS THE GATE, AND IT IS A COMPILE ERROR RATHER THAN A TEST FAILURE, for the reason ADR 0043
+/// gives about the builtin surface: a rule somebody has to remember to check is a rule that holds
+/// until the day it matters. A refusal that names nothing is the one thing a refusal must never
+/// be, because naming what it lacked is the entire reason this backend refuses instead of
+/// guessing -- and an unnamed one does worse than say nothing, because the enclosing instruction
+/// then invents a reason. `Object.getOwnPropertyDescriptor(f, "prototype")` was reported as
+/// `operation=Call detail=Call callee is unsupported by the native callable model`, a false
+/// statement about a supported callee, produced by a helper three frames down that refused
+/// silently.
+///
+/// So the status has exactly three producers, all of them in the prelude's diagnostic preamble,
+/// and the prelude C may only ever *test* it. Anything else fails here.
+///
+/// A `const` panic carries a literal and nothing else, and a crate that does not compile cannot
+/// run the test that would explain -- so the message carries the `grep` that names the line
+/// instead. `refusal_sites_name_themselves` is the standing check, and it sees the half a `const`
+/// cannot: that the internal-status sites are in the functions `REFUSAL_INTERNAL_STATUS` claims.
+const fn assert_refusals_name_themselves(source: &str, internal_sites: usize) {
+    let bytes = source.as_bytes();
+    let mut at = 0;
+    let mut internal = 0;
+    while at + 9 <= bytes.len() {
+        if bytes[at] != b'K' || !bytes_match_at(bytes, at, b"KILN_C99_") {
+            at += refusal_scan_shift(bytes[at + 8]);
+        } else {
+            if bytes_match_at(bytes, at, b"KILN_C99_CONTROL_ERROR") {
+                assert!(
+                    at >= 3
+                        && (bytes_match_at(bytes, at - 3, b"== ")
+                            || bytes_match_at(bytes, at - 3, b"!= ")),
+                    "the prelude C produces KILN_C99_CONTROL_ERROR by hand instead of through \
+                     KILN_C99_REFUSE, KILN_C99_REFUSE_NAMED or KILN_C99_REFUSE_INTERNAL, so a \
+                     refusal there would name nothing. This crate no longer compiles, so the \
+                     test that explains cannot run: `grep -n KILN_C99_CONTROL_ERROR \
+                     crates/kiln-backend-c/src/runtime/*.c | grep -v '[=!]= '` names the line"
+                );
+            }
+            if bytes_match_at(bytes, at, b"KILN_C99_REFUSE(") {
+                assert!(
+                    at + 17 < bytes.len() && bytes[at + 16] == b'"' && bytes[at + 17] != b'"',
+                    "a KILN_C99_REFUSE site has no reason literal; say what the site lacked"
+                );
+            }
+            if bytes_match_at(bytes, at, b"KILN_C99_REFUSE_NAMED(") {
+                assert!(
+                    at + 23 < bytes.len() && bytes[at + 22] == b'"' && bytes[at + 23] != b'"',
+                    "a KILN_C99_REFUSE_NAMED site has no reason literal; say what the site lacked"
+                );
+            }
+            if bytes_match_at(bytes, at, b"KILN_C99_REFUSE_INTERNAL(") {
+                assert!(
+                    at + 26 < bytes.len() && bytes[at + 25] == b'"' && bytes[at + 26] != b'"',
+                    "a KILN_C99_REFUSE_INTERNAL site does not name the caller that converts it"
+                );
+                internal += 1;
+            }
+            at += 9;
+        }
+    }
+    assert!(
+        internal == internal_sites,
+        "the prelude C holds a different number of KILN_C99_REFUSE_INTERNAL sites than \
+         REFUSAL_INTERNAL_STATUS declares; add the row that says which caller converts the new \
+         one, or drop the row that no longer describes anything. `grep -c \
+         KILN_C99_REFUSE_INTERNAL crates/kiln-backend-c/src/runtime/*.c` is the count"
+    );
+}
+
+const _: () = assert_refusals_name_themselves(
+    concat!(
+        include_str!("runtime/prelude_core.c"),
+        include_str!("runtime/prelude_runtime.c")
+    ),
+    internal_refusal_sites(REFUSAL_INTERNAL_STATUS),
+);
+
 /// The globals [`BUILTIN_SURFACE`] speaks for, in declaration order and without repeats.
 pub fn builtin_surface_owners() -> Vec<&'static str> {
     let mut owners: Vec<&'static str> = Vec::new();
@@ -2114,6 +2285,81 @@ static size_t kiln_c99_diagnostic_function_len = 0;
  * nothing else is using it. */
 static char kiln_c99_diagnostic_compose[128];
 static int kiln_c99_diagnostic_active_depth = 0;
+
+/* THE THREE WAYS TO PRODUCE `KILN_C99_CONTROL_ERROR`, AND THERE ARE NO OTHERS.
+ *
+ * A refusal that names nothing sends the reader somewhere else. Four investigations in one day
+ * went to the wrong place because the site that knew what was missing said nothing and let an
+ * enclosing instruction invent a reason -- `Object.getOwnPropertyDescriptor(f, "prototype")` was
+ * reported as an unsupported *callee*, which is a false statement about a supported one.
+ *
+ * So the status is never written by hand in the prelude C. It comes from one of these, each of
+ * which carries the reason at the place that knows it, and `assert_refusals_name_themselves`
+ * fails the build if the token appears anywhere else. That is the ADR 0043 move applied one layer
+ * down: a gate in `const` evaluation rather than a test somebody has to remember.
+ *
+ * The first note wins, here as everywhere else in the diagnostic: the innermost helper runs first
+ * and is the most specific, so an outer one adds provenance and leaves the detail alone. */
+static int kiln_c99_refuse(const char *lacked) {
+    if (kiln_c99_diagnostic_detail == NULL) {
+        kiln_c99_diagnostic_detail = lacked;
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
+/* A refusal whose subject is a name the site is holding and no instruction carries -- the member
+ * behind a `GetProperty` is named by the instruction, but the member behind a backlog entry read
+ * through a built-in's store is not.
+ *
+ * `kiln_c99_diagnostic_detail` is a `const char *` and cannot be formatted into, so the composed
+ * text goes in `kiln_c99_diagnostic_compose`, which `GetComputed` also writes -- for the
+ * *function* field, and only while no detail exists. One buffer, one writer: `GetComputed` checks
+ * whether the detail already points into it, and an inner site that got there first keeps it. */
+static int kiln_c99_refuse_named(const char *lacked, const char *subject, size_t subject_len) {
+    if (kiln_c99_diagnostic_detail == NULL) {
+        /* Copied rather than `snprintf`ed. Nothing formatted here is a number, so the locale would
+         * not change the answer -- but "this unit never calls the C library's printers" is a rule
+         * a test can state in one line, and one with an exception for the diagnostic that only
+         * joins two strings is not. */
+        size_t room = sizeof kiln_c99_diagnostic_compose - 1;
+        size_t at = strlen(lacked);
+        if (at > room) {
+            at = room;
+        }
+        memcpy(kiln_c99_diagnostic_compose, lacked, at);
+        if (at + 2 < room) {
+            kiln_c99_diagnostic_compose[at++] = ':';
+            kiln_c99_diagnostic_compose[at++] = ' ';
+            if (subject_len > room - at) {
+                subject_len = room - at;
+            }
+            memcpy(kiln_c99_diagnostic_compose + at, subject, subject_len);
+            at += subject_len;
+        }
+        kiln_c99_diagnostic_compose[at] = '\0';
+        kiln_c99_diagnostic_detail = kiln_c99_diagnostic_compose;
+    }
+    return KILN_C99_CONTROL_ERROR;
+}
+
+/* `KILN_C99_CONTROL_ERROR` is also an *internal* status: a reader hands it to a caller that
+ * converts it into something the program sees, and no refusal is ever reported. `JSON.parse` on
+ * `{bad` throws a `SyntaxError` in both engines, so the reader's twenty-two exits are not gaps and
+ * a detail on one would be noise -- and noise is how a gate earns an exemption and stops meaning
+ * anything.
+ *
+ * The argument names the caller that does the converting. It is compiled away; it is there so the
+ * claim can be checked by reading, and `REFUSAL_INTERNAL_STATUS` in the emitter carries the same
+ * claim as a row that has to be added before a new one of these will build. */
+static int kiln_c99_internal_status(const char *converted_by) {
+    (void)converted_by;
+    return KILN_C99_CONTROL_ERROR;
+}
+
+#define KILN_C99_REFUSE(lacked) return kiln_c99_refuse(lacked)
+#define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
+    return kiln_c99_refuse_named((lacked), (subject), (subject_len))
+#define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
  * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
@@ -6194,7 +6440,7 @@ fn emit_instruction(
             // this costs nothing outside CommonJS.
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_c99_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -6271,7 +6517,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; if (target.tag == KILN_VALUE_BUILTIN) {{ const char *named = kiln_c99_builtin_name(target.bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag; if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(target.bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len()
             )
             .unwrap();
@@ -6306,7 +6552,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - 1].tag; const char *named = stack[sp - 1].tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(stack[sp - 1].bits) : NULL; if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {{ int written = named != NULL ? snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%s.%.*s\", named, (int)key.len, key.ptr) : snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%.*s\", (int)key.len, key.ptr); if (written > 0) {{ kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose; kiln_c99_diagnostic_function_len = (size_t)written < sizeof kiln_c99_diagnostic_compose ? (size_t)written : sizeof kiln_c99_diagnostic_compose - 1; }} }} else if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} kiln_c99_diagnostic_detail = \"GetComputed lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
+                "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = stack[sp - 1].tag; if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {{ const char *named = stack[sp - 1].tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(stack[sp - 1].bits) : NULL; if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {{ int written = named != NULL ? snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%s.%.*s\", named, (int)key.len, key.ptr) : snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%.*s\", (int)key.len, key.ptr); if (written > 0) {{ kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose; kiln_c99_diagnostic_function_len = (size_t)written < sizeof kiln_c99_diagnostic_compose ? (size_t)written : sizeof kiln_c99_diagnostic_compose - 1; }} }} else if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetComputed lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
             )
             .unwrap();
         }
@@ -6378,7 +6624,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; if (stack[sp - {argc} - 1].tag == KILN_VALUE_BUILTIN) {{ const char *named = kiln_c99_builtin_name(stack[sp - {argc} - 1].bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
+                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; if (stack[sp - {argc} - 1].tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(stack[sp - {argc} - 1].bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
                 argc + 1
             )
             .unwrap();
@@ -6644,7 +6890,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_site(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = method.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value method; kiln_value call_result = kiln_c99_undefined(); int status; kiln_value self_value = stack[sp - {argc} - 1]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_site(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
@@ -8865,7 +9111,9 @@ int main(void) {{
     if (kiln_c99_diagnostic_instruction != (size_t)1) return 3;
     if (strcmp(kiln_c99_diagnostic_operation, "GetProperty(f16round)") != 0) return 4;
     if (kiln_c99_diagnostic_detail == NULL ||
-        strcmp(kiln_c99_diagnostic_detail, "GetProperty lookup refused") != 0) return 5;
+        strcmp(kiln_c99_diagnostic_detail,
+               "a member the language puts on this built-in and this backend has not built")
+            != 0) return 5;
     if (kiln_c99_diagnostic_receiver_tag != KILN_VALUE_BUILTIN) return 6;
     return 0;
 }}
@@ -10865,6 +11113,89 @@ int main(void) {{
     /// Every binary operator emits now. The rule the two refused ones stood for still holds and
     /// is worth a test of its own: an instruction this backend cannot do must say so rather than
     /// emit a silent undefined, which is what `unreachable_unsupported_instructions` covers.
+    /// The explanation for the `const` gate above, which can only say *that* a site broke the
+    /// rule. This says which file, which line and which enclosing function -- and checks the half
+    /// the gate cannot see, that the internal-status sites really are where
+    /// `REFUSAL_INTERNAL_STATUS` says they are and in the numbers it claims.
+    #[test]
+    fn refusal_sites_name_themselves() {
+        const SOURCES: [(&str, &str); 2] = [
+            (
+                "runtime/prelude_core.c",
+                include_str!("runtime/prelude_core.c"),
+            ),
+            (
+                "runtime/prelude_runtime.c",
+                include_str!("runtime/prelude_runtime.c"),
+            ),
+        ];
+
+        let mut unnamed = Vec::new();
+        let mut internal_by_function: Vec<(String, usize)> = Vec::new();
+        for (path, source) in SOURCES {
+            // A top-level definition starts in column zero; everything inside one is indented.
+            let mut function = String::from("<file scope>");
+            for (index, line) in source.lines().enumerate() {
+                if line.starts_with(|first: char| first.is_ascii_alphabetic())
+                    && let Some((head, _)) = line.split_once('(')
+                    && let Some(name) = head
+                        .split(|byte: char| !(byte.is_alphanumeric() || byte == '_'))
+                        .next_back()
+                {
+                    function = name.to_owned();
+                }
+                if line.contains("KILN_C99_CONTROL_ERROR")
+                    && !line.contains("== KILN_C99_CONTROL_ERROR")
+                    && !line.contains("!= KILN_C99_CONTROL_ERROR")
+                {
+                    unnamed.push(format!("{path}:{} in {function}", index + 1));
+                }
+                if line.contains("KILN_C99_REFUSE_INTERNAL(") {
+                    match internal_by_function
+                        .iter_mut()
+                        .find(|(name, _)| *name == function)
+                    {
+                        Some((_, count)) => *count += 1,
+                        None => internal_by_function.push((function.clone(), 1)),
+                    }
+                }
+            }
+        }
+
+        assert!(
+            unnamed.is_empty(),
+            "these prelude sites produce KILN_C99_CONTROL_ERROR by hand, so a refusal there would \
+             name nothing and the enclosing instruction would invent a reason for it. Use \
+             KILN_C99_REFUSE with what the site lacked, KILN_C99_REFUSE_NAMED when the subject is \
+             a name only the site holds, or KILN_C99_REFUSE_INTERNAL when a caller converts the \
+             status:\n  {}",
+            unnamed.join("\n  ")
+        );
+
+        for row in REFUSAL_INTERNAL_STATUS {
+            let found = internal_by_function
+                .iter()
+                .find(|(name, _)| name == row.function)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            assert_eq!(
+                found, row.sites,
+                "REFUSAL_INTERNAL_STATUS says {} holds {} internal-status sites converted by {}, \
+                 and the prelude holds {}",
+                row.function, row.sites, row.converted_by, found
+            );
+        }
+        for (function, count) in &internal_by_function {
+            assert!(
+                REFUSAL_INTERNAL_STATUS
+                    .iter()
+                    .any(|row| row.function == function.as_str()),
+                "{function} holds {count} KILN_C99_REFUSE_INTERNAL sites and no \
+                 REFUSAL_INTERNAL_STATUS row says which caller converts them"
+            );
+        }
+    }
+
     #[test]
     fn the_reference_operators_emit_rather_than_answering_undefined() {
         for operator in [BinaryOp::In, BinaryOp::InstanceOf] {
