@@ -35313,7 +35313,9 @@ fn call_native(
             match native {
                 Native::StringToUpperCase => Value::String(text.to_uppercase()),
                 Native::StringToLowerCase => Value::String(text.to_lowercase()),
-                Native::StringTrim => Value::String(text.trim().to_owned()),
+                Native::StringTrim => {
+                    Value::String(text.trim_matches(is_js_whitespace).to_owned())
+                }
                 // All three take a position, and all three ignored it: `"hello".startsWith("ell", 1)`
                 // is true and read as false, which is a wrong answer rather than a missing
                 // feature. Counted in UTF-16 units, like every other position the language
@@ -35696,8 +35698,12 @@ fn call_native(
                 // already normalised, which is what a bundler emits, and wrong for text that is
                 // not -- which is why it is called out here rather than left to be discovered.
                 Native::StringNormalize => Value::String(text.clone()),
-                Native::StringTrimStart => Value::String(text.trim_start().to_owned()),
-                Native::StringTrimEnd => Value::String(text.trim_end().to_owned()),
+                Native::StringTrimStart => {
+                    Value::String(text.trim_start_matches(is_js_whitespace).to_owned())
+                }
+                Native::StringTrimEnd => {
+                    Value::String(text.trim_end_matches(is_js_whitespace).to_owned())
+                }
                 Native::StringConcat => {
                     let mut joined = text.clone();
                     for argument in arguments {
@@ -40987,6 +40993,17 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
 /// A method shorthand is the one shape this cannot tell apart from an ordinary function: the
 /// compiler does not record which it is, so `({ m() {} }).m` is reported constructable here and
 /// is not. That is a gap in what the IR carries, not a judgement made here.
+/// The characters `trim`, `trimStart` and `trimEnd` remove.
+///
+/// Rust's `char::is_whitespace` is Unicode `White_Space`, and the language's `WhiteSpace`
+/// production is that set *plus* U+FEFF, which Unicode classifies as a format character rather
+/// than whitespace. So `"\u{feff}a\u{feff}".trim()` kept both ends here and strips them
+/// everywhere else -- a byte-order mark at the front of a file read as text is exactly how one
+/// arrives, and it survived into a value the program then compared against.
+fn is_js_whitespace(character: char) -> bool {
+    character.is_whitespace() || character == '\u{feff}'
+}
+
 fn is_constructor(value: &Value) -> bool {
     match value {
         Value::Function(closure) => closure
