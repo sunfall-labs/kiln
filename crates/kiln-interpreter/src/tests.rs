@@ -108,7 +108,6 @@ fn proxy_own_key_invariant_source_includes_exotic_and_native_keys() {
     assert!(keys.contains(&"from".to_owned()));
     assert!(keys.contains(&"@@species".to_owned()));
 }
-use super::*;
 use kiln_host_abi::{HostError, HostOp};
 use kiln_ir::Builtin;
 

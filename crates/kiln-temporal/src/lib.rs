@@ -476,7 +476,7 @@ fn calendar_reference_from(id: Option<&str>) -> Result<Calendar> {
     // error -- which names what the program actually wrote -- is the one that is reported.
     match temporal_rs::parsers::parse_allowed_calendar_formats(id.as_bytes()) {
         None => Err(Error::from(direct)),
-        Some(annotation) if annotation.is_empty() => Ok(Calendar::ISO),
+        Some([]) => Ok(Calendar::ISO),
         Some(annotation) => Ok(Calendar::try_from_utf8(annotation)?),
     }
 }

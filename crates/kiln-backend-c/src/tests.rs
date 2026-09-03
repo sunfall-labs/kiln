@@ -2474,7 +2474,7 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
     }
     // An ordinary global of another name is untouched: this refuses one hook, not a class of
     // instruction the backend already supports.
-    assert!(matches!(
+    assert!(
         emit(&program(
             vec![Constant::String("Array".to_owned())],
             vec![
@@ -2483,9 +2483,9 @@ fn refuses_to_make_a_realm_by_name_rather_than_answering_from_its_only_one() {
                 Instruction::Return,
             ],
             0,
-        )),
-        Ok(_)
-    ));
+        ))
+        .is_ok()
+    );
 }
 
 #[test]
