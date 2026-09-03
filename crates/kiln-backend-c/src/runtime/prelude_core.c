@@ -11025,6 +11025,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 kiln_value built;
                 size_t group;
                 status = kiln_c99_new_array(&built);
+                kiln_array *arr = kiln_c99_array_of(built);
+                if (status == KILN_C99_OK && groups > 0) {
+                    status = kiln_c99_reserve((void **)&arr->elements, &arr->capacity, groups, sizeof *arr->elements);
+                }
                 for (group = 0; group < groups && status == KILN_C99_OK; ++group) {
                     int64_t from = ranges[group * 2];
                     int64_t to = ranges[group * 2 + 1];
@@ -11037,22 +11041,48 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     } else {
                         piece = kiln_c99_from_units(units + (size_t)from, (size_t)(to - from));
                     }
-                    status = kiln_c99_array_push(built, piece);
+                    arr->elements[arr->count++] = piece;
                 }
                 if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, built, "index", 5,
-                                          kiln_c99_number((double)ranges[0]), depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    status = kiln_c99_put(host, built, "input", 5, subject,
-                                          depth, thrown);
-                }
-                if (status == KILN_C99_OK) {
-                    /* Present and undefined rather than absent: a program reads `m.groups?.name`,
-                     * and the key being there is what stops that from looking like a different
-                     * shape. Named groups themselves are not collected on either side yet. */
-                    status = kiln_c99_put(host, built, "groups", 6, kiln_c99_undefined(), depth,
-                                          thrown);
+                    status = kiln_c99_new_object(&arr->properties);
+                    if (status == KILN_C99_OK) {
+                        static const char *s_index_key = NULL;
+                        static const char *s_input_key = NULL;
+                        static const char *s_groups_key = NULL;
+                        if (!s_index_key) {
+                            s_index_key = kiln_c99_intern("index", 5);
+                            s_input_key = kiln_c99_intern("input", 5);
+                            s_groups_key = kiln_c99_intern("groups", 6);
+                        }
+                        kiln_object *props = kiln_c99_object_of(arr->properties);
+                        props->properties = (kiln_property *)calloc(3, sizeof(kiln_property));
+                        if (props->properties == NULL) {
+                            status = KILN_C99_OUT_OF_MEMORY;
+                        } else {
+                            props->capacity = 3;
+                            props->count = 3;
+                            props->properties[0].key = s_index_key;
+                            props->properties[0].key_len = 5;
+                            props->properties[0].value = kiln_c99_number((double)ranges[0]);
+                            props->properties[0].writable = 1;
+                            props->properties[0].enumerable = 1;
+                            props->properties[0].configurable = 1;
+
+                            props->properties[1].key = s_input_key;
+                            props->properties[1].key_len = 5;
+                            props->properties[1].value = subject;
+                            props->properties[1].writable = 1;
+                            props->properties[1].enumerable = 1;
+                            props->properties[1].configurable = 1;
+
+                            props->properties[2].key = s_groups_key;
+                            props->properties[2].key_len = 6;
+                            props->properties[2].value = kiln_c99_undefined();
+                            props->properties[2].writable = 1;
+                            props->properties[2].enumerable = 1;
+                            props->properties[2].configurable = 1;
+                        }
+                    }
                 }
                 if (units_allocated) free(units);
                 *result = built;
@@ -16897,42 +16927,40 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             kiln_value key = is_array ? kiln_c99_text(kiln_c99_number((double)index))
                                       : kiln_c99_array_of(keys)->elements[index];
             kiln_value member;
-            kiln_text member_text = {NULL, 0, 0};
             int wrote;
             status = kiln_c99_get_computed(host, value, key, &member, depth, thrown);
             if (status != KILN_C99_OK) {
                 free(nested.bytes);
                 return status;
             }
-            status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
-                                         nested.bytes, nested.len, &wrote, depth, &frame, thrown);
-            if (status != KILN_C99_OK) {
-                free(nested.bytes);
-                free(member_text.bytes);
-                return status;
-            }
-            /* An element with no JSON spelling holds its position as null; a *member* with none
-             * is dropped, separator and all, which is why the member is built aside first. */
-            if (!wrote && !is_array) {
-                free(member_text.bytes);
-                continue;
-            }
+            size_t checkpoint = text->len;
+            size_t written_before = written;
             KILN_JSON_BREAK(written == 0);
-            written += 1;
             if (!is_array && (kiln_c99_json_quote(text, key.ptr, key.len) != KILN_C99_OK ||
                               kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") !=
                                   KILN_C99_OK)) {
                 free(nested.bytes);
-                free(member_text.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            if ((wrote ? kiln_c99_text_append(text, member_text.bytes, member_text.len)
-                       : kiln_c99_text_append_c(text, "null")) != KILN_C99_OK) {
+            status = kiln_c99_json_value(host, text, member, indent, indent_len,
+                                         nested.bytes, nested.len, &wrote, depth, &frame, thrown);
+            if (status != KILN_C99_OK) {
                 free(nested.bytes);
-                free(member_text.bytes);
-                return KILN_C99_OUT_OF_MEMORY;
+                return status;
             }
-            free(member_text.bytes);
+            if (!wrote) {
+                if (!is_array) {
+                    text->len = checkpoint;
+                    written = written_before;
+                    continue;
+                } else {
+                    if (kiln_c99_text_append_c(text, "null") != KILN_C99_OK) {
+                        free(nested.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                }
+            }
+            written += 1;
         }
         if (indent_len != 0 && written != 0 &&
             (kiln_c99_text_append_c(text, "\n") != KILN_C99_OK ||
@@ -16960,7 +16988,6 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         KILN_JSON_OPEN("{");
         for (index = 0; index < length && index < object->count; ++index) {
             kiln_value member;
-            kiln_text member_text = {NULL, 0, 0};
             int wrote;
             if (!object->properties[index].enumerable) {
                 continue;
@@ -16978,29 +17005,26 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
             } else {
                 member = object->properties[index].value;
             }
-            /* Serialised into a buffer of its own first: a member with no JSON spelling is
-             * *dropped*, so its separator must not have been written yet. */
-            status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
-                                         nested.bytes, nested.len, &wrote, depth, &frame, thrown);
-            if (status != KILN_C99_OK) {
-                free(nested.bytes);
-                free(member_text.bytes);
-                return status;
-            }
-            if (!wrote) {
-                free(member_text.bytes);
-                continue;
-            }
+            size_t checkpoint = text->len;
+            size_t written_before = written;
             KILN_JSON_BREAK(written == 0);
             if (kiln_c99_json_quote(text, object->properties[index].key,
                                     object->properties[index].key_len) != KILN_C99_OK ||
-                kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK ||
-                kiln_c99_text_append(text, member_text.bytes, member_text.len) != KILN_C99_OK) {
+                kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK) {
                 free(nested.bytes);
-                free(member_text.bytes);
                 return KILN_C99_OUT_OF_MEMORY;
             }
-            free(member_text.bytes);
+            status = kiln_c99_json_value(host, text, member, indent, indent_len,
+                                         nested.bytes, nested.len, &wrote, depth, &frame, thrown);
+            if (status != KILN_C99_OK) {
+                free(nested.bytes);
+                return status;
+            }
+            if (!wrote) {
+                text->len = checkpoint;
+                written = written_before;
+                continue;
+            }
             written += 1;
         }
         if (indent_len != 0 && written != 0 &&
@@ -17301,7 +17325,7 @@ static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out) {
             if (status != KILN_C99_OK) {
                 return status;
             }
-            status = kiln_c99_put(NULL, built, key.ptr, key.len, member, 0, NULL);
+            status = kiln_c99_own_data(built, key.ptr, key.len, member);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -17649,8 +17673,7 @@ static uint64_t kiln_c99_hash_u64(uint64_t x) {
 
 static uint64_t kiln_c99_hash_value(kiln_value val) {
     if (val.tag == KILN_VALUE_NUMBER) {
-        double d;
-        memcpy(&d, &val.bits, sizeof(d));
+        double d = kiln_c99_bits_to_double(val.bits);
         if (isnan(d)) return UINT64_C(0x7ff8000000000000);
         if (d == 0.0) return 0;
         return kiln_c99_hash_u64(val.bits);
@@ -17663,6 +17686,13 @@ static uint64_t kiln_c99_hash_value(kiln_value val) {
             h *= UINT64_C(1099511628211);
         }
         return h;
+    }
+    if (val.tag == KILN_VALUE_BIGINT) {
+        int64_t high = 0;
+        uint64_t low = 0;
+        if (kiln_bigint_to_i128((const void *)(uintptr_t)val.bits, &high, &low) == 0) {
+            return kiln_c99_hash_u64(((uint64_t)KILN_VALUE_BIGINT << 48) ^ (uint64_t)high ^ low);
+        }
     }
     return kiln_c99_hash_u64(((uint64_t)val.tag << 48) ^ val.bits);
 }
@@ -17688,6 +17718,21 @@ static int kiln_c99_collection_rehash(kiln_collection *collection, size_t new_ca
     return KILN_C99_OK;
 }
 
+static int kiln_c99_same_value_zero_fast(kiln_value left, kiln_value right) {
+    if (left.tag != right.tag) return 0;
+    if (left.bits == right.bits) return 1;
+    if (left.tag == KILN_VALUE_NUMBER) {
+        double a = kiln_c99_bits_to_double(left.bits);
+        double b = kiln_c99_bits_to_double(right.bits);
+        return a == b || (isnan(a) && isnan(b));
+    }
+    if (left.tag == KILN_VALUE_STRING) {
+        if (left.len != right.len) return 0;
+        return memcmp(left.ptr, right.ptr, left.len) == 0;
+    }
+    return kiln_c99_same_value_zero(left, right);
+}
+
 /* The index of a key, or -1. SameValueZero, which is what a collection compares with: NaN finds
  * itself, where `===` never would, and that is why `new Set([NaN, NaN]).size` is 1. */
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
@@ -17703,7 +17748,7 @@ static double kiln_c99_collection_find(kiln_collection *collection, kiln_value k
             int32_t entry_idx = collection->hash_table[idx];
             if (entry_idx >= 0 && (size_t)entry_idx < collection->count) {
                 if (!collection->entries[entry_idx].dead &&
-                    kiln_c99_same_value_zero(collection->entries[entry_idx].key, key)) {
+                    kiln_c99_same_value_zero_fast(collection->entries[entry_idx].key, key)) {
                     return (double)entry_idx;
                 }
             }
@@ -17717,7 +17762,7 @@ static double kiln_c99_collection_find(kiln_collection *collection, kiln_value k
         if (collection->entries[index].dead) {
             continue;
         }
-        if (kiln_c99_same_value_zero(collection->entries[index].key, key)) {
+        if (kiln_c99_same_value_zero_fast(collection->entries[index].key, key)) {
             return (double)index;
         }
     }
@@ -17726,46 +17771,64 @@ static double kiln_c99_collection_find(kiln_collection *collection, kiln_value k
 
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
     kiln_collection *collection = kiln_c99_collection_of(target);
-    double at = kiln_c99_collection_find(collection, key);
     int status;
-    if (at >= 0.0) {
-        /* Re-setting a key keeps its position: insertion order is the order of *first*
-         * appearance, which is what iteration reports. */
-        collection->entries[(size_t)at].value = value;
-        return KILN_C99_OK;
-    }
-    status = kiln_c99_reserve((void **)&collection->entries, &collection->capacity,
-                              collection->count + 1, sizeof *collection->entries);
-    if (status != KILN_C99_OK) {
-        return status;
-    }
-    size_t new_idx = collection->count;
-    collection->entries[new_idx].key = key;
-    collection->entries[new_idx].value = value;
-    collection->entries[new_idx].dead = 0;
-    collection->count += 1;
-    collection->live += 1;
-
     if (collection->count >= 8) {
         if (collection->hash_table == NULL || collection->count * 2 >= collection->hash_capacity) {
             size_t new_cap = collection->hash_capacity == 0 ? 16 : collection->hash_capacity * 2;
             while (new_cap <= collection->count * 2) new_cap *= 2;
             status = kiln_c99_collection_rehash(collection, new_cap);
             if (status != KILN_C99_OK) return status;
-        } else {
-            size_t mask = collection->hash_capacity - 1;
-            uint64_t h = kiln_c99_hash_value(key);
-            size_t idx = (size_t)(h & mask);
-            while (collection->hash_table[idx] != -1) {
-                int32_t e = collection->hash_table[idx];
-                if (e >= 0 && (size_t)e < collection->count && collection->entries[e].dead) {
-                    break;
-                }
-                idx = (idx + 1) & mask;
-            }
-            collection->hash_table[idx] = (int32_t)new_idx;
         }
+        size_t mask = collection->hash_capacity - 1;
+        uint64_t h = kiln_c99_hash_value(key);
+        size_t idx = (size_t)(h & mask);
+        size_t probes = 0;
+        int32_t insert_slot = -1;
+        while (collection->hash_table[idx] != -1 && probes < collection->hash_capacity) {
+            int32_t entry_idx = collection->hash_table[idx];
+            if (entry_idx >= 0 && (size_t)entry_idx < collection->count) {
+                if (collection->entries[entry_idx].dead) {
+                    if (insert_slot == -1) insert_slot = (int32_t)idx;
+                } else if (kiln_c99_same_value_zero_fast(collection->entries[entry_idx].key, key)) {
+                    collection->entries[entry_idx].value = value;
+                    return KILN_C99_OK;
+                }
+            } else if (insert_slot == -1) {
+                insert_slot = (int32_t)idx;
+            }
+            idx = (idx + 1) & mask;
+            probes++;
+        }
+        if (insert_slot == -1) insert_slot = (int32_t)idx;
+
+        status = kiln_c99_reserve((void **)&collection->entries, &collection->capacity,
+                                  collection->count + 1, sizeof *collection->entries);
+        if (status != KILN_C99_OK) return status;
+
+        size_t new_idx = collection->count;
+        collection->entries[new_idx].key = key;
+        collection->entries[new_idx].value = value;
+        collection->entries[new_idx].dead = 0;
+        collection->count += 1;
+        collection->live += 1;
+        collection->hash_table[insert_slot] = (int32_t)new_idx;
+        return KILN_C99_OK;
     }
+
+    double at = kiln_c99_collection_find(collection, key);
+    if (at >= 0.0) {
+        collection->entries[(size_t)at].value = value;
+        return KILN_C99_OK;
+    }
+    status = kiln_c99_reserve((void **)&collection->entries, &collection->capacity,
+                              collection->count + 1, sizeof *collection->entries);
+    if (status != KILN_C99_OK) return status;
+    size_t new_idx = collection->count;
+    collection->entries[new_idx].key = key;
+    collection->entries[new_idx].value = value;
+    collection->entries[new_idx].dead = 0;
+    collection->count += 1;
+    collection->live += 1;
     return KILN_C99_OK;
 }
 

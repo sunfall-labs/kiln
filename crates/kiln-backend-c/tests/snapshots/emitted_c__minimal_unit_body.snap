@@ -4,11 +4,23 @@ expression: body(&unit)
 ---
 /* Program hash: 6f821f3641b87c4f; bytecode version: 2. */
 
+static inline KILN_ALWAYS_INLINE double kiln_fast_to_double(uint64_t bits) {
+    union { uint64_t u; double d; } pun;
+    pun.u = bits;
+    return pun.d;
+}
+
+static inline KILN_ALWAYS_INLINE uint64_t kiln_fast_from_double(double d) {
+    union { double d; uint64_t u; } pun;
+    pun.d = d;
+    return pun.u;
+}
+
 static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number(double val) {
     kiln_value v;
     v.tag = KILN_VALUE_NUMBER;
     v.len = 0;
-    memcpy(&v.bits, &val, sizeof(v.bits));
+    v.bits = kiln_fast_from_double(val);
     return v;
 }
 
@@ -41,8 +53,7 @@ static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
         return val.bits != 0;
     }
     if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {
-        double d;
-        memcpy(&d, &val.bits, sizeof(d));
+        double d = kiln_fast_to_double(val.bits);
         return d != 0.0 && !isnan(d);
     }
     return kiln_c99_truthy(val);

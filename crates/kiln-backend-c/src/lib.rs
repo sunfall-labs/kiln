@@ -698,11 +698,23 @@ fn compute_guarded_loads(code: &[Instruction]) -> HashSet<usize> {
 fn render_fast_inlines(output: &mut String) {
     output.push_str(
         r#"
+static inline KILN_ALWAYS_INLINE double kiln_fast_to_double(uint64_t bits) {
+    union { uint64_t u; double d; } pun;
+    pun.u = bits;
+    return pun.d;
+}
+
+static inline KILN_ALWAYS_INLINE uint64_t kiln_fast_from_double(double d) {
+    union { double d; uint64_t u; } pun;
+    pun.d = d;
+    return pun.u;
+}
+
 static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number(double val) {
     kiln_value v;
     v.tag = KILN_VALUE_NUMBER;
     v.len = 0;
-    memcpy(&v.bits, &val, sizeof(v.bits));
+    v.bits = kiln_fast_from_double(val);
     return v;
 }
 
@@ -735,8 +747,7 @@ static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
         return val.bits != 0;
     }
     if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {
-        double d;
-        memcpy(&d, &val.bits, sizeof(d));
+        double d = kiln_fast_to_double(val.bits);
         return d != 0.0 && !isnan(d);
     }
     return kiln_c99_truthy(val);
@@ -2899,7 +2910,7 @@ fn emit_instruction(
         Instruction::Unary(operator) => {
             let unwind = unwind_or_return(handlers, site);
             match numeric_fast_unary_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (KILN_LIKELY(operand.tag == KILN_VALUE_NUMBER)) {{ double a; memcpy(&a, &operand.bits, sizeof(a)); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (KILN_LIKELY(operand.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(operand.bits); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
                 None => writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
             }
         }
@@ -2908,7 +2919,7 @@ fn emit_instruction(
             // has nowhere to put a thrown value -- the entry point declares that slot only when
             // something can reach it -- so this is the form that program has to keep.
             match numeric_fast_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(left.bits); double b = kiln_fast_to_double(right.bits); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
                 None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap(),
             }
         }
@@ -2917,7 +2928,7 @@ fn emit_instruction(
             // hands every other case straight back to `kiln_c99_binary`.
             let unwind = unwind_or_return(handlers, site);
             match numeric_fast_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(left.bits); double b = kiln_fast_to_double(right.bits); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
                 None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
             }
         }
