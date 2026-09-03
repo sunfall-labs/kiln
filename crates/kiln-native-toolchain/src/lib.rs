@@ -745,7 +745,8 @@ impl Toolchain {
     pub fn discover_with_runner(runner: Arc<dyn ProcessRunner>) -> Result<Self, ToolchainError> {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let entries = std::env::split_paths(&path).collect::<Vec<_>>();
-        Self::discover_in_path_entries(&entries, runner)
+        let cc = std::env::var_os("CC");
+        Self::discover_in_path_entries_with_cc(&entries, cc.as_deref(), runner)
     }
 
     /// Find a compiler in explicit path entries.  This is useful for hermetic callers and tests.
@@ -753,6 +754,42 @@ impl Toolchain {
         entries: &[PathBuf],
         runner: Arc<dyn ProcessRunner>,
     ) -> Result<Self, ToolchainError> {
+        Self::discover_in_path_entries_with_cc(entries, None, runner)
+    }
+
+    /// Find a compiler in explicit path entries, optionally honoring an explicit `CC` specification.
+    pub fn discover_in_path_entries_with_cc(
+        entries: &[PathBuf],
+        cc: Option<&std::ffi::OsStr>,
+        runner: Arc<dyn ProcessRunner>,
+    ) -> Result<Self, ToolchainError> {
+        if let Some(cc) = cc {
+            let cc_trimmed = cc.to_str().map(str::trim).unwrap_or("");
+            if !cc_trimmed.is_empty() {
+                let mut parts = cc_trimmed.split_whitespace();
+                let binary = parts.next().unwrap_or(cc_trimmed);
+                let binary_path = Path::new(binary);
+
+                if binary_path.is_absolute() || binary_path.components().count() > 1 {
+                    if is_executable_file(binary_path) {
+                        return Self::from_compiler_with_runner(binary_path, runner);
+                    }
+                } else {
+                    for entry in entries {
+                        let path = entry.join(binary);
+                        if is_executable_file(&path)
+                            && let Ok(toolchain) =
+                                Self::from_compiler_with_runner(&path, Arc::clone(&runner))
+                        {
+                            return Ok(toolchain);
+                        }
+                    }
+                }
+                return Err(ToolchainError::NoCompiler {
+                    searched: vec![cc_trimmed.to_owned()],
+                });
+            }
+        }
         let searched = DEFAULT_COMPILER_CANDIDATES
             .iter()
             .map(|candidate| (*candidate).to_owned())
@@ -1830,5 +1867,58 @@ mod tests {
             .expect("shared link");
         assert!(report.output_size > 0);
         fs::remove_dir_all(directory).expect("temporary directory cleanup");
+    }
+
+    #[test]
+    fn discover_with_cc_selects_explicit_compiler() {
+        let directory = temp_dir("cc-discovery");
+        let gcc_path = directory.join("gcc");
+        let clang_path = directory.join("clang");
+        fs::write(&gcc_path, "").expect("write fake gcc");
+        fs::write(&clang_path, "").expect("write fake clang");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&gcc_path, fs::Permissions::from_mode(0o755)).expect("chmod gcc");
+            fs::set_permissions(&clang_path, fs::Permissions::from_mode(0o755))
+                .expect("chmod clang");
+        }
+
+        let runner_impl = Arc::new(FakeRunner::new(
+            [
+                ProcessOutput::success("gcc (Ubuntu 13.2.0) 13.2.0\n", ""),
+                ProcessOutput::success("x86_64-linux-gnu\n", ""),
+            ],
+            false,
+        ));
+        let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
+
+        let toolchain = Toolchain::discover_in_path_entries_with_cc(
+            &[directory.clone()],
+            Some(std::ffi::OsStr::new("gcc")),
+            runner,
+        )
+        .expect("discover explicit gcc");
+
+        assert_eq!(toolchain.identity().kind, CompilerKind::Gcc);
+        assert_eq!(toolchain.identity().path, gcc_path);
+
+        let runner_empty: Arc<dyn ProcessRunner> = Arc::new(FakeRunner::new([], false));
+        let error = Toolchain::discover_in_path_entries_with_cc(
+            &[directory.clone()],
+            Some(std::ffi::OsStr::new("nonexistent-cc")),
+            runner_empty,
+        )
+        .expect_err("nonexistent CC must fail");
+
+        match error {
+            ToolchainError::NoCompiler { searched } => {
+                assert_eq!(searched, vec!["nonexistent-cc".to_owned()]);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        fs::remove_dir_all(directory).expect("cleanup");
     }
 }
