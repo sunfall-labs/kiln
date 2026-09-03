@@ -21366,10 +21366,20 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                 slex.len = step_len;
                 slex.pos = 0;
                 kiln_dyn_lexer_next(&slex);
-                kiln_value dummy;
-                int status = kiln_dyn_eval_expr(host, &slex, scope, receiver, args, argc, depth, &dummy, thrown);
+                while (slex.curr.kind != KILN_DYN_EOF) {
+                    kiln_value dummy;
+                    int status = kiln_dyn_eval_expr(host, &slex, scope, receiver, args, argc, depth, &dummy, thrown);
+                    if (status != KILN_C99_OK) {
+                        kiln_dyn_token_free(&slex.curr);
+                        return status;
+                    }
+                    if (slex.curr.kind == KILN_DYN_COMMA) {
+                        kiln_dyn_lexer_next(&slex);
+                    } else {
+                        break;
+                    }
+                }
                 kiln_dyn_token_free(&slex.curr);
-                if (status != KILN_C99_OK) return status;
             }
         }
         if (*returned == 2 && lex->break_label != NULL && my_label != NULL &&
