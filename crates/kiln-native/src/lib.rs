@@ -826,6 +826,70 @@ impl NativeBuilder {
             [launcher_source_digest],
         );
 
+        let link_options_digest = Digest::hash(
+            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
+        );
+        if let Some(app_info) = self.lookup_digest(&application_key)?
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+            && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
+            && let Some(launcher_info) = self.lookup_digest(&launcher_key)?
+        {
+            let candidate_executable_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::C,
+                &runtime_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                [
+                    app_info.0,
+                    prelude_info.0,
+                    runtime_info.0,
+                    launcher_info.0,
+                    number_provider_digest,
+                ],
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&candidate_executable_key)? {
+                debug_assert_eq!(artifact.digest, Digest::hash(&artifact.bytes));
+                materialize(&options.output, &artifact.bytes, true)?;
+                return Ok(NativeBuildReport {
+                    output: options.output.clone(),
+                    module_symbol: module.symbol,
+                    tool: identity,
+                    cache_hits: CacheHits {
+                        generated_c: generated_c_hit,
+                        application_object: true,
+                        runtime_object: true,
+                        launcher_object: true,
+                        executable: true,
+                    },
+                    sizes: ArtifactSizes {
+                        generated_c: module_source.len() as u64,
+                        application_object: app_info.1,
+                        runtime_object: runtime_info.1,
+                        launcher_object: launcher_info.1,
+                        executable: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_started.elapsed(),
+                    },
+                    module_artifacts: vec![ModuleArtifactInfo {
+                        logical_path: None,
+                        generated_c_cache_hit: generated_c_hit,
+                        object_cache_hit: true,
+                        generated_c_bytes: module_source.len() as u64,
+                        object_bytes: app_info.1,
+                    }],
+                    runtime_generated_c_cache_hit,
+                    launcher_generated_c_cache_hit,
+                });
+            }
+        }
+
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
             ..CompileOptions::default()
@@ -1108,6 +1172,80 @@ impl NativeBuilder {
             object_options,
             [prelude_source_digest],
         );
+
+        if let Some(object_info) = self.lookup_digest(&object_key)?
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+        {
+            let link_inputs = [object_info.0, prelude_info.0, number_provider_digest];
+            let loader = shared_library_loader_path(
+                &options.output,
+                shared_library_content_identity(
+                    &compiler,
+                    Backend::Custom("native-shared-library-loader".to_owned()),
+                    &embedding_abi,
+                    &target,
+                    profile,
+                    &[module.symbol.as_str(), module_api_symbol.as_str()],
+                    link_inputs,
+                ),
+            )?;
+            let link_options_digest = Digest::hash(
+                format!(
+                    "shared-library\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    profile.as_str(),
+                    shared_library_name(),
+                    shared_library_link_identity(&loader),
+                    shared_library_link_policy(),
+                    EMBEDDING_MODULE_API_VERSION,
+                    [module.symbol.as_str(), module_api_symbol.as_str()].join(","),
+                )
+                .as_bytes(),
+            );
+            let library_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::Custom("native-shared-library".to_owned()),
+                &embedding_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                link_inputs,
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&library_key)? {
+                publish_shared_artifacts_with_symbols(
+                    &options.output,
+                    &loader,
+                    header_source.as_bytes(),
+                    &artifact.bytes,
+                    &module.symbol,
+                    &module_api_symbol,
+                )?;
+                return Ok(NativeSharedLibraryReport {
+                    output: options.output.clone(),
+                    loader,
+                    header,
+                    module_symbol: module.symbol,
+                    module_api_symbol,
+                    tool: identity,
+                    cache_hits: NativeSharedLibraryCacheHits {
+                        generated_c: generated_c_hit,
+                        object: true,
+                        library: true,
+                    },
+                    sizes: NativeSharedLibrarySizes {
+                        generated_c: module_source.len() as u64,
+                        object: object_info.1,
+                        library: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_started.elapsed(),
+                    },
+                });
+            }
+        }
 
         let compile_options = CompileOptions {
             profile: profile.toolchain(),
@@ -1434,6 +1572,106 @@ impl NativeBuilder {
             shared_prelude_object_options,
             [prelude_source_digest],
         );
+
+        let mut module_object_infos = Vec::with_capacity(module_keys.len());
+        let mut all_modules_cached = true;
+        for key in &module_keys {
+            match self.lookup_digest(key)? {
+                Some(info) => module_object_infos.push(info),
+                None => {
+                    all_modules_cached = false;
+                    break;
+                }
+            }
+        }
+        if all_modules_cached
+            && let Some(wrapper_info) = self.lookup_digest(&wrapper_object_key)?
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+        {
+            let mut link_inputs = module_object_infos
+                .iter()
+                .map(|(digest, _)| *digest)
+                .collect::<Vec<_>>();
+            link_inputs.push(number_provider_digest);
+            link_inputs.push(prelude_info.0);
+            link_inputs.push(wrapper_info.0);
+            let loader = shared_library_loader_path(
+                &options.output,
+                shared_library_content_identity(
+                    &compiler,
+                    Backend::Custom("native-shared-graph-loader".to_owned()),
+                    &embedding_abi,
+                    &target,
+                    profile,
+                    &[wrapper_symbol.as_str(), module_api_symbol.as_str()],
+                    link_inputs.iter().copied(),
+                ),
+            )?;
+            let link_options_digest = Digest::hash(
+                format!(
+                    "shared-graph\0{}\0system-math\0{}\0{}\0{}\0module-api-v{}\0exports={}",
+                    profile.as_str(),
+                    shared_library_name(),
+                    shared_library_link_identity(&loader),
+                    shared_library_link_policy(),
+                    EMBEDDING_MODULE_API_VERSION,
+                    [wrapper_symbol.as_str(), module_api_symbol.as_str()].join(","),
+                )
+                .as_bytes(),
+            );
+            let library_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::Custom("native-shared-graph".to_owned()),
+                &embedding_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                link_inputs,
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&library_key)? {
+                publish_shared_artifacts_with_symbols(
+                    &options.output,
+                    &loader,
+                    header_source.as_bytes(),
+                    &artifact.bytes,
+                    &wrapper_symbol,
+                    &module_api_symbol,
+                )?;
+                return Ok(NativeSharedLibraryReport {
+                    output: options.output.clone(),
+                    loader,
+                    header,
+                    module_symbol: wrapper_symbol,
+                    module_api_symbol,
+                    tool: identity,
+                    cache_hits: NativeSharedLibraryCacheHits {
+                        generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
+                        object: true,
+                        library: true,
+                    },
+                    sizes: NativeSharedLibrarySizes {
+                        generated_c: module_sources
+                            .iter()
+                            .map(|(source, _, _)| source.len() as u64)
+                            .sum::<u64>()
+                            + wrapper_bytes.len() as u64,
+                        object: module_object_infos
+                            .iter()
+                            .map(|(_, size)| *size)
+                            .sum::<u64>()
+                            + wrapper_info.1,
+                        library: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_started.elapsed(),
+                    },
+                });
+            }
+        }
 
         let compile_started = Instant::now();
         let (module_objects, other_objects) = rayon::join(
@@ -1773,6 +2011,93 @@ impl NativeBuilder {
             object_options,
             [launcher_source_digest],
         );
+
+        let link_options_digest = Digest::hash(
+            format!("{}\0system-math\0system-entropy-v1", profile.as_str()).as_bytes(),
+        );
+
+        let mut module_object_infos = Vec::with_capacity(module_keys.len());
+        let mut all_modules_cached = true;
+        for key in &module_keys {
+            match self.lookup_digest(key)? {
+                Some(info) => module_object_infos.push(info),
+                None => {
+                    all_modules_cached = false;
+                    break;
+                }
+            }
+        }
+        if all_modules_cached
+            && let Some(prelude_info) = self.lookup_digest(&prelude_key)?
+            && let Some(runtime_info) = self.lookup_digest(&runtime_key)?
+            && let Some(launcher_info) = self.lookup_digest(&launcher_key)?
+        {
+            let mut link_inputs = module_object_infos
+                .iter()
+                .map(|(digest, _)| *digest)
+                .collect::<Vec<_>>();
+            link_inputs.push(prelude_info.0);
+            link_inputs.push(runtime_info.0);
+            link_inputs.push(launcher_info.0);
+            link_inputs.push(number_provider_digest);
+            let candidate_executable_key = key(
+                ArtifactKind::LinkedArtifact,
+                &compiler,
+                Backend::C,
+                &runtime_abi,
+                &target,
+                profile.cache(),
+                link_options_digest,
+                link_inputs,
+            );
+            if let Lookup::Hit(artifact) = self.lookup(&candidate_executable_key)? {
+                debug_assert_eq!(artifact.digest, Digest::hash(&artifact.bytes));
+                materialize(&options.output, &artifact.bytes, true)?;
+                let mut module_artifacts = Vec::with_capacity(modules.len());
+                for (index, _) in modules.iter().enumerate() {
+                    module_artifacts.push(ModuleArtifactInfo {
+                        logical_path: Some(logical_paths[index].clone()),
+                        generated_c_cache_hit: module_sources[index].2,
+                        object_cache_hit: true,
+                        generated_c_bytes: module_sources[index].0.len() as u64,
+                        object_bytes: module_object_infos[index].1,
+                    });
+                }
+                let total_elapsed = total_started.elapsed();
+                return Ok(NativeBuildReport {
+                    output: options.output.clone(),
+                    module_symbol: modules[0].1.symbol.clone(),
+                    tool: identity,
+                    cache_hits: CacheHits {
+                        generated_c: module_sources.iter().all(|(_, _, hit)| *hit),
+                        application_object: true,
+                        runtime_object: true,
+                        launcher_object: true,
+                        executable: true,
+                    },
+                    sizes: ArtifactSizes {
+                        generated_c: module_sources
+                            .iter()
+                            .map(|(source, _, _)| source.len() as u64)
+                            .sum(),
+                        application_object: module_object_infos.iter().map(|(_, size)| *size).sum(),
+                        runtime_object: runtime_info.1,
+                        launcher_object: launcher_info.1,
+                        executable: artifact.bytes.len() as u64,
+                    },
+                    timings: BuildTimings {
+                        emit: emit_elapsed,
+                        compile: Duration::ZERO,
+                        link: Duration::ZERO,
+                        total: total_elapsed,
+                    },
+                    module_artifacts,
+                    runtime_generated_c_cache_hit,
+                    launcher_generated_c_cache_hit,
+                });
+            }
+        }
+
         let (module_objects, ((prelude_object, runtime_object), launcher_object)) = rayon::join(
             || {
                 let module_keys_ref = &module_keys;
@@ -2052,6 +2377,12 @@ impl NativeBuilder {
         #[cfg(test)]
         self.assert_live_cache_identity(key);
         Ok(self.cache.lookup(key)?)
+    }
+
+    fn lookup_digest(&self, key: &ArtifactKey) -> Result<Option<(Digest, u64)>, NativeError> {
+        #[cfg(test)]
+        self.assert_live_cache_identity(key);
+        Ok(self.cache.lookup_digest(key)?)
     }
 
     #[cfg(test)]
@@ -9496,6 +9827,8 @@ console.log(direct === via, via.answer);
         assert!(second.build.cache_hits.runtime_object);
         assert!(second.build.cache_hits.launcher_object);
         assert!(second.build.cache_hits.executable);
+        assert_eq!(second.build.timings.compile, Duration::ZERO);
+        assert_eq!(second.build.timings.link, Duration::ZERO);
         assert_eq!(second.exit_code, Some(0));
         assert_eq!(second.stdout, b"native 42\n");
         assert!(second.stderr.is_empty());
@@ -10420,6 +10753,8 @@ int main(void) {{
         // Diagnostics use logical project-relative paths, so sibling roots reuse launchers too.
         assert!(second.build.cache_hits.launcher_object);
         assert!(second.build.cache_hits.executable);
+        assert_eq!(second.build.timings.compile, Duration::ZERO);
+        assert_eq!(second.build.timings.link, Duration::ZERO);
         assert_eq!(second.stdout, b"42\n");
         assert_eq!(second.result, Some(HostValue::Number(99.0_f64.to_bits())));
 

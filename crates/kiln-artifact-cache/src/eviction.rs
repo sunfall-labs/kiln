@@ -1542,11 +1542,14 @@ mod tests {
             .map(|handle| handle.join().expect("join"))
             .collect();
 
-        // Every sweeper saw all sixty records and resolved each one to either "I removed it" or
-        // "it was already gone". Neither outcome is an error, and no sweeper is starved.
+        // Every sweeper scanned whatever records remained in the directory and resolved each one to
+        // either "I removed it" or "it was already gone". Neither outcome is an error, and no sweeper is starved.
         for report in &reports {
-            assert_eq!(report.records_scanned, 60);
-            assert_eq!(report.records_evicted + report.records_raced, 60);
+            assert!(report.records_scanned <= 60);
+            assert_eq!(
+                report.records_evicted + report.records_raced,
+                report.records_scanned
+            );
             assert!(!report.over_budget_after_sweep);
         }
         // Deliberately not asserting that the successes sum to *exactly* sixty. `unlink` is not an
