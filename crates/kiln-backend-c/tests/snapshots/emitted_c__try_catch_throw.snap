@@ -4,6 +4,42 @@ expression: body(&unit)
 ---
 /* Program hash: 8b7a743292a34fdb; bytecode version: 2. */
 static const char kiln_module_8b7a743292a34fdbc7105dc34a2551c2_constant_1[] = "boom";
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number(double val) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    memcpy(&v.bits, &val, sizeof(v.bits));
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number_bits(uint64_t bits) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    v.bits = bits;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_boolean(int b) {
+    kiln_value v;
+    v.tag = KILN_VALUE_BOOLEAN;
+    v.len = 0;
+    v.bits = b ? 1u : 0u;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
+    if (KILN_LIKELY(val.tag == KILN_VALUE_BOOLEAN)) {
+        return val.bits != 0;
+    }
+    if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {
+        double d;
+        memcpy(&d, &val.bits, sizeof(d));
+        return d != 0.0 && !isnan(d);
+    }
+    return kiln_c99_truthy(val);
+}
 static void kiln_module_8b7a743292a34fdbc7105dc34a2551c2_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
@@ -25,10 +61,10 @@ kiln_label_0:;
     kiln_handlers[kiln_handler_top] = 9; kiln_handler_stack[kiln_handler_top] = sp; ++kiln_handler_top;
 kiln_label_1:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    stack[sp++] = kiln_c99_boolean(1);
+    stack[sp++] = kiln_fast_boolean(1);
 kiln_label_2:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    if (!kiln_c99_truthy(stack[--sp])) goto kiln_label_5;
+    if (!kiln_fast_truthy(stack[--sp])) goto kiln_label_5;
 kiln_label_3:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, kiln_module_8b7a743292a34fdbc7105dc34a2551c2_constant_1, 4);
@@ -38,7 +74,7 @@ kiln_label_4:;
     goto kiln_unwind;
 kiln_label_5:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
-    stack[sp++] = kiln_c99_number_bits(UINT64_C(4619567317775286272));
+    stack[sp++] = kiln_fast_number_bits(UINT64_C(4619567317775286272));
 kiln_label_6:;
     kiln_c99_diagnostic_site = NULL; kiln_c99_diagnostic_operation = NULL; kiln_c99_diagnostic_instruction = 0; kiln_c99_diagnostic_depth = 0; kiln_c99_diagnostic_method = 0; kiln_c99_diagnostic_receiver_tag = 0; kiln_c99_diagnostic_has_method = 0; kiln_c99_diagnostic_detail = NULL; kiln_c99_diagnostic_function = NULL; kiln_c99_diagnostic_function_len = 0;
     locals[0] = stack[--sp];

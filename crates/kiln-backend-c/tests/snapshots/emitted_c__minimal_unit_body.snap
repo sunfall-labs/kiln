@@ -3,6 +3,42 @@ source: crates/kiln-backend-c/tests/emitted_c.rs
 expression: body(&unit)
 ---
 /* Program hash: 6f821f3641b87c4f; bytecode version: 2. */
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number(double val) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    memcpy(&v.bits, &val, sizeof(v.bits));
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_number_bits(uint64_t bits) {
+    kiln_value v;
+    v.tag = KILN_VALUE_NUMBER;
+    v.len = 0;
+    v.bits = bits;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE kiln_value kiln_fast_boolean(int b) {
+    kiln_value v;
+    v.tag = KILN_VALUE_BOOLEAN;
+    v.len = 0;
+    v.bits = b ? 1u : 0u;
+    return v;
+}
+
+static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
+    if (KILN_LIKELY(val.tag == KILN_VALUE_BOOLEAN)) {
+        return val.bits != 0;
+    }
+    if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {
+        double d;
+        memcpy(&d, &val.bits, sizeof(d));
+        return d != 0.0 && !isnan(d);
+    }
+    return kiln_c99_truthy(val);
+}
 static void kiln_module_6f821f3641b87c4fcf58a3af90bd2540_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }

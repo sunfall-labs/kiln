@@ -620,6 +620,17 @@ KILN_VALUE_DATA_VIEW = 27
 #define KILN_C99_GROUP_MATH_NUMBER UINT32_C(1048576)
 static uint32_t kiln_c99_method_groups(uint64_t code) {
 static int kiln_c99_method_in_group(uint64_t code, uint32_t group) {
+#ifndef KILN_LIKELY
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_LIKELY(x)   (__builtin_expect(!!(x), 1))
+#define KILN_UNLIKELY(x) (__builtin_expect(!!(x), 0))
+#define KILN_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define KILN_LIKELY(x)   (x)
+#define KILN_UNLIKELY(x) (x)
+#define KILN_ALWAYS_INLINE
+#endif
+#endif
 typedef struct kiln_value {
 typedef enum kiln_typed_kind {
 typedef struct kiln_typed_buffer {
