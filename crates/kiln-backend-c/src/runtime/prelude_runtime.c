@@ -923,7 +923,7 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_PHASE_RESET 2
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
 #define KILN_GC_HOOKS_VERSION 2u
-#define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
+#define KILN_GC_DEFAULT_FLOOR ((size_t)4 * 1024 * 1024)
 /* What the `introspect` hook reports back, as a bitmask. `ARMED` is what tells the drive to keep
  * its park short enough to notice a signal; `DUMPED` says a request was pending and was served. */
 #define KILN_C99_INTROSPECT_ARMED 1
@@ -6712,8 +6712,8 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
             * is a constructor and is not, so `typeof DataView === "function"` stays true. */
            builtin == KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_SYMBOL_PROTOTYPE ||
-           (builtin >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
-            builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
+            (builtin >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
+             builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
 }
 
 /* The method a name resolves to on a given receiver, or 0.  One generated code list means a read
