@@ -113,6 +113,16 @@ IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 REFUSAL = re.compile(r"^kiln: native (?:backend )?(.*)$")
 REFUSED_MEMBER = re.compile(r"operation=\w+\(([^)]*)\)")
 
+# Not every `kiln: native ...` line is a refusal, and the ones that are not must never be filed as
+# one. This tool hands its own build scratch back after every receiver while other receivers are
+# still compiling, so a compile can find the directory it was about to write into already gone and
+# say `cache failed: could not install cache artifact ...`. That is this tool tripping over its own
+# feet, not the backend declining a member --- and the first full run on `main` filed
+# `WeakRef.prototype`'s two members as refusals because of it. A run that says one of these is not
+# a measurement: retry it, and if it keeps happening, name it under "Runs that were not
+# measurements" rather than folding it into the backlog.
+NOT_A_REFUSAL = ("cache failed:",)
+
 # The shared description of a value. It must produce identical bytes in both engines from
 # operations both engines have, which rules out `Object.prototype.toString.call` and rules out
 # reading `.name` or `.length` off a built-in function --- ADR 0043 records that reading `length`
@@ -222,7 +232,12 @@ class Runner:
             if ok:
                 return lines, refusal
         self.errors.append(f"{tag}: {refusal}")
-        return lines, refusal
+        # `not probed:` is the spelling `classify` routes to *unmeasured*. Saying it here is what
+        # keeps a run that failed three times out of the refusal count: the first full run on
+        # `main` put `WeakRef.prototype`'s two members in the backlog because a give-up still
+        # looked like a refusal to the caller, and two members of a thousand is small enough that
+        # nobody would have caught it by reading.
+        return lines, f"not probed: {refusal}"
 
     def _attempt(
         self, source: str, *, native: bool, node: bool, tag: str
@@ -263,6 +278,11 @@ class Runner:
                 refusal = re.sub(r" module=\S+", "", match.group(1))
                 continue
             lines.append(line)
+        if refusal is not None and refusal.startswith(NOT_A_REFUSAL):
+            # A `kiln: native ...` line that is this tool's own scratch going missing under it.
+            # Fail the attempt so it is retried, and keep the text so a run that never recovers is
+            # named rather than filed as backlog.
+            return lines, refusal, False
         # Completion is the sentinel, not the exit status. A `.cjs` entry run through the Node
         # adapter exits non-zero after printing every line it was asked for --- both engines do,
         # so it is the harness and not the backend --- and treating that as a failed run retried
