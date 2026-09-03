@@ -638,6 +638,10 @@ static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_
     return KILN_C99_OK;
 }
 
+static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
+                                         const kiln_value *args, size_t argc,
+                                         int depth, kiln_value *thrown);
+
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
                          kiln_value *thrown) {
@@ -856,6 +860,8 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
             return kiln_c99_array_constructor(result, args, argc, thrown);
         case KILN_C99_BUILTIN_OBJECT:
             return kiln_c99_object_constructor(result, args, argc);
+        case KILN_C99_BUILTIN_FUNCTION:
+            return kiln_c99_dynamic_new_function(host, result, args, argc, depth, thrown);
         case KILN_C99_BUILTIN_ERROR:
         case KILN_C99_BUILTIN_TYPE_ERROR:
         case KILN_C99_BUILTIN_RANGE_ERROR:
@@ -19785,6 +19791,1055 @@ static int kiln_c99_object_constructor(kiln_value *out, const kiln_value *args, 
     return KILN_C99_OK;
 }
 
+static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_value right);
+static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value);
+static kiln_value kiln_c99_typeof(kiln_value value);
+
+typedef struct kiln_dyn_binding {
+    char *name;
+    kiln_value value;
+} kiln_dyn_binding;
+
+typedef struct kiln_dyn_scope {
+    kiln_dyn_binding *bindings;
+    size_t count;
+    size_t capacity;
+    struct kiln_dyn_scope *parent;
+} kiln_dyn_scope;
+
+static void kiln_dyn_scope_init(kiln_dyn_scope *scope, kiln_dyn_scope *parent) {
+    scope->bindings = NULL;
+    scope->count = 0;
+    scope->capacity = 0;
+    scope->parent = parent;
+}
+
+static int kiln_dyn_scope_set(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value val) {
+    size_t i;
+    for (i = 0; i < scope->count; ++i) {
+        if (strlen(scope->bindings[i].name) == name_len &&
+            strncmp(scope->bindings[i].name, name, name_len) == 0) {
+            scope->bindings[i].value = val;
+            return 1;
+        }
+    }
+    if (scope->count >= scope->capacity) {
+        size_t new_cap = scope->capacity == 0 ? 8 : scope->capacity * 2;
+        kiln_dyn_binding *new_b = (kiln_dyn_binding *)realloc(scope->bindings, new_cap * sizeof *new_b);
+        if (new_b == NULL) return 0;
+        scope->bindings = new_b;
+        scope->capacity = new_cap;
+    }
+    char *dup = (char *)malloc(name_len + 1);
+    if (dup == NULL) return 0;
+    memcpy(dup, name, name_len);
+    dup[name_len] = '\0';
+    scope->bindings[scope->count].name = dup;
+    scope->bindings[scope->count].value = val;
+    scope->count++;
+    return 1;
+}
+
+static int kiln_dyn_scope_get(kiln_dyn_scope *scope, const char *name, size_t name_len, kiln_value *out) {
+    kiln_dyn_scope *curr = scope;
+    while (curr != NULL) {
+        size_t i;
+        for (i = 0; i < curr->count; ++i) {
+            if (strlen(curr->bindings[i].name) == name_len &&
+                strncmp(curr->bindings[i].name, name, name_len) == 0) {
+                *out = curr->bindings[i].value;
+                return 1;
+            }
+        }
+        curr = curr->parent;
+    }
+    return 0;
+}
+
+static void kiln_dyn_scope_destroy(kiln_dyn_scope *scope) {
+    size_t i;
+    for (i = 0; i < scope->count; ++i) {
+        free(scope->bindings[i].name);
+    }
+    free(scope->bindings);
+}
+
+typedef enum {
+    KILN_DYN_EOF,
+    KILN_DYN_NUM,
+    KILN_DYN_STR,
+    KILN_DYN_IDENT,
+    KILN_DYN_KW_RETURN,
+    KILN_DYN_KW_IF,
+    KILN_DYN_KW_ELSE,
+    KILN_DYN_KW_VAR,
+    KILN_DYN_KW_LET,
+    KILN_DYN_KW_CONST,
+    KILN_DYN_KW_TRUE,
+    KILN_DYN_KW_FALSE,
+    KILN_DYN_KW_NULL,
+    KILN_DYN_KW_UNDEFINED,
+    KILN_DYN_KW_THIS,
+    KILN_DYN_KW_ARGUMENTS,
+    KILN_DYN_KW_TYPEOF,
+    KILN_DYN_PLUS,
+    KILN_DYN_MINUS,
+    KILN_DYN_STAR,
+    KILN_DYN_SLASH,
+    KILN_DYN_PERCENT,
+    KILN_DYN_ASSIGN,
+    KILN_DYN_EQ,
+    KILN_DYN_STRICT_EQ,
+    KILN_DYN_NE,
+    KILN_DYN_STRICT_NE,
+    KILN_DYN_LT,
+    KILN_DYN_LE,
+    KILN_DYN_GT,
+    KILN_DYN_GE,
+    KILN_DYN_AND,
+    KILN_DYN_OR,
+    KILN_DYN_NULLISH,
+    KILN_DYN_NOT,
+    KILN_DYN_DOT,
+    KILN_DYN_COMMA,
+    KILN_DYN_COLON,
+    KILN_DYN_QUESTION,
+    KILN_DYN_SEMI,
+    KILN_DYN_LPAREN,
+    KILN_DYN_RPAREN,
+    KILN_DYN_LBRACE,
+    KILN_DYN_RBRACE,
+    KILN_DYN_LBRACKET,
+    KILN_DYN_RBRACKET,
+    KILN_DYN_ERROR
+} kiln_dyn_token_kind;
+
+typedef struct {
+    kiln_dyn_token_kind kind;
+    const char *start;
+    size_t len;
+    double num_val;
+    char *str_val;
+    size_t str_len;
+} kiln_dyn_token;
+
+typedef struct {
+    const char *src;
+    size_t len;
+    size_t pos;
+    kiln_dyn_token curr;
+} kiln_dyn_lexer;
+
+static void kiln_dyn_token_free(kiln_dyn_token *tok) {
+    if (tok->kind == KILN_DYN_STR && tok->str_val != NULL) {
+        free(tok->str_val);
+        tok->str_val = NULL;
+    }
+}
+
+static void kiln_dyn_lexer_next(kiln_dyn_lexer *lex) {
+    kiln_dyn_token_free(&lex->curr);
+    memset(&lex->curr, 0, sizeof(lex->curr));
+
+    while (lex->pos < lex->len) {
+        char c = lex->src[lex->pos];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
+            lex->pos++;
+            continue;
+        }
+        if (c == '/' && lex->pos + 1 < lex->len && lex->src[lex->pos + 1] == '/') {
+            lex->pos += 2;
+            while (lex->pos < lex->len && lex->src[lex->pos] != '\n') {
+                lex->pos++;
+            }
+            continue;
+        }
+        if (c == '/' && lex->pos + 1 < lex->len && lex->src[lex->pos + 1] == '*') {
+            lex->pos += 2;
+            while (lex->pos + 1 < lex->len && !(lex->src[lex->pos] == '*' && lex->src[lex->pos + 1] == '/')) {
+                lex->pos++;
+            }
+            if (lex->pos + 1 < lex->len) lex->pos += 2;
+            continue;
+        }
+        break;
+    }
+
+    if (lex->pos >= lex->len) {
+        lex->curr.kind = KILN_DYN_EOF;
+        return;
+    }
+
+    char c = lex->src[lex->pos];
+    const char *start = &lex->src[lex->pos];
+
+    if ((c >= '0' && c <= '9') || (c == '.' && lex->pos + 1 < lex->len && (lex->src[lex->pos + 1] >= '0' && lex->src[lex->pos + 1] <= '9'))) {
+        size_t num_start = lex->pos;
+        int has_dot = (c == '.');
+        lex->pos++;
+        while (lex->pos < lex->len) {
+            char nc = lex->src[lex->pos];
+            if (nc >= '0' && nc <= '9') {
+                lex->pos++;
+            } else if (nc == '.' && !has_dot) {
+                has_dot = 1;
+                lex->pos++;
+            } else if ((nc == 'e' || nc == 'E') && lex->pos + 1 < lex->len) {
+                lex->pos++;
+                if (lex->src[lex->pos] == '+' || lex->src[lex->pos] == '-') {
+                    lex->pos++;
+                }
+            } else {
+                break;
+            }
+        }
+        size_t num_len = lex->pos - num_start;
+        double val = kiln_string_to_number(start, num_len);
+        lex->curr.kind = KILN_DYN_NUM;
+        lex->curr.start = start;
+        lex->curr.len = num_len;
+        lex->curr.num_val = val;
+        return;
+    }
+
+    if (c == '\'' || c == '"' || c == '`') {
+        char quote = c;
+        lex->pos++;
+        size_t str_start = lex->pos;
+        size_t cap = 16;
+        size_t out_len = 0;
+        char *buf = (char *)malloc(cap);
+        while (lex->pos < lex->len && lex->src[lex->pos] != quote) {
+            char sc = lex->src[lex->pos];
+            if (sc == '\\' && lex->pos + 1 < lex->len) {
+                lex->pos++;
+                sc = lex->src[lex->pos];
+                if (sc == 'n') sc = '\n';
+                else if (sc == 'r') sc = '\r';
+                else if (sc == 't') sc = '\t';
+            }
+            if (out_len + 2 > cap) {
+                cap *= 2;
+                buf = (char *)realloc(buf, cap);
+            }
+            buf[out_len++] = sc;
+            lex->pos++;
+        }
+        if (lex->pos < lex->len && lex->src[lex->pos] == quote) {
+            lex->pos++;
+        }
+        buf[out_len] = '\0';
+        lex->curr.kind = KILN_DYN_STR;
+        lex->curr.start = start;
+        lex->curr.len = lex->pos - (str_start - 1);
+        lex->curr.str_val = buf;
+        lex->curr.str_len = out_len;
+        return;
+    }
+
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$') {
+        size_t id_start = lex->pos;
+        while (lex->pos < lex->len) {
+            char ic = lex->src[lex->pos];
+            if ((ic >= 'a' && ic <= 'z') || (ic >= 'A' && ic <= 'Z') || (ic >= '0' && ic <= '9') || ic == '_' || ic == '$') {
+                lex->pos++;
+            } else {
+                break;
+            }
+        }
+        size_t id_len = lex->pos - id_start;
+        lex->curr.start = &lex->src[id_start];
+        lex->curr.len = id_len;
+
+        #define KILN_CHECK_KW(s, k) if (id_len == strlen(s) && strncmp(&lex->src[id_start], s, id_len) == 0) { lex->curr.kind = k; return; }
+        KILN_CHECK_KW("return", KILN_DYN_KW_RETURN);
+        KILN_CHECK_KW("if", KILN_DYN_KW_IF);
+        KILN_CHECK_KW("else", KILN_DYN_KW_ELSE);
+        KILN_CHECK_KW("var", KILN_DYN_KW_VAR);
+        KILN_CHECK_KW("let", KILN_DYN_KW_LET);
+        KILN_CHECK_KW("const", KILN_DYN_KW_CONST);
+        KILN_CHECK_KW("true", KILN_DYN_KW_TRUE);
+        KILN_CHECK_KW("false", KILN_DYN_KW_FALSE);
+        KILN_CHECK_KW("null", KILN_DYN_KW_NULL);
+        KILN_CHECK_KW("undefined", KILN_DYN_KW_UNDEFINED);
+        KILN_CHECK_KW("this", KILN_DYN_KW_THIS);
+        KILN_CHECK_KW("arguments", KILN_DYN_KW_ARGUMENTS);
+        KILN_CHECK_KW("typeof", KILN_DYN_KW_TYPEOF);
+        #undef KILN_CHECK_KW
+
+        lex->curr.kind = KILN_DYN_IDENT;
+        return;
+    }
+
+    lex->pos++;
+    lex->curr.start = start;
+    lex->curr.len = 1;
+
+    switch (c) {
+    case '=':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+                lex->pos++;
+                lex->curr.len = 3;
+                lex->curr.kind = KILN_DYN_STRICT_EQ;
+                return;
+            }
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_EQ;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_ASSIGN;
+        return;
+    case '!':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+                lex->pos++;
+                lex->curr.len = 3;
+                lex->curr.kind = KILN_DYN_STRICT_NE;
+                return;
+            }
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_NE;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_NOT;
+        return;
+    case '<':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_LE;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_LT;
+        return;
+    case '>':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '=') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_GE;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_GT;
+        return;
+    case '&':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '&') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_AND;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_ERROR;
+        return;
+    case '|':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '|') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_OR;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_ERROR;
+        return;
+    case '?':
+        if (lex->pos < lex->len && lex->src[lex->pos] == '?') {
+            lex->pos++;
+            lex->curr.len = 2;
+            lex->curr.kind = KILN_DYN_NULLISH;
+            return;
+        }
+        lex->curr.kind = KILN_DYN_QUESTION;
+        return;
+    case '+': lex->curr.kind = KILN_DYN_PLUS; return;
+    case '-': lex->curr.kind = KILN_DYN_MINUS; return;
+    case '*': lex->curr.kind = KILN_DYN_STAR; return;
+    case '/': lex->curr.kind = KILN_DYN_SLASH; return;
+    case '%': lex->curr.kind = KILN_DYN_PERCENT; return;
+    case '.': lex->curr.kind = KILN_DYN_DOT; return;
+    case ',': lex->curr.kind = KILN_DYN_COMMA; return;
+    case ':': lex->curr.kind = KILN_DYN_COLON; return;
+    case ';': lex->curr.kind = KILN_DYN_SEMI; return;
+    case '(': lex->curr.kind = KILN_DYN_LPAREN; return;
+    case ')': lex->curr.kind = KILN_DYN_RPAREN; return;
+    case '{': lex->curr.kind = KILN_DYN_LBRACE; return;
+    case '}': lex->curr.kind = KILN_DYN_RBRACE; return;
+    case '[': lex->curr.kind = KILN_DYN_LBRACKET; return;
+    case ']': lex->curr.kind = KILN_DYN_RBRACKET; return;
+    default:
+        lex->curr.kind = KILN_DYN_ERROR;
+        return;
+    }
+}
+
+static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                              kiln_value receiver, const kiln_value *args, size_t argc,
+                              int depth, kiln_value *out, kiln_value *thrown);
+
+static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                kiln_value receiver, const kiln_value *args, size_t argc,
+                                int depth, kiln_value *out, kiln_value *thrown) {
+    if (lex->curr.kind == KILN_DYN_NUM) {
+        *out = kiln_c99_number(lex->curr.num_val);
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_STR) {
+        *out = kiln_c99_copy_text(lex->curr.str_val, lex->curr.str_len);
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_TRUE) {
+        *out = kiln_c99_boolean(1);
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_FALSE) {
+        *out = kiln_c99_boolean(0);
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_NULL) {
+        *out = kiln_c99_null();
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_UNDEFINED) {
+        *out = kiln_c99_undefined();
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_THIS) {
+        *out = receiver;
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_ARGUMENTS) {
+        int status = kiln_c99_new_array(out);
+        if (status != KILN_C99_OK) return status;
+        for (size_t i = 0; i < argc; ++i) {
+            status = kiln_c99_array_push(*out, args[i]);
+            if (status != KILN_C99_OK) return status;
+        }
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_IDENT) {
+        const char *name = lex->curr.start;
+        size_t name_len = lex->curr.len;
+        kiln_dyn_lexer_next(lex);
+        if (kiln_dyn_scope_get(scope, name, name_len, out)) {
+            return KILN_C99_OK;
+        }
+        kiln_value globals = kiln_c99_undefined();
+        int status = kiln_c99_global_object(&globals);
+        if (status == KILN_C99_OK) {
+            status = kiln_c99_get(host, globals, name, name_len, out, depth, thrown);
+            if (status == KILN_C99_OK) {
+                return KILN_C99_OK;
+            }
+        }
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "Variable is not defined");
+    }
+    if (lex->curr.kind == KILN_DYN_LPAREN) {
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, out, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (lex->curr.kind == KILN_DYN_RPAREN) {
+            kiln_dyn_lexer_next(lex);
+            return KILN_C99_OK;
+        }
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected ')'");
+    }
+    if (lex->curr.kind == KILN_DYN_LBRACKET) {
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_c99_new_array(out);
+        if (status != KILN_C99_OK) return status;
+        while (lex->curr.kind != KILN_DYN_RBRACKET && lex->curr.kind != KILN_DYN_EOF) {
+            kiln_value elem;
+            status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &elem, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_array_push(*out, elem);
+            if (status != KILN_C99_OK) return status;
+            if (lex->curr.kind == KILN_DYN_COMMA) {
+                kiln_dyn_lexer_next(lex);
+            } else {
+                break;
+            }
+        }
+        if (lex->curr.kind == KILN_DYN_RBRACKET) {
+            kiln_dyn_lexer_next(lex);
+            return KILN_C99_OK;
+        }
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected ']'");
+    }
+    if (lex->curr.kind == KILN_DYN_LBRACE) {
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_c99_new_object(out);
+        if (status != KILN_C99_OK) return status;
+        while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
+            const char *key_name = NULL;
+            size_t key_len = 0;
+            if (lex->curr.kind == KILN_DYN_IDENT || lex->curr.kind == KILN_DYN_STR) {
+                key_name = lex->curr.kind == KILN_DYN_STR ? lex->curr.str_val : lex->curr.start;
+                key_len = lex->curr.kind == KILN_DYN_STR ? lex->curr.str_len : lex->curr.len;
+                kiln_dyn_lexer_next(lex);
+            } else {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected property key");
+            }
+            if (lex->curr.kind != KILN_DYN_COLON) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected ':'");
+            }
+            kiln_dyn_lexer_next(lex);
+            kiln_value val;
+            status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &val, thrown);
+            if (status != KILN_C99_OK) return status;
+            status = kiln_c99_put(host, *out, key_name, key_len, val, 0, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (lex->curr.kind == KILN_DYN_COMMA) {
+                kiln_dyn_lexer_next(lex);
+            } else {
+                break;
+            }
+        }
+        if (lex->curr.kind == KILN_DYN_RBRACE) {
+            kiln_dyn_lexer_next(lex);
+            return KILN_C99_OK;
+        }
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected '}'");
+    }
+
+    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Unexpected token in expression");
+}
+
+static int kiln_dyn_eval_postfix(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                 kiln_value receiver, const kiln_value *args, size_t argc,
+                                 int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_primary(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    kiln_value current_receiver = kiln_c99_undefined();
+
+    while (1) {
+        if (lex->curr.kind == KILN_DYN_DOT) {
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind != KILN_DYN_IDENT) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected identifier after '.'");
+            }
+            const char *prop = lex->curr.start;
+            size_t prop_len = lex->curr.len;
+            kiln_dyn_lexer_next(lex);
+            kiln_value res;
+            status = kiln_c99_get(host, *out, prop, prop_len, &res, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            current_receiver = *out;
+            *out = res;
+        } else if (lex->curr.kind == KILN_DYN_LBRACKET) {
+            kiln_dyn_lexer_next(lex);
+            kiln_value idx;
+            status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &idx, thrown);
+            if (status != KILN_C99_OK) return status;
+            if (lex->curr.kind != KILN_DYN_RBRACKET) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected ']'");
+            }
+            kiln_dyn_lexer_next(lex);
+            kiln_value res;
+            status = kiln_c99_get_computed(host, *out, idx, &res, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            current_receiver = *out;
+            *out = res;
+        } else if (lex->curr.kind == KILN_DYN_LPAREN) {
+            kiln_dyn_lexer_next(lex);
+            kiln_value call_args[16];
+            size_t call_argc = 0;
+            while (lex->curr.kind != KILN_DYN_RPAREN && lex->curr.kind != KILN_DYN_EOF) {
+                if (call_argc < 16) {
+                    status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &call_args[call_argc++], thrown);
+                    if (status != KILN_C99_OK) return status;
+                } else {
+                    return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR, "Too many arguments");
+                }
+                if (lex->curr.kind == KILN_DYN_COMMA) {
+                    kiln_dyn_lexer_next(lex);
+                } else {
+                    break;
+                }
+            }
+            if (lex->curr.kind != KILN_DYN_RPAREN) {
+                return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected ')'");
+            }
+            kiln_dyn_lexer_next(lex);
+            kiln_value res;
+            status = kiln_c99_call(host, &res, *out, current_receiver, call_args, call_argc, depth, thrown);
+            if (status != KILN_C99_OK) return status;
+            current_receiver = kiln_c99_undefined();
+            *out = res;
+        } else {
+            break;
+        }
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_unary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                               kiln_value receiver, const kiln_value *args, size_t argc,
+                               int depth, kiln_value *out, kiln_value *thrown) {
+    if (lex->curr.kind == KILN_DYN_NOT) {
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, out, thrown);
+        if (status != KILN_C99_OK) return status;
+        *out = kiln_c99_boolean(!kiln_c99_truthy(*out));
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_MINUS) {
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, out, thrown);
+        if (status != KILN_C99_OK) return status;
+        *out = kiln_c99_unary(2, *out);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_PLUS) {
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, out, thrown);
+        if (status != KILN_C99_OK) return status;
+        *out = kiln_c99_unary(1, *out);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_TYPEOF) {
+        kiln_dyn_lexer_next(lex);
+        int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, out, thrown);
+        if (status != KILN_C99_OK) return status;
+        *out = kiln_c99_typeof(*out);
+        return KILN_C99_OK;
+    }
+    return kiln_dyn_eval_postfix(host, lex, scope, receiver, args, argc, depth, out, thrown);
+}
+
+static int kiln_dyn_eval_multiplicative(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                        kiln_value receiver, const kiln_value *args, size_t argc,
+                                        int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    while (lex->curr.kind == KILN_DYN_STAR || lex->curr.kind == KILN_DYN_SLASH || lex->curr.kind == KILN_DYN_PERCENT) {
+        kiln_dyn_token_kind op = lex->curr.kind;
+        kiln_dyn_lexer_next(lex);
+        kiln_value right;
+        status = kiln_dyn_eval_unary(host, lex, scope, receiver, args, argc, depth, &right, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (op == KILN_DYN_STAR) *out = kiln_c99_binary(3, *out, right);
+        else if (op == KILN_DYN_SLASH) *out = kiln_c99_binary(4, *out, right);
+        else if (op == KILN_DYN_PERCENT) *out = kiln_c99_binary(5, *out, right);
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_additive(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                  kiln_value receiver, const kiln_value *args, size_t argc,
+                                  int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_multiplicative(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    while (lex->curr.kind == KILN_DYN_PLUS || lex->curr.kind == KILN_DYN_MINUS) {
+        kiln_dyn_token_kind op = lex->curr.kind;
+        kiln_dyn_lexer_next(lex);
+        kiln_value right;
+        status = kiln_dyn_eval_multiplicative(host, lex, scope, receiver, args, argc, depth, &right, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (op == KILN_DYN_PLUS) *out = kiln_c99_binary(1, *out, right);
+        else *out = kiln_c99_binary(2, *out, right);
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_relational(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_additive(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    while (lex->curr.kind == KILN_DYN_LT || lex->curr.kind == KILN_DYN_LE ||
+           lex->curr.kind == KILN_DYN_GT || lex->curr.kind == KILN_DYN_GE) {
+        kiln_dyn_token_kind op = lex->curr.kind;
+        kiln_dyn_lexer_next(lex);
+        kiln_value right;
+        status = kiln_dyn_eval_additive(host, lex, scope, receiver, args, argc, depth, &right, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (op == KILN_DYN_LT) *out = kiln_c99_binary(9, *out, right);
+        else if (op == KILN_DYN_LE) *out = kiln_c99_binary(10, *out, right);
+        else if (op == KILN_DYN_GT) *out = kiln_c99_binary(11, *out, right);
+        else if (op == KILN_DYN_GE) *out = kiln_c99_binary(12, *out, right);
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_equality(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                  kiln_value receiver, const kiln_value *args, size_t argc,
+                                  int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_relational(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    while (lex->curr.kind == KILN_DYN_STRICT_EQ || lex->curr.kind == KILN_DYN_STRICT_NE ||
+           lex->curr.kind == KILN_DYN_EQ || lex->curr.kind == KILN_DYN_NE) {
+        kiln_dyn_token_kind op = lex->curr.kind;
+        kiln_dyn_lexer_next(lex);
+        kiln_value right;
+        status = kiln_dyn_eval_relational(host, lex, scope, receiver, args, argc, depth, &right, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (op == KILN_DYN_STRICT_EQ) *out = kiln_c99_binary(7, *out, right);
+        else if (op == KILN_DYN_STRICT_NE) *out = kiln_c99_binary(8, *out, right);
+        else if (op == KILN_DYN_EQ) *out = kiln_c99_binary(15, *out, right);
+        else if (op == KILN_DYN_NE) *out = kiln_c99_binary(16, *out, right);
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_logical_and(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                     kiln_value receiver, const kiln_value *args, size_t argc,
+                                     int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_equality(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    while (lex->curr.kind == KILN_DYN_AND) {
+        kiln_dyn_lexer_next(lex);
+        if (!kiln_c99_truthy(*out)) {
+            kiln_value dummy;
+            status = kiln_dyn_eval_equality(host, lex, scope, receiver, args, argc, depth, &dummy, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            status = kiln_dyn_eval_equality(host, lex, scope, receiver, args, argc, depth, out, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_logical_or(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_logical_and(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    while (lex->curr.kind == KILN_DYN_OR || lex->curr.kind == KILN_DYN_NULLISH) {
+        kiln_dyn_token_kind op = lex->curr.kind;
+        kiln_dyn_lexer_next(lex);
+        int take_lhs = (op == KILN_DYN_OR) ? kiln_c99_truthy(*out)
+                                           : (out->tag != KILN_VALUE_UNDEFINED && out->tag != KILN_VALUE_NULL);
+        if (take_lhs) {
+            kiln_value dummy;
+            status = kiln_dyn_eval_logical_and(host, lex, scope, receiver, args, argc, depth, &dummy, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            status = kiln_dyn_eval_logical_and(host, lex, scope, receiver, args, argc, depth, out, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_ternary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                 kiln_value receiver, const kiln_value *args, size_t argc,
+                                 int depth, kiln_value *out, kiln_value *thrown) {
+    int status = kiln_dyn_eval_logical_or(host, lex, scope, receiver, args, argc, depth, out, thrown);
+    if (status != KILN_C99_OK) return status;
+
+    if (lex->curr.kind == KILN_DYN_QUESTION) {
+        kiln_dyn_lexer_next(lex);
+        int cond_true = kiln_c99_truthy(*out);
+        kiln_value true_val;
+        status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &true_val, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (lex->curr.kind != KILN_DYN_COLON) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected ':' in ternary");
+        }
+        kiln_dyn_lexer_next(lex);
+        kiln_value false_val;
+        status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &false_val, thrown);
+        if (status != KILN_C99_OK) return status;
+        *out = cond_true ? true_val : false_val;
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_dyn_eval_assignment(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    int depth, kiln_value *out, kiln_value *thrown) {
+    if (lex->curr.kind == KILN_DYN_IDENT) {
+        const char *name = lex->curr.start;
+        size_t name_len = lex->curr.len;
+        size_t saved_pos = lex->pos;
+        kiln_dyn_token saved_tok = lex->curr;
+
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind == KILN_DYN_ASSIGN) {
+            kiln_dyn_lexer_next(lex);
+            kiln_value rhs;
+            int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
+            if (status != KILN_C99_OK) return status;
+            kiln_value dummy;
+            if (kiln_dyn_scope_get(scope, name, name_len, &dummy)) {
+                kiln_dyn_scope_set(scope, name, name_len, rhs);
+            } else {
+                kiln_value globals = kiln_c99_undefined();
+                status = kiln_c99_global_object(&globals);
+                if (status == KILN_C99_OK) {
+                    status = kiln_c99_put(host, globals, name, name_len, rhs, 0, thrown);
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
+            *out = rhs;
+            return KILN_C99_OK;
+        } else if (lex->curr.kind == KILN_DYN_DOT) {
+            kiln_dyn_lexer_next(lex);
+            if (lex->curr.kind == KILN_DYN_IDENT) {
+                const char *prop = lex->curr.start;
+                size_t prop_len = lex->curr.len;
+                kiln_dyn_lexer_next(lex);
+                if (lex->curr.kind == KILN_DYN_ASSIGN) {
+                    kiln_dyn_lexer_next(lex);
+                    kiln_value rhs;
+                    int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &rhs, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    kiln_value target;
+                    if (!kiln_dyn_scope_get(scope, name, name_len, &target)) {
+                        kiln_value globals = kiln_c99_undefined();
+                        status = kiln_c99_global_object(&globals);
+                        if (status != KILN_C99_OK) return status;
+                        status = kiln_c99_get(host, globals, name, name_len, &target, depth, thrown);
+                        if (status != KILN_C99_OK) return status;
+                    }
+                    status = kiln_c99_put(host, target, prop, prop_len, rhs, 0, thrown);
+                    if (status != KILN_C99_OK) return status;
+                    *out = rhs;
+                    return KILN_C99_OK;
+                }
+            }
+        }
+        lex->pos = saved_pos;
+        lex->curr = saved_tok;
+    }
+    return kiln_dyn_eval_ternary(host, lex, scope, receiver, args, argc, depth, out, thrown);
+}
+
+static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                              kiln_value receiver, const kiln_value *args, size_t argc,
+                              int depth, kiln_value *out, kiln_value *thrown) {
+    return kiln_dyn_eval_assignment(host, lex, scope, receiver, args, argc, depth, out, thrown);
+}
+
+static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
+                              kiln_value receiver, const kiln_value *args, size_t argc,
+                              int depth, kiln_value *result, int *returned, kiln_value *thrown) {
+    if (lex->curr.kind == KILN_DYN_SEMI) {
+        kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_RETURN) {
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
+            int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, result, thrown);
+            if (status != KILN_C99_OK) return status;
+        } else {
+            *result = kiln_c99_undefined();
+        }
+        if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+        *returned = 1;
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_IF) {
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind != KILN_DYN_LPAREN) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected '(' after if");
+        }
+        kiln_dyn_lexer_next(lex);
+        kiln_value cond;
+        int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &cond, thrown);
+        if (status != KILN_C99_OK) return status;
+        if (lex->curr.kind != KILN_DYN_RPAREN) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected ')' after if condition");
+        }
+        kiln_dyn_lexer_next(lex);
+        int is_true = kiln_c99_truthy(cond);
+        if (is_true) {
+            status = kiln_dyn_eval_stmt(host, lex, scope, receiver, args, argc, depth, result, returned, thrown);
+            if (status != KILN_C99_OK || *returned) return status;
+            if (lex->curr.kind == KILN_DYN_KW_ELSE) {
+                kiln_dyn_lexer_next(lex);
+                if (lex->curr.kind == KILN_DYN_LBRACE) {
+                    int bdepth = 1;
+                    kiln_dyn_lexer_next(lex);
+                    while (bdepth > 0 && lex->curr.kind != KILN_DYN_EOF) {
+                        if (lex->curr.kind == KILN_DYN_LBRACE) bdepth++;
+                        else if (lex->curr.kind == KILN_DYN_RBRACE) bdepth--;
+                        kiln_dyn_lexer_next(lex);
+                    }
+                } else {
+                    while (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_EOF) {
+                        kiln_dyn_lexer_next(lex);
+                    }
+                    if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+                }
+            }
+        } else {
+            if (lex->curr.kind == KILN_DYN_LBRACE) {
+                int bdepth = 1;
+                kiln_dyn_lexer_next(lex);
+                while (bdepth > 0 && lex->curr.kind != KILN_DYN_EOF) {
+                    if (lex->curr.kind == KILN_DYN_LBRACE) bdepth++;
+                    else if (lex->curr.kind == KILN_DYN_RBRACE) bdepth--;
+                    kiln_dyn_lexer_next(lex);
+                }
+            } else {
+                while (lex->curr.kind != KILN_DYN_SEMI && lex->curr.kind != KILN_DYN_EOF) {
+                    kiln_dyn_lexer_next(lex);
+                }
+                if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+            }
+            if (lex->curr.kind == KILN_DYN_KW_ELSE) {
+                kiln_dyn_lexer_next(lex);
+                status = kiln_dyn_eval_stmt(host, lex, scope, receiver, args, argc, depth, result, returned, thrown);
+                if (status != KILN_C99_OK || *returned) return status;
+            }
+        }
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_KW_VAR || lex->curr.kind == KILN_DYN_KW_LET || lex->curr.kind == KILN_DYN_KW_CONST) {
+        kiln_dyn_lexer_next(lex);
+        if (lex->curr.kind != KILN_DYN_IDENT) {
+            return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_SYNTAX_ERROR, "Expected identifier");
+        }
+        const char *name = lex->curr.start;
+        size_t name_len = lex->curr.len;
+        kiln_dyn_lexer_next(lex);
+        kiln_value init = kiln_c99_undefined();
+        if (lex->curr.kind == KILN_DYN_ASSIGN) {
+            kiln_dyn_lexer_next(lex);
+            int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &init, thrown);
+            if (status != KILN_C99_OK) return status;
+        }
+        if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+        kiln_dyn_scope_set(scope, name, name_len, init);
+        return KILN_C99_OK;
+    }
+    if (lex->curr.kind == KILN_DYN_LBRACE) {
+        kiln_dyn_lexer_next(lex);
+        while (lex->curr.kind != KILN_DYN_RBRACE && lex->curr.kind != KILN_DYN_EOF) {
+            int status = kiln_dyn_eval_stmt(host, lex, scope, receiver, args, argc, depth, result, returned, thrown);
+            if (status != KILN_C99_OK || *returned) return status;
+        }
+        if (lex->curr.kind == KILN_DYN_RBRACE) kiln_dyn_lexer_next(lex);
+        return KILN_C99_OK;
+    }
+
+    kiln_value expr_val;
+    int status = kiln_dyn_eval_expr(host, lex, scope, receiver, args, argc, depth, &expr_val, thrown);
+    if (status != KILN_C99_OK) return status;
+    if (lex->curr.kind == KILN_DYN_SEMI) kiln_dyn_lexer_next(lex);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_dynamic_body_trampoline(kiln_host *host, kiln_value *result, kiln_value *upvalues,
+                                            kiln_value receiver, const kiln_value *args, size_t argc,
+                                            int depth, kiln_value *thrown, struct kiln_generator *frame) {
+    (void)frame;
+    kiln_value params_val = upvalues[0];
+    kiln_value body_val = upvalues[1];
+
+    kiln_dyn_scope scope;
+    kiln_dyn_scope_init(&scope, NULL);
+
+    if (params_val.tag == KILN_VALUE_STRING && params_val.ptr != NULL && params_val.len > 0) {
+        const char *p = params_val.ptr;
+        size_t plen = params_val.len;
+        size_t ppos = 0;
+        size_t arg_idx = 0;
+        while (ppos < plen) {
+            while (ppos < plen && (p[ppos] == ' ' || p[ppos] == '\t' || p[ppos] == ',')) ppos++;
+            if (ppos >= plen) break;
+            size_t pstart = ppos;
+            while (ppos < plen && p[ppos] != ' ' && p[ppos] != '\t' && p[ppos] != ',') ppos++;
+            size_t pname_len = ppos - pstart;
+            kiln_value arg_val = (arg_idx < argc) ? args[arg_idx] : kiln_c99_undefined();
+            kiln_dyn_scope_set(&scope, &p[pstart], pname_len, arg_val);
+            arg_idx++;
+        }
+    }
+
+    const char *bsrc = (body_val.tag == KILN_VALUE_STRING && body_val.ptr != NULL) ? body_val.ptr : "";
+    size_t blen = (body_val.tag == KILN_VALUE_STRING && body_val.ptr != NULL) ? body_val.len : 0;
+    kiln_dyn_lexer lex;
+    memset(&lex, 0, sizeof(lex));
+    lex.src = bsrc;
+    lex.len = blen;
+    lex.pos = 0;
+    kiln_dyn_lexer_next(&lex);
+
+    int returned = 0;
+    *result = kiln_c99_undefined();
+    int status = KILN_C99_OK;
+
+    while (lex.curr.kind != KILN_DYN_EOF) {
+        status = kiln_dyn_eval_stmt(host, &lex, &scope, receiver, args, argc, depth, result, &returned, thrown);
+        if (status != KILN_C99_OK || returned) {
+            break;
+        }
+    }
+
+    kiln_dyn_token_free(&lex.curr);
+    kiln_dyn_scope_destroy(&scope);
+    return status;
+}
+
+static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
+                                         const kiln_value *args, size_t argc,
+                                         int depth, kiln_value *thrown) {
+    (void)host;
+    (void)depth;
+    (void)thrown;
+    kiln_value upvalues[2];
+    if (argc == 0) {
+        upvalues[0] = kiln_c99_copy_text("", 0);
+        upvalues[1] = kiln_c99_copy_text("", 0);
+    } else if (argc == 1) {
+        upvalues[0] = kiln_c99_copy_text("", 0);
+        upvalues[1] = kiln_c99_text(args[0]);
+    } else {
+        size_t total_len = 0;
+        size_t i;
+        for (i = 0; i < argc - 1; ++i) {
+            kiln_value t = kiln_c99_text(args[i]);
+            total_len += (t.tag == KILN_VALUE_STRING && t.ptr != NULL) ? t.len : 0;
+            if (i + 1 < argc - 1) total_len++;
+        }
+        char *joined = (char *)malloc(total_len + 1);
+        if (joined == NULL) return KILN_C99_OUT_OF_MEMORY;
+        size_t cur = 0;
+        for (i = 0; i < argc - 1; ++i) {
+            kiln_value t = kiln_c99_text(args[i]);
+            size_t tlen = (t.tag == KILN_VALUE_STRING && t.ptr != NULL) ? t.len : 0;
+            if (tlen > 0) {
+                memcpy(&joined[cur], t.ptr, tlen);
+                cur += tlen;
+            }
+            if (i + 1 < argc - 1) joined[cur++] = ',';
+        }
+        joined[cur] = '\0';
+        upvalues[0] = kiln_c99_copy_text(joined, cur);
+        free(joined);
+        upvalues[1] = kiln_c99_text(args[argc - 1]);
+    }
+
+    const char *body_src = (upvalues[1].tag == KILN_VALUE_STRING && upvalues[1].ptr != NULL) ? upvalues[1].ptr : "";
+    size_t body_len = (upvalues[1].tag == KILN_VALUE_STRING && upvalues[1].ptr != NULL) ? upvalues[1].len : 0;
+
+    return kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
+                                 "anonymous", 9, body_src, body_len,
+                                 "eval", 0, (uint32_t)(argc > 1 ? argc - 1 : 0),
+                                 0, 0, 0, 0, 0, kiln_c99_undefined(),
+                                 kiln_c99_undefined(), 0, 16, 0, 0,
+                                 upvalues, 2);
+}
+
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
                               const kiln_value *args, size_t argc, int depth,
                               kiln_value *thrown) {
@@ -19796,8 +20851,7 @@ static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value ca
     kiln_value adopted;
     int status;
     if (callee.tag == KILN_VALUE_BUILTIN && callee.bits == KILN_C99_BUILTIN_FUNCTION) {
-        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_EVAL_ERROR,
-                                    "Code generation from strings disallowed for this context");
+        return kiln_c99_dynamic_new_function(host, result, args, argc, depth, thrown);
     }
     /* `new 5` is a TypeError the program can catch, not a fault that stops it. Reaching the
      * prototype lookup below with a non-callable answered "a method this backend does not have"

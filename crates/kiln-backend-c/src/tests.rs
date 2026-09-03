@@ -4487,3 +4487,82 @@ fn absent_answers_are_where_they_say() {
         );
     }
 }
+
+#[test]
+fn executable_dynamic_function_construction_and_evaluation() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    uint64_t realm = 0;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 99;
+    kiln_test_realm_active = 1;
+
+    kiln_value dummy;
+    int mod_status = {}(NULL, &dummy);
+    if (mod_status != KILN_C99_OK) return 100;
+
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value result = kiln_c99_undefined();
+
+    // 1. Dynamic function with no arguments returning constant:
+    kiln_value args1[1] = {{ kiln_c99_copy_text("return 42;", 10) }};
+    int status = kiln_c99_dynamic_new_function(NULL, &result, args1, 1, 0, &thrown);
+    if (status != KILN_C99_OK || result.tag != KILN_VALUE_FUNCTION) return 1;
+
+    kiln_value call_res = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status != KILN_C99_OK) return 2;
+    if (call_res.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(call_res) != 42.0) return 3;
+
+    // 2. Dynamic function with two parameters:
+    kiln_value args2[3] = {{
+        kiln_c99_copy_text("a", 1),
+        kiln_c99_copy_text("b", 1),
+        kiln_c99_copy_text("return a + b;", 13)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, args2, 3, 0, &thrown);
+    if (status != KILN_C99_OK) return 4;
+
+    kiln_value call_args2[2] = {{ kiln_c99_number(100.0), kiln_c99_number(23.0) }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), call_args2, 2, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(call_res) != 123.0) return 5;
+
+    // 3. Dynamic function mutating an object on the native heap:
+    kiln_value my_obj;
+    status = kiln_c99_new_object(&my_obj);
+    if (status != KILN_C99_OK) return 6;
+    status = kiln_c99_put(NULL, my_obj, "count", 5, kiln_c99_number(10.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 7;
+
+    kiln_value args3[2] = {{
+        kiln_c99_copy_text("obj", 3),
+        kiln_c99_copy_text("obj.count = obj.count + 5; return obj.count;", 44)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, args3, 2, 0, &thrown);
+    if (status != KILN_C99_OK) return 8;
+
+    kiln_value call_args3[1] = {{ my_obj }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), call_args3, 1, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(call_res) != 15.0) return 9;
+
+    kiln_value read_back;
+    status = kiln_c99_get(NULL, my_obj, "count", 5, &read_back, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(read_back) != 15.0) return 10;
+
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "dynamic-function");
+    assert!(
+        run.status.success(),
+        "dynamic function execution failed with exit code {:?}:\nstdout:\n{}\nstderr:\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
