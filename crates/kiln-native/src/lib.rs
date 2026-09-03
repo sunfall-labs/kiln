@@ -2701,7 +2701,7 @@ fn emit_native_graph_module_with_policy(
 
 /// `node:http`'s materializer, which is the one body that is generated rather than written out.
 ///
-/// `METHODS` is thirty-four strings that both engines have to publish identically, and the shared
+/// `METHODS` is the string list both engines have to publish identically, and the shared
 /// list lives in `kiln-node-abi`. Building the C from that list is what makes the two engines one
 /// fact: a method added there reaches the interpreter's array and this array in the same commit,
 /// where a hand-copied C literal would be a second list that agrees until it does not.
@@ -3085,15 +3085,19 @@ if (status != KILN_C99_OK) return status;
 exports[0] = worker;
 exports[1] = namespace;"#,
         ),
+        // `node:module`'s default is the `Module` class, the same shape `node:stream`'s default
+        // is the `Stream` class: node answers `typeof` "function" for both, and the interpreter
+        // does too. This built a fresh namespace object instead, so the two engines read the same
+        // bytecode two ways -- "object" here against "function" there -- and a bundle that
+        // feature-detects `typeof require("node:module") === "function"` took the other branch.
+        // `createRequire` hangs off the class, which is where node has it.
         NodeBuiltin::Module => Some(
             r#"kiln_value create_require = kiln_c99_method(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE);
-kiln_value namespace;
-int status = kiln_c99_new_object(&namespace);
-if (status != KILN_C99_OK) return status;
-status = kiln_c99_put(host, namespace, "createRequire", 13, create_require, 0, NULL);
+kiln_value module_class = kiln_c99_method(KILN_C99_METHOD_NODE_MODULE);
+int status = kiln_c99_put(host, module_class, "createRequire", 13, create_require, 0, NULL);
 if (status != KILN_C99_OK) return status;
 exports[0] = create_require;
-exports[1] = namespace;"#,
+exports[1] = module_class;"#,
         ),
         NodeBuiltin::QueryString => Some(
             r#"kiln_value parse = kiln_c99_method(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE);
