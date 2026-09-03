@@ -6287,6 +6287,7 @@ pub fn execute_node_module_in_runtime<H: HostOps + ?Sized>(
 }
 
 /// Execute one Node module while preserving realm resources and jobs for subsequent modules.
+#[allow(clippy::too_many_arguments)]
 pub fn execute_node_module_in_session<H: HostOps + ?Sized>(
     module: &ModuleProgram,
     import_values: &[Value],
@@ -20804,10 +20805,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // handler added on a later tick is still a handler -- `p.catch(...)` on the next line is
         // ordinary code. The `.return()` marker is an internal unwinding sentinel and never a
         // JavaScript rejection.
-        if unobserved && let Settled::Rejected(reason) = &outcome {
-            if !matches!(reason, Value::Native(Native::ReturnSignal, _)) {
-                self.unhandled = Some(reason.clone());
-            }
+        if unobserved
+            && let Settled::Rejected(reason) = &outcome
+            && !matches!(reason, Value::Native(Native::ReturnSignal, _))
+        {
+            self.unhandled = Some(reason.clone());
         }
         for reaction in reactions {
             // The reaction's own context, not this one: whatever settled the promise may be an

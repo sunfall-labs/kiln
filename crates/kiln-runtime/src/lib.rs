@@ -4,6 +4,11 @@
 //! Tokio runtime and drives a [`Realm`] whose language-level queues remain explicit: Tokio wakes
 //! the realm at the next deadline, while the realm decides the order in which JavaScript work
 //! runs. Tokio types are deliberately private to this crate.
+#![allow(
+    clippy::type_complexity,
+    clippy::enum_variant_names,
+    clippy::wrong_self_convention
+)]
 
 mod http_body;
 pub mod http_client;

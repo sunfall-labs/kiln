@@ -571,6 +571,8 @@ impl IrProgram {
                 // Generated functions have no parameter-binding prologue; arguments already
                 // occupy their declared slots when the fuzz harness calls them.
                 prologue_end: 0,
+                mapped_arguments: false,
+                span: kiln_ir::Span::new(0, 0),
                 code: std::mem::take(&mut builder.code),
                 upvalues: Vec::new(),
             });
@@ -584,6 +586,7 @@ impl IrProgram {
         builder.push(Instruction::Return);
 
         let well_formed = Program {
+            source: std::sync::Arc::from(""),
             version: kiln_ir::BYTECODE_VERSION,
             constants: builder.constants,
             code: builder.code,

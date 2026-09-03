@@ -971,10 +971,10 @@ fn handle_run<E: QueryEngine>(
             revision,
         }) => {
             let graph = match panic::catch_unwind(AssertUnwindSafe(|| {
-                if let Some((old, changed)) = stale.as_ref() {
-                    if let Some(graph) = patch_graph_from_snapshot(&snapshot, old, *changed)? {
-                        return Ok((graph, true));
-                    }
+                if let Some((old, changed)) = stale.as_ref()
+                    && let Some(graph) = patch_graph_from_snapshot(&snapshot, old, *changed)?
+                {
+                    return Ok((graph, true));
                 }
                 build_graph_from_snapshot(&snapshot).map(|graph| (graph, false))
             })) {

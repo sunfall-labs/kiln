@@ -28,12 +28,11 @@ KILN_PROFILE_CLIENTS="${KILN_PROFILE_CLIENTS:-4}"
 KILN_PROFILE_CONNS="${KILN_PROFILE_CONNS:-16}"
 KILN_PROFILE_WORKLOAD="${KILN_PROFILE_WORKLOAD:-mixed}"
 
-for tool in gprof; do
-	command -v "$tool" >/dev/null 2>&1 || {
-		printf '%s is not installed; `apt-get install binutils` provides it\n' "$tool" >&2
-		exit 1
-	}
-done
+if ! command -v gprof >/dev/null 2>&1; then
+	# shellcheck disable=SC2016
+	printf 'gprof is not installed; `apt-get install binutils` provides it\n' >&2
+	exit 1
+fi
 
 KILN_PROFILE_WORK="$(mktemp -d)"
 kiln_profile_cleanup() {
@@ -42,7 +41,7 @@ kiln_profile_cleanup() {
 	local held
 	held=$(ss -lntpH "sport = :$KILN_PROFILE_PORT" 2>/dev/null |
 		grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u || true)
-	[[ -n $held ]] && kill -9 $held 2>/dev/null || true
+	[[ -n $held ]] && kill -9 "$held" 2>/dev/null || true
 	rm -rf "$KILN_PROFILE_WORK"
 }
 trap kiln_profile_cleanup EXIT
@@ -73,6 +72,7 @@ wait || true
 
 if [[ ! -f $KILN_PROFILE_WORK/gmon.out ]]; then
 	printf 'no gmon.out: the module has to close its listener so the program exits.\n' >&2
+	# shellcheck disable=SC2016
 	printf 'Add `setTimeout(() => server.close(), %s000)` to a profiling copy of it.\n' \
 		"$KILN_PROFILE_SECONDS" >&2
 	exit 1

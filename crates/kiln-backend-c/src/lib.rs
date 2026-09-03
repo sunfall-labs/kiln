@@ -709,6 +709,7 @@ fn render_unwind(output: &mut String, handlers: &[u32], suspends: bool, uncaught
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_function(
     output: &mut String,
     program: &Program,

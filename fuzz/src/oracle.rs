@@ -79,6 +79,8 @@ fn oracle_frontend(_path: &str, text: &str) -> Module {
     }
 
     Module {
+        source: std::sync::Arc::from(&text[..]),
+        strict: false,
         source_kind: SourceKind::JavaScript,
         source_goal: SourceGoal::Module,
         items: text
