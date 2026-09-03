@@ -2037,7 +2037,20 @@ fn native_builtin_supported_exports(
         NodeBuiltin::Module => &["createRequire", "default"],
         NodeBuiltin::QueryString => &["decode", "default", "parse"],
         NodeBuiltin::Url => &["URL", "default", "fileURLToPath", "parse", "pathToFileURL"],
-        NodeBuiltin::Buffer => &["Buffer", "constants", "default"],
+        // Every name the shared ABI declares: `Buffer`'s statics are real methods in this
+        // runtime, so there is nothing here to hold an alignment slot for.
+        NodeBuiltin::Buffer => &[
+            "Buffer",
+            "alloc",
+            "allocUnsafe",
+            "allocUnsafeSlow",
+            "byteLength",
+            "concat",
+            "constants",
+            "default",
+            "from",
+            "isBuffer",
+        ],
         NodeBuiltin::AsyncHooks => &["AsyncResource", "default"],
         NodeBuiltin::Crypto => &["createHash", "default", "randomUUID"],
         _ => &[],
@@ -2485,6 +2498,10 @@ exports[3] = parse;
 exports[4] = path_to_file_url;"#,
         ),
         NodeBuiltin::Buffer => Some(
+            // The seven statics are the same method codes the `Buffer` global answers, because
+            // they are the same functions: the interpreter hands `require("node:buffer").alloc`
+            // and `Buffer.alloc` the same value, and two different codes here would be two
+            // different functions to `===`.
             r#"kiln_value constructor = kiln_c99_builtin(KILN_C99_BUILTIN_BUFFER);
 kiln_value constants;
 int status = kiln_c99_new_object(&constants);
@@ -2493,9 +2510,44 @@ status = kiln_c99_put(host, constants, "MAX_STRING_LENGTH", 17, kiln_c99_number(
 if (status != KILN_C99_OK) return status;
 status = kiln_c99_put(host, constructor, "constants", 9, constants, 0, NULL);
 if (status != KILN_C99_OK) return status;
+kiln_value alloc = kiln_c99_method(KILN_C99_METHOD_BUFFER_ALLOC);
+kiln_value byte_length = kiln_c99_method(KILN_C99_METHOD_BUFFER_BYTE_LENGTH);
+kiln_value concat = kiln_c99_method(KILN_C99_METHOD_BUFFER_CONCAT);
+kiln_value from = kiln_c99_method(KILN_C99_METHOD_BUFFER_FROM);
+kiln_value is_buffer = kiln_c99_method(KILN_C99_METHOD_BUFFER_IS_BUFFER);
+kiln_value namespace;
+status = kiln_c99_new_object(&namespace);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "Buffer", 6, constructor, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "alloc", 5, alloc, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "allocUnsafe", 11, alloc, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "allocUnsafeSlow", 15, alloc, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "byteLength", 10, byte_length, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "concat", 6, concat, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "constants", 9, constants, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "from", 4, from, 0, NULL);
+if (status != KILN_C99_OK) return status;
+status = kiln_c99_put(host, namespace, "isBuffer", 8, is_buffer, 0, NULL);
+if (status != KILN_C99_OK) return status;
 exports[0] = constructor;
-exports[1] = constants;
-exports[2] = constructor;"#,
+exports[1] = alloc;
+exports[2] = alloc;
+exports[3] = alloc;
+exports[4] = byte_length;
+exports[5] = concat;
+exports[6] = constants;
+/* `default` is the module namespace, not the constructor: that is what the interpreter answers,
+ * and `typeof require("node:buffer").default` is "object" there. It read "function" here. */
+exports[7] = namespace;
+exports[8] = from;
+exports[9] = is_buffer;"#,
         ),
         NodeBuiltin::AsyncHooks => Some(
             // Slot 0 is `AsyncLocalStorage`. The interpreter has one; this runtime does not,
@@ -8891,6 +8943,15 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
         assert_eq!(report.stdout, b"function\n");
     }
 
+    /// `require("node:buffer")` is the module, and `default` is the module namespace rather than
+    /// the constructor.
+    ///
+    /// This used to assert `buffer.Buffer === buffer.default`, which was true here and false in
+    /// the interpreter -- `default` is the namespace object there, and `typeof` says "object"
+    /// rather than "function". That is the class of divergence this backend is not allowed to
+    /// have, and the assertion was encoding it as the contract. What the two engines really share
+    /// is the identity every `Buffer.isBuffer` shim depends on: whichever way you reach the
+    /// constructor, it is the same value.
     #[test]
     fn native_commonjs_builtin_namespace_is_not_its_default_export() {
         use kiln_module_resolver::NodeRuntimeResolver;
@@ -8903,7 +8964,7 @@ console.log(ready, globalThis.realmMarker, process.realmMarker, Atomics.realmMar
             .expect("write CommonJS package");
         fs::write(
             root.path.join("pkg/index.js"),
-            "const buffer = require('node:buffer'); module.exports = typeof buffer.constants.MAX_STRING_LENGTH === 'number' && buffer.Buffer === buffer.default;",
+            "const buffer = require('node:buffer'); module.exports = typeof buffer.constants.MAX_STRING_LENGTH === 'number' && buffer.Buffer !== buffer.default && buffer.default.Buffer === buffer.Buffer && typeof buffer.from === 'function';",
         )
         .expect("write namespace consumer");
         let entry = root.path.join("main.mjs");

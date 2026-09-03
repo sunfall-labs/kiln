@@ -1,6 +1,6 @@
 {
  "errors": [],
- "native_runs": 558,
+ "native_runs": 572,
  "receivers": {
   "AbortController": {
    "expr": "globalThis.AbortController",
@@ -14,9 +14,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=anonymous receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=anonymous receiver_tag=8"
    },
-   "self_description": "cache failed: corrupt cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/runtime-library/42/42dede4106400ecf50f992fd3f41c4b5a23aa0fdb5d036f653f68d2f042fe1c1: same cache key already contains a different payload",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "AbortSignal": {
@@ -27,12 +27,18 @@
    },
    "kind": "static",
    "native": {
-    "length": "undefined",
     "name": "string \"anonymous\""
    },
-   "native_names": null,
-   "refused": {},
-   "self_description": "cache failed: corrupt cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/runtime-library/42/42dede4106400ecf50f992fd3f41c4b5a23aa0fdb5d036f653f68d2f042fe1c1: same cache key already contains a different payload",
+   "native_names": [
+    "abort",
+    "any",
+    "name",
+    "timeout"
+   ],
+   "refused": {
+    "length": "refusal: instruction=68 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=anonymous receiver_tag=8"
+   },
+   "self_description": null,
    "unreachable": null
   },
   "AggregateError": {
@@ -47,9 +53,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=AggregateError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AggregateError receiver_tag=8"
    },
-   "self_description": "cache failed: corrupt cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/runtime-library/42/42dede4106400ecf50f992fd3f41c4b5a23aa0fdb5d036f653f68d2f042fe1c1: same cache key already contains a different payload",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "AggregateError.prototype": {
@@ -67,8 +73,8 @@
     "constructor"
    ],
    "refused": {
-    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=AggregateError receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=AggregateError receiver_tag=8"
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=AggregateError receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=AggregateError receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -90,7 +96,6 @@
     "@@species": "function",
     "from": "function",
     "isArray": "function",
-    "length": "undefined",
     "name": "string \"Array\"",
     "of": "function",
     "prototype": "object"
@@ -103,7 +108,8 @@
     "prototype"
    ],
    "refused": {
-    "fromAsync": "refusal: instruction=185 operation=GetProperty(fromAsync) detail=GetProperty lookup refused function=Array receiver_tag=8"
+    "fromAsync": "refusal: instruction=185 operation=GetProperty(fromAsync) detail=a member the language puts on this built-in and this backend has not built function=Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Array receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -227,7 +233,7 @@
     "unshift"
    ],
    "refused": {
-    "values": "refusal: instruction=874 operation=GetProperty(values) detail=GetProperty lookup refused function=Array receiver_tag=8"
+    "values": "refusal: instruction=874 operation=GetProperty(values) detail=a member the language puts on this built-in and this backend has not built function=Array receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -243,15 +249,16 @@
    "kind": "static",
    "native": {
     "isView": "function",
-    "length": "undefined",
-    "name": "string \"ArrayBuffer\"",
-    "prototype": "undefined"
+    "name": "string \"ArrayBuffer\""
    },
    "native_names": [
     "isView",
     "name"
    ],
-   "refused": {},
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8"
+   },
    "self_description": null,
    "unreachable": null
   },
@@ -273,10 +280,23 @@
    },
    "kind": "prototype",
    "native": {},
-   "native_names": [],
-   "refused": {},
-   "self_description": null,
-   "unreachable": "native: receiver is undefined"
+   "native_names": null,
+   "refused": {
+    "byteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "detached": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "immutable": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "maxByteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "resizable": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "resize": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "slice": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "sliceToImmutable": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "transfer": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "transferToFixedLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+    "transferToImmutable": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ArrayBuffer receiver_tag=8",
+   "unreachable": null
   },
   "AsyncDisposableStack": {
    "expr": "globalThis.AsyncDisposableStack",
@@ -291,10 +311,10 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
-    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "AsyncDisposableStack.prototype": {
@@ -312,15 +332,15 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "adopt": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
-    "defer": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
-    "disposeAsync": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
-    "disposed": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
-    "move": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
-    "use": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8"
+    "adopt": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
+    "defer": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
+    "disposeAsync": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
+    "disposed": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
+    "move": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
+    "use": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=AsyncDisposableStack receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=AsyncDisposableStack receiver_tag=8",
    "unreachable": null
   },
   "Atomics": {
@@ -344,7 +364,7 @@
    },
    "kind": "static",
    "native": {
-    "@@toStringTag": "undefined",
+    "@@toStringTag": "string \"Atomics\"",
     "add": "function",
     "and": "function",
     "compareExchange": "function",
@@ -395,12 +415,12 @@
    },
    "native_names": null,
    "refused": {
-    "asIntN": "refusal: instruction=45 operation=GetProperty(asIntN) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
-    "asUintN": "refusal: instruction=45 operation=GetProperty(asUintN) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
-    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8"
+    "asIntN": "refusal: instruction=45 operation=GetProperty(asIntN) detail=a member the language puts on this built-in and this backend has not built function=BigInt receiver_tag=8",
+    "asUintN": "refusal: instruction=45 operation=GetProperty(asUintN) detail=a member the language puts on this built-in and this backend has not built function=BigInt receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "BigInt.prototype": {
@@ -415,12 +435,12 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
-    "toLocaleString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
-    "toString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
-    "valueOf": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8"
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt receiver_tag=8",
+    "toLocaleString": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt receiver_tag=8",
+    "toString": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt receiver_tag=8",
+    "valueOf": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt receiver_tag=8",
    "unreachable": null
   },
   "BigInt64Array": {
@@ -439,13 +459,13 @@
    },
    "native_names": null,
    "refused": {
-    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "from": "refusal: instruction=45 operation=GetProperty(from) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "of": "refusal: instruction=68 operation=GetProperty(of) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8"
+    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=a member the language puts on this built-in and this backend has not built function=BigInt64Array receiver_tag=8",
+    "from": "refusal: instruction=45 operation=GetProperty(from) detail=a member the language puts on this built-in and this backend has not built function=BigInt64Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "of": "refusal: instruction=68 operation=GetProperty(of) detail=a member the language puts on this built-in and this backend has not built function=BigInt64Array receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "BigInt64Array.prototype": {
@@ -458,10 +478,10 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8"
+    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
    "unreachable": null
   },
   "BigInt64Array.prototype^": {
@@ -507,43 +527,43 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "at": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "buffer": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "byteLength": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "byteOffset": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "constructor": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "copyWithin": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "entries": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "every": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "fill": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "filter": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "find": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "findIndex": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "findLast": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "findLastIndex": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "forEach": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "includes": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "indexOf": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "join": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "keys": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "lastIndexOf": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "length": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "map": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "reduce": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "reduceRight": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "reverse": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "set": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "slice": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "some": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "sort": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "subarray": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "toReversed": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "toSorted": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "toString": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "values": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
-    "with": "refusal: instruction=10 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8"
+    "at": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "buffer": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "byteLength": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "byteOffset": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "constructor": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "copyWithin": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "entries": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "every": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "fill": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "filter": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "find": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "findIndex": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "findLast": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "findLastIndex": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "forEach": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "includes": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "indexOf": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "join": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "keys": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "lastIndexOf": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "length": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "map": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "reduce": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "reduceRight": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "reverse": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "set": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "slice": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "some": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "sort": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "subarray": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "toReversed": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "toSorted": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "toString": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "values": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
+    "with": "refusal: instruction=10 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=5 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigInt64Array receiver_tag=8",
+   "self_description": "refusal: instruction=5 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigInt64Array receiver_tag=8",
    "unreachable": null
   },
   "BigInt64Array^": {
@@ -565,9 +585,9 @@
     "constructor"
    ],
    "refused": {
-    "length": "refusal: instruction=72 operation=GetProperty(length) detail=GetProperty lookup refused function=Function receiver_tag=8",
-    "name": "refusal: instruction=47 operation=GetProperty(name) detail=GetProperty lookup refused function=Function receiver_tag=8",
-    "prototype": "refusal: instruction=47 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Function receiver_tag=8"
+    "length": "refusal: instruction=72 operation=GetProperty(length) detail=a member the language puts on this built-in and this backend has not built function=Function receiver_tag=8",
+    "name": "refusal: instruction=47 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Function receiver_tag=8",
+    "prototype": "refusal: instruction=47 operation=GetProperty(prototype) detail=a member the language puts on this built-in and this backend has not built function=Function receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -588,13 +608,13 @@
    },
    "native_names": null,
    "refused": {
-    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
-    "from": "refusal: instruction=45 operation=GetProperty(from) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
-    "of": "refusal: instruction=68 operation=GetProperty(of) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
-    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8"
+    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=a member the language puts on this built-in and this backend has not built function=BigUint64Array receiver_tag=8",
+    "from": "refusal: instruction=45 operation=GetProperty(from) detail=a member the language puts on this built-in and this backend has not built function=BigUint64Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigUint64Array receiver_tag=8",
+    "of": "refusal: instruction=68 operation=GetProperty(of) detail=a member the language puts on this built-in and this backend has not built function=BigUint64Array receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigUint64Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "BigUint64Array.prototype": {
@@ -607,10 +627,10 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8"
+    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigUint64Array receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigUint64Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=BigUint64Array receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=BigUint64Array receiver_tag=8",
    "unreachable": null
   },
   "Boolean": {
@@ -626,10 +646,10 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
-    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Boolean receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Boolean receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Boolean.prototype": {
@@ -644,12 +664,12 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
-    "toLocaleString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
-    "toString": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
-    "valueOf": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8"
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Boolean receiver_tag=8",
+    "toLocaleString": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Boolean receiver_tag=8",
+    "toString": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Boolean receiver_tag=8",
+    "valueOf": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Boolean receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Boolean receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Boolean receiver_tag=8",
    "unreachable": null
   },
   "Buffer": {
@@ -675,7 +695,6 @@
     "concat": "function",
     "from": "function",
     "isBuffer": "function",
-    "length": "undefined",
     "name": "string \"Buffer\""
    },
    "native_names": [
@@ -689,7 +708,8 @@
     "name"
    ],
    "refused": {
-    "constants": "refusal: instruction=229 operation=GetProperty(constants) detail=GetProperty lookup refused function=Buffer receiver_tag=8"
+    "constants": "refusal: instruction=229 operation=GetProperty(constants) detail=a member the language puts on this built-in and this backend has not built function=Buffer receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Buffer receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -708,9 +728,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=DataView receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DataView receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "DataView.prototype": {
@@ -789,9 +809,9 @@
     "setUint8"
    ],
    "refused": {
-    "buffer": "refusal: instruction=529 operation=GetProperty(buffer) detail=GetProperty lookup refused function=DataView receiver_tag=8",
-    "byteLength": "refusal: instruction=46 operation=GetProperty(byteLength) detail=GetProperty lookup refused function=DataView receiver_tag=8",
-    "byteOffset": "refusal: instruction=46 operation=GetProperty(byteOffset) detail=GetProperty lookup refused function=DataView receiver_tag=8"
+    "buffer": "refusal: instruction=529 operation=GetProperty(buffer) detail=a member the language puts on this built-in and this backend has not built function=DataView receiver_tag=8",
+    "byteLength": "refusal: instruction=46 operation=GetProperty(byteLength) detail=a member the language puts on this built-in and this backend has not built function=DataView receiver_tag=8",
+    "byteOffset": "refusal: instruction=46 operation=GetProperty(byteOffset) detail=a member the language puts on this built-in and this backend has not built function=DataView receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -809,7 +829,6 @@
    "kind": "static",
    "native": {
     "UTC": "function",
-    "length": "undefined",
     "name": "string \"Date\"",
     "now": "function",
     "parse": "function",
@@ -822,7 +841,9 @@
     "parse",
     "prototype"
    ],
-   "refused": {},
+   "refused": {
+    "length": "refusal: instruction=160 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Date receiver_tag=8"
+   },
    "self_description": null,
    "unreachable": null
   },
@@ -912,38 +933,38 @@
     "toString"
    ],
    "refused": {
-    "getUTCDate": "refusal: instruction=368 operation=GetProperty(getUTCDate) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getUTCDay": "refusal: instruction=46 operation=GetProperty(getUTCDay) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getUTCFullYear": "refusal: instruction=46 operation=GetProperty(getUTCFullYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getUTCHours": "refusal: instruction=46 operation=GetProperty(getUTCHours) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getUTCMilliseconds": "refusal: instruction=46 operation=GetProperty(getUTCMilliseconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getUTCMinutes": "refusal: instruction=46 operation=GetProperty(getUTCMinutes) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getUTCMonth": "refusal: instruction=46 operation=GetProperty(getUTCMonth) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getUTCSeconds": "refusal: instruction=46 operation=GetProperty(getUTCSeconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "getYear": "refusal: instruction=46 operation=GetProperty(getYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setDate": "refusal: instruction=46 operation=GetProperty(setDate) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setFullYear": "refusal: instruction=46 operation=GetProperty(setFullYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setHours": "refusal: instruction=46 operation=GetProperty(setHours) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setMilliseconds": "refusal: instruction=46 operation=GetProperty(setMilliseconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setMinutes": "refusal: instruction=46 operation=GetProperty(setMinutes) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setMonth": "refusal: instruction=46 operation=GetProperty(setMonth) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setSeconds": "refusal: instruction=46 operation=GetProperty(setSeconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setTime": "refusal: instruction=46 operation=GetProperty(setTime) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setUTCDate": "refusal: instruction=46 operation=GetProperty(setUTCDate) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setUTCFullYear": "refusal: instruction=46 operation=GetProperty(setUTCFullYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setUTCHours": "refusal: instruction=46 operation=GetProperty(setUTCHours) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setUTCMilliseconds": "refusal: instruction=46 operation=GetProperty(setUTCMilliseconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setUTCMinutes": "refusal: instruction=46 operation=GetProperty(setUTCMinutes) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setUTCMonth": "refusal: instruction=46 operation=GetProperty(setUTCMonth) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setUTCSeconds": "refusal: instruction=46 operation=GetProperty(setUTCSeconds) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "setYear": "refusal: instruction=46 operation=GetProperty(setYear) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "toDateString": "refusal: instruction=46 operation=GetProperty(toDateString) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "toGMTString": "refusal: instruction=46 operation=GetProperty(toGMTString) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "toLocaleDateString": "refusal: instruction=46 operation=GetProperty(toLocaleDateString) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "toLocaleString": "refusal: instruction=46 operation=GetProperty(toLocaleString) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "toLocaleTimeString": "refusal: instruction=46 operation=GetProperty(toLocaleTimeString) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "toTimeString": "refusal: instruction=46 operation=GetProperty(toTimeString) detail=GetProperty lookup refused function=Date receiver_tag=8",
-    "toUTCString": "refusal: instruction=46 operation=GetProperty(toUTCString) detail=GetProperty lookup refused function=Date receiver_tag=8"
+    "getUTCDate": "refusal: instruction=368 operation=GetProperty(getUTCDate) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getUTCDay": "refusal: instruction=46 operation=GetProperty(getUTCDay) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getUTCFullYear": "refusal: instruction=46 operation=GetProperty(getUTCFullYear) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getUTCHours": "refusal: instruction=46 operation=GetProperty(getUTCHours) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getUTCMilliseconds": "refusal: instruction=46 operation=GetProperty(getUTCMilliseconds) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getUTCMinutes": "refusal: instruction=46 operation=GetProperty(getUTCMinutes) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getUTCMonth": "refusal: instruction=46 operation=GetProperty(getUTCMonth) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getUTCSeconds": "refusal: instruction=46 operation=GetProperty(getUTCSeconds) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "getYear": "refusal: instruction=46 operation=GetProperty(getYear) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setDate": "refusal: instruction=46 operation=GetProperty(setDate) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setFullYear": "refusal: instruction=46 operation=GetProperty(setFullYear) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setHours": "refusal: instruction=46 operation=GetProperty(setHours) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setMilliseconds": "refusal: instruction=46 operation=GetProperty(setMilliseconds) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setMinutes": "refusal: instruction=46 operation=GetProperty(setMinutes) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setMonth": "refusal: instruction=46 operation=GetProperty(setMonth) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setSeconds": "refusal: instruction=46 operation=GetProperty(setSeconds) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setTime": "refusal: instruction=46 operation=GetProperty(setTime) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setUTCDate": "refusal: instruction=46 operation=GetProperty(setUTCDate) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setUTCFullYear": "refusal: instruction=46 operation=GetProperty(setUTCFullYear) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setUTCHours": "refusal: instruction=46 operation=GetProperty(setUTCHours) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setUTCMilliseconds": "refusal: instruction=46 operation=GetProperty(setUTCMilliseconds) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setUTCMinutes": "refusal: instruction=46 operation=GetProperty(setUTCMinutes) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setUTCMonth": "refusal: instruction=46 operation=GetProperty(setUTCMonth) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setUTCSeconds": "refusal: instruction=46 operation=GetProperty(setUTCSeconds) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "setYear": "refusal: instruction=46 operation=GetProperty(setYear) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toDateString": "refusal: instruction=46 operation=GetProperty(toDateString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toGMTString": "refusal: instruction=46 operation=GetProperty(toGMTString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toLocaleDateString": "refusal: instruction=46 operation=GetProperty(toLocaleDateString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toLocaleString": "refusal: instruction=46 operation=GetProperty(toLocaleString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toLocaleTimeString": "refusal: instruction=46 operation=GetProperty(toLocaleTimeString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toTimeString": "refusal: instruction=46 operation=GetProperty(toTimeString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8",
+    "toUTCString": "refusal: instruction=46 operation=GetProperty(toUTCString) detail=a member the language puts on this built-in and this backend has not built function=Date receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -961,10 +982,10 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
-    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "DisposableStack.prototype": {
@@ -982,15 +1003,15 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "adopt": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
-    "defer": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
-    "dispose": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
-    "disposed": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
-    "move": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
-    "use": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8"
+    "adopt": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
+    "defer": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
+    "dispose": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
+    "disposed": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
+    "move": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
+    "use": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=DisposableStack receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=DisposableStack receiver_tag=8",
    "unreachable": null
   },
   "Error": {
@@ -1004,7 +1025,6 @@
    "kind": "static",
    "native": {
     "captureStackTrace": "function",
-    "length": "undefined",
     "name": "string \"Error\""
    },
    "native_names": [
@@ -1013,7 +1033,8 @@
     "prototype"
    ],
    "refused": {
-    "isError": "refusal: instruction=91 operation=GetProperty(isError) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "isError": "refusal: instruction=91 operation=GetProperty(isError) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1038,8 +1059,8 @@
     "valueOf"
    ],
    "refused": {
-    "message": "refusal: instruction=92 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "message": "refusal: instruction=92 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1056,9 +1077,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=EvalError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=EvalError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "EvalError.prototype": {
@@ -1079,8 +1100,8 @@
     "valueOf"
    ],
    "refused": {
-    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1098,10 +1119,10 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
-    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=FinalizationRegistry receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=FinalizationRegistry receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "FinalizationRegistry.prototype": {
@@ -1115,11 +1136,11 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
-    "register": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
-    "unregister": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8"
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=FinalizationRegistry receiver_tag=8",
+    "register": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=FinalizationRegistry receiver_tag=8",
+    "unregister": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=FinalizationRegistry receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=FinalizationRegistry receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=FinalizationRegistry receiver_tag=8",
    "unreachable": null
   },
   "Float16Array": {
@@ -1138,13 +1159,13 @@
    },
    "native_names": null,
    "refused": {
-    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
-    "from": "refusal: instruction=45 operation=GetProperty(from) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
-    "of": "refusal: instruction=68 operation=GetProperty(of) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
-    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8"
+    "BYTES_PER_ELEMENT": "refusal: instruction=45 operation=GetProperty(BYTES_PER_ELEMENT) detail=a member the language puts on this built-in and this backend has not built function=Float16Array receiver_tag=8",
+    "from": "refusal: instruction=45 operation=GetProperty(from) detail=a member the language puts on this built-in and this backend has not built function=Float16Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Float16Array receiver_tag=8",
+    "of": "refusal: instruction=68 operation=GetProperty(of) detail=a member the language puts on this built-in and this backend has not built function=Float16Array receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Float16Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Float16Array.prototype": {
@@ -1157,10 +1178,10 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8"
+    "BYTES_PER_ELEMENT": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Float16Array receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Float16Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=Float16Array receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Float16Array receiver_tag=8",
    "unreachable": null
   },
   "Float32Array": {
@@ -1183,9 +1204,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Float32Array receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Float32Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Float32Array.prototype": {
@@ -1226,9 +1247,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Float64Array receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Float64Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Float64Array.prototype": {
@@ -1263,9 +1284,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Function receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Function receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Function.prototype": {
@@ -1294,8 +1315,8 @@
     "constructor"
    ],
    "refused": {
-    "arguments": "refusal: instruction=138 operation=GetProperty(arguments) detail=GetProperty lookup refused function=Function receiver_tag=8",
-    "caller": "refusal: instruction=46 operation=GetProperty(caller) detail=GetProperty lookup refused function=Function receiver_tag=8"
+    "arguments": "refusal: instruction=138 operation=GetProperty(arguments) detail=a member the language puts on this built-in and this backend has not built function=Function receiver_tag=8",
+    "caller": "refusal: instruction=46 operation=GetProperty(caller) detail=a member the language puts on this built-in and this backend has not built function=Function receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1320,9 +1341,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Int16Array receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Int16Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Int16Array.prototype": {
@@ -1363,9 +1384,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Int32Array receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Int32Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Int32Array.prototype": {
@@ -1406,9 +1427,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Int8Array receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Int8Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Int8Array.prototype": {
@@ -1443,7 +1464,6 @@
    "kind": "static",
    "native": {
     "from": "function",
-    "length": "undefined",
     "name": "string \"Iterator\"",
     "prototype": "object"
    },
@@ -1453,9 +1473,10 @@
     "prototype"
    ],
    "refused": {
-    "concat": "refusal: instruction=114 operation=GetProperty(concat) detail=GetProperty lookup refused function=Iterator receiver_tag=8",
-    "zip": "refusal: instruction=68 operation=GetProperty(zip) detail=GetProperty lookup refused function=Iterator receiver_tag=8",
-    "zipKeyed": "refusal: instruction=45 operation=GetProperty(zipKeyed) detail=GetProperty lookup refused function=Iterator receiver_tag=8"
+    "concat": "refusal: instruction=114 operation=GetProperty(concat) detail=a member the language puts on this built-in and this backend has not built function=Iterator receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Iterator receiver_tag=8",
+    "zip": "refusal: instruction=45 operation=GetProperty(zip) detail=a member the language puts on this built-in and this backend has not built function=Iterator receiver_tag=8",
+    "zipKeyed": "refusal: instruction=45 operation=GetProperty(zipKeyed) detail=a member the language puts on this built-in and this backend has not built function=Iterator receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1518,8 +1539,8 @@
     "stringify"
    ],
    "refused": {
-    "isRawJSON": "refusal: instruction=116 operation=GetProperty(isRawJSON) detail=GetProperty lookup refused function=JSON receiver_tag=8",
-    "rawJSON": "refusal: instruction=45 operation=GetProperty(rawJSON) detail=GetProperty lookup refused function=JSON receiver_tag=8"
+    "isRawJSON": "refusal: instruction=116 operation=GetProperty(isRawJSON) detail=a member the language puts on this built-in and this backend has not built function=JSON receiver_tag=8",
+    "rawJSON": "refusal: instruction=45 operation=GetProperty(rawJSON) detail=a member the language puts on this built-in and this backend has not built function=JSON receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1539,10 +1560,10 @@
    },
    "native_names": null,
    "refused": {
-    "groupBy": "refusal: instruction=45 operation=GetProperty(groupBy) detail=GetProperty lookup refused function=Map receiver_tag=8",
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Map receiver_tag=8"
+    "groupBy": "refusal: instruction=45 operation=GetProperty(groupBy) detail=a member the language puts on this built-in and this backend has not built function=Map receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Map receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Map.prototype": {
@@ -1589,9 +1610,9 @@
     "values"
    ],
    "refused": {
-    "getOrInsert": "refusal: instruction=276 operation=GetProperty(getOrInsert) detail=GetProperty lookup refused function=Map receiver_tag=8",
-    "getOrInsertComputed": "refusal: instruction=46 operation=GetProperty(getOrInsertComputed) detail=GetProperty lookup refused function=Map receiver_tag=8",
-    "size": "refusal: instruction=46 operation=GetProperty(size) detail=GetProperty lookup refused function=Map receiver_tag=8"
+    "getOrInsert": "refusal: instruction=276 operation=GetProperty(getOrInsert) detail=a member the language puts on this built-in and this backend has not built function=Map receiver_tag=8",
+    "getOrInsertComputed": "refusal: instruction=46 operation=GetProperty(getOrInsertComputed) detail=a member the language puts on this built-in and this backend has not built function=Map receiver_tag=8",
+    "size": "refusal: instruction=46 operation=GetProperty(size) detail=a member the language puts on this built-in and this backend has not built function=Map receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1738,7 +1759,7 @@
     "trunc"
    ],
    "refused": {
-    "f16round": "refusal: instruction=1059 operation=GetProperty(f16round) detail=GetProperty lookup refused function=Math receiver_tag=8"
+    "f16round": "refusal: instruction=1059 operation=GetProperty(f16round) detail=a member the language puts on this built-in and this backend has not built function=Math receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1778,7 +1799,6 @@
     "isInteger": "function",
     "isNaN": "function",
     "isSafeInteger": "function",
-    "length": "undefined",
     "name": "string \"Number\"",
     "parseFloat": "function",
     "parseInt": "function",
@@ -1802,7 +1822,9 @@
     "parseInt",
     "prototype"
    ],
-   "refused": {},
+   "refused": {
+    "length": "refusal: instruction=413 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Number receiver_tag=8"
+   },
    "self_description": null,
    "unreachable": null
   },
@@ -1830,8 +1852,8 @@
     "valueOf"
    ],
    "refused": {
-    "toExponential": "refusal: instruction=138 operation=GetProperty(toExponential) detail=GetProperty lookup refused function=Number receiver_tag=8",
-    "toPrecision": "refusal: instruction=46 operation=GetProperty(toPrecision) detail=GetProperty lookup refused function=Number receiver_tag=8"
+    "toExponential": "refusal: instruction=138 operation=GetProperty(toExponential) detail=a member the language puts on this built-in and this backend has not built function=Number receiver_tag=8",
+    "toPrecision": "refusal: instruction=46 operation=GetProperty(toPrecision) detail=a member the language puts on this built-in and this backend has not built function=Number receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1885,7 +1907,6 @@
     "isExtensible": "function",
     "isFrozen": "function",
     "keys": "function",
-    "length": "undefined",
     "name": "string \"Object\"",
     "preventExtensions": "function",
     "prototype": "object",
@@ -1917,9 +1938,10 @@
     "values"
    ],
    "refused": {
-    "groupBy": "refusal: instruction=551 operation=GetProperty(groupBy) detail=GetProperty lookup refused function=Object receiver_tag=8",
-    "isSealed": "refusal: instruction=45 operation=GetProperty(isSealed) detail=GetProperty lookup refused function=Object receiver_tag=8",
-    "seal": "refusal: instruction=68 operation=GetProperty(seal) detail=GetProperty lookup refused function=Object receiver_tag=8"
+    "groupBy": "refusal: instruction=551 operation=GetProperty(groupBy) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
+    "isSealed": "refusal: instruction=45 operation=GetProperty(isSealed) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Object receiver_tag=8",
+    "seal": "refusal: instruction=45 operation=GetProperty(seal) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1960,11 +1982,11 @@
     "valueOf"
    ],
    "refused": {
-    "__defineGetter__": "refusal: instruction=207 operation=GetProperty(__defineGetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
-    "__defineSetter__": "refusal: instruction=46 operation=GetProperty(__defineSetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
-    "__lookupGetter__": "refusal: instruction=46 operation=GetProperty(__lookupGetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
-    "__lookupSetter__": "refusal: instruction=46 operation=GetProperty(__lookupSetter__) detail=GetProperty lookup refused function=Object receiver_tag=8",
-    "__proto__": "refusal: instruction=46 operation=GetProperty(__proto__) detail=GetProperty lookup refused function=Object receiver_tag=8"
+    "__defineGetter__": "refusal: instruction=207 operation=GetProperty(__defineGetter__) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
+    "__defineSetter__": "refusal: instruction=46 operation=GetProperty(__defineSetter__) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
+    "__lookupGetter__": "refusal: instruction=46 operation=GetProperty(__lookupGetter__) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
+    "__lookupSetter__": "refusal: instruction=46 operation=GetProperty(__lookupSetter__) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8",
+    "__proto__": "refusal: instruction=46 operation=GetProperty(__proto__) detail=a member the language puts on this built-in and this backend has not built function=Object receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -1989,7 +2011,6 @@
     "all": "function",
     "allSettled": "function",
     "any": "function",
-    "length": "undefined",
     "name": "string \"Promise\"",
     "prototype": "object",
     "race": "function",
@@ -2009,7 +2030,8 @@
     "withResolvers"
    ],
    "refused": {
-    "try": "refusal: instruction=275 operation=GetProperty(try) detail=GetProperty lookup refused function=Promise receiver_tag=8"
+    "length": "refusal: instruction=252 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Promise receiver_tag=8",
+    "try": "refusal: instruction=45 operation=GetProperty(try) detail=a member the language puts on this built-in and this backend has not built function=Promise receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2048,7 +2070,6 @@
    },
    "kind": "static",
    "native": {
-    "length": "undefined",
     "name": "string \"Proxy\"",
     "revocable": "function"
    },
@@ -2056,7 +2077,9 @@
     "name",
     "revocable"
    ],
-   "refused": {},
+   "refused": {
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Proxy receiver_tag=8"
+   },
    "self_description": null,
    "unreachable": null
   },
@@ -2072,9 +2095,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=RangeError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=RangeError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "RangeError.prototype": {
@@ -2095,8 +2118,8 @@
     "valueOf"
    ],
    "refused": {
-    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2113,9 +2136,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=ReferenceError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=ReferenceError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "ReferenceError.prototype": {
@@ -2136,8 +2159,8 @@
     "valueOf"
    ],
    "refused": {
-    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2183,11 +2206,11 @@
     "set"
    ],
    "refused": {
-    "defineProperty": "refusal: instruction=254 operation=GetProperty(defineProperty) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
-    "getPrototypeOf": "refusal: instruction=45 operation=GetProperty(getPrototypeOf) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
-    "isExtensible": "refusal: instruction=45 operation=GetProperty(isExtensible) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
-    "preventExtensions": "refusal: instruction=45 operation=GetProperty(preventExtensions) detail=GetProperty lookup refused function=Reflect receiver_tag=8",
-    "setPrototypeOf": "refusal: instruction=45 operation=GetProperty(setPrototypeOf) detail=GetProperty lookup refused function=Reflect receiver_tag=8"
+    "defineProperty": "refusal: instruction=254 operation=GetProperty(defineProperty) detail=a member the language puts on this built-in and this backend has not built function=Reflect receiver_tag=8",
+    "getPrototypeOf": "refusal: instruction=45 operation=GetProperty(getPrototypeOf) detail=a member the language puts on this built-in and this backend has not built function=Reflect receiver_tag=8",
+    "isExtensible": "refusal: instruction=45 operation=GetProperty(isExtensible) detail=a member the language puts on this built-in and this backend has not built function=Reflect receiver_tag=8",
+    "preventExtensions": "refusal: instruction=45 operation=GetProperty(preventExtensions) detail=a member the language puts on this built-in and this backend has not built function=Reflect receiver_tag=8",
+    "setPrototypeOf": "refusal: instruction=45 operation=GetProperty(setPrototypeOf) detail=a member the language puts on this built-in and this backend has not built function=Reflect receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2207,10 +2230,10 @@
    },
    "native_names": null,
    "refused": {
-    "escape": "refusal: instruction=45 operation=GetProperty(escape) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=RegExp receiver_tag=8"
+    "escape": "refusal: instruction=45 operation=GetProperty(escape) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=RegExp receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "RegExp.prototype": {
@@ -2245,16 +2268,16 @@
     "toString"
    ],
    "refused": {
-    "dotAll": "refusal: instruction=138 operation=GetProperty(dotAll) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "flags": "refusal: instruction=46 operation=GetProperty(flags) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "global": "refusal: instruction=46 operation=GetProperty(global) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "hasIndices": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/linked-artifact/8b/8bb76d93c3be50453a75d376b22db6c7d9e96de784dd6578abc857e8b794db7b: No such file or directory (os error 2)",
-    "ignoreCase": "refusal: instruction=46 operation=GetProperty(ignoreCase) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "multiline": "refusal: instruction=46 operation=GetProperty(multiline) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "source": "refusal: instruction=46 operation=GetProperty(source) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "sticky": "refusal: instruction=46 operation=GetProperty(sticky) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "unicode": "refusal: instruction=46 operation=GetProperty(unicode) detail=GetProperty lookup refused function=RegExp receiver_tag=8",
-    "unicodeSets": "refusal: instruction=46 operation=GetProperty(unicodeSets) detail=GetProperty lookup refused function=RegExp receiver_tag=8"
+    "dotAll": "refusal: instruction=138 operation=GetProperty(dotAll) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "flags": "refusal: instruction=46 operation=GetProperty(flags) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "global": "refusal: instruction=46 operation=GetProperty(global) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "hasIndices": "refusal: instruction=46 operation=GetProperty(hasIndices) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "ignoreCase": "refusal: instruction=46 operation=GetProperty(ignoreCase) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "multiline": "refusal: instruction=46 operation=GetProperty(multiline) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "source": "refusal: instruction=46 operation=GetProperty(source) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "sticky": "refusal: instruction=46 operation=GetProperty(sticky) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "unicode": "refusal: instruction=46 operation=GetProperty(unicode) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8",
+    "unicodeSets": "refusal: instruction=46 operation=GetProperty(unicodeSets) detail=a member the language puts on this built-in and this backend has not built function=RegExp receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2273,9 +2296,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Set receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Set receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Set.prototype": {
@@ -2325,14 +2348,14 @@
     "values"
    ],
    "refused": {
-    "difference": "refusal: instruction=253 operation=GetProperty(difference) detail=GetProperty lookup refused function=Set receiver_tag=8",
-    "intersection": "refusal: instruction=46 operation=GetProperty(intersection) detail=GetProperty lookup refused function=Set receiver_tag=8",
-    "isDisjointFrom": "refusal: instruction=46 operation=GetProperty(isDisjointFrom) detail=GetProperty lookup refused function=Set receiver_tag=8",
-    "isSubsetOf": "refusal: instruction=46 operation=GetProperty(isSubsetOf) detail=GetProperty lookup refused function=Set receiver_tag=8",
-    "isSupersetOf": "refusal: instruction=46 operation=GetProperty(isSupersetOf) detail=GetProperty lookup refused function=Set receiver_tag=8",
-    "size": "refusal: instruction=46 operation=GetProperty(size) detail=GetProperty lookup refused function=Set receiver_tag=8",
-    "symmetricDifference": "refusal: instruction=46 operation=GetProperty(symmetricDifference) detail=GetProperty lookup refused function=Set receiver_tag=8",
-    "union": "refusal: instruction=46 operation=GetProperty(union) detail=GetProperty lookup refused function=Set receiver_tag=8"
+    "difference": "refusal: instruction=253 operation=GetProperty(difference) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
+    "intersection": "refusal: instruction=46 operation=GetProperty(intersection) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
+    "isDisjointFrom": "refusal: instruction=46 operation=GetProperty(isDisjointFrom) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
+    "isSubsetOf": "refusal: instruction=46 operation=GetProperty(isSubsetOf) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
+    "isSupersetOf": "refusal: instruction=46 operation=GetProperty(isSupersetOf) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
+    "size": "refusal: instruction=46 operation=GetProperty(size) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
+    "symmetricDifference": "refusal: instruction=46 operation=GetProperty(symmetricDifference) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8",
+    "union": "refusal: instruction=46 operation=GetProperty(union) detail=a member the language puts on this built-in and this backend has not built function=Set receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2386,10 +2409,10 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
-    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "SharedArrayBuffer.prototype": {
@@ -2406,14 +2429,14 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "byteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
-    "grow": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
-    "growable": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
-    "maxByteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
-    "slice": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8"
+    "byteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8",
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8",
+    "grow": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8",
+    "growable": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8",
+    "maxByteLength": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8",
+    "slice": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SharedArrayBuffer receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SharedArrayBuffer receiver_tag=8",
    "unreachable": null
   },
   "String": {
@@ -2429,7 +2452,6 @@
    "kind": "static",
    "native": {
     "fromCharCode": "function",
-    "length": "undefined",
     "name": "string \"String\"",
     "prototype": "object",
     "raw": "function"
@@ -2441,7 +2463,8 @@
     "raw"
    ],
    "refused": {
-    "fromCodePoint": "refusal: instruction=137 operation=GetProperty(fromCodePoint) detail=GetProperty lookup refused function=String receiver_tag=8"
+    "fromCodePoint": "refusal: instruction=137 operation=GetProperty(fromCodePoint) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=String receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2528,7 +2551,7 @@
     "startsWith": "function",
     "substr": "function",
     "substring": "function",
-    "toLocaleString": "undefined",
+    "toLocaleString": "function",
     "toLowerCase": "function",
     "toString": "function",
     "toUpperCase": "function",
@@ -2536,7 +2559,7 @@
     "trimEnd": "function",
     "trimStart": "function",
     "valueOf": "function",
-    "values": "undefined"
+    "values": "function"
    },
    "native_names": [
     "at",
@@ -2564,32 +2587,34 @@
     "startsWith",
     "substr",
     "substring",
+    "toLocaleString",
     "toLowerCase",
     "toString",
     "toUpperCase",
     "trim",
     "trimEnd",
     "trimStart",
-    "valueOf"
+    "valueOf",
+    "values"
    ],
    "refused": {
-    "anchor": "refusal: instruction=782 operation=GetProperty(anchor) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "big": "refusal: instruction=46 operation=GetProperty(big) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "blink": "refusal: instruction=46 operation=GetProperty(blink) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "bold": "refusal: instruction=46 operation=GetProperty(bold) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "fixed": "refusal: instruction=46 operation=GetProperty(fixed) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "fontcolor": "refusal: instruction=46 operation=GetProperty(fontcolor) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "fontsize": "refusal: instruction=46 operation=GetProperty(fontsize) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "italics": "refusal: instruction=46 operation=GetProperty(italics) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "link": "refusal: instruction=46 operation=GetProperty(link) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "small": "refusal: instruction=46 operation=GetProperty(small) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "strike": "refusal: instruction=46 operation=GetProperty(strike) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "sub": "refusal: instruction=46 operation=GetProperty(sub) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "sup": "refusal: instruction=46 operation=GetProperty(sup) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "toLocaleLowerCase": "refusal: instruction=46 operation=GetProperty(toLocaleLowerCase) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "toLocaleUpperCase": "refusal: instruction=69 operation=GetProperty(toLocaleUpperCase) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "trimLeft": "refusal: instruction=46 operation=GetProperty(trimLeft) detail=GetProperty lookup refused function=String receiver_tag=8",
-    "trimRight": "refusal: instruction=46 operation=GetProperty(trimRight) detail=GetProperty lookup refused function=String receiver_tag=8"
+    "anchor": "refusal: instruction=828 operation=GetProperty(anchor) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "big": "refusal: instruction=46 operation=GetProperty(big) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "blink": "refusal: instruction=46 operation=GetProperty(blink) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "bold": "refusal: instruction=46 operation=GetProperty(bold) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "fixed": "refusal: instruction=46 operation=GetProperty(fixed) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "fontcolor": "refusal: instruction=46 operation=GetProperty(fontcolor) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "fontsize": "refusal: instruction=46 operation=GetProperty(fontsize) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "italics": "refusal: instruction=46 operation=GetProperty(italics) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "link": "refusal: instruction=46 operation=GetProperty(link) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "small": "refusal: instruction=46 operation=GetProperty(small) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "strike": "refusal: instruction=46 operation=GetProperty(strike) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "sub": "refusal: instruction=46 operation=GetProperty(sub) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "sup": "refusal: instruction=46 operation=GetProperty(sup) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "toLocaleLowerCase": "refusal: instruction=46 operation=GetProperty(toLocaleLowerCase) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "toLocaleUpperCase": "refusal: instruction=46 operation=GetProperty(toLocaleUpperCase) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "trimLeft": "refusal: instruction=46 operation=GetProperty(trimLeft) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8",
+    "trimRight": "refusal: instruction=46 operation=GetProperty(trimRight) detail=a member the language puts on this built-in and this backend has not built function=String receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2606,9 +2631,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SuppressedError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "SuppressedError.prototype": {
@@ -2622,11 +2647,11 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8",
-    "message": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8",
-    "name": "refusal: instruction=9 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8"
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SuppressedError receiver_tag=8",
+    "message": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SuppressedError receiver_tag=8",
+    "name": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SuppressedError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=SuppressedError receiver_tag=8",
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SuppressedError receiver_tag=8",
    "unreachable": null
   },
   "Symbol": {
@@ -2659,11 +2684,9 @@
     "isConcatSpreadable": "symbol",
     "iterator": "symbol",
     "keyFor": "function",
-    "length": "undefined",
     "match": "symbol",
     "matchAll": "symbol",
     "name": "string \"Symbol\"",
-    "prototype": "undefined",
     "replace": "symbol",
     "search": "symbol",
     "species": "symbol",
@@ -2690,7 +2713,10 @@
     "toStringTag",
     "unscopables"
    ],
-   "refused": {},
+   "refused": {
+    "length": "refusal: instruction=413 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Symbol receiver_tag=8",
+    "prototype": "refusal: instruction=45 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Symbol receiver_tag=8"
+   },
    "self_description": null,
    "unreachable": null
   },
@@ -2704,10 +2730,15 @@
    },
    "kind": "prototype",
    "native": {},
-   "native_names": [],
-   "refused": {},
-   "self_description": null,
-   "unreachable": "native: receiver is undefined"
+   "native_names": null,
+   "refused": {
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Symbol receiver_tag=8",
+    "toLocaleString": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Symbol receiver_tag=8",
+    "toString": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Symbol receiver_tag=8",
+    "valueOf": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Symbol receiver_tag=8"
+   },
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Symbol receiver_tag=8",
+   "unreachable": null
   },
   "SyntaxError": {
    "expr": "globalThis.SyntaxError",
@@ -2721,9 +2752,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=SyntaxError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=SyntaxError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "SyntaxError.prototype": {
@@ -2744,8 +2775,8 @@
     "valueOf"
    ],
    "refused": {
-    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2762,9 +2793,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=TextDecoder receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=TextDecoder receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "TextEncoder": {
@@ -2779,9 +2810,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=anonymous receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=anonymous receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "TypeError": {
@@ -2796,9 +2827,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=TypeError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=TypeError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "TypeError.prototype": {
@@ -2819,8 +2850,8 @@
     "valueOf"
    ],
    "refused": {
-    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2837,9 +2868,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=URIError receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=URIError receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "URIError.prototype": {
@@ -2860,8 +2891,8 @@
     "valueOf"
    ],
    "refused": {
-    "message": "refusal: instruction=69 operation=GetProperty(message) detail=GetProperty lookup refused function=Error receiver_tag=8",
-    "name": "refusal: instruction=46 operation=GetProperty(name) detail=GetProperty lookup refused function=Error receiver_tag=8"
+    "message": "refusal: instruction=69 operation=GetProperty(message) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8",
+    "name": "refusal: instruction=46 operation=GetProperty(name) detail=a member the language puts on this built-in and this backend has not built function=Error receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -2878,9 +2909,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=URL receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=URL receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Uint16Array": {
@@ -2903,9 +2934,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint16Array receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Uint16Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Uint16Array.prototype": {
@@ -2946,9 +2977,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint32Array receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Uint32Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Uint32Array.prototype": {
@@ -2991,11 +3022,11 @@
    },
    "native_names": null,
    "refused": {
-    "fromBase64": "refusal: instruction=91 operation=GetProperty(fromBase64) detail=GetProperty lookup refused function=Uint8Array receiver_tag=8",
-    "fromHex": "refusal: instruction=45 operation=GetProperty(fromHex) detail=GetProperty lookup refused function=Uint8Array receiver_tag=8",
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint8Array receiver_tag=8"
+    "fromBase64": "refusal: instruction=91 operation=GetProperty(fromBase64) detail=a member the language puts on this built-in and this backend has not built function=Uint8Array receiver_tag=8",
+    "fromHex": "refusal: instruction=45 operation=GetProperty(fromHex) detail=a member the language puts on this built-in and this backend has not built function=Uint8Array receiver_tag=8",
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Uint8Array receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Uint8Array.prototype": {
@@ -3011,16 +3042,17 @@
    "kind": "prototype",
    "native": {
     "BYTES_PER_ELEMENT": "number 1",
-    "constructor": "function",
-    "setFromBase64": "undefined",
-    "setFromHex": "undefined",
-    "toBase64": "undefined",
-    "toHex": "undefined"
+    "constructor": "function"
    },
    "native_names": [
     "constructor"
    ],
-   "refused": {},
+   "refused": {
+    "setFromBase64": "refusal: instruction=92 operation=GetProperty(setFromBase64) detail=a typed-array member this backend has not implemented function=Uint8Array receiver_tag=8",
+    "setFromHex": "refusal: instruction=46 operation=GetProperty(setFromHex) detail=a typed-array member this backend has not implemented function=Uint8Array receiver_tag=8",
+    "toBase64": "refusal: instruction=46 operation=GetProperty(toBase64) detail=a typed-array member this backend has not implemented function=Uint8Array receiver_tag=8",
+    "toHex": "refusal: instruction=46 operation=GetProperty(toHex) detail=a typed-array member this backend has not implemented function=Uint8Array receiver_tag=8"
+   },
    "self_description": null,
    "unreachable": null
   },
@@ -3044,9 +3076,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=91 operation=GetProperty(length) detail=GetProperty lookup refused function=Uint8ClampedArray receiver_tag=8"
+    "length": "refusal: instruction=91 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=Uint8ClampedArray receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "Uint8ClampedArray.prototype": {
@@ -3081,9 +3113,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=WeakMap receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=WeakMap receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "WeakMap.prototype": {
@@ -3114,8 +3146,8 @@
     "set"
    ],
    "refused": {
-    "getOrInsert": "refusal: instruction=161 operation=GetProperty(getOrInsert) detail=GetProperty lookup refused function=WeakMap receiver_tag=8",
-    "getOrInsertComputed": "refusal: instruction=46 operation=GetProperty(getOrInsertComputed) detail=GetProperty lookup refused function=WeakMap receiver_tag=8"
+    "getOrInsert": "refusal: instruction=161 operation=GetProperty(getOrInsert) detail=a member the language puts on this built-in and this backend has not built function=WeakMap receiver_tag=8",
+    "getOrInsertComputed": "refusal: instruction=46 operation=GetProperty(getOrInsertComputed) detail=a member the language puts on this built-in and this backend has not built function=WeakMap receiver_tag=8"
    },
    "self_description": null,
    "unreachable": null
@@ -3133,10 +3165,10 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=WeakRef receiver_tag=8",
-    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=GetProperty lookup refused function=WeakRef receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=WeakRef receiver_tag=8",
+    "prototype": "refusal: instruction=68 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=WeakRef receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "WeakRef.prototype": {
@@ -3149,11 +3181,11 @@
    "native": {},
    "native_names": null,
    "refused": {
-    "constructor": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/48/48679765afccd92f1acb1c4e5558d8b448a47acb8b126a059008ca896246a7a7: No such file or directory (os error 2)",
-    "deref": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/48/48679765afccd92f1acb1c4e5558d8b448a47acb8b126a059008ca896246a7a7: No such file or directory (os error 2)"
+    "constructor": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=WeakRef receiver_tag=8",
+    "deref": "refusal: instruction=9 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=WeakRef receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=GetProperty lookup refused function=WeakRef receiver_tag=8",
-   "unreachable": "native: cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/48/48679765afccd92f1acb1c4e5558d8b448a47acb8b126a059008ca896246a7a7: No such file or directory (os error 2)"
+   "self_description": "refusal: instruction=4 operation=GetProperty(prototype) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=WeakRef receiver_tag=8",
+   "unreachable": null
   },
   "WeakSet": {
    "expr": "globalThis.WeakSet",
@@ -3164,14 +3196,14 @@
    },
    "kind": "static",
    "native": {
-    "name": "string \"WeakSet\""
+    "name": "string \"WeakSet\"",
+    "prototype": "object"
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=WeakSet receiver_tag=8",
-    "prototype": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/native-object/68/6800b304dff9c83c4830428b0efecba451300e24fdf352c955e8dc9feb8d279e: No such file or directory (os error 2)"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=WeakSet receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "WeakSet.prototype": {
@@ -3213,7 +3245,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3230,7 +3262,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3247,7 +3279,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3289,7 +3321,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3306,7 +3338,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3323,7 +3355,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "cache failed: could not install cache artifact /Users/alee/Developer/Personal/kiln/.claude/worktrees/agent-ab1e765a735cc9898/.kiln/cache/generated-c/da/da8861a2b645b6ea9528d601e20b5b20b9a80b836d2b2ea3ce912a7c5cd3d177: No such file or directory (os error 2)"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3340,7 +3372,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3357,7 +3389,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3374,9 +3406,9 @@
    },
    "native_names": null,
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused function=eval receiver_tag=8"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a built-in callable's own `length` or `prototype`, which this backend does not model for this built-in function=eval receiver_tag=8"
    },
-   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=CallMethod invocation refused receiver_tag=11",
+   "self_description": "refusal: instruction=4 operation=CallMethod(getOwnPropertyNames) detail=own keys of a built-in whose statics are computed from its kind rather than declared receiver_tag=8",
    "unreachable": null
   },
   "globalThis": {
@@ -3674,7 +3706,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3691,7 +3723,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3708,7 +3740,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=49 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=49 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -3736,30 +3768,41 @@
   "node:buffer": {
    "expr": "require(\"node:buffer\")",
    "interpreted": {
+    "Buffer": "function",
     "alloc": "function",
     "allocUnsafe": "function",
     "allocUnsafeSlow": "function",
     "byteLength": "function",
     "concat": "function",
     "constants": "object",
+    "default": "object",
     "from": "function",
     "isBuffer": "function"
    },
    "kind": "namespace",
    "native": {
-    "alloc": "undefined",
-    "allocUnsafe": "undefined",
-    "allocUnsafeSlow": "undefined",
-    "byteLength": "undefined",
-    "concat": "undefined",
+    "Buffer": "function",
+    "alloc": "function",
+    "allocUnsafe": "function",
+    "allocUnsafeSlow": "function",
+    "byteLength": "function",
+    "concat": "function",
     "constants": "object",
-    "from": "undefined",
-    "isBuffer": "undefined"
+    "default": "object",
+    "from": "function",
+    "isBuffer": "function"
    },
    "native_names": [
     "Buffer",
+    "alloc",
+    "allocUnsafe",
+    "allocUnsafeSlow",
+    "byteLength",
+    "concat",
     "constants",
-    "default"
+    "default",
+    "from",
+    "isBuffer"
    ],
    "refused": {},
    "self_description": null,
@@ -3839,7 +3882,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=49 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=49 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -4382,7 +4425,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -4399,7 +4442,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -4416,7 +4459,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -4433,7 +4476,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -4450,7 +4493,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -4467,7 +4510,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null
@@ -4484,7 +4527,7 @@
    },
    "native_names": [],
    "refused": {
-    "length": "refusal: instruction=45 operation=GetProperty(length) detail=GetProperty lookup refused receiver_tag=11"
+    "length": "refusal: instruction=45 operation=GetProperty(length) detail=a member of a native method other than name receiver_tag=11"
    },
    "self_description": null,
    "unreachable": null

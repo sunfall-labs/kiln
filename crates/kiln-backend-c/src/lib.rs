@@ -1937,8 +1937,13 @@ builtin_backlog! {
      "refused by name: shared memory has no representation here"),
     ("Atomics", "xor",
      "refused by name: shared memory has no representation here"),
+    // The one member of `Atomics` that is only a name rather than a shared-memory operation, and
+    // the realm's Atomics object answers it. It stays a row here because `BUILTIN_SURFACE` has no
+    // `Atomics` built-in to hang it on: the object is built at run time by
+    // `kiln_c99_atomics_object`, not dispatched through the table.
     ("Atomics", "@@toStringTag",
-     "refused by name: shared memory has no representation here"),
+     "answered by the realm's Atomics object rather than by a surface row; there is no Atomics \
+              built-in constant for a row to name"),
 }
 
 const fn surface_answers(surface: &[BuiltinMember], global: &str, member: &str) -> bool {
@@ -2095,6 +2100,113 @@ const fn internal_refusal_sites(rows: &[InternalRefusal]) -> usize {
     total
 }
 
+/// One prelude function's `KILN_C99_ABSENT` sites, and what proves the name really is absent.
+///
+/// The twin of [`InternalRefusal`], and it exists for the same reason: an answer a gate cannot
+/// tell from an oversight is an answer nobody has to justify.
+struct AbsentAnswer {
+    /// The prelude function holding the sites.
+    function: &'static str,
+    /// How many `KILN_C99_ABSENT` sites it holds.
+    sites: usize,
+    /// What makes `undefined` the right answer there rather than a silent wrong one.
+    proved_by: &'static str,
+}
+
+/// Every place the emitted prelude answers a read with `undefined`, by the function that holds it.
+///
+/// THE CLASS THIS EXISTS TO STOP. The native backend refuses what it has not built, which is the
+/// right instinct -- but a read that answers `undefined` refuses nothing, and `undefined` is what
+/// `typeof x.member === "function"` walks past. A bundled `postcss` died on `path.dirname` for
+/// weeks that way, and a sweep on 2026-09-02 found thirty more: `Buffer.alloc` off
+/// `require("node:buffer")`, `ArrayBuffer.prototype`, `Symbol.prototype`,
+/// `String.prototype.values`, `Uint8Array.prototype.toBase64`, `Array.length`. Every one was a
+/// place where the *membership predicate* behind an `undefined` answer was short, and no build and
+/// no test could see it, because the wrong branch and the right branch look identical from inside.
+///
+/// So each row names the predicate that decides. Adding a site without a row fails the build; so
+/// does deleting a predicate's last site and leaving the row. `absent_answers_are_where_they_say`
+/// checks the half a `const` cannot -- that the sites are in the functions claimed here.
+const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
+    AbsentAnswer {
+        function: "kiln_c99_callable_store",
+        sites: 4,
+        proved_by: "a callable with no property store has no own member at all, so there is no \
+                    list to be short of",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_get_with_receiver",
+        sites: 1,
+        proved_by: "an accessor with no getter: the language defines that read as undefined",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_store_get",
+        sites: 1,
+        proved_by: "an accessor with no getter: the language defines that read as undefined",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_get_own_kind",
+        sites: 19,
+        proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
+                    kiln_c99_is_string_member, kiln_c99_is_date_member, \
+                    kiln_c99_is_collection_member, kiln_c99_is_array_buffer_member, \
+                    kiln_c99_is_typed_array_member, and BUILTIN_SURFACE plus \
+                    BUILTIN_SURFACE_BACKLOG for the table-driven built-ins. These are the lists \
+                    the two engines can disagree about, and \
+                    scripts/native-surface-inventory.py --gate is what measures them",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_get_ikey",
+        sites: 2,
+        proved_by: "a hidden runtime slot no program can name, and -- THE WEAKEST ROW HERE -- a \
+                    well-known symbol whose read reached a refusal. That second one is a \
+                    catch-all rather than a list: a symbol probe must not stop a program \
+                    (`kiln_c99_to_primitive` asks every reference for `@@toPrimitive`), so a \
+                    refusal on a `@@` key becomes `undefined`, and a symbol the receiver really \
+                    does own but this backend has not wired is swallowed with it. \
+                    `Array.prototype[Symbol.iterator]` was exactly that until 2026-09-02. Each \
+                    receiver that owns a well-known symbol has to answer it before the read gets \
+                    here; the inventory gate is what finds the ones that do not",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_get_computed",
+        sites: 4,
+        proved_by: "an index past the end and reserved slots nobody set: absence by position \
+                    rather than by name, so no list decides it",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_iso_string",
+        sites: 1,
+        proved_by: "not a member read at all: an instant with no ISO spelling, whose caller \
+                    decides between a throw and a null",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_node_diagnostics",
+        sites: 1,
+        proved_by: "not a member read at all: `channel.publish` returns undefined",
+    },
+    AbsentAnswer {
+        function: "kiln_c99_node_util",
+        sites: 1,
+        proved_by: "not a member read at all: the `debuglog` no-op returns undefined",
+    },
+];
+
+const fn absent_answer_sites(rows: &[AbsentAnswer]) -> usize {
+    let mut total = 0;
+    let mut index = 0;
+    while index < rows.len() {
+        assert!(
+            !rows[index].proved_by.is_empty() && !rows[index].function.is_empty(),
+            "an ABSENT_ANSWER_SITES row does not say what proves the name absent, which cannot be \
+             told from a silent wrong answer somebody did not notice"
+        );
+        total += rows[index].sites;
+        index += 1;
+    }
+    total
+}
+
 const fn bytes_match_at(bytes: &[u8], at: usize, needle: &[u8]) -> bool {
     if at + needle.len() > bytes.len() {
         return false;
@@ -2129,7 +2241,16 @@ const fn refusal_scan_shift(window_end: u8) -> usize {
     }
 }
 
-/// A refusal in the emitted prelude names what it lacked, or says which caller converts it.
+/// A refusal in the emitted prelude names what it lacked, and an `undefined` answer names what
+/// proves the name absent.
+///
+/// TWO HALVES OF ONE RULE, WHICH IS WHY THEY SHARE A SCAN. A read either says "the language puts
+/// a member here and this backend has not built it", which stops the program at the cause, or "the
+/// language puts nothing here", whose answer is `undefined` and stops nothing. Getting the second
+/// one when the first was true is the expensive failure: `typeof x.member === "function"` takes
+/// the other branch and the program dies three frames later naming nothing. Thirty of those were
+/// measured on 2026-09-02, so `KILN_C99_ABSENT` and `ABSENT_ANSWER_SITES` now impose on the
+/// `undefined` side the ceremony `KILN_C99_REFUSE` already imposed on the refusing side.
 ///
 /// THIS IS THE GATE, AND IT IS A COMPILE ERROR RATHER THAN A TEST FAILURE, for the reason ADR 0043
 /// gives about the builtin surface: a rule somebody has to remember to check is a rule that holds
@@ -2148,10 +2269,11 @@ const fn refusal_scan_shift(window_end: u8) -> usize {
 /// run the test that would explain -- so the message carries the `grep` that names the line
 /// instead. `refusal_sites_name_themselves` is the standing check, and it sees the half a `const`
 /// cannot: that the internal-status sites are in the functions `REFUSAL_INTERNAL_STATUS` claims.
-const fn assert_refusals_name_themselves(source: &str, internal_sites: usize) {
+const fn assert_refusals_name_themselves(source: &str, internal_sites: usize, absent_sites: usize) {
     let bytes = source.as_bytes();
     let mut at = 0;
     let mut internal = 0;
+    let mut absent = 0;
     while at + 9 <= bytes.len() {
         if bytes[at] != b'K' || !bytes_match_at(bytes, at, b"KILN_C99_") {
             at += refusal_scan_shift(bytes[at + 8]);
@@ -2180,6 +2302,43 @@ const fn assert_refusals_name_themselves(source: &str, internal_sites: usize) {
                     "a KILN_C99_REFUSE_NAMED site has no reason literal; say what the site lacked"
                 );
             }
+            /* An `undefined` answer must come through KILN_C99_ABSENT, which carries the reason
+             * the name really is absent. Written by hand it carries nothing, and a short
+             * membership list then reads as `undefined` where the interpreter has a value -- the
+             * one wrong answer this backend is not allowed to give (ADR 0042). The check runs off
+             * `return KILN_C99_OK;`, which the scan already stops at, and looks backwards. */
+            if bytes_match_at(bytes, at, b"KILN_C99_OK;")
+                && at >= 7
+                && bytes_match_at(bytes, at - 7, b"return ")
+            {
+                let mut back = at - 7;
+                while back > 0
+                    && (bytes[back - 1] == b' '
+                        || bytes[back - 1] == b'\n'
+                        || bytes[back - 1] == b'\r'
+                        || bytes[back - 1] == b'\t')
+                {
+                    back -= 1;
+                }
+                let answer = b"*out = kiln_c99_undefined();";
+                assert!(
+                    back < answer.len() || !bytes_match_at(bytes, back - answer.len(), answer),
+                    "the prelude C answers a read with `undefined` by hand instead of through \
+                     KILN_C99_ABSENT, so nothing there says why the name is absent rather than \
+                     unimplemented -- and a short membership list would read as a silent wrong \
+                     answer. This crate no longer compiles, so the test that explains cannot run: \
+                     `grep -n -A1 '\\*out = kiln_c99_undefined();' \
+                     crates/kiln-backend-c/src/runtime/*.c | grep -B1 'return KILN_C99_OK'` names \
+                     the line"
+                );
+            }
+            if bytes_match_at(bytes, at, b"KILN_C99_ABSENT(") {
+                assert!(
+                    at + 17 < bytes.len() && bytes[at + 16] == b'"' && bytes[at + 17] != b'"',
+                    "a KILN_C99_ABSENT site has no reason literal; say what proves the name absent"
+                );
+                absent += 1;
+            }
             if bytes_match_at(bytes, at, b"KILN_C99_REFUSE_INTERNAL(") {
                 assert!(
                     at + 26 < bytes.len() && bytes[at + 25] == b'"' && bytes[at + 26] != b'"',
@@ -2197,6 +2356,14 @@ const fn assert_refusals_name_themselves(source: &str, internal_sites: usize) {
          one, or drop the row that no longer describes anything. `grep -c \
          KILN_C99_REFUSE_INTERNAL crates/kiln-backend-c/src/runtime/*.c` is the count"
     );
+    assert!(
+        absent == absent_sites,
+        "the prelude C holds a different number of KILN_C99_ABSENT sites than \
+         ABSENT_ANSWER_SITES declares. A new one is a new place a read answers `undefined`: add \
+         the row that says which membership predicate proves the name absent, or drop the row \
+         that no longer describes anything. `grep -c KILN_C99_ABSENT \
+         crates/kiln-backend-c/src/runtime/*.c` is the count"
+    );
 }
 
 const _: () = assert_refusals_name_themselves(
@@ -2205,6 +2372,7 @@ const _: () = assert_refusals_name_themselves(
         include_str!("runtime/prelude_runtime.c")
     ),
     internal_refusal_sites(REFUSAL_INTERNAL_STATUS),
+    absent_answer_sites(ABSENT_ANSWER_SITES),
 );
 
 /// The globals [`BUILTIN_SURFACE`] speaks for, in declaration order and without repeats.
@@ -2360,6 +2528,36 @@ static int kiln_c99_internal_status(const char *converted_by) {
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
     return kiln_c99_refuse_named((lacked), (subject), (subject_len))
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
+
+/* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
+ *
+ * A refusal says "the language puts a member here and this backend has not built it" and stops
+ * the program at the cause. This says the opposite: "the language puts nothing here", whose
+ * answer is `undefined` and whose read must not stop anything. `Object.nope` is not a gap.
+ *
+ * The two are told apart by a membership predicate -- `kiln_c99_is_array_member`,
+ * `kiln_c99_is_string_member`, `BUILTIN_SURFACE` plus `BUILTIN_SURFACE_BACKLOG`, and the rest --
+ * and when one of those lists is short the wrong branch is taken *silently*. That is the
+ * expensive failure this backend has: a refusal stops a program at the cause, an `undefined`
+ * walks past `typeof x.member === "function"` and dies three frames later. Thirty of them were
+ * measured on one afternoon, and not one was visible in a build or a test.
+ *
+ * So an `undefined` answer is now spelled here, with a reason that names the predicate proving
+ * absence, exactly as a refusal names what it lacked. `assert_absent_answers_are_declared` fails
+ * the build if the prelude C hands one back any other way, or if the number of them changes
+ * without a row in `ABSENT_ANSWER_SITES` saying which function grew one and why. The reason is
+ * compiled away; it is there so the claim can be read, and so that adding a silent `undefined`
+ * costs somebody a sentence about why it is not a wrong answer.
+ *
+ * WHAT THIS CANNOT DO. It cannot prove a predicate is *complete* -- that is the two engines'
+ * question, and `scripts/native-surface-inventory.py --gate` is what asks it. What it can do is
+ * make every place that could be wrong a place somebody wrote down. */
+#define KILN_C99_ABSENT(why, out)      \
+    do {                               \
+        (void)(why);                   \
+        *(out) = kiln_c99_undefined(); \
+        return KILN_C99_OK;            \
+    } while (0)
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
  * anything.  The interpreter's own limit is 10000 frames, but its frames are heap-allocated and
@@ -3679,9 +3877,51 @@ static uint64_t kiln_c99_typed_prototype_method(const char *key, size_t key_len)
  * else a program names is absent, and absent is `undefined`. These are the names that are not
  * absent and are not implemented either: answering `undefined` for one would be a silent wrong
  * answer, so a read of one refuses instead and lands in the backlog by name. */
-static int kiln_c99_is_typed_array_member(const char *key, size_t key_len) {
+static int kiln_c99_is_typed_array_member(int byte_view, const char *key, size_t key_len) {
     static const char *const members[] = {"copyWithin", "toLocaleString", "toReversed",
                                           "toSorted",   "with"};
+    /* The base64 and hex codecs are `Uint8Array`'s alone -- they read and write *bytes*, and no
+     * other view's element is a byte -- so the kind is part of the question. `Int32Array.prototype
+     * .toBase64` is absent in the language and `undefined` is its right answer; on a `Uint8Array`
+     * the interpreter has a function, and `undefined` there is the silent wrong answer a
+     * `typeof view.toBase64 === "function"` feature test walks past. */
+    static const char *const byte_members[] = {"setFromBase64", "setFromHex", "toBase64", "toHex"};
+    size_t index;
+    for (index = 0; index < sizeof members / sizeof *members; ++index) {
+        if (kiln_c99_same_name(key, key_len, members[index])) {
+            return 1;
+        }
+    }
+    if (!byte_view) {
+        return 0;
+    }
+    for (index = 0; index < sizeof byte_members / sizeof *byte_members; ++index) {
+        if (kiln_c99_same_name(key, key_len, byte_members[index])) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* Whether a name is a member of `ArrayBuffer.prototype` *in the language* that this backend does
+ * not answer -- the same question `kiln_c99_is_typed_array_member` asks one type over.
+ *
+ * An `ArrayBuffer` here answers `byteLength` and `constructor` and nothing else, and every other
+ * name read as `undefined` against the interpreter's functions and booleans:
+ * `typeof buffer.slice === "function"` is a feature test a bundle really writes, and `undefined`
+ * walks past it. None of these is implemented -- the buffer has no length that can move and no
+ * hand-off -- so each refuses by name and lands in the backlog rather than lying about itself. */
+static int kiln_c99_is_array_buffer_member(const char *key, size_t key_len) {
+    static const char *const members[] = {"detached",
+                                          "immutable",
+                                          "maxByteLength",
+                                          "resizable",
+                                          "resize",
+                                          "slice",
+                                          "sliceToImmutable",
+                                          "transfer",
+                                          "transferToFixedLength",
+                                          "transferToImmutable"};
     size_t index;
     for (index = 0; index < sizeof members / sizeof *members; ++index) {
         if (kiln_c99_same_name(key, key_len, members[index])) {
@@ -3705,7 +3945,22 @@ static int kiln_c99_is_data_view_member(const char *key, size_t key_len) {
            kiln_c99_same_name(key, key_len, "setFloat16");
 }
 
+/* `String.prototype`'s members, by name.
+ *
+ * Two of them are not operations of their own and so have no code in the generated dispatch
+ * group, and a name the group did not carry read as `undefined` here where the interpreter has a
+ * function -- the silent wrong answer, on the prototype object *and* on every string instance.
+ * `values` is the string iterator, which is the same function `@@iterator` hands out, so
+ * `[..."ab"]` and `"ab".values()` walk the same scalar values. `toLocaleString` invokes the
+ * receiver's own `toString`, which for a string is the string: there is no locale in it to
+ * consult, so nothing here is the Intl surface ADR 0042 refuses by name. */
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
+    if (kiln_c99_same_name(key, key_len, "values")) {
+        return KILN_C99_METHOD_ARRAY_VALUES;
+    }
+    if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
+        return KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING;
+    }
     return kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_STRING_DISPATCH);
 }
 
@@ -11192,6 +11447,91 @@ int main(void) {{
                     .any(|row| row.function == function.as_str()),
                 "{function} holds {count} KILN_C99_REFUSE_INTERNAL sites and no \
                  REFUSAL_INTERNAL_STATUS row says which caller converts them"
+            );
+        }
+    }
+
+    /// The explanation for the `KILN_C99_ABSENT` half of the `const` gate above, which can only
+    /// say *that* the count moved.
+    ///
+    /// This says which file, which line and which enclosing function, and it checks the half the
+    /// gate cannot see: that the sites are in the functions `ABSENT_ANSWER_SITES` claims and in
+    /// the numbers it claims. A row is a promise that a membership predicate decides that site,
+    /// and a site in a function no row names is a place a read answers `undefined` with nobody
+    /// having said why.
+    #[test]
+    fn absent_answers_are_where_they_say() {
+        const SOURCES: [(&str, &str); 2] = [
+            (
+                "runtime/prelude_core.c",
+                include_str!("runtime/prelude_core.c"),
+            ),
+            (
+                "runtime/prelude_runtime.c",
+                include_str!("runtime/prelude_runtime.c"),
+            ),
+        ];
+
+        let mut by_function: Vec<(String, usize)> = Vec::new();
+        let mut by_hand = Vec::new();
+        for (path, source) in SOURCES {
+            let lines: Vec<&str> = source.lines().collect();
+            // A top-level definition starts in column zero; everything inside one is indented.
+            let mut function = String::from("<file scope>");
+            for (index, line) in lines.iter().enumerate() {
+                if line.starts_with(|first: char| first.is_ascii_alphabetic())
+                    && let Some((head, _)) = line.split_once('(')
+                    && let Some(name) = head
+                        .split(|byte: char| !(byte.is_alphanumeric() || byte == '_'))
+                        .next_back()
+                {
+                    function = name.to_owned();
+                }
+                if line.trim() == "*out = kiln_c99_undefined();"
+                    && lines
+                        .get(index + 1)
+                        .is_some_and(|next| next.trim() == "return KILN_C99_OK;")
+                {
+                    by_hand.push(format!("{path}:{} in {function}", index + 1));
+                }
+                if line.contains("KILN_C99_ABSENT(") {
+                    match by_function.iter_mut().find(|(name, _)| *name == function) {
+                        Some((_, count)) => *count += 1,
+                        None => by_function.push((function.clone(), 1)),
+                    }
+                }
+            }
+        }
+
+        assert!(
+            by_hand.is_empty(),
+            "these prelude sites answer a read with `undefined` by hand, so nothing there says \
+             why the name is absent rather than unimplemented -- which is the difference between \
+             what the language answers and a silent wrong answer a feature test walks past. Use \
+             KILN_C99_ABSENT with the predicate that proves absence:\n  {}",
+            by_hand.join("\n  ")
+        );
+
+        for row in ABSENT_ANSWER_SITES {
+            let found = by_function
+                .iter()
+                .find(|(name, _)| name == row.function)
+                .map(|(_, count)| *count)
+                .unwrap_or(0);
+            assert_eq!(
+                found, row.sites,
+                "ABSENT_ANSWER_SITES says {} answers `undefined` at {} sites, proved absent by {}, \
+                 and the prelude holds {}",
+                row.function, row.sites, row.proved_by, found
+            );
+        }
+        for (function, count) in &by_function {
+            assert!(
+                ABSENT_ANSWER_SITES
+                    .iter()
+                    .any(|row| row.function == function.as_str()),
+                "{function} answers `undefined` at {count} sites and no ABSENT_ANSWER_SITES row \
+                 says what proves those names absent"
             );
         }
     }
