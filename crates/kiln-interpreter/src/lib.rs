@@ -24657,6 +24657,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let built = self.construct_finalization_registry(&arguments, current)?;
                 self.stack.push(built);
             }
+            // A bound function's `[[Construct]]` prepends the bound arguments and forwards to
+            // the target. The bound *receiver* is dropped: `new` makes its own, which is the
+            // whole difference between calling a bound function and constructing one. And when
+            // the wrapper is itself the `new.target` -- which is every plain `new f.bind(o)()`
+            // -- the target takes its place, because the instance has to inherit from the
+            // target's `prototype` and a bound function has none.
+            //
+            // `is_constructor` already answered for the wrapper by asking the target, so a bound
+            // arrow still falls through to the refusal below rather than being run as one.
+            Value::Bound(ref bound) if is_constructor(&bound.target) => {
+                let mut forwarded = bound.arguments.clone();
+                forwarded.extend(arguments);
+                let target = bound.target.clone();
+                let new_target = if strict_equal(&new_target, &callee) {
+                    target.clone()
+                } else {
+                    new_target
+                };
+                return self.construct_as(target, forwarded, new_target, current);
+            }
             Value::Function(closure) => {
                 // `new` creates the instance, runs the body with it as `this`, and
                 // yields the instance -- unless the body returned an object, which
