@@ -16172,11 +16172,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         value: receiver.type_name(),
                     });
                 };
-                let subject: Vec<u16> = arguments
-                    .first()
-                    .map_or_else(String::new, Value::to_display_string)
-                    .encode_utf16()
-                    .collect();
+                // `ToString(S)`, which for an object *calls* its `toString`. The display
+                // spelling is the machine's: `/\.14/.exec({ toString: () => Math.PI })` matched
+                // against the literal text "[object Object]" and answered null.
+                let subject_text = match arguments.first() {
+                    Some(argument) if is_an_object(argument) && !is_callable(argument) => {
+                        self.as_text(argument, instruction)?
+                    }
+                    Some(argument) => argument.to_display_string(),
+                    None => String::new(),
+                };
+                let subject: Vec<u16> = subject_text.encode_utf16().collect();
                 // Only `g` and `y` carry a cursor; a plain pattern always searches from the
                 // start, however many times it is used.
                 let start = if regexp.global || regexp.sticky {
