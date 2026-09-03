@@ -3313,6 +3313,7 @@ static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, ui
     size_t low = 0;
     size_t high;
     size_t at;
+    if (key == NULL || key_len == 0) return 0;
     if (!kiln_c99_method_index_ready) kiln_c99_method_index_build();
     high = kiln_c99_method_index_len;
     while (low < high) {
@@ -3342,6 +3343,7 @@ static uint64_t kiln_c99_lookup_method_group(const char *key, size_t key_len, ui
 static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t first,
                                        uint64_t last) {
     uint64_t code;
+    if (key == NULL || key_len == 0) return 0;
     for (code = first; code <= last; ++code) {
         const char *name = kiln_c99_method_name(code);
         size_t len;

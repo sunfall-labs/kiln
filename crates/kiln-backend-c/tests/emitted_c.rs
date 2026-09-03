@@ -953,9 +953,12 @@ fn runtime_prelude_size() {
     // Widened once more when the builtin-surface work landed on top of that: `DataView`'s twenty
     // accessors and their handler, the iterator helpers and their lazy pipeline, the change-by-copy
     // array methods and the collection and spread work are about 2,700 lines between them, to
-    // 29,792. Measured on the ported tree, not derived. The band is again roughly +/-9%.
+    // Widened once more for the native in-process dynamic evaluator and Ajv schema compilation
+    // engine: an AST-free recursive descent lexer, parser, lexical scope stack, and dynamic
+    // closure trampoline supporting runtime code generation without external engine dependencies,
+    // bringing the prelude to 32,507 lines. The ceiling is widened to 35,500.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 32_500;
+    const CEILING_LINES: usize = 35_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
