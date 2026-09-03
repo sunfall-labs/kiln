@@ -28,6 +28,14 @@
 # answer lets it continue on a bad value. Set KILN_THIRDPARTY_NATIVE=0 to skip the native pass
 # when you only want the fast half.
 #
+# WHAT "NODE'S BYTES" INCLUDES. Both streams, and node's exit status. This compared output alone
+# for a long time, and a bundle that printed exactly node's bytes and then exited 1 was a *match*
+# to it -- which is how a CommonJS entry exiting 1 on success survived for weeks, invisible here
+# and immediately fatal to anyone running the same program from a Makefile or CI. The status is
+# compared against node's own rather than against zero, because a bundle node runs to a nonzero
+# exit is expected to reach the same nonzero exit here. A refusal is still classified as a refusal
+# before any of this: it exits nonzero by design, and that is not the disagreement being hunted.
+#
 # Bundles small enough to read are committed; the large ones are gitignored, and this skips them
 # with a note rather than failing, because a checkout that has not run build.sh is not broken.
 set -euo pipefail
@@ -97,17 +105,24 @@ run_interpreted() {
 	# node's is written as it happens. A bundled `vue-reactivity` emits one `console.warn` and
 	# diverged on ordering alone. Per-stream also checks that each line went to the right place,
 	# which merging could not see at all.
+	# Each engine's status comes from its stdout run; the second run exists only to separate the
+	# streams and is the same program over the same inputs.
 	local expected expected_err actual actual_err
-	expected="$(TZ=UTC node "$bundle" 2>/dev/null || true)"
+	local expected_status=0 actual_status=0
+	expected="$(TZ=UTC node "$bundle" 2>/dev/null)" || expected_status=$?
 	expected_err="$(TZ=UTC node "$bundle" 2>&1 1>/dev/null || true)"
-	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>/dev/null || true)"
+	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>/dev/null)" || actual_status=$?
 	actual_err="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>&1 1>/dev/null || true)"
-	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]]; then
+	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]] &&
+		((actual_status == expected_status)); then
 		touch "$WORK_DIR/$name.interp_matched"
 	else
 		{
-			printf '%s\n' "    node: $(printf '%s' "$expected" | head -3 | tr '\n' '|')"
-			printf '%s\n' "    kiln: $(printf '%s' "$actual" | head -3 | tr '\n' '|')"
+			printf '%s\n' "    node: $(printf '%s' "$expected" | head -3 | tr '\n' '|') [exit $expected_status]"
+			printf '%s\n' "    kiln: $(printf '%s' "$actual" | head -3 | tr '\n' '|') [exit $actual_status]"
+			if [[ $actual == "$expected" && $actual_err == "$expected_err" ]]; then
+				printf '%s\n' "    the bytes agree; only the exit status differs"
+			fi
 		} > "$WORK_DIR/$name.interp_diverged"
 	fi
 }
@@ -179,11 +194,13 @@ run_native() {
 		adapter="--node"
 	fi
 	local expected expected_err actual actual_err
-	expected="$(TZ=UTC node "$bundle" 2>/dev/null || true)"
+	local expected_status=0 actual_status=0
+	expected="$(TZ=UTC node "$bundle" 2>/dev/null)" || expected_status=$?
 	expected_err="$(TZ=UTC node "$bundle" 2>&1 1>/dev/null || true)"
-	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>/dev/null || true)"
+	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>/dev/null)" || actual_status=$?
 	actual_err="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>&1 1>/dev/null || true)"
-	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]]; then
+	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]] &&
+		((actual_status == expected_status)); then
 		touch "$WORK_DIR/$name.native_matched"
 	# No colon required: a refusal that names nothing still prints `native backend refusal` and
 	# stops there, and matching on the colon classified those as divergences -- the one outcome
@@ -210,8 +227,11 @@ run_native() {
 		printf '%s\n' "$refusal_summary" > "$WORK_DIR/$name.native_refused"
 	else
 		{
-			printf '%s\n' "    node:   $(printf '%s' "$expected" | head -3 | tr '\n' '|')"
-			printf '%s\n' "    native: $(printf '%s' "$actual" | head -3 | tr '\n' '|')"
+			printf '%s\n' "    node:   $(printf '%s' "$expected" | head -3 | tr '\n' '|') [exit $expected_status]"
+			printf '%s\n' "    native: $(printf '%s' "$actual" | head -3 | tr '\n' '|') [exit $actual_status]"
+			if [[ $actual == "$expected" && $actual_err == "$expected_err" ]]; then
+				printf '%s\n' "    the bytes agree; only the exit status differs"
+			fi
 		} > "$WORK_DIR/$name.native_diverged"
 	fi
 }

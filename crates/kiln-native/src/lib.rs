@@ -4742,10 +4742,20 @@ fn decode_run_result(
     if !process_succeeded {
         return Ok(None);
     }
-    let bytes = fs::read(path).map_err(|error| NativeError::RunResult {
-        path: path.to_path_buf(),
-        message: error.to_string(),
-    })?;
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        // A run that finished but completed with a value the boundary cannot carry -- a CommonJS
+        // entry completes with its `module.exports` object -- writes no file, on purpose. That is
+        // an absent result, not a broken one, and the launcher already exited 0 to say so. Any
+        // other read error is still a genuine harness failure and is still reported as one.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(NativeError::RunResult {
+                path: path.to_path_buf(),
+                message: error.to_string(),
+            });
+        }
+    };
     decode_native_result(&bytes)
         .map(Some)
         .map_err(|error| NativeError::RunResult {
@@ -8549,6 +8559,55 @@ int main(void) {{
                 },
             )
             .expect("shared graph builds");
+    }
+
+    /// A CommonJS entry completes with `module.exports`, which is an object unless the module
+    /// assigns a scalar to it. The result file carries only the five boundary scalars, so the
+    /// launcher declines to write an object -- and used to charge that refusal to the program,
+    /// which exited 1 after printing exactly the right bytes and saying nothing on stderr. The
+    /// run succeeded and simply has no scalar to report.
+    #[test]
+    fn native_commonjs_object_exports_finish_successfully_with_no_scalar_result() {
+        use kiln_module_resolver::NodeRuntimeResolver;
+
+        let root = TestDirectory::new("kiln-native-commonjs-object-exports-exit");
+        fs::write(root.path.join("package.json"), r#"{"type":"commonjs"}"#)
+            .expect("write package metadata");
+        let entry = root.path.join("main.js");
+        fs::write(&entry, "console.log(\"ok\");").expect("write CommonJS entry");
+        let graph = ModuleGraph::build_node(
+            &entry,
+            NodeRuntimeResolver::new(&root.path).expect("node resolver"),
+            |path: &Path| fs::read_to_string(path),
+            OxcFrontend,
+        )
+        .expect("build CommonJS graph");
+        let Some(toolchain) = Toolchain::discover().ok() else {
+            eprintln!("skipping native CommonJS exit-status integration: no C compiler found");
+            return;
+        };
+        let builder = NativeBuilder::new(ArtifactCache::new(root.path.join("cache")), toolchain);
+        let report = builder
+            .run_graph(
+                &graph,
+                &NativeBuildOptions {
+                    output: root.path.join("program"),
+                    profile: NativeProfile::Dev,
+                    realm: NativeRealmPolicy::default(),
+                },
+            )
+            .expect("native CommonJS graph builds and runs");
+        assert_eq!(
+            report.exit_code,
+            Some(0),
+            "stderr={}",
+            String::from_utf8_lossy(&report.stderr)
+        );
+        assert_eq!(report.stdout, b"ok\n");
+        assert_eq!(
+            report.result, None,
+            "an object result is an absent one here"
+        );
     }
 
     #[test]
