@@ -30,8 +30,50 @@
 //! already spell a reserved store key that way. `length`, `name` and `prototype` are not listed --
 //! they belong to every callable rather than to any particular one, and each engine supplies them
 //! from its own knowledge of what a function is.
+//!
+//! # The key is the name
+//!
+//! `name` is not listed as a *member*, but this table still decides it: a static's `.name` is its
+//! member key. `Object.keys.name` is `"keys"`, and node makes that true for every static on every
+//! built-in without exception -- it was measured across all seventeen rows where the two engines
+//! disagreed, and node's answer was the key every time.
+//!
+//! That was not always how either engine answered. Each derived the name separately -- the native
+//! backend from a hand-written `case` per method code, the interpreter from the Rust variant's
+//! spelling -- so the name was written down three times and agreed twice at best. Fifteen native
+//! rows had a key and no `case` and reported `""`; thirteen interpreter rows reported the variant,
+//! so `Buffer.concat.name` was `"nodeBufferConcat"`. Nothing caught it, because a wrong name
+//! refuses nothing: it is a string a program reads, and reading it succeeds.
+//!
+//! So the native backend now reads the name out of the row, and the interpreter is held to the row
+//! by `every_surface_member_is_named_for_its_key`. [`NAME_IS_SHARED`] is the only way out, and it
+//! has two entries.
+//! # Order is observable
+//!
+//! A string-keyed member enumerates in the order it is defined, so this list is the order
+//! `Object.getOwnPropertyNames` and `Reflect.ownKeys` report -- in both engines, since both read
+//! it from here. Match the reference implementation rather than grouping by what reads well:
+//! `Array` carried `fromAsync` before `of` and a differential probe caught it, because V8 defines
+//! `of` first and a proxy's `ownKeys` prints the difference. Appending a new member to the end of
+//! a list is therefore a claim about where the reference implementation defines it.
 
 #![forbid(unsafe_code)]
+
+/// The members this implementation serves with *another* member's function.
+///
+/// A static's `.name` is its member key -- `Object.keys.name` is `"keys"` -- and node makes that
+/// true for every static on every built-in, without exception. Both engines therefore take the
+/// name straight from the key in [`SURFACE`], which is what stops the name being written down
+/// twice and drifting: seventeen of them had, and nobody could tell, because a name is a string a
+/// program reads rather than an operation that can refuse.
+///
+/// These are the rows where that cannot hold. `Buffer.allocUnsafe` is not a distinct function
+/// here -- it is `Buffer.alloc`, which differs from node only in that node zero-fills one and not
+/// the other -- so it reports `"alloc"`, the name of the function it actually is. Listing it is
+/// how the guards in both engines tell a known alias from a name that has drifted, and the list
+/// is short on purpose: the entry is a debt, not a licence.
+pub const NAME_IS_SHARED: &[(&str, &str)] =
+    &[("Buffer", "allocUnsafe"), ("Buffer", "allocUnsafeSlow")];
 
 /// A built-in global and the members it owns.
 pub struct Builtin {
@@ -77,7 +119,7 @@ pub const SURFACE: &[Builtin] = &[
     },
     Builtin {
         global: "Array",
-        members: &["isArray", "from", "fromAsync", "of", "@@species"],
+        members: &["isArray", "from", "of", "fromAsync", "@@species"],
     },
     Builtin {
         global: "String",

@@ -3091,6 +3091,8 @@ mod realm {
     #[cfg(test)]
     #[allow(clippy::unwrap_used, clippy::expect_used)]
     mod tests {
+        use std::error::Error;
+        use std::sync::PoisonError;
         use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
         static CALLABLE_STORE_DROPS: AtomicUsize = AtomicUsize::new(0);
@@ -3562,7 +3564,10 @@ mod realm {
                 0
             }
             unsafe extern "C" fn roots(heap: *mut c_void, context: *mut c_void, phase: i32) {
-                ROOT_PHASES.lock().unwrap().push(phase);
+                ROOT_PHASES
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .push(phase);
                 if phase == GC_PHASE_MARK || phase == GC_PHASE_TEARDOWN {
                     assert!(!heap.is_null());
                     // SAFETY: the heap is live in both marking phases.
@@ -3635,13 +3640,22 @@ mod realm {
                 unsafe { kiln_realm_enter(handle, Some(enter), (&raw mut slot).cast::<c_void>()) },
                 0
             );
-            assert_eq!(ROOT_PHASES.lock().unwrap().as_slice(), &[GC_PHASE_MARK]);
+            assert_eq!(
+                ROOT_PHASES
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_slice(),
+                &[GC_PHASE_MARK]
+            );
             assert_eq!(MARKED_VALUES.load(AtomicOrdering::SeqCst), 1);
             assert_eq!(kiln_realm_destroy(handle), 0);
             assert_eq!(BEGINS.load(AtomicOrdering::SeqCst), 1);
             assert_eq!(ENDS.load(AtomicOrdering::SeqCst), 1);
             assert_eq!(
-                ROOT_PHASES.lock().unwrap().as_slice(),
+                ROOT_PHASES
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_slice(),
                 &[GC_PHASE_MARK, GC_PHASE_TEARDOWN, GC_PHASE_RESET]
             );
             assert_eq!(MARKED_VALUES.load(AtomicOrdering::SeqCst), 2);
@@ -3652,7 +3666,8 @@ mod realm {
         /// to be readable from there: the prelude calls back into this archive in the middle of
         /// the hook, so anything the drive still had borrowed would panic instead of printing.
         #[test]
-        fn the_turn_boundary_offers_the_dump_and_the_report_reads_the_runtime() {
+        fn the_turn_boundary_offers_the_dump_and_the_report_reads_the_runtime()
+        -> Result<(), Box<dyn Error>> {
             use std::sync::atomic::AtomicUsize;
             static OFFERS: AtomicUsize = AtomicUsize::new(0);
             static REPORT: std::sync::Mutex<Option<(i32, u64, [u64; 9])>> =
@@ -3674,7 +3689,8 @@ mod realm {
                 // boundary with the realm active.
                 let status =
                     unsafe { kiln_realm_runtime_report(fields.as_mut_ptr(), 9, &raw mut count) };
-                *REPORT.lock().unwrap() = Some((status, count, fields));
+                *REPORT.lock().unwrap_or_else(PoisonError::into_inner) =
+                    Some((status, count, fields));
                 INTROSPECT_ARMED
             }
             static HOOKS: GcHooks = GcHooks {
@@ -3709,7 +3725,10 @@ mod realm {
             );
             assert_eq!(OFFERS.load(AtomicOrdering::SeqCst), 1);
 
-            let (status, count, fields) = REPORT.lock().unwrap().expect("the hook reported");
+            let (status, count, fields) = REPORT
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .ok_or("the hook reported")?;
             assert_eq!(status, 0);
             assert_eq!(count, RUNTIME_REPORT_FIELDS as u64);
             // A realm runtime owns exactly one worker, and this one served nothing.
@@ -3720,14 +3739,15 @@ mod realm {
                 "connections and requests in flight"
             );
             assert_eq!(kiln_realm_destroy(handle), 0);
+            Ok(())
         }
 
         /// The park cap exists so an idle server answers a signal; it must not touch a
         /// virtual-clock realm, whose park is free by construction and whose determinism would
         /// otherwise start depending on real time.
         #[test]
-        fn a_park_is_capped_only_for_an_armed_wall_clock_realm() {
-            let realm = NativeRealm::new().expect("a realm builds");
+        fn a_park_is_capped_only_for_an_armed_wall_clock_realm() -> Result<(), Box<dyn Error>> {
+            let realm = NativeRealm::new()?;
             let brief = std::time::Duration::from_millis(5);
             let hour = std::time::Duration::from_secs(3600);
 
@@ -3751,6 +3771,7 @@ mod realm {
             realm.introspect_armed.set(false);
             assert_eq!(introspect_park(&realm, None), None);
             assert_eq!(introspect_park(&realm, Some(hour)), Some(hour));
+            Ok(())
         }
 
         struct RecordedWork {
@@ -5290,7 +5311,7 @@ mod realm {
         }
 
         #[test]
-        fn wall_clock_realm_reads_the_host_and_fires_timers_on_it() {
+        fn wall_clock_realm_reads_the_host_and_fires_timers_on_it() -> Result<(), Box<dyn Error>> {
             let mut handle = 0;
             let mut now = f64::NAN;
             let mut fired: Option<std::time::Instant> = None;
@@ -5299,8 +5320,7 @@ mod realm {
             assert_eq!(kiln_realm_use_wall_clock(0), INVALID_ARGUMENT);
             assert_eq!(kiln_realm_use_wall_clock(handle), 0);
             let before = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as f64;
             assert_eq!(
                 unsafe {
@@ -5339,10 +5359,11 @@ mod realm {
                 },
                 0
             );
-            let fired = fired.expect("the timer ran during the drive");
+            let fired = fired.ok_or("the timer ran during the drive")?;
             // Virtual time would have jumped the 30 ms; wall time waits for them.
             assert!(fired.duration_since(armed) >= std::time::Duration::from_millis(30));
             assert_eq!(kiln_realm_destroy(handle), 0);
+            Ok(())
         }
 
         #[test]

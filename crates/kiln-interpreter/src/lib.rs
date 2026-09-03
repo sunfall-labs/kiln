@@ -26908,12 +26908,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// Shared by `Object.assign` and object spread because the two copy the same set: the
     /// spread was reading the store directly, found none, and produced `{}` from a proxy that
     /// `Object.assign` beside it copied correctly.
-    fn proxy_own_enumerable(
+    /// Walk a proxy source's own enumerable properties, handing each to `visit` as soon as it is
+    /// read.
+    ///
+    /// The visit happens inside the walk rather than after it because `Object.assign` writes
+    /// through this and the order is observable. `CopyDataProperties` reads and writes one key
+    /// at a time -- `[[GetOwnProperty]]`, `[[Get]]`, `Set` -- so a proxy source feeding a proxy
+    /// target sees `desc:b, get:b, set:b, desc:a, get:a, set:a`. Collecting every value first and
+    /// writing them afterwards produced `desc:b, get:b, desc:a, get:a, set:b, set:a`, which is
+    /// the same properties in the same order and still the wrong trace: a handler that decides
+    /// what to return from a later `get` based on an earlier `set` observes the difference.
+    fn for_each_proxy_own_enumerable(
         &mut self,
         source: &Value,
         instruction: usize,
-    ) -> Result<Vec<(String, Value)>, ExecutionError> {
-        let mut copied = Vec::new();
+        mut visit: impl FnMut(&mut Self, String, Value) -> Result<(), ExecutionError>,
+    ) -> Result<(), ExecutionError> {
         for key in self.own_keys(source, instruction)? {
             let descriptor =
                 self.proxy_descriptor(source, &Value::String(key.clone()), instruction)?;
@@ -26928,8 +26938,23 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // answer a read with something its descriptor did not mention, and a spread copies
             // what a read produces.
             let value = self.read_property(source, &key, instruction)?;
-            copied.push((key, value));
+            visit(self, key, value)?;
         }
+        Ok(())
+    }
+
+    /// The same walk, collected.  An object spread builds a fresh object with no traps on it, so
+    /// nothing can observe when the writes happen relative to the reads.
+    fn proxy_own_enumerable(
+        &mut self,
+        source: &Value,
+        instruction: usize,
+    ) -> Result<Vec<(String, Value)>, ExecutionError> {
+        let mut copied = Vec::new();
+        self.for_each_proxy_own_enumerable(source, instruction, |_, key, value| {
+            copied.push((key, value));
+            Ok(())
+        })?;
         Ok(copied)
     }
 
@@ -26952,9 +26977,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 continue;
             }
             if matches!(source, Value::Proxy(_)) {
-                for (key, value) in self.proxy_own_enumerable(source, instruction)? {
-                    self.set_computed(&target, &Value::String(key), value, instruction)?;
-                }
+                self.for_each_proxy_own_enumerable(source, instruction, |this, key, value| {
+                    this.set_computed(&target, &Value::String(key), value, instruction)
+                        .map(|_| ())
+                })?;
             } else {
                 for (key, property) in own_properties(&self.intrinsics, source) {
                     let value = match property {
@@ -42837,6 +42863,45 @@ fn native_js_name(native: &Native) -> String {
         // `SetTimeout` starts with a type name that is not its type: the derivation strips `Set`
         // -- the collection -- and answers `timeout`. A prefix that is a word in its own right is
         // the one thing a name derived from a variant cannot get right on its own.
+        // THE SHARED SURFACE'S OWN NAMES.
+        //
+        // `kiln_builtin_surface::SURFACE` says which members each built-in has, and the key it
+        // says it under *is* the name that member reports -- node makes that true for every
+        // static on every built-in, measured. The native backend now reads the name out of the
+        // row; this derivation cannot, because the table is keyed by `(global, member)` and
+        // nothing here maps a `Native` back to one without inverting the crate dependency.
+        //
+        // So these are spelled out, and `every_surface_member_is_named_for_its_key` holds them to
+        // the table by reading each member through the real property path. Thirteen of them were
+        // wrong when that guard was written: the derivation strips a known type prefix and
+        // lowercases what is left, and it has no prefix for `NodeBuffer`, `AbortSignal`,
+        // `Performance` or `Error` -- so `Buffer.concat.name` was `"nodeBufferConcat"`, which is
+        // this file's spelling of a variant handed to a program that asked what a function is
+        // called. `ObjectOwnNames` is the other shape: a variant named for neither its type nor
+        // its member, which no prefix rule could have recovered.
+        //
+        // Adding a prefix to the derivation's table would have fixed some of these and is the
+        // wrong move: a longest-prefix strip over a growing list is what produced them, and
+        // "Error" as a prefix would rename every error variant that follows it.
+        Native::ObjectOwnNames => "getOwnPropertyNames".to_owned(),
+        Native::ErrorCaptureStackTrace => "captureStackTrace".to_owned(),
+        Native::ErrorIsError => "isError".to_owned(),
+        // The derivation lowercases only the first character, so a name whose own spelling is
+        // lower-case past a digit comes back with a capital in it: `f16Round` for `f16round`.
+        Native::MathF16Round => "f16round".to_owned(),
+        Native::PerformanceNow => "now".to_owned(),
+        Native::NodeBufferFrom => "from".to_owned(),
+        // One variant for `alloc`, `allocUnsafe` and `allocUnsafeSlow`, which node makes three
+        // functions with three names. It reports the name of the function it actually is;
+        // `kiln_builtin_surface::NAME_IS_SHARED` is where the other two are written down, and is
+        // what stops the guard reading them as drift.
+        Native::NodeBufferAlloc => "alloc".to_owned(),
+        Native::NodeBufferIsBuffer => "isBuffer".to_owned(),
+        Native::NodeBufferByteLength => "byteLength".to_owned(),
+        Native::NodeBufferConcat => "concat".to_owned(),
+        Native::AbortSignalAbort => "abort".to_owned(),
+        Native::AbortSignalTimeout => "timeout".to_owned(),
+        Native::AbortSignalAny => "any".to_owned(),
         // FOUR NAMES THE DERIVATION SPELLED OUT OF THE RUST VARIANT.
         //
         // These are not near-misses of capitalisation: each one handed a program the identifier
