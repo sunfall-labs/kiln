@@ -24781,33 +24781,80 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         if let Some(source) = arguments.first().cloned()
             && !matches!(source, Value::Undefined | Value::Null)
         {
-            for item in self.drain_iterable(&source, current)? {
-                let (key, value) = if is_map {
-                    // An entry's two halves are ordinary `Get`s: a `Map` seeded from entries an
-                    // accessor produces has to see what the getter answers, and stop if it throws.
-                    (
-                        self.read_computed(&item, &Value::Number(0.0), current)?,
-                        self.read_computed(&item, &Value::Number(1.0), current)?,
-                    )
-                } else {
-                    (item, Value::Undefined)
+            // `AddEntriesFromIterable` steps the source and inserts what it got, one entry at a
+            // time. Draining it first was not merely a different order: an entry whose getter
+            // throws is how a program says "stop", and a source that never reports `done`
+            // relies on it -- so `new Map(endless)` walked for ever accumulating values, and the
+            // throw that would have ended it was never reached. It ran until the step limit.
+            let method =
+                self.read_property(&source, WellKnown::Iterator.property_key(), current)?;
+            if !is_callable(&method) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!("{} is not iterable", source.to_display_string()),
+                });
+            }
+            let iterator = self.call_value(&method, source.clone(), Vec::new(), current)?;
+            let next = self.iterator_direct(&iterator, current)?;
+            loop {
+                let Some(item) = self.iterator_step(&iterator, &next, current)? else {
+                    break;
                 };
-                // The collection's *own* insert, weak or strong: it is the one whose brand
-                // check this receiver passes, and the two do the same work behind it.
-                call_native(
-                    &self.intrinsics,
-                    match (is_map, weak) {
-                        (true, true) => Native::WeakMapSet,
-                        (true, false) => Native::MapSet,
-                        (false, true) => Native::WeakSetAdd,
-                        (false, false) => Native::SetAdd,
-                    },
-                    &collection,
-                    &[key, value],
-                )?;
+                // Anything that goes wrong from here is the iteration's failure, and the source
+                // is told the walk is over before it travels. The close is discarded because the
+                // original throw says more than a complaint from `return`.
+                match self.insert_collection_entry(&collection, is_map, weak, item, current) {
+                    Ok(()) => {}
+                    Err(error) => {
+                        self.close_discarding(&iterator, current);
+                        return Err(error);
+                    }
+                }
             }
         }
         Ok(collection)
+    }
+
+    /// One entry of a collection being seeded from an iterable.
+    ///
+    /// A `Map` entry is a *pair*, read with two ordinary `Get`s, so an accessor in front of
+    /// either half runs and may throw. A `Set` takes the item itself.
+    fn insert_collection_entry(
+        &mut self,
+        collection: &Value,
+        is_map: bool,
+        weak: bool,
+        item: Value,
+        current: usize,
+    ) -> Result<(), ExecutionError> {
+        let (key, value) = if is_map {
+            // The specification requires an object here before it reads either half: a `Map`
+            // seeded from `[1, 2]` refuses the number rather than reading `1[0]` as undefined.
+            if !is_an_object(&item) && !is_callable(&item) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!("{} is not an entry pair", item.to_display_string()),
+                });
+            }
+            (
+                self.read_computed(&item, &Value::Number(0.0), current)?,
+                self.read_computed(&item, &Value::Number(1.0), current)?,
+            )
+        } else {
+            (item, Value::Undefined)
+        };
+        // The collection's *own* insert, weak or strong: it is the one whose brand check this
+        // receiver passes, and the two do the same work behind it.
+        call_native(
+            &self.intrinsics,
+            match (is_map, weak) {
+                (true, true) => Native::WeakMapSet,
+                (true, false) => Native::MapSet,
+                (false, true) => Native::WeakSetAdd,
+                (false, false) => Native::SetAdd,
+            },
+            collection,
+            &[key, value],
+        )?;
+        Ok(())
     }
 
     /// Build the object a native parent constructor produces, for `super()` in a derived class.
