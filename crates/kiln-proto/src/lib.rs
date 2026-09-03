@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 27;
+pub const PROTOCOL_VERSION: u32 = 28;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -766,6 +766,11 @@ pub struct RunSummary {
     pub file: FileId,
     pub succeeded: bool,
     pub stdout: String,
+    /// The program's own standard error, verbatim. Separate from `diagnostics`, which are the
+    /// engine's words about the program: this is the program's words, and it goes to the caller's
+    /// standard error unchanged rather than being prefixed as a note.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stderr: String,
     pub value: Option<String>,
     /// Exact scalar identity for differential checks. `None` means execution failed or returned
     /// a value outside the scalar HostOps boundary; `value` remains the human display spelling.
@@ -905,7 +910,7 @@ mod tests {
 
     #[test]
     fn protocol_v25_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 27);
+        assert_eq!(PROTOCOL_VERSION, 28);
 
         let requests = [
             (

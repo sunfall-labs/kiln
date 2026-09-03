@@ -935,6 +935,19 @@ const fn validate_method_ids(ids: &[MethodId]) {
         tail_high >= APPEND_ONLY_BASE,
         "append-only method tail must exist"
     );
+    // Numbers handed out in advance, and therefore allowed to be absent for as long as the
+    // branch holding them is open.
+    //
+    // Append-at-max is the right rule while one person at a time is adding codes. It stops being
+    // possible the moment several branches are open at once: the numbers have to be reserved up
+    // front instead, and whoever holds the *lower* reservation then lands into a hole rather
+    // than onto the end. Refusing the hole would mean the branches could only land in one order,
+    // which is not a property anybody can arrange.
+    //
+    // 442..=449 is such a reservation, held by a branch that had not landed when the `DataView`
+    // block took 450..=469. The row goes when it lands -- a reserved ID that has since been
+    // declared is simply an ID, and nothing below objects to one.
+    const RESERVED_METHOD_IDS: [u16; 8] = [442, 443, 444, 445, 446, 447, 448, 449];
     let mut value = APPEND_ONLY_BASE;
     while value <= tail_high {
         let mut found = false;
@@ -946,7 +959,17 @@ const fn validate_method_ids(ids: &[MethodId]) {
             }
             index += 1;
         }
-        assert!(found, "append-only method IDs must have no gaps");
+        let mut reserved = 0;
+        while !found && reserved < RESERVED_METHOD_IDS.len() {
+            if RESERVED_METHOD_IDS[reserved] == value {
+                found = true;
+            }
+            reserved += 1;
+        }
+        assert!(
+            found,
+            "append-only method IDs must have no gaps, and this one is not a reserved range"
+        );
         value += 1;
     }
 }
@@ -973,6 +996,17 @@ method_ids! {
     (KILN_C99_METHOD_ARRAY_FIND_LAST, 218, ArrayLookup),
     (KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX, 219, ArrayLookup),
     (KILN_C99_METHOD_ARRAY_REDUCE_RIGHT, 220, ArrayLookup),
+    /* The four ES2023 change-by-copy methods, each the counterpart of one that mutates: `with`
+     * to an index assignment, `toReversed` to `reverse`, `toSorted` to `sort`, `toSpliced` to
+     * `splice`. They sit beside the array block they belong to, but their codes come off the
+     * append-only tail rather than continuing 220: the tail is the one place a change can add to
+     * without knowing what else is landing beside it, which is what it is for. Group membership
+     * is what puts a code on an array, not numeric adjacency -- and that is the property that
+     * makes appending anywhere cheap. */
+    (KILN_C99_METHOD_ARRAY_TO_SORTED, 443, ArrayLookup),
+    (KILN_C99_METHOD_ARRAY_TO_REVERSED, 444, ArrayLookup),
+    (KILN_C99_METHOD_ARRAY_TO_SPLICED, 445, ArrayLookup),
+    (KILN_C99_METHOD_ARRAY_WITH, 446, ArrayLookup),
     (KILN_C99_METHOD_STRING_CODE_POINT_AT, 240, StringDispatch),
     (KILN_C99_METHOD_STRING_SUBSTR, 241, StringDispatch),
     (KILN_C99_METHOD_STRING_LOCALE_COMPARE, 242, StringDispatch),
@@ -1252,7 +1286,7 @@ method_ids! {
     (KILN_C99_METHOD_NODE_WRITABLE_WRITE, 374, NodeStream),
     (KILN_C99_METHOD_NODE_WRITABLE_END, 375, NodeStream),
     (KILN_C99_METHOD_NODE_WRITABLE_DESTROY, 376, NodeStream),
-    (KILN_C99_METHOD_NODE_PERFORMANCE_NOW, 377, Direct),
+    (KILN_C99_METHOD_PERFORMANCE_NOW, 377, Direct),
     (KILN_C99_METHOD_NODE_FS_EXISTS_SYNC, 378, Direct),
     (KILN_C99_METHOD_NODE_FS_READ_FILE, 379, Direct),
     (KILN_C99_METHOD_NODE_FS_STAT, 380, Direct),
@@ -1312,7 +1346,7 @@ method_ids! {
      * `Atomics` methods are: nothing looks these up by name through a group range, so a `log`
      * on some other receiver cannot find them. */
     (KILN_C99_METHOD_CONSOLE_LOG, 431, Direct),
-    (KILN_C99_METHOD_CONSOLE_UNAVAILABLE, 432, Direct),
+    (KILN_C99_METHOD_CONSOLE_ERROR, 432, Direct),
     (KILN_C99_METHOD_OBJECT_GET_OWN_PROPERTY_SYMBOLS, 433, Generic),
     /* The two halves of `req.headers`. They are a method pair rather than a stored object so
      * that the header table is built only if a program reads it -- see the accessor installed in
@@ -1342,6 +1376,55 @@ method_ids! {
     (KILN_C99_METHOD_SET_MINUTES, 182, Generic, DateSetter),
     (KILN_C99_METHOD_SET_SECONDS, 183, Generic, DateSetter),
     (KILN_C99_METHOD_SET_MILLISECONDS, 184, Generic, DateSetter),
+    // `DataView.prototype`. `Direct` because the whole block is answered by one handler the
+    // dispatcher reaches through a range test, which is what the group means here -- the same
+    // arrangement `KILN_C99_METHOD_TYPED_SUBARRAY` and its neighbours already use.
+    (KILN_C99_METHOD_DATA_VIEW_GET_INT8, 447, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_UINT8, 448, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_INT16, 449, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_UINT16, 450, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_INT32, 451, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_UINT32, 452, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_FLOAT32, 453, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_FLOAT64, 454, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_BIG_INT64, 455, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_GET_BIG_UINT64, 456, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_INT8, 457, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_UINT8, 458, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_INT16, 459, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_UINT16, 460, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_INT32, 461, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_UINT32, 462, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_FLOAT32, 463, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_FLOAT64, 464, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_BIG_INT64, 465, Direct),
+    (KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64, 466, Direct),
+
+    /* The iterator helpers (ES2025). Contiguous on purpose, twice over: 470..481 is the range
+     * `Iterator.prototype` is read through by name, and 470..484 is the range the dispatcher
+     * routes to `kiln_c99_iterator_method`. Nothing else may sit inside either, and the three
+     * codes past the name range -- the two methods a helper carries and `Iterator.from` -- are
+     * deliberately outside it, because `next` and `return` are the *helper's* members and
+     * `Iterator.prototype.next` is not a thing the language has. */
+    (KILN_C99_METHOD_ITERATOR_MAP, 467, Generic),
+    (KILN_C99_METHOD_ITERATOR_FILTER, 468, Generic),
+    (KILN_C99_METHOD_ITERATOR_TAKE, 469, Generic),
+    (KILN_C99_METHOD_ITERATOR_DROP, 470, Generic),
+    (KILN_C99_METHOD_ITERATOR_FLAT_MAP, 471, Generic),
+    (KILN_C99_METHOD_ITERATOR_REDUCE, 472, Generic),
+    (KILN_C99_METHOD_ITERATOR_TO_ARRAY, 473, Generic),
+    (KILN_C99_METHOD_ITERATOR_FOR_EACH, 474, Generic),
+    (KILN_C99_METHOD_ITERATOR_SOME, 475, Generic),
+    (KILN_C99_METHOD_ITERATOR_EVERY, 476, Generic),
+    (KILN_C99_METHOD_ITERATOR_FIND, 477, Generic),
+    (KILN_C99_METHOD_ITERATOR_INCLUDES, 478, Generic),
+    (KILN_C99_METHOD_ITERATOR_HELPER_NEXT, 479, Generic),
+    (KILN_C99_METHOD_ITERATOR_HELPER_RETURN, 480, Generic),
+    (KILN_C99_METHOD_ITERATOR_FROM, 481, Generic),
+    // A member a node builtin publishes and this backend has not built. One code for all of them,
+    // because the refusal does not need to be told which member it is: the instruction that
+    // called it already carries the name, so this answers `CallMethod(readFileSync)`.
+    (KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED, 482, Direct),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -1638,6 +1721,12 @@ builtin_surface! {
     (KILN_C99_BUILTIN_SYMBOL, "Symbol", "toStringTag", sym("@@toStringTag")),
     (KILN_C99_BUILTIN_SYMBOL, "Symbol", "unscopables", sym("@@unscopables")),
 
+    /* `Iterator.from` is the whole of the constructor's answered surface, and it is the member a
+     * bundled `immer` reads. `concat`, `zip` and `zipKeyed` are still backlog below: each builds
+     * a helper over *several* sources, which is a different shape from the one-source helpers
+     * `Iterator.prototype` hands out. */
+    (KILN_C99_BUILTIN_ITERATOR, "Iterator", "from", code(KILN_C99_METHOD_ITERATOR_FROM)),
+
     (KILN_C99_BUILTIN_BUFFER, "Buffer", "from", code(KILN_C99_METHOD_BUFFER_FROM)),
     (KILN_C99_BUILTIN_BUFFER, "Buffer", "alloc", code(KILN_C99_METHOD_BUFFER_ALLOC)),
     // Three names for one operation: nothing here hands back uninitialised memory, so the
@@ -1783,14 +1872,15 @@ builtin_backlog! {
      "not implemented; needs a width-truncating call the BigInt provider does not export"),
     ("Map", "groupBy",
      "not implemented; needs an iterator walk keyed by a callback's result"),
-    ("Iterator", "from",
-     "refused by name: the Iterator helpers are in the unavailable-globals range"),
     ("Iterator", "concat",
-     "refused by name: the Iterator helpers are in the unavailable-globals range"),
+     "not implemented; it walks a list of iterables in turn, so its helper holds a cursor over \
+              several sources where every helper here holds one"),
     ("Iterator", "zip",
-     "refused by name: the Iterator helpers are in the unavailable-globals range"),
+     "not implemented; it steps several sources per `next` and has a padding and \
+              longest/shortest mode this backend has nowhere to put"),
     ("Iterator", "zipKeyed",
-     "refused by name: the Iterator helpers are in the unavailable-globals range"),
+     "not implemented; the keyed twin of `zip`, and blocked on the same missing multi-source \
+              helper"),
     ("Buffer", "constants",
      "not implemented; the constants namespace object has no representation here"),
     ("Math", "f16round",
@@ -1999,6 +2089,11 @@ static int kiln_c99_diagnostic_has_method = 0;
 static const char *kiln_c99_diagnostic_detail = NULL;
 static const char *kiln_c99_diagnostic_function = NULL;
 static size_t kiln_c99_diagnostic_function_len = 0;
+/* Composed text for a diagnostic that wants more than one name. `GetComputed` is the only
+ * operation whose key is a value rather than a constant, so its refusal could not say which member
+ * was read -- `operation=GetComputed` and nothing else. Written at the moment of failure, when
+ * nothing else is using it. */
+static char kiln_c99_diagnostic_compose[128];
 static int kiln_c99_diagnostic_active_depth = 0;
 
 /* Recursion runs on the C stack, where exhausting it aborts the process instead of reporting
@@ -2086,7 +2181,26 @@ enum kiln_value_tag {
     KILN_VALUE_TEMPORAL = 25,
     /* A graph-scoped CommonJS require function. Private to native graph objects: bits holds a
      * kiln_commonjs_require*, whose callback and opaque context are supplied by the launcher. */
-    KILN_VALUE_COMMONJS_REQUIRE = 26
+    KILN_VALUE_COMMONJS_REQUIRE = 26,
+    /* A `DataView`: a window onto a buffer whose element type and byte order are chosen at each
+     * access. bits holds a kiln_data_view*.
+     *
+     * WHY A TAG AND NOT A TYPED VIEW WITH A FLAG. A DataView is not a typed array wearing a
+     * different hat -- it has no element kind, no length in elements and no indexed properties at
+     * all -- so sharing KILN_VALUE_TYPED_ARRAY would mean every `tag == KILN_VALUE_TYPED_ARRAY`
+     * test in this file had to learn to say no, and each one that was missed would answer
+     * confidently and wrongly about `view.length`, `view[0]` or `Array.from(view)`. A silent
+     * wrong answer is the one thing this backend is not allowed to give (ADR 0042).
+     *
+     * WHY NOT A NEW `kiln_typed_kind` EITHER. That one is a real C enum, switched over without a
+     * default in `kiln_c99_typed_name`, `_constructor`, `_prototype`, `_width`, `_get` and `_set`
+     * -- and the emitted C is compiled with `-Wall -Wextra -Werror`. A new kind would therefore
+     * *require* six answers to questions a DataView has no answer to.
+     *
+     * The tag is cheap for the reason the ones above it are: the embedding boundary carries
+     * exactly tags 0 through 4, so KILN_C_ABI_VERSION does not move, and every switch over
+     * `value.tag` here has a `default`. */
+    KILN_VALUE_DATA_VIEW = 27
 };
 
 #define KILN_C99_BUILTIN_PROMISE 15
@@ -2202,6 +2316,10 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST),
     emit_method_define!(KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX),
     emit_method_define!(KILN_C99_METHOD_ARRAY_REDUCE_RIGHT),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_SORTED),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_REVERSED),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_TO_SPLICED),
+    emit_method_define!(KILN_C99_METHOD_ARRAY_WITH),
     r#"
 /* String methods, part two, numbered above the array block for the same reason the array block is
  * numbered above the namespace one: the guard that routes a code to a receiver kind is a range,
@@ -2227,6 +2345,44 @@ enum kiln_value_tag {
 "#,
     emit_method_define!(KILN_C99_METHOD_ERROR_TO_STRING),
     r#"
+/* `DataView.prototype`, whose twenty accessors are one contiguous block so that a receiver check
+ * and a name lookup are both a range test. The ten `get`s come first and the ten `set`s second,
+ * with the BigInt pair at the end of each half, so that "is this a write" is one comparison
+ * against the first `set` rather than a second table. */
+"#,
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT8),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT8),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT16),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT16),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_INT32),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_UINT32),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_FLOAT32),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_FLOAT64),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_BIG_INT64),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_GET_BIG_UINT64),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT8),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT8),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT16),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT16),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_INT32),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_UINT32),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_FLOAT32),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_FLOAT64),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_BIG_INT64),
+    emit_method_define!(KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64),
+    r#"
+/* The block's endpoints are `..._GET_INT8` and `..._SET_BIG_UINT64`, spelled out at each of the
+ * five range tests below rather than aliased to a shorter pair of names.
+ *
+ * An alias would read better and cannot be had. `parse_numeric_id_defines` in
+ * `tests/emitted_c.rs` treats *every* `#define KILN_C99_METHOD_...` line as a numeric ID
+ * declaration and fails the run when the value does not parse as a number, and giving the alias a
+ * numeric value instead makes it a duplicate of the member it names -- which that file allows for
+ * exactly one pair, `TEMPORAL_LAST`. Spelling the endpoints out is also what lets
+ * `every_method_a_name_lookup_walks_over_has_a_name` resolve this block's lookup range at all: it
+ * reads the two bounds of each `kiln_c99_lookup_method` call out of the `#define` table, so a
+ * bound it cannot resolve is a range it silently stops checking. */
+
 #define KILN_C99_BUILTIN_MAP 8
 #define KILN_C99_BUILTIN_SET 9
 /* The error constructors, contiguous so the kind is the offset: `new TypeError(m)` and
@@ -2266,11 +2422,21 @@ enum kiln_value_tag {
  * to ask about them is "is this one of them" -- `kiln_c99_is_unavailable_global`. */
 #define KILN_C99_BUILTIN_UNAVAILABLE_FIRST 76
 #define KILN_C99_BUILTIN_INTL 76
-#define KILN_C99_BUILTIN_DATA_VIEW 77
+/* 77 was `DataView` until it became a real constructor. Retired rather than reused: every code
+ * between the two markers means "this backend does not implement this global", so handing 77 to
+ * the next global to be built would put an implemented one inside the unimplemented range, and
+ * closing the hole by shifting the fifteen below it would renumber a range to save one number
+ * nobody counts. `RETIRED_BUILTINS` in `tests/emitted_c.rs` is where the hole is recorded, since
+ * builtin codes are otherwise required to be dense. */
 #define KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER 78
 #define KILN_C99_BUILTIN_WEAK_REF 79
 #define KILN_C99_BUILTIN_FINALIZATION_REGISTRY 80
 #define KILN_C99_BUILTIN_SHADOW_REALM 81
+/* `Iterator` is the one member of this block that is no longer one of them: `Iterator.from` and
+ * most of `Iterator.prototype` are answered now. It keeps 82 rather than moving out of the range
+ * because the builtin IDs are asserted gapless from 1 (`assert_numeric_id_invariants`), so a
+ * vacated number is a build failure -- and the two markers around this block are read by nothing
+ * today, so the exception costs a comment rather than a dispatch. */
 #define KILN_C99_BUILTIN_ITERATOR 82
 #define KILN_C99_BUILTIN_FLOAT16_ARRAY 83
 #define KILN_C99_BUILTIN_BIG_INT64_ARRAY 84
@@ -2281,8 +2447,25 @@ enum kiln_value_tag {
 #define KILN_C99_BUILTIN_EVAL_ERROR 89
 #define KILN_C99_BUILTIN_TEXT_DECODER 90
 #define KILN_C99_BUILTIN_EVAL 91
+#define KILN_C99_BUILTIN_UNAVAILABLE_LAST 91
+
+/* `performance`, which is answered rather than refused: `performance.now()` reads the realm's
+ * virtual clock, which is the only clock a reproducible build is allowed to have (ADR 0015). It
+ * keeps the number it was given while it was unavailable and sits one past the end of the range
+ * above, because the number is what an emitted unit stores and renumbering it would invalidate
+ * every cached artifact to say nothing new. */
 #define KILN_C99_BUILTIN_PERFORMANCE 92
-#define KILN_C99_BUILTIN_UNAVAILABLE_LAST 92
+
+/* `DataView`, which used to be one of the globals above and is now a constructor like any other.
+ * Numbered past the unavailable range rather than inside the hole it left, because a code in that
+ * range is what the comment there promises is unimplemented. Its prototype table is next to it
+ * for the reason every other pair here is: the two are read as one thing. */
+#define KILN_C99_BUILTIN_DATA_VIEW 93
+#define KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE 94
+/* `%IteratorPrototype%`: the table the iterator helpers live on, and the object every helper this
+ * backend builds links to. A method table rather than a constructor, so it reports `typeof
+ * "object"` through `kiln_c99_is_namespace` exactly as `Array.prototype` does. */
+#define KILN_C99_BUILTIN_ITERATOR_PROTOTYPE 95
 
 #define KILN_C99_BUILTIN_DATE 7
 
@@ -2727,7 +2910,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_WRITE),
     emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_END),
     emit_method_define!(KILN_C99_METHOD_NODE_WRITABLE_DESTROY),
-    emit_method_define!(KILN_C99_METHOD_NODE_PERFORMANCE_NOW),
+    emit_method_define!(KILN_C99_METHOD_PERFORMANCE_NOW),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_EXISTS_SYNC),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_READ_FILE),
     emit_method_define!(KILN_C99_METHOD_NODE_FS_STAT),
@@ -2739,6 +2922,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_NODE_PATH_BASENAME),
     emit_method_define!(KILN_C99_METHOD_NODE_PATH_EXTNAME),
     emit_method_define!(KILN_C99_METHOD_NODE_PATH_RELATIVE),
+    emit_method_define!(KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED),
     emit_method_define!(KILN_C99_METHOD_NODE_ASSERT_OK),
     emit_method_define!(KILN_C99_METHOD_NODE_WORKER_CONSTRUCTOR),
     emit_method_define!(KILN_C99_METHOD_NODE_MODULE_CREATE_REQUIRE),
@@ -2756,7 +2940,7 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_PROCESS_CWD),
     emit_method_define!(KILN_C99_METHOD_ATOMICS_UNAVAILABLE),
     emit_method_define!(KILN_C99_METHOD_CONSOLE_LOG),
-    emit_method_define!(KILN_C99_METHOD_CONSOLE_UNAVAILABLE),
+    emit_method_define!(KILN_C99_METHOD_CONSOLE_ERROR),
     emit_method_define!(KILN_C99_METHOD_SET_IMMEDIATE),
     emit_method_define!(KILN_C99_METHOD_CLEAR_IMMEDIATE),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER),
@@ -2812,6 +2996,27 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_SET_MINUTES),
     emit_method_define!(KILN_C99_METHOD_SET_SECONDS),
     emit_method_define!(KILN_C99_METHOD_SET_MILLISECONDS),
+    r#"
+/* The iterator helpers. 470..481 is a name range -- `kiln_c99_lookup_method` walks it to answer
+ * `Iterator.prototype.map` -- and 470..484 is the dispatch range. A helper's own `next` and
+ * `return` sit past the name range so that reading `Iterator.prototype.next` finds nothing, which
+ * is correct: the helpers live on the table and `next` lives on the helper object. */
+"#,
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_MAP),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_FILTER),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_TAKE),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_DROP),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_FLAT_MAP),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_REDUCE),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_TO_ARRAY),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_FOR_EACH),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_SOME),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_EVERY),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_FIND),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_INCLUDES),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_HELPER_NEXT),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_HELPER_RETURN),
+    emit_method_define!(KILN_C99_METHOD_ITERATOR_FROM),
     r#"
 /* Dispatch membership is generated from the Rust method registry.  Keep these predicates exact:
  * numeric adjacency is an implementation detail, not a category contract. */
@@ -2996,6 +3201,34 @@ static uint64_t kiln_c99_lookup_method(const char *key, size_t key_len, uint64_t
     return 0;
 }
 
+/* `Iterator.prototype`'s members, by name.
+ *
+ * The 470..481 range is the table: adding a helper is adding a code with a name to it, and this
+ * function does not have to be edited. `@@iterator` is answered off the range because an iterator
+ * is its own iterable and the function that says so is the one every *other* iterator in this
+ * backend answers with -- a helper and an array iterator must hand back the same value, or
+ * `it[Symbol.iterator] === it[Symbol.iterator]` stops being an identity a program can rely on. */
+static uint64_t kiln_c99_iterator_prototype_method(const char *key, size_t key_len) {
+    if (kiln_c99_same_name(key, key_len, "@@iterator")) {
+        return KILN_C99_METHOD_ITERATOR_SELF;
+    }
+    return kiln_c99_lookup_method(key, key_len, KILN_C99_METHOD_ITERATOR_MAP,
+                                  KILN_C99_METHOD_ITERATOR_INCLUDES);
+}
+
+/* A member the language puts on `Iterator.prototype` that this backend has not built.
+ *
+ * Named rather than counted, and separate from the range above, because the two absences are
+ * different answers. `it.nope` is undefined on any object and must stay so; `it.chunks` is a
+ * function in the interpreter, so answering undefined here would send
+ * `typeof it.chunks === "function"` down the branch written for a realm that never had it. The
+ * refusal is the honest half of that pair. */
+static int kiln_c99_iterator_prototype_gap(const char *key, size_t key_len) {
+    return kiln_c99_same_name(key, key_len, "chunks") ||
+           kiln_c99_same_name(key, key_len, "windows") ||
+           kiln_c99_same_name(key, key_len, "join");
+}
+
 static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
     return kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_ARRAY_LOOKUP);
 }
@@ -3009,9 +3242,11 @@ static uint64_t kiln_c99_array_method(const char *key, size_t key_len) {
  * reactive proxy does, and `dayjs` does the same to a date; both stopped here.
  *
  * Keeping the list is what preserves the other half. A name that really is a member but is not
- * implemented yet still refuses by name, so `a.toSorted(f)` says so rather than becoming
+ * implemented yet still refuses by name, so `a.toLocaleString()` says so rather than becoming
  * "undefined is not a function" three frames from the cause -- and, worse, rather than quietly
- * failing a `typeof a.toSorted === "function"` feature test. */
+ * failing a `typeof a.toLocaleString === "function"` feature test. The four copying methods used
+ * to be this comment's example and are now implemented, which is what a name on this list is
+ * supposed to do: hold the refusal open until somebody answers it. */
 static int kiln_c99_is_array_member(const char *key, size_t key_len) {
     static const char *const members[] = {
         "at", "concat", "constructor", "copyWithin", "entries", "every", "fill", "filter", "find",
@@ -3048,6 +3283,55 @@ static int kiln_c99_is_date_member(const char *key, size_t key_len) {
         }
     }
     return key_len > 2 && key[0] == '@' && key[1] == '@';
+}
+
+/* The same question one type further over: whether a name is a member of the prototype the
+ * language gives *this* collection.
+ *
+ * The four kinds do not share a member list -- a `Set` has no `get`, a `WeakMap` has neither
+ * `size` nor an iterator -- so the answer depends on the receiver, not only on the name. Every
+ * other name is absent, and absent is undefined: `m.__v_isRef` and `m.nope` are what the
+ * language answers, not gaps in this backend, and refusing them ended the process where it
+ * should have answered. A bundled `vue-reactivity` reads arbitrary names off a reactive `Map`
+ * for exactly the reason it reads them off a reactive array, and stopped here after the array
+ * was fixed. */
+static int kiln_c99_is_collection_member(const kiln_collection *collection, const char *key,
+                                         size_t key_len) {
+    /* `Object.prototype` is above every one of them, so its members count as members here too:
+     * a name this backend cannot resolve yet has to keep refusing rather than answer undefined. */
+    static const char *const shared[] = {
+        "__defineGetter__", "__defineSetter__", "__lookupGetter__", "__lookupSetter__",
+        "__proto__", "constructor", "delete", "has", "hasOwnProperty", "isPrototypeOf",
+        "propertyIsEnumerable", "toLocaleString", "toString", "valueOf"};
+    static const char *const strong[] = {"clear", "entries", "forEach", "keys", "size", "values"};
+    size_t index;
+    for (index = 0; index < sizeof shared / sizeof *shared; ++index) {
+        if (kiln_c99_same_name(key, key_len, shared[index])) {
+            return 1;
+        }
+    }
+    if (!collection->is_weak) {
+        for (index = 0; index < sizeof strong / sizeof *strong; ++index) {
+            if (kiln_c99_same_name(key, key_len, strong[index])) {
+                return 1;
+            }
+        }
+    }
+    if (collection->is_map && (kiln_c99_same_name(key, key_len, "get") ||
+                               kiln_c99_same_name(key, key_len, "set"))) {
+        return 1;
+    }
+    if (!collection->is_map && kiln_c99_same_name(key, key_len, "add")) {
+        return 1;
+    }
+    /* The two symbol-keyed members, spelled the way a reserved key reaches here. They are named
+     * rather than answered for the whole `@@` prefix because these prototypes really do carry
+     * only these two: `m[Symbol.species]` is absent in the language, and absent is undefined.
+     * `@@toStringTag` is what `Object.prototype.toString` reads, so a weak collection has it. */
+    if (kiln_c99_same_name(key, key_len, "@@toStringTag")) {
+        return 1;
+    }
+    return !collection->is_weak && kiln_c99_same_name(key, key_len, "@@iterator");
 }
 
 /* Whether a name is a member of `String.prototype` *in the language*, which is a different
@@ -3142,6 +3426,20 @@ static int kiln_c99_is_typed_array_member(const char *key, size_t key_len) {
     return 0;
 }
 
+/* Whether a name is a member of `DataView.prototype` *in the language* that this backend does not
+ * answer -- the same question `kiln_c99_is_typed_array_member` asks one type over, and it has the
+ * same two-name answer.
+ *
+ * `getFloat16` and `setFloat16` are the whole list. Half precision has no decode here and the
+ * number provider exports no `f16round` either (`Math.f16round` is in the backlog for that
+ * reason), and answering a `Float32` decode of the same two bytes would be a wrong answer no
+ * program could see coming. The interpreter *does* answer both, so `undefined` would be a
+ * divergence the gate cannot see; a refusal is one it can. */
+static int kiln_c99_is_data_view_member(const char *key, size_t key_len) {
+    return kiln_c99_same_name(key, key_len, "getFloat16") ||
+           kiln_c99_same_name(key, key_len, "setFloat16");
+}
+
 static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
     return kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_STRING_DISPATCH);
 }
@@ -3220,6 +3518,7 @@ const C99_MUTABLE_STATE_OWNERS: &[(&str, C99StateOwner)] = &[
     ("kiln_c99_diagnostic_detail", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_function", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_function_len", C99StateOwner::Realm),
+    ("kiln_c99_diagnostic_compose", C99StateOwner::Realm),
     ("kiln_c99_diagnostic_active_depth", C99StateOwner::Frame),
     ("kiln_c99_new_target", C99StateOwner::Frame),
     ("kiln_c99_inheriting_new_target", C99StateOwner::Frame),
@@ -3558,6 +3857,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::ReferenceError
             | kiln_ir::Builtin::SyntaxError
             | kiln_ir::Builtin::UriError
+            | kiln_ir::Builtin::EvalError
             | kiln_ir::Builtin::AggregateError
             | kiln_ir::Builtin::NotANumber
             | kiln_ir::Builtin::Infinity
@@ -4431,6 +4731,7 @@ fn render_unwind(output: &mut String, handlers: &[u32], suspends: bool, uncaught
         "    if (kiln_handler_top == 0) return KILN_C99_THROWN;\n"
     });
     output.push_str("    --kiln_handler_top;\n");
+    output.push_str("    kiln_c99_forget_handled_throw();\n");
     output.push_str("    sp = kiln_handler_stack[kiln_handler_top];\n");
     output.push_str("    stack[sp++] = *thrown;\n");
     output.push_str("    switch (kiln_handlers[kiln_handler_top]) {\n");
@@ -5944,7 +6245,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = target.tag; if (target.tag == KILN_VALUE_BUILTIN) {{ const char *named = kiln_c99_builtin_name(target.bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
                 text.len()
             )
             .unwrap();
@@ -5979,7 +6280,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - 1].tag; kiln_c99_diagnostic_detail = \"GetComputed lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
+                "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = stack[sp - 1].tag; const char *named = stack[sp - 1].tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(stack[sp - 1].bits) : NULL; if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {{ int written = named != NULL ? snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%s.%.*s\", named, (int)key.len, key.ptr) : snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%.*s\", (int)key.len, key.ptr); if (written > 0) {{ kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose; kiln_c99_diagnostic_function_len = (size_t)written < sizeof kiln_c99_diagnostic_compose ? (size_t)written : sizeof kiln_c99_diagnostic_compose - 1; }} }} else if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} kiln_c99_diagnostic_detail = \"GetComputed lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
             )
             .unwrap();
         }
@@ -6374,6 +6675,7 @@ fn emit_instruction(
                 }
                 kiln_ir::Builtin::SyntaxError => "kiln_c99_builtin(KILN_C99_BUILTIN_SYNTAX_ERROR)",
                 kiln_ir::Builtin::UriError => "kiln_c99_builtin(KILN_C99_BUILTIN_URI_ERROR)",
+                kiln_ir::Builtin::EvalError => "kiln_c99_builtin(KILN_C99_BUILTIN_EVAL_ERROR)",
                 kiln_ir::Builtin::AggregateError => {
                     "kiln_c99_builtin(KILN_C99_BUILTIN_AGGREGATE_ERROR)"
                 }
@@ -6436,6 +6738,10 @@ fn emit_instruction(
                 kiln_ir::Builtin::TextEncoder => {
                     "kiln_c99_builtin(KILN_C99_BUILTIN_TEXT_ENCODER)"
                 }
+                // Not built like `Atomics` and `process` are, which are real objects because a
+                // program writes to them. Nothing writes to `performance`, so it stays the
+                // built-in value it already was on `globalThis` -- and the two spellings reach
+                // the same value without a slot to keep in step.
                 kiln_ir::Builtin::Performance => {
                     "kiln_c99_builtin(KILN_C99_BUILTIN_PERFORMANCE)"
                 }
@@ -6531,9 +6837,24 @@ fn emit_instruction(
                     );
                 }
                 if *commonjs {
-                    output.push_str(
-                        "    { kiln_value module_value = locals[2].tag == KILN_VALUE_CELL ? *kiln_c99_cell_of(locals[2]) : locals[2]; int export_status = kiln_c99_get(host, module_value, \"exports\", 7, &exports[0], depth, thrown); if (export_status != KILN_C99_OK) return export_status; }\n",
-                    );
+                    // `depth` and `thrown` are declared by the entry point only when the module
+                    // has callables in it, so a CommonJS module that declares no function at all
+                    // -- `console.log("ok")` in a `.cjs` is the whole of one -- named two
+                    // identifiers that were not there, and the C would not compile. It is the
+                    // read that has to bend rather than the declaration: with no callable
+                    // anywhere in the module there is no getter that could have been installed on
+                    // `module`, so this read provably cannot re-enter or throw and the depth
+                    // counter and the thrown slot have nothing to carry.
+                    let (depth, thrown) = if *callables {
+                        ("depth", "thrown")
+                    } else {
+                        ("0", "NULL")
+                    };
+                    writeln!(
+                        output,
+                        "    {{ kiln_value module_value = locals[2].tag == KILN_VALUE_CELL ? *kiln_c99_cell_of(locals[2]) : locals[2]; int export_status = kiln_c99_get(host, module_value, \"exports\", 7, &exports[0], {depth}, {thrown}); if (export_status != KILN_C99_OK) return export_status; }}"
+                    )
+                    .unwrap();
                 }
                 for (index, binding) in exports.iter().enumerate() {
                     // The slot is handed over exactly as it stands, box included. A mutable
@@ -6587,9 +6908,14 @@ fn instruction_diagnostic(instruction: &Instruction, constants: &[Constant]) -> 
         operation.push_str(name);
         operation.push(')');
     }
+    // `@` survives the filter because a reserved key is spelled `@@iterator` everywhere else in
+    // this backend, and stripping the prefix here made the diagnostic name a property the program
+    // does not have: `CallMethod(iterator)` reads as a call to something called `iterator`, when
+    // what refused was `for...of` reaching for `Symbol.iterator`. That cost real time on a bundled
+    // `marked` -- the operation named one thing and the lookup did another.
     operation
         .bytes()
-        .filter(|byte| byte.is_ascii_alphanumeric() || b"_.$:-()".contains(byte))
+        .filter(|byte| byte.is_ascii_alphanumeric() || b"_.$:-()@".contains(byte))
         .map(char::from)
         .collect()
 }

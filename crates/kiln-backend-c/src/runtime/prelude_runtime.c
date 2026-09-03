@@ -206,6 +206,7 @@ static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value han
 static kiln_array *kiln_c99_array_of(kiln_value value);
 static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value);
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value);
+static kiln_data_view *kiln_c99_data_view_of(kiln_value value);
 static double kiln_c99_as_number(kiln_value value);
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
                                       kiln_value *thrown);
@@ -237,6 +238,8 @@ static int kiln_c99_new_typed_buffer(kiln_value *out, size_t byte_length);
 static int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind,
                                     kiln_value source, size_t byte_offset, size_t length,
                                     int has_length, kiln_value *thrown);
+static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byte_offset,
+                                  size_t byte_length, int has_length, kiln_value *thrown);
 static int kiln_c99_to_index(kiln_value value, size_t *out, kiln_value *thrown);
 static size_t kiln_c99_typed_width(kiln_typed_kind kind);
 static double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
@@ -251,6 +254,7 @@ static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_own_data_hot_key(kiln_value target, int id, kiln_value value);
 static int kiln_c99_put_hot_key(kiln_host *host, kiln_value target, int id, kiln_value value,
                                 int depth, kiln_value *thrown);
+static int kiln_c99_put_refused(kiln_value target, const char *key, size_t key_len);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -295,6 +299,8 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
 static int kiln_c99_describe_property(kiln_host *host, kiln_value target, const char *key,
                                       size_t key_len, kiln_value *out, int *found, int depth,
                                       kiln_value *thrown);
+static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kiln_value key,
+                                         int *found, int depth, kiln_value *thrown);
 static int kiln_c99_proxy_own_keys(kiln_host *host, kiln_value proxy, kiln_value *out, int depth,
                                    kiln_value *thrown);
 static int kiln_c99_proxy_describe(kiln_host *host, kiln_value proxy, kiln_value key,
@@ -548,6 +554,9 @@ static int kiln_c99_node_http(kiln_host *host, kiln_value *result, uint64_t code
 static int kiln_c99_node_fs(kiln_host *host, kiln_value *result, uint64_t code,
                             kiln_value receiver, const kiln_value *args, size_t argc,
                             int depth, kiln_value *thrown);
+static int kiln_c99_iterator_method(kiln_host *host, kiln_value *result, uint64_t code,
+                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    int depth, kiln_value *thrown);
 
 static kiln_value kiln_c99_value(uint32_t tag, uint64_t bits, const char *ptr, size_t len) {
     kiln_value value;
@@ -735,6 +744,231 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
     size_t *lengths = NULL;
     size_t count = 0;
     size_t capacity = 0;
+    size_t index = 0;
+    int absolute = len > 0 && path[0] == '/';
+    int trailing = len > 0 && path[len - 1] == '/';
+    int status = KILN_C99_OK;
+    while (index <= len) {
+        size_t start = index;
+        size_t length;
+        while (index < len && path[index] != '/') ++index;
+        length = index - start;
+        ++index;
+        if (length == 0 || (length == 1 && path[start] == '.')) continue;
+        if (length == 2 && path[start] == '.' && path[start + 1] == '.') {
+            /* `..` cancels the component before it, but never another `..` -- so "a/../.." keeps
+             * one. With nothing to cancel it survives in a relative path and is dropped in an
+             * absolute one, which is what makes "/.." the root. */
+            if (count > 0 && !(lengths[count - 1] == 2 && parts[count - 1][0] == '.' &&
+                               parts[count - 1][1] == '.')) {
+                --count;
+                continue;
+            }
+            if (absolute) continue;
+        }
+        if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) !=
+            KILN_C99_OK) {
+            status = KILN_C99_OUT_OF_MEMORY;
+            goto done;
+        }
+        {
+            size_t *grown = (size_t *)realloc(lengths, capacity * sizeof *lengths);
+            if (grown == NULL) {
+                status = KILN_C99_OUT_OF_MEMORY;
+                goto done;
+            }
+            lengths = grown;
+        }
+        parts[count] = path + start;
+        lengths[count++] = length;
+    }
+    if (absolute) status = kiln_c99_text_append_c(out, "/");
+    for (index = 0; status == KILN_C99_OK && index < count; ++index) {
+        if (out->len != 0 && out->bytes[out->len - 1] != '/')
+            status = kiln_c99_text_append_c(out, "/");
+        if (status == KILN_C99_OK)
+            status = kiln_c99_text_append(out, parts[index], lengths[index]);
+    }
+    if (status == KILN_C99_OK && out->len == 0) status = kiln_c99_text_append_c(out, ".");
+    /* The root and the current directory are already their own trailing separator; anything else
+     * keeps the one it was given. */
+    if (status == KILN_C99_OK && trailing &&
+        !(out->len == 1 && (out->bytes[0] == '/' || out->bytes[0] == '.')))
+        status = kiln_c99_text_append_c(out, "/");
+done:
+    free(parts);
+    free(lengths);
+    return status;
+}
+
+/* Where the *body* of a path begins -- the point the component walk below will not go under.
+ *
+ * The four decompositions are Rust's `Path::parent`, `file_name` and `extension` in the
+ * interpreter, so they inherit `Path::components`: a run of separators is not a component and a
+ * `.` is normalized away, *except* for the single leading `.` that "./a" and "." start with. That
+ * exception is the whole of this function, and leaving it out makes `dirname(".")` answer "/". */
+static size_t kiln_c99_posix_body_floor(const char *path, size_t len) {
+    if (len > 0 && path[0] == '/') return 1;
+    if (len == 1 && path[0] == '.') return 1;
+    if (len >= 2 && path[0] == '.' && path[1] == '/') return 1;
+    return 0;
+}
+
+/* The last component of `path[0, *end)` that is a name or `..`, read the way
+ * `Components::next_back` reads one.
+ *
+ * `*end` is both the input bound and the output: on success it is moved to the end of the
+ * component found, which is exactly where `as_path` would have trimmed the remainder to, and on
+ * failure to the floor. That is why `dirname` can call this twice and do no trimming of its
+ * own -- popping a component and trimming what the pop left behind are the same walk. */
+static int kiln_c99_posix_last_component(const char *path, size_t floor, size_t *start,
+                                         size_t *end) {
+    size_t at = *end;
+    while (at > floor) {
+        size_t from;
+        if (path[at - 1] == '/') {
+            --at;
+            continue;
+        }
+        from = at;
+        while (from > floor && path[from - 1] != '/') --from;
+        if (at - from == 1 && path[from] == '.') {
+            at = from;
+            continue;
+        }
+        *start = from;
+        *end = at;
+        return 1;
+    }
+    *end = at;
+    return 0;
+}
+
+/* The next `Component::Normal` of an already normalized path at or after `*at`.
+ *
+ * Names only: `relative` walks those and nothing else, because the normalizer has already folded
+ * every `..` it could and a leading one that survived names no directory this walk could match
+ * against the other side. */
+static int kiln_c99_posix_next_name(const char *path, size_t len, size_t *at, size_t *start,
+                                    size_t *stop) {
+    while (*at < len) {
+        size_t from = *at;
+        while (*at < len && path[*at] != '/') ++*at;
+        if (*at > from) {
+            size_t length = *at - from;
+            int dots = (length == 1 && path[from] == '.') ||
+                       (length == 2 && path[from] == '.' && path[from + 1] == '.');
+            if (!dots) {
+                *start = from;
+                *stop = *at;
+                if (*at < len) ++*at;
+                return 1;
+            }
+        }
+        if (*at < len) ++*at;
+    }
+    return 0;
+}
+
+/* `path.relative(from, to)`: the path that reaches `to` when walked from `from`.
+ *
+ * The two sides are normalized first and then walked in step. The pair that first disagrees is
+ * the one the walk stops on, and it is not re-read: everything still ahead on the `from` side
+ * becomes a `..`, and that pair's `to` half plus everything after it is the descent. */
+static int kiln_c99_posix_relative(kiln_text *out, const char *from, size_t from_len,
+                                   const char *to, size_t to_len) {
+    kiln_text left = {NULL, 0, 0};
+    kiln_text right = {NULL, 0, 0};
+    size_t left_at = 0;
+    size_t right_at = 0;
+    size_t up = 0;
+    size_t stop_start = 0;
+    size_t stop_stop = 0;
+    int stop_pending = 0;
+    int status = kiln_c99_posix_normalize(&left, from, from_len);
+    if (status == KILN_C99_OK) status = kiln_c99_posix_normalize(&right, to, to_len);
+    while (status == KILN_C99_OK) {
+        size_t left_start, left_stop, right_start, right_stop;
+        int have_left =
+            kiln_c99_posix_next_name(left.bytes, left.len, &left_at, &left_start, &left_stop);
+        int have_right =
+            kiln_c99_posix_next_name(right.bytes, right.len, &right_at, &right_start, &right_stop);
+        if (have_left && have_right && left_stop - left_start == right_stop - right_start &&
+            memcmp(left.bytes + left_start, right.bytes + right_start,
+                   left_stop - left_start) == 0) {
+            continue;
+        }
+        if (have_left) {
+            size_t ignored_start, ignored_stop;
+            up = 1;
+            while (kiln_c99_posix_next_name(left.bytes, left.len, &left_at, &ignored_start,
+                                            &ignored_stop))
+                ++up;
+        }
+        if (have_right) {
+            stop_pending = 1;
+            stop_start = right_start;
+            stop_stop = right_stop;
+        }
+        break;
+    }
+    while (status == KILN_C99_OK && up > 0) {
+        if (out->len != 0) status = kiln_c99_text_append_c(out, "/");
+        if (status == KILN_C99_OK) status = kiln_c99_text_append_c(out, "..");
+        --up;
+    }
+    if (status == KILN_C99_OK && stop_pending) {
+        if (out->len != 0) status = kiln_c99_text_append_c(out, "/");
+        if (status == KILN_C99_OK)
+            status = kiln_c99_text_append(out, right.bytes + stop_start, stop_stop - stop_start);
+        while (status == KILN_C99_OK) {
+            size_t start, stop;
+            if (!kiln_c99_posix_next_name(right.bytes, right.len, &right_at, &start, &stop)) break;
+            if (out->len != 0) status = kiln_c99_text_append_c(out, "/");
+            if (status == KILN_C99_OK)
+                status = kiln_c99_text_append(out, right.bytes + start, stop - start);
+        }
+    }
+    free(left.bytes);
+    free(right.bytes);
+    return status;
+}
+
+/* A path answer as a string value.
+ *
+ * Zero length goes through the tagged empty string rather than a zero-byte allocation, because an
+ * allocator that answers NULL for zero bytes would otherwise make "" indistinguishable from
+ * running out of memory -- and `basename`, `extname` and `relative` all answer "" legitimately. */
+static int kiln_c99_node_path_text(kiln_value *result, const char *text, size_t len) {
+    if (len == 0) {
+        *result = kiln_c99_value(KILN_VALUE_STRING, 0, NULL, 0);
+        return KILN_C99_OK;
+    }
+    *result = kiln_c99_copy_text(text, len);
+    return result->tag == KILN_VALUE_STRING ? KILN_C99_OK : KILN_C99_OUT_OF_MEMORY;
+}
+
+/* The argument at `index` as a path, or "" when it is absent.
+ *
+ * Absent rather than `undefined`: the interpreter defaults a missing path to the empty string and
+ * coerces anything present, and the halfway house here -- refusing a non-string while defaulting
+ * a missing one -- is the convention `join` and `resolve` already set on this surface. */
+static int kiln_c99_node_path_argument(const kiln_value *args, size_t argc, size_t index,
+                                       const char **text, size_t *len, kiln_value *thrown) {
+    *text = "";
+    *len = 0;
+    if (index >= argc) return KILN_C99_OK;
+    if (args[index].tag != KILN_VALUE_STRING)
+        return kiln_c99_throw_not_a(thrown, args[index], "string path");
+    *text = args[index].ptr;
+    *len = args[index].len;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_node_path(kiln_value *result, uint64_t code,
+                              const kiln_value *args, size_t argc, kiln_value *thrown) {
+    kiln_text joined = {0};
+    kiln_text built = {0};
     size_t index;
     int absolute = code == KILN_C99_METHOD_NODE_PATH_RESOLVE;
     int status = KILN_C99_OK;
@@ -783,67 +1017,36 @@ static int kiln_c99_node_path(kiln_value *result, uint64_t code,
         if (args[index].tag != KILN_VALUE_STRING)
             return kiln_c99_throw_not_a(thrown, args[index], "string path");
         part = args[index];
-        if (part.len == 0) continue;
-        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE && part.ptr[0] == '/') {
-            joined.len = 0;
-            absolute = 1;
-        }
-        if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
+        if (code == KILN_C99_METHOD_NODE_PATH_RESOLVE) {
+            if (part.len == 0) continue;
+            if (part.ptr[0] == '/') {
+                joined.len = 0;
+                absolute = 1;
+            }
+            if (joined.len != 0 && joined.bytes[joined.len - 1] != '/')
+                status = kiln_c99_text_append_c(&joined, "/");
+        } else if (index > 0) {
             status = kiln_c99_text_append_c(&joined, "/");
+        }
         if (status == KILN_C99_OK) status = kiln_c99_text_append(&joined, part.ptr, part.len);
         if (status != KILN_C99_OK) goto done;
     }
     if (absolute && (joined.len == 0 || joined.bytes[0] != '/')) {
         kiln_text prefixed = {0};
         status = kiln_c99_text_append_c(&prefixed, "/");
-        if (status == KILN_C99_OK) status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
+        if (status == KILN_C99_OK)
+            status = kiln_c99_text_append(&prefixed, joined.bytes, joined.len);
         free(joined.bytes);
         joined = prefixed;
         if (status != KILN_C99_OK) goto done;
     }
-    /* Normalize in place by retaining slices. `..` cannot escape an absolute root. */
-    for (index = 0; index <= joined.len;) {
-        size_t start = index;
-        size_t length;
-        while (index < joined.len && joined.bytes[index] != '/') ++index;
-        length = index - start;
-        ++index;
-        if (length == 0 || (length == 1 && joined.bytes[start] == '.')) continue;
-        if (length == 2 && joined.bytes[start] == '.' && joined.bytes[start + 1] == '.') {
-            if (count > 0 && !(lengths[count - 1] == 2 &&
-                parts[count - 1][0] == '.' && parts[count - 1][1] == '.')) {
-                --count;
-            } else if (!absolute) {
-                if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-                lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
-                if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-                parts[count] = joined.bytes + start; lengths[count++] = length;
-            }
-            continue;
-        }
-        if (kiln_c99_reserve((void **)&parts, &capacity, count + 1, sizeof *parts) != KILN_C99_OK) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-        lengths = (size_t *)realloc(lengths, capacity * sizeof *lengths);
-        if (lengths == NULL) { status = KILN_C99_OUT_OF_MEMORY; goto done; }
-        parts[count] = joined.bytes + start; lengths[count++] = length;
-    }
-    {
-        kiln_text normalized = {0};
-        if (absolute) status = kiln_c99_text_append_c(&normalized, "/");
-        for (index = 0; status == KILN_C99_OK && index < count; ++index) {
-            if (normalized.len != 0 && normalized.bytes[normalized.len - 1] != '/')
-                status = kiln_c99_text_append_c(&normalized, "/");
-            if (status == KILN_C99_OK)
-                status = kiln_c99_text_append(&normalized, parts[index], lengths[index]);
-        }
-        if (status == KILN_C99_OK && normalized.len == 0)
-            status = kiln_c99_text_append_c(&normalized, absolute ? "/" : ".");
-        if (status == KILN_C99_OK)
-            *result = kiln_c99_text_value(&normalized);
-        else free(normalized.bytes);
+    status = kiln_c99_posix_normalize(&built, joined.bytes, joined.len);
+    if (status == KILN_C99_OK) {
+        *result = kiln_c99_text_value(&built);
+    } else {
+        free(built.bytes);
     }
 done:
-    free(parts);
-    free(lengths);
     free(joined.bytes);
     return status;
 }
@@ -866,6 +1069,10 @@ static kiln_typed_buffer *kiln_c99_typed_buffer_of(kiln_value value) {
 
 static kiln_typed_array *kiln_c99_typed_array_of(kiln_value value) {
     return (kiln_typed_array *)(uintptr_t)value.bits;
+}
+
+static kiln_data_view *kiln_c99_data_view_of(kiln_value value) {
+    return (kiln_data_view *)(uintptr_t)value.bits;
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -910,6 +1117,10 @@ typedef enum kiln_gc_kind {
     KILN_GC_SYMBOL,
     KILN_GC_TYPED_BUFFER,
     KILN_GC_TYPED_ARRAY,
+    /* A DataView holds one edge -- the buffer it borrows -- and owns no growth buffer of its own,
+     * so it is traced and never finalised. The bytes belong to KILN_GC_TYPED_BUFFER, which is the
+     * one place they are released. */
+    KILN_GC_DATA_VIEW,
     KILN_GC_COMMONJS_REQUIRE,
     KILN_GC_METHOD_STORE,
     KILN_GC_NODE_SERVER,
@@ -1899,6 +2110,9 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         break;
     case KILN_GC_TYPED_ARRAY:
         kiln_c99_gc_mark_block(heap, ((kiln_typed_array *)payload)->buffer);
+        break;
+    case KILN_GC_DATA_VIEW:
+        kiln_c99_gc_mark_block(heap, ((kiln_data_view *)payload)->buffer);
         break;
     case KILN_GC_METHOD_STORE:
         kiln_c99_gc_mark_value(heap, &((kiln_method_store *)payload)->properties);
@@ -3117,6 +3331,146 @@ static int kiln_c99_typed_alloc(kiln_value *out, kiln_typed_kind kind, size_t co
     return KILN_C99_OK;
 }
 
+/* `new DataView(buffer[, byteOffset[, byteLength]])`.
+ *
+ * The two failures are different errors and a program tells them apart: a first argument that is
+ * not an ArrayBuffer is a TypeError, and a window that does not fit inside the buffer is a
+ * RangeError. Both messages are the interpreter's, word for word -- `error.message` is
+ * program-visible, so a fault the two engines spell differently is a divergence like any other.
+ *
+ * There is no alignment rule to check, which is the other half of why this type exists: byte
+ * offset 1 is a legal DataView and an illegal `Uint16Array`, and `kiln_c99_new_typed_array`'s
+ * `byte_offset % width` test has no counterpart here. */
+static int kiln_c99_new_data_view(kiln_value *out, kiln_value source, size_t byte_offset,
+                                  size_t byte_length, int has_length, kiln_value *thrown) {
+    kiln_typed_buffer *buffer;
+    kiln_data_view *view;
+    if (source.tag != KILN_VALUE_ARRAY_BUFFER) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
+                                    "Method called on an incompatible receiver");
+    }
+    buffer = kiln_c99_typed_buffer_of(source);
+    if (byte_offset > buffer->byte_length) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "Offset is outside the bounds of the DataView");
+    }
+    /* A subtraction from a quantity already known to be large enough, never `byte_offset +
+     * byte_length`: both are size_t, that sum can wrap, and a wrapped sum compares *small* --
+     * which would admit exactly the window this test exists to reject. */
+    if (has_length && byte_length > buffer->byte_length - byte_offset) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_RANGE_ERROR,
+                                    "Offset is outside the bounds of the DataView");
+    }
+    view = (kiln_data_view *)kiln_c99_gc_alloc(KILN_GC_DATA_VIEW, sizeof *view);
+    if (view == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    view->buffer = buffer;
+    view->byte_offset = byte_offset;
+    /* With no explicit length the view runs to the end of the buffer, and keeps running there:
+     * nothing here can resize a buffer, so the length is settled once rather than tracked. */
+    view->byte_length = has_length ? byte_length : buffer->byte_length - byte_offset;
+    *out = kiln_c99_value(KILN_VALUE_DATA_VIEW, (uint64_t)(uintptr_t)view, NULL, 0);
+    return KILN_C99_OK;
+}
+
+/* Where an access of `width` bytes at `offset` lands, or zero when it does not fit entirely
+ * inside the window.
+ *
+ * Every bound is a subtraction, for the reason given in the constructor: `offset + width` on two
+ * size_t values can wrap, and the wrapped sum is small enough to pass a naive comparison. Written
+ * this way, an access that ends *exactly* at the last byte is admitted (`offset == byte_length -
+ * width`) and one byte further is not. */
+static int kiln_c99_data_view_at(kiln_data_view *view, size_t offset, size_t width,
+                                 uint8_t **out) {
+    if (view->byte_length < width || offset > view->byte_length - width) {
+        return 0;
+    }
+    /* The window was measured against the buffer when the view was made and no buffer here can
+     * shrink afterwards. Asked again anyway, because this is the test that decides whether these
+     * particular bytes are ours to touch, and a mistake in it is a read out of bounds rather than
+     * a wrong number. */
+    if (view->byte_offset > view->buffer->byte_length ||
+        view->byte_length > view->buffer->byte_length - view->byte_offset) {
+        return 0;
+    }
+    *out = view->buffer->bytes + view->byte_offset + offset;
+    return 1;
+}
+
+/* Gather `width` bytes into an unsigned integer, most significant byte first unless the call
+ * asked for little-endian.
+ *
+ * BIG-ENDIAN IS THE DEFAULT, and it is the one thing about this type that surprises everybody. A
+ * typed array is always the platform's order and cannot be asked for another; a DataView is
+ * always network order unless the call passes a truthy `littleEndian`. So `dv.getUint16(0)` and
+ * `new Uint16Array(b)[0]` disagree on every machine this runs on, and both are right -- which is
+ * why getting the default backwards is invisible until the bytes meet something outside the
+ * program.
+ *
+ * A byte loop rather than a `memcpy` and a swap: the width is 1, 2, 4 or 8 and the buffer offset
+ * is arbitrary, so there is no aligned load to make anyway. Unaligned access is the ordinary case
+ * here, not the exception. */
+static uint64_t kiln_c99_data_view_gather(const uint8_t *bytes, size_t width, int little_endian) {
+    uint64_t bits = 0;
+    size_t index;
+    for (index = 0; index < width; ++index) {
+        bits = (bits << 8) | (uint64_t)bytes[little_endian ? width - 1 - index : index];
+    }
+    return bits;
+}
+
+/* The inverse, and deliberately the same shape: one function per direction, each reading the flag
+ * the same way, so the pair cannot disagree about which way the reversal goes. A disagreement
+ * there round-trips perfectly through the same view and only shows once the bytes leave. */
+static void kiln_c99_data_view_scatter(uint8_t *bytes, size_t width, int little_endian,
+                                       uint64_t bits) {
+    size_t index;
+    for (index = 0; index < width; ++index) {
+        bytes[little_endian ? index : width - 1 - index] = (uint8_t)(bits & UINT64_C(0xFF));
+        bits >>= 8;
+    }
+}
+
+/* An unsigned 64-bit value as decimal digits, most significant first, answering the length.
+ *
+ * `out` needs room for twenty, which is what 18446744073709551615 takes. Written out rather than
+ * reached through `snprintf` because `%llu` is the one length modifier this backend cannot assume
+ * (ADR 0013 keeps the number formatting in the provider for the same reason). */
+static size_t kiln_c99_uint64_digits(uint64_t value, char *out) {
+    char reversed[20];
+    size_t count = 0;
+    size_t index;
+    do {
+        reversed[count++] = (char)('0' + (int)(value % 10));
+        value /= 10;
+    } while (value != 0);
+    for (index = 0; index < count; ++index) {
+        out[index] = reversed[count - 1 - index];
+    }
+    return count;
+}
+
+/* `0xFFFFFFFFFFFFFFFF`, built once.
+ *
+ * `BigInt.asUintN(64, v)` spelled as the provider's own bitwise AND, which is what
+ * `setBigInt64`/`setBigUint64` need: the language *wraps* there rather than refusing, so
+ * `setBigUint64(0, -1n)` stores all ones and `setBigInt64(0, 2n ** 200n)` stores the low sixty-
+ * four bits. `kiln_bigint_to_i128` alone would have called the second of those out of range.
+ *
+ * Nothing frees a BigInt handle here, so a shared one is safe to keep -- the same bargain
+ * `kiln_c99_bigint_one` makes for `1n`. */
+static const void *kiln_c99_bigint_uint64_mask(void) {
+    static void *mask = NULL;
+    if (mask == NULL) {
+        static const unsigned char digits[] = "18446744073709551615";
+        if (kiln_bigint_parse(digits, sizeof digits - 1, 10, &mask) != 0) {
+            return NULL;
+        }
+    }
+    return mask;
+}
+
 /* The order `%TypedArray%.prototype.sort` uses with no comparator: ascending *numeric*.
  *
  * Not `Array.prototype.sort`'s order, which spells its elements out and compares the text --
@@ -3583,6 +3937,7 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
         object->properties[position].writable = 1;
         object->properties[position].configurable = 1;
         object->properties[position].accessor = 0;
+        object->properties[position].refused = 0;
         object->properties[position].value = kiln_c99_undefined();
         object->properties[position].getter = kiln_c99_undefined();
         object->properties[position].setter = kiln_c99_undefined();
@@ -3822,6 +4177,30 @@ static const char *kiln_c99_method_name(uint64_t code) {
         return "fromEpochMilliseconds";
     case KILN_C99_METHOD_TEMPORAL_INSTANT_FROM_EPOCH_NANOSECONDS:
         return "fromEpochNanoseconds";
+    /* `DataView.prototype`. Spelled out rather than derived from a width and a signedness,
+     * because the names are not a pattern the language follows all the way -- `getUint8` and
+     * `getBigUint64` capitalise the "U" differently, and a rule that got that wrong would name a
+     * method nobody can call. */
+    case KILN_C99_METHOD_DATA_VIEW_GET_INT8: return "getInt8";
+    case KILN_C99_METHOD_DATA_VIEW_GET_UINT8: return "getUint8";
+    case KILN_C99_METHOD_DATA_VIEW_GET_INT16: return "getInt16";
+    case KILN_C99_METHOD_DATA_VIEW_GET_UINT16: return "getUint16";
+    case KILN_C99_METHOD_DATA_VIEW_GET_INT32: return "getInt32";
+    case KILN_C99_METHOD_DATA_VIEW_GET_UINT32: return "getUint32";
+    case KILN_C99_METHOD_DATA_VIEW_GET_FLOAT32: return "getFloat32";
+    case KILN_C99_METHOD_DATA_VIEW_GET_FLOAT64: return "getFloat64";
+    case KILN_C99_METHOD_DATA_VIEW_GET_BIG_INT64: return "getBigInt64";
+    case KILN_C99_METHOD_DATA_VIEW_GET_BIG_UINT64: return "getBigUint64";
+    case KILN_C99_METHOD_DATA_VIEW_SET_INT8: return "setInt8";
+    case KILN_C99_METHOD_DATA_VIEW_SET_UINT8: return "setUint8";
+    case KILN_C99_METHOD_DATA_VIEW_SET_INT16: return "setInt16";
+    case KILN_C99_METHOD_DATA_VIEW_SET_UINT16: return "setUint16";
+    case KILN_C99_METHOD_DATA_VIEW_SET_INT32: return "setInt32";
+    case KILN_C99_METHOD_DATA_VIEW_SET_UINT32: return "setUint32";
+    case KILN_C99_METHOD_DATA_VIEW_SET_FLOAT32: return "setFloat32";
+    case KILN_C99_METHOD_DATA_VIEW_SET_FLOAT64: return "setFloat64";
+    case KILN_C99_METHOD_DATA_VIEW_SET_BIG_INT64: return "setBigInt64";
+    case KILN_C99_METHOD_DATA_VIEW_SET_BIG_UINT64: return "setBigUint64";
     case KILN_C99_METHOD_PUSH: return "push";
     case KILN_C99_METHOD_POP: return "pop";
     case KILN_C99_METHOD_JOIN: return "join";
@@ -3850,6 +4229,10 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_ARRAY_FIND_LAST: return "findLast";
     case KILN_C99_METHOD_ARRAY_FIND_LAST_INDEX: return "findLastIndex";
     case KILN_C99_METHOD_ARRAY_REDUCE_RIGHT: return "reduceRight";
+    case KILN_C99_METHOD_ARRAY_TO_SORTED: return "toSorted";
+    case KILN_C99_METHOD_ARRAY_TO_REVERSED: return "toReversed";
+    case KILN_C99_METHOD_ARRAY_TO_SPLICED: return "toSpliced";
+    case KILN_C99_METHOD_ARRAY_WITH: return "with";
     case KILN_C99_METHOD_MAP: return "map";
     case KILN_C99_METHOD_FILTER: return "filter";
     case KILN_C99_METHOD_ARRAY_GENERIC_MAP: return "map";
@@ -3990,6 +4373,25 @@ static const char *kiln_c99_method_name(uint64_t code) {
     case KILN_C99_METHOD_COLLECTION_ITERATOR_NEXT: return "next";
     case KILN_C99_METHOD_PRIMITIVE_TO_STRING: return "toString";
     case KILN_C99_METHOD_ITERATOR_SELF: return "@@iterator";
+    /* The iterator helpers. These names are not decoration: `kiln_c99_lookup_method` walks the
+     * 470..481 range comparing them, so this switch *is* the `Iterator.prototype` member table. */
+    case KILN_C99_METHOD_ITERATOR_MAP: return "map";
+    case KILN_C99_METHOD_ITERATOR_FILTER: return "filter";
+    case KILN_C99_METHOD_ITERATOR_TAKE: return "take";
+    case KILN_C99_METHOD_ITERATOR_DROP: return "drop";
+    case KILN_C99_METHOD_ITERATOR_FLAT_MAP: return "flatMap";
+    case KILN_C99_METHOD_ITERATOR_REDUCE: return "reduce";
+    case KILN_C99_METHOD_ITERATOR_TO_ARRAY: return "toArray";
+    case KILN_C99_METHOD_ITERATOR_FOR_EACH: return "forEach";
+    case KILN_C99_METHOD_ITERATOR_SOME: return "some";
+    case KILN_C99_METHOD_ITERATOR_EVERY: return "every";
+    case KILN_C99_METHOD_ITERATOR_FIND: return "find";
+    case KILN_C99_METHOD_ITERATOR_INCLUDES: return "includes";
+    /* A helper's own two methods, and the static that wraps a foreign iterator in one. Past the
+     * name range above, so none of them can be found by reading a name off the table. */
+    case KILN_C99_METHOD_ITERATOR_HELPER_NEXT: return "next";
+    case KILN_C99_METHOD_ITERATOR_HELPER_RETURN: return "return";
+    case KILN_C99_METHOD_ITERATOR_FROM: return "from";
     case KILN_C99_METHOD_ARRAY_VALUES: return "values";
     /* `%ThrowTypeError%` is the realm's one anonymous function, so the name is empty rather
      * than descriptive: a program reading `arguments.callee`'s getter must not learn one. */
@@ -4864,12 +5266,10 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     /* The globals this backend has not implemented still have to name themselves, because the
      * name is what the refusal reports and what `X.name` answers. */
     case KILN_C99_BUILTIN_INTL: return "Intl";
-    case KILN_C99_BUILTIN_DATA_VIEW: return "DataView";
     case KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER: return "SharedArrayBuffer";
     case KILN_C99_BUILTIN_WEAK_REF: return "WeakRef";
     case KILN_C99_BUILTIN_FINALIZATION_REGISTRY: return "FinalizationRegistry";
     case KILN_C99_BUILTIN_SHADOW_REALM: return "ShadowRealm";
-    case KILN_C99_BUILTIN_ITERATOR: return "Iterator";
     case KILN_C99_BUILTIN_FLOAT16_ARRAY: return "Float16Array";
     case KILN_C99_BUILTIN_BIG_INT64_ARRAY: return "BigInt64Array";
     case KILN_C99_BUILTIN_BIG_UINT64_ARRAY: return "BigUint64Array";
@@ -4879,6 +5279,8 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_EVAL_ERROR: return "EvalError";
     case KILN_C99_BUILTIN_TEXT_DECODER: return "TextDecoder";
     case KILN_C99_BUILTIN_EVAL: return "eval";
+    /* Lower-case because that is what the language calls it: `performance` is an object a
+     * program reads `now` from, not a constructor it names. */
     case KILN_C99_BUILTIN_PERFORMANCE: return "performance";
     case KILN_C99_BUILTIN_STRING: return "String";
     case KILN_C99_BUILTIN_MATH: return "Math";
@@ -4917,6 +5319,10 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE: return "WeakMap";
     case KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE: return "WeakSet";
     case KILN_C99_BUILTIN_STRING_PROTOTYPE: return "String";
+    /* Both spell "Iterator": the constructor answers it for `Iterator.name`, and the table
+     * answers it because a refusal naming the table has to name the global a reader can find. */
+    case KILN_C99_BUILTIN_ITERATOR: return "Iterator";
+    case KILN_C99_BUILTIN_ITERATOR_PROTOTYPE: return "Iterator";
     case KILN_C99_BUILTIN_SYMBOL: return "Symbol";
     case KILN_C99_BUILTIN_REGEXP: return "RegExp";
     case KILN_C99_BUILTIN_REGEXP_PROTOTYPE: return "RegExp";
@@ -4925,6 +5331,9 @@ static const char *kiln_c99_builtin_name(uint64_t builtin) {
     case KILN_C99_BUILTIN_FUNCTION_PROTOTYPE: return "Function";
     case KILN_C99_BUILTIN_FUNCTION: return "Function";
     case KILN_C99_BUILTIN_ARRAY_BUFFER: return "ArrayBuffer";
+    case KILN_C99_BUILTIN_DATA_VIEW: return "DataView";
+    /* A prototype table answers with its constructor's name, as every other pair here does. */
+    case KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE: return "DataView";
     case KILN_C99_BUILTIN_INT8_ARRAY: return "Int8Array";
     case KILN_C99_BUILTIN_UINT8_ARRAY: return "Uint8Array";
     case KILN_C99_BUILTIN_UINT8_CLAMPED_ARRAY: return "Uint8ClampedArray";
@@ -5271,10 +5680,10 @@ static int kiln_c99_console_object(kiln_value *out) {
                                         kiln_c99_method(KILN_C99_METHOD_CONSOLE_LOG));
     if (status == KILN_C99_OK)
         status = kiln_c99_define_method(*console, "error", 5,
-                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_UNAVAILABLE));
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_ERROR));
     if (status == KILN_C99_OK)
         status = kiln_c99_define_method(*console, "warn", 4,
-                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_UNAVAILABLE));
+                                        kiln_c99_method(KILN_C99_METHOD_CONSOLE_ERROR));
     if (status != KILN_C99_OK) return status;
     *out = *console;
     return KILN_C99_OK;
@@ -5426,6 +5835,10 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"AbortController", KILN_C99_BUILTIN_ABORT_CONTROLLER},
                         {"AbortSignal", KILN_C99_BUILTIN_ABORT_SIGNAL},
                         {"TextEncoder", KILN_C99_BUILTIN_TEXT_ENCODER},
+                        /* Not a constructor, and here for the same reason the constructors are:
+                         * `globalThis.performance` is the spelling a bundle's feature detection
+                         * uses, and it has to find the same value the bare name does. */
+                        {"performance", KILN_C99_BUILTIN_PERFORMANCE},
                         /* THE REST OF THE REALM'S FURNITURE. Everything below this line was
                          * reachable by its bare name -- `new WeakMap()` compiles and runs -- and
                          * absent from the global *object*, so `globalThis.WeakMap` answered
@@ -5434,6 +5847,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                          * bundle's feature detection actually uses. One list now. */
                         {"Function", KILN_C99_BUILTIN_FUNCTION},
                         {"ArrayBuffer", KILN_C99_BUILTIN_ARRAY_BUFFER},
+                        {"DataView", KILN_C99_BUILTIN_DATA_VIEW},
                         {"WeakMap", KILN_C99_BUILTIN_WEAK_MAP},
                         {"WeakSet", KILN_C99_BUILTIN_WEAK_SET},
                         {"URL", KILN_C99_BUILTIN_URL},
@@ -5447,18 +5861,17 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"Uint32Array", KILN_C99_BUILTIN_UINT32_ARRAY},
                         {"Float32Array", KILN_C99_BUILTIN_FLOAT32_ARRAY},
                         {"Float64Array", KILN_C99_BUILTIN_FLOAT64_ARRAY},
+                        {"Iterator", KILN_C99_BUILTIN_ITERATOR},
                         /* AND THE ONES THIS BACKEND DOES NOT IMPLEMENT. Present so that `typeof`
                          * answers what the interpreter answers; every use of one refuses and
                          * names itself. `undefined` here would not stop a compiled program -- it
                          * would send it down the branch written for a realm that never had the
                          * feature, which is a different program from the one the author wrote. */
                         {"Intl", KILN_C99_BUILTIN_INTL},
-                        {"DataView", KILN_C99_BUILTIN_DATA_VIEW},
                         {"SharedArrayBuffer", KILN_C99_BUILTIN_SHARED_ARRAY_BUFFER},
                         {"WeakRef", KILN_C99_BUILTIN_WEAK_REF},
                         {"FinalizationRegistry", KILN_C99_BUILTIN_FINALIZATION_REGISTRY},
                         {"ShadowRealm", KILN_C99_BUILTIN_SHADOW_REALM},
-                        {"Iterator", KILN_C99_BUILTIN_ITERATOR},
                         {"Float16Array", KILN_C99_BUILTIN_FLOAT16_ARRAY},
                         {"BigInt64Array", KILN_C99_BUILTIN_BIG_INT64_ARRAY},
                         {"BigUint64Array", KILN_C99_BUILTIN_BIG_UINT64_ARRAY},
@@ -5467,8 +5880,7 @@ static int kiln_c99_global_object(kiln_value *out) {
                         {"SuppressedError", KILN_C99_BUILTIN_SUPPRESSED_ERROR},
                         {"EvalError", KILN_C99_BUILTIN_EVAL_ERROR},
                         {"TextDecoder", KILN_C99_BUILTIN_TEXT_DECODER},
-                        {"eval", KILN_C99_BUILTIN_EVAL},
-                        {"performance", KILN_C99_BUILTIN_PERFORMANCE}};
+                        {"eval", KILN_C99_BUILTIN_EVAL}};
     static const struct {
         const char *name;
         uint64_t code;
@@ -6189,12 +6601,16 @@ static int kiln_c99_is_namespace(uint64_t builtin) {
            builtin == KILN_C99_BUILTIN_WEAK_MAP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_WEAK_SET_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_STRING_PROTOTYPE ||
+           builtin == KILN_C99_BUILTIN_ITERATOR_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_REGEXP_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_DATE_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_NUMBER_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_FUNCTION_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_PROMISE_PROTOTYPE ||
            builtin == KILN_C99_BUILTIN_TYPED_ARRAY_PROTOTYPE ||
+           /* `DataView.prototype` is a table, and therefore a namespace here; `DataView` itself
+            * is a constructor and is not, so `typeof DataView === "function"` stays true. */
+           builtin == KILN_C99_BUILTIN_DATA_VIEW_PROTOTYPE ||
            (builtin >= KILN_C99_BUILTIN_INT8_ARRAY_PROTOTYPE &&
             builtin <= KILN_C99_BUILTIN_FLOAT64_ARRAY_PROTOTYPE);
 }

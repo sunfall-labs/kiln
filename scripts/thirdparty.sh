@@ -75,9 +75,17 @@ for probe in "$BUNDLES"/probes/*.mjs; do
 	fi
 	# Same TZ discipline as the differential harness: kiln's realm is always UTC (ADR 0015) and
 	# node takes its zone from the environment, so the two are only comparable under TZ=UTC.
-	expected="$(TZ=UTC node "$bundle" 2>&1 || true)"
-	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>&1 || true)"
-	if [[ $actual == "$expected" ]]; then
+	# The two streams are compared separately, not merged with `2>&1`. Merging made the test
+	# depend on interleaving, and the interleaving legitimately differs: kiln captures a
+	# program's stdout and writes it when the run ends, so its stderr lands after all of its
+	# stdout, where node's is written as it happens. Comparing each stream against node's own
+	# checks the same bytes *and* checks that each line went to the right place, which merging
+	# could not see at all.
+	expected="$(TZ=UTC node "$bundle" 2>/dev/null || true)"
+	expected_err="$(TZ=UTC node "$bundle" 2>&1 1>/dev/null || true)"
+	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>/dev/null || true)"
+	actual_err="$("$KILN" --one-shot ${adapter:+"$adapter"} run "$bundle" 2>&1 1>/dev/null || true)"
+	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]]; then
 		matched=$((matched + 1))
 	else
 		diverged=$((diverged + 1))
@@ -124,17 +132,38 @@ for probe in "$BUNDLES"/probes/*.mjs; do
 	if [[ $NODE_PLATFORM == *" $name "* ]]; then
 		adapter="--node"
 	fi
-	expected="$(TZ=UTC node "$bundle" 2>&1 || true)"
-	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>&1 || true)"
-	if [[ $actual == "$expected" ]]; then
+	expected="$(TZ=UTC node "$bundle" 2>/dev/null || true)"
+	expected_err="$(TZ=UTC node "$bundle" 2>&1 1>/dev/null || true)"
+	actual="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>/dev/null || true)"
+	actual_err="$("$KILN" --one-shot ${adapter:+"$adapter"} run --native "$bundle" 2>&1 1>/dev/null || true)"
+	if [[ $actual == "$expected" && $actual_err == "$expected_err" ]]; then
 		native_matched=$((native_matched + 1))
 	# A refusal names itself, and the name is the whole value of the outcome: it says which member
 	# of which builtin the backend has not been given yet, which is the next thing to implement.
 	# Matching on the marker rather than on the exit status keeps a library that legitimately
 	# prints the word "refusal" from being miscounted.
-	elif [[ $actual == *"native backend refusal"* || $actual == *"unsupported native emission:"* ]]; then
+	# No colon required. A refusal that names nothing still prints `native backend refusal` and
+	# stops there, and matching on the colon classified those as divergences -- which is the one
+	# outcome that must never be wrong, because a divergence is the thing that fails this script.
+	# An uncaught `EvalError` about code generation is the third outcome, and it belongs with the
+	# refusals rather than the divergences. The realm has no compiler and says so (ADR 0045); a
+	# library with a fallback takes it -- `zod` does -- and one whose whole job is compiling
+	# schemas, as `ajv`'s is, correctly has nowhere to go. That is a capability this realm does
+	# not have, which is what "refused" means here, and not a wrong answer.
+	elif [[ $actual_err == *"native backend refusal"* || $actual_err == *"unsupported native emission"* ||
+		$actual_err == *"EvalError: Code generation from strings disallowed"* ]]; then
 		native_refused=$((native_refused + 1))
-		REFUSALS+=("  $(printf '%-14s %s' "$name" "$(printf '%s' "$actual" | grep -oE '(operation=[^ ]+( detail=[^=]*)?|unsupported native emission: .*)' | head -1)")")
+		# `|| true` because a refusal that names nothing makes grep exit 1, and under `set -e`
+		# with pipefail that killed the script mid-report -- silently, after the interpreted
+		# summary had already printed, which read exactly like the native pass not existing.
+		reason="$(printf '%s' "$actual_err" | grep -oE '(operation=[^ ]+( detail=[^=]*)?|unsupported native emission: .*)' | head -1 || true)"
+		# An anonymous refusal is worth saying out loud rather than printing as a blank line: the
+		# entire value of refusing instead of guessing is that the refusal names what it lacked.
+		if [[ -z $reason && $actual_err == *"Code generation from strings disallowed"* ]]; then
+			reason="requires runtime code generation, which this realm has none of (ADR 0045)"
+		fi
+		[[ -n $reason ]] || reason="(refused without naming anything -- a diagnostic bug)"
+		REFUSALS+=("  $(printf '%-14s %s' "$name" "$reason")")
 	else
 		native_diverged=$((native_diverged + 1))
 		NATIVE_DIVERGENCES+=("  $name")

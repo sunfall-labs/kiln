@@ -284,10 +284,25 @@ fn open(one_shot: bool, socket: &Path) -> Result<Box<dyn Backend>> {
 
 fn report(output: Output) -> Result<i32> {
     emit(&output.text)?;
+    // The program's own standard error, before Kiln's notes and without the `kiln:` prefix: the
+    // two streams are separate so that a caller redirecting one and not the other gets what the
+    // program actually wrote, which is what `console.error` going to stderr is for.
+    emit_error(&output.error_text)?;
     for note in &output.notes {
         eprintln!("kiln: {note}");
     }
     Ok(output.exit_code)
+}
+
+fn emit_error(text: &str) -> Result<()> {
+    if text.is_empty() {
+        return Ok(());
+    }
+    let mut stderr = std::io::stderr().lock();
+    stderr
+        .write_all(text.as_bytes())
+        .and_then(|()| stderr.flush())
+        .map_err(|source| Error::io("cannot write to stderr", source))
 }
 
 fn emit(text: &str) -> Result<()> {

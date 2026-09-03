@@ -1273,6 +1273,7 @@ mod tests {
                         file: FileId(1),
                         succeeded: !failed,
                         stdout: format!("program: {}\n", source.trim()),
+                        stderr: String::new(),
                         value: Some("undefined".to_string()),
                         scalar_value: (!failed)
                             .then_some(kiln_proto::ScalarValueSummary::Undefined),

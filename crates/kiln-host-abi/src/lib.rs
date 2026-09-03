@@ -4,7 +4,7 @@
 //! services. Keep this crate dependency-free and make values crossing the boundary owned.
 
 /// Version of the host operation and value contract.
-pub const HOST_ABI_VERSION: u32 = 2;
+pub const HOST_ABI_VERSION: u32 = 3;
 
 /// Operations a compiled program can request from its host.
 #[repr(u16)]
@@ -20,6 +20,14 @@ pub enum HostOp {
     TimeZone = 4,
     /// The host locale tag, such as `en-US`.
     Locale = 5,
+    /// Write one line to the host's standard error.
+    ///
+    /// Separate from [`HostOp::WriteStdout`] because the stream a line went to is observable:
+    /// `console.error` goes to standard error in every engine a program is written against, and
+    /// a caller that redirects one stream and not the other sees the difference. Both engines
+    /// shared the stdout operation until this existed, which made `2>&1` the only way their
+    /// output matched node's.
+    WriteStderr = 6,
 }
 
 /// A scalar value that is safe to own at the host boundary.
