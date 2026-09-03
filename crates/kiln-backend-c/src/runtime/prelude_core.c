@@ -9609,6 +9609,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             thrown, KILN_C99_BUILTIN_ERROR,
             "node:module createRequire requires the captured graph resolution index");
     }
+    /* The `Module` class `require("node:module")` hands back. It exists so that `typeof` and
+     * `module.createRequire` answer -- which is the whole of what a program reads off it here --
+     * and constructing a module record is not something this backend has: its graph is resolved
+     * before execution, so there is no loader for a `new Module()` to be part of. Refusing names
+     * that, where an object built to look like a module record would be a wrong answer a program
+     * would carry three frames further. */
+    if (code == KILN_C99_METHOD_NODE_MODULE) {
+        KILN_C99_REFUSE("the node:module Module constructor, which this backend does not build");
+    }
     if (code == KILN_C99_METHOD_NODE_URL_FILE_URL_TO_PATH) {
         kiln_value input = kiln_c99_text(argc > 0 ? args[0] : kiln_c99_undefined());
         kiln_value encoded;
