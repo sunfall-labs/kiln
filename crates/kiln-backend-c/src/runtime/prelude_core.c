@@ -12836,27 +12836,6 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             *result = kiln_c99_text_value(&built);
             return KILN_C99_OK;
         }
-        case KILN_C99_METHOD_STRING_FROM_CHAR_CODE: {
-            uint16_t stack_units[64];
-            uint16_t *units = stack_units;
-            size_t i;
-            if (argc > 64) {
-                units = (uint16_t *)malloc(argc * sizeof(uint16_t));
-                if (units == NULL) return KILN_C99_OUT_OF_MEMORY;
-            }
-            for (i = 0; i < argc; ++i) {
-                double num;
-                status = kiln_c99_to_number_checked(host, args[i], &num, depth, thrown);
-                if (status != KILN_C99_OK) {
-                    if (units != stack_units) free(units);
-                    return status;
-                }
-                units[i] = (uint16_t)(uint32_t)num;
-            }
-            *result = kiln_c99_from_units(units, argc);
-            if (units != stack_units) free(units);
-            return KILN_C99_OK;
-        }
         case KILN_C99_METHOD_OBJECT_FROM_ENTRIES: {
             kiln_value built;
             kiln_array *pairs;

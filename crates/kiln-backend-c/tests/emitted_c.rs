@@ -656,11 +656,12 @@ fn runtime_prelude_size() {
     // copy of node's algorithms. A ceiling of 27,000 is the one this change would have needed
     // without that; it is worth knowing which of the two numbers is the honest one.
     //
-    // Widened once more when the builtin-surface branch landed on top: `DataView`'s twenty
-    // accessors and their handler, the iterator helpers, and the change-by-copy array methods
-    // are about 2,500 lines between them. Measured, not derived.
-    const FLOOR_LINES: usize = 22_500;
-    const CEILING_LINES: usize = 33_000;
+    // Widened once more when the builtin-surface work landed on top of that: `DataView`'s twenty
+    // accessors and their handler, the iterator helpers and their lazy pipeline, the change-by-copy
+    // array methods and the collection and spread work are about 2,700 lines between them, to
+    // 29,792. Measured on the ported tree, not derived. The band is again roughly +/-9%.
+    const FLOOR_LINES: usize = 27_100;
+    const CEILING_LINES: usize = 32_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
