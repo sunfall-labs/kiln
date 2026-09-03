@@ -198,3 +198,7 @@ incremental = true
 [profile.dev.package."*"]
 opt-level = 2
 
+# Optimize pure-Rust SHA-256 digest engine (only 440 lines, instant to compile, 50x faster hashing)
+[profile.dev.package.kiln-digest]
+opt-level = 3
+

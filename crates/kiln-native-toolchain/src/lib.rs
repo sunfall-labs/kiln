@@ -143,6 +143,39 @@ impl fmt::Display for CompilerKind {
     }
 }
 
+/// The detected or configured linker acceleration for native artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkerKind {
+    /// Default platform linker (e.g. GNU ld on Linux, ld64 on macOS, link.exe on Windows).
+    #[default]
+    Default,
+    /// Fast modern ELF/Mach-O linker `mold`.
+    Mold,
+    /// LLVM modern linker `lld` (`ld.lld`).
+    Lld,
+}
+
+impl LinkerKind {
+    /// Command-line flag passed to compiler drivers to invoke this linker.
+    pub const fn flag(self) -> Option<&'static str> {
+        match self {
+            Self::Default => None,
+            Self::Mold => Some("-fuse-ld=mold"),
+            Self::Lld => Some("-fuse-ld=lld"),
+        }
+    }
+}
+
+impl fmt::Display for LinkerKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Default => write!(formatter, "default"),
+            Self::Mold => write!(formatter, "mold"),
+            Self::Lld => write!(formatter, "lld"),
+        }
+    }
+}
+
 /// Identity captured when a compiler is opened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolIdentity {
@@ -163,6 +196,8 @@ pub struct ToolIdentity {
     /// discovery remains usable with unusual wrappers and older drivers; callers must retain the
     /// sentinel in cache keys rather than substituting the host target.
     pub target: String,
+    /// The detected or configured linker acceleration.
+    pub linker: LinkerKind,
 }
 
 impl ToolIdentity {
@@ -184,13 +219,16 @@ impl ToolIdentity {
             format!("{}:{value}", value.len())
         }
 
-        [
+        let mut parts = vec![
             field(&self.canonical_path.to_string_lossy()),
             field(&self.kind.to_string()),
             field(&self.version),
             field(&self.target),
-        ]
-        .join("|")
+        ];
+        if self.linker != LinkerKind::Default {
+            parts.push(field(&self.linker.to_string()));
+        }
+        parts.join("|")
     }
 }
 
@@ -698,6 +736,55 @@ fn zig_command_prefix() -> Vec<OsString> {
     prefix
 }
 
+/// Auto-detect or select a linker strategy for a given compiler and target platform.
+fn detect_linker(
+    compiler: CompilerKind,
+    platform: TargetPlatform,
+    search_entries: &[PathBuf],
+) -> LinkerKind {
+    if compiler == CompilerKind::Zig || platform != TargetPlatform::Linux {
+        return LinkerKind::Default;
+    }
+
+    if let Ok(env_val) = std::env::var("KILN_LINKER") {
+        match env_val.trim().to_ascii_lowercase().as_str() {
+            "mold" => return LinkerKind::Mold,
+            "lld" | "ld.lld" => return LinkerKind::Lld,
+            "default" | "system" | "ld" | "none" => return LinkerKind::Default,
+            other => eprintln!(
+                "kiln: unrecognized KILN_LINKER `{other}`; falling back to auto-detection"
+            ),
+        }
+    }
+
+    let is_in_path = |name: &str| -> bool {
+        if !search_entries.is_empty() {
+            for entry in search_entries {
+                if is_executable_file(&entry.join(name)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        if let Some(path_var) = std::env::var_os("PATH") {
+            for entry in std::env::split_paths(&path_var) {
+                if is_executable_file(&entry.join(name)) {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+
+    if is_in_path("mold") || is_in_path("ld.mold") {
+        LinkerKind::Mold
+    } else if is_in_path("ld.lld") || is_in_path("lld") {
+        LinkerKind::Lld
+    } else {
+        LinkerKind::Default
+    }
+}
+
 /// A configured, versioned C compiler driver.
 pub struct Toolchain {
     identity: ToolIdentity,
@@ -772,7 +859,14 @@ impl Toolchain {
 
                 if binary_path.is_absolute() || binary_path.components().count() > 1 {
                     if is_executable_file(binary_path) {
-                        return Self::from_compiler_with_runner(binary_path, runner);
+                        return Self::from_compiler_with_runner(binary_path, runner).map(
+                            |toolchain| {
+                                let platform = toolchain.identity().target_platform();
+                                let linker =
+                                    detect_linker(toolchain.identity().kind, platform, entries);
+                                toolchain.with_linker(linker)
+                            },
+                        );
                     }
                 } else {
                     for entry in entries {
@@ -781,7 +875,10 @@ impl Toolchain {
                             && let Ok(toolchain) =
                                 Self::from_compiler_with_runner(&path, Arc::clone(&runner))
                         {
-                            return Ok(toolchain);
+                            let platform = toolchain.identity().target_platform();
+                            let linker =
+                                detect_linker(toolchain.identity().kind, platform, entries);
+                            return Ok(toolchain.with_linker(linker));
                         }
                     }
                 }
@@ -801,7 +898,9 @@ impl Toolchain {
                     && let Ok(toolchain) =
                         Self::from_compiler_with_runner(&path, Arc::clone(&runner))
                 {
-                    return Ok(toolchain);
+                    let platform = toolchain.identity().target_platform();
+                    let linker = detect_linker(toolchain.identity().kind, platform, entries);
+                    return Ok(toolchain.with_linker(linker));
                 }
             }
         }
@@ -893,6 +992,8 @@ impl Toolchain {
             Vec::new()
         };
         let canonical_path = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let platform = TargetPlatform::from_target(&target);
+        let linker = detect_linker(kind, platform, &[]);
         Ok(Self {
             identity: ToolIdentity {
                 canonical_path,
@@ -900,6 +1001,7 @@ impl Toolchain {
                 kind,
                 version,
                 target,
+                linker,
             },
             command_prefix,
             zig_cache,
@@ -909,6 +1011,17 @@ impl Toolchain {
 
     pub fn identity(&self) -> &ToolIdentity {
         &self.identity
+    }
+
+    /// Return the detected or configured linker acceleration for this toolchain.
+    pub fn linker(&self) -> LinkerKind {
+        self.identity.linker
+    }
+
+    /// Override or configure the linker acceleration strategy for this toolchain.
+    pub fn with_linker(mut self, linker: LinkerKind) -> Self {
+        self.identity.linker = linker;
+        self
     }
 
     /// Compile one emitted C translation unit to an object file.
@@ -987,6 +1100,9 @@ impl Toolchain {
         }
         let mut args = self.command_prefix.clone();
         args.extend(mode_flags.iter().copied().map(OsString::from));
+        if let Some(flag) = self.identity.linker.flag() {
+            args.push(OsString::from(flag));
+        }
         for flag in options.profile.link_flags() {
             args.push(OsString::from(flag));
         }
@@ -1918,6 +2034,87 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+
+        fs::remove_dir_all(directory).expect("cleanup");
+    }
+
+    #[test]
+    fn linker_flags_and_stable_key_reflect_acceleration() {
+        assert_eq!(LinkerKind::Default.flag(), None);
+        assert_eq!(LinkerKind::Mold.flag(), Some("-fuse-ld=mold"));
+        assert_eq!(LinkerKind::Lld.flag(), Some("-fuse-ld=lld"));
+
+        let identity_default = ToolIdentity {
+            path: PathBuf::from("clang"),
+            canonical_path: PathBuf::from("/usr/bin/clang"),
+            kind: CompilerKind::Clang,
+            version: "18.1.3".to_owned(),
+            target: "x86_64-linux-gnu".to_owned(),
+            linker: LinkerKind::Default,
+        };
+        let mut identity_mold = identity_default.clone();
+        identity_mold.linker = LinkerKind::Mold;
+
+        let mut identity_lld = identity_default.clone();
+        identity_lld.linker = LinkerKind::Lld;
+
+        assert_ne!(identity_default.stable_key(), identity_mold.stable_key());
+        assert_ne!(identity_mold.stable_key(), identity_lld.stable_key());
+        assert!(identity_mold.stable_key().contains("mold"));
+        assert!(identity_lld.stable_key().contains("lld"));
+    }
+
+    #[test]
+    fn linker_auto_detection_prefers_mold_then_lld() {
+        let directory = temp_dir("linker-detection");
+        let mold_path = directory.join("mold");
+        let lld_path = directory.join("ld.lld");
+        fs::write(&mold_path, "").expect("write fake mold");
+        fs::write(&lld_path, "").expect("write fake lld");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&mold_path, fs::Permissions::from_mode(0o755)).expect("chmod mold");
+            fs::set_permissions(&lld_path, fs::Permissions::from_mode(0o755)).expect("chmod lld");
+        }
+
+        // Linux + Clang with both mold and lld present selects mold
+        let detected = detect_linker(
+            CompilerKind::Clang,
+            TargetPlatform::Linux,
+            &[directory.clone()],
+        );
+        assert_eq!(detected, LinkerKind::Mold);
+
+        // Without mold, selects lld
+        fs::remove_file(&mold_path).expect("remove mold");
+        let detected_lld = detect_linker(
+            CompilerKind::Clang,
+            TargetPlatform::Linux,
+            &[directory.clone()],
+        );
+        assert_eq!(detected_lld, LinkerKind::Lld);
+
+        // Zig stays Default regardless of linkers in path
+        assert_eq!(
+            detect_linker(
+                CompilerKind::Zig,
+                TargetPlatform::Linux,
+                &[directory.clone()]
+            ),
+            LinkerKind::Default
+        );
+
+        // Non-Linux stays Default
+        assert_eq!(
+            detect_linker(
+                CompilerKind::Clang,
+                TargetPlatform::Macos,
+                &[directory.clone()]
+            ),
+            LinkerKind::Default
+        );
 
         fs::remove_dir_all(directory).expect("cleanup");
     }
