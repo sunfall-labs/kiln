@@ -6044,36 +6044,36 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
          * would have produced -- writable, enumerable, configurable data -- without the walk up
          * that chain looking for a setter that cannot be there. */
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "method", 6,
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_METHOD,
                                        kiln_c99_node_http_method_text(
                                            (const char *)event->method,
                                            (size_t)event->method_len));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "url", 3,
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_URL,
                                        kiln_c99_copy_text((const char *)event->target,
                                                           (size_t)event->target_len));
         /* Two spellings, both constants: a copy per request bought nothing a literal does not
          * already give, and the string a program reads is indistinguishable either way. */
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "httpVersion", 11,
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION,
                                        event->version_minor
                                            ? kiln_c99_static_text(kiln_c99_http_version_11, 3)
                                            : kiln_c99_static_text(kiln_c99_http_version_10, 3));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "httpVersionMajor", 16, kiln_c99_number(1.0));
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MAJOR, kiln_c99_number(1.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "httpVersionMinor", 16,
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_HTTP_VERSION_MINOR,
                                        kiln_c99_number(event->version_minor ? 1.0 : 0.0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "aborted", 7, kiln_c99_boolean(0));
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_ABORTED, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "complete", 8, kiln_c99_boolean(0));
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_COMPLETE, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "destroyed", 9, kiln_c99_boolean(0));
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "socket", 6, socket->object);
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_SOCKET, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(request, "connection", 10, socket->object);
+            status = kiln_c99_own_data_hot_key(request, KILN_C99_HOT_KEY_CONNECTION, socket->object);
         /* `headers` is an accessor until it is read.  Building the table eagerly cost one
          * object and two heap strings per header on every request, and the common server reads
          * one header or none.  The flattened bytes are copied instead -- one malloc and one
@@ -6115,11 +6115,11 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
         if (status == KILN_C99_OK)
             status = kiln_c99_own_data(response->object, "req", 3, request);
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(response->object, "socket", 6, socket->object);
+            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_SOCKET, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(response->object, "connection", 10, socket->object);
+            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_CONNECTION, socket->object);
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(response->object, "statusCode", 10,
+            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_STATUS_CODE,
                                        kiln_c99_number(200.0));
         if (status == KILN_C99_OK)
             status = kiln_c99_own_data(response->object, "headersSent", 11, kiln_c99_boolean(0));
@@ -6127,7 +6127,7 @@ static int kiln_c99_node_http_event(void *opaque, const kiln_realm_http_event *e
             status = kiln_c99_own_data(response->object, "writableEnded", 13,
                                        kiln_c99_boolean(0));
         if (status == KILN_C99_OK)
-            status = kiln_c99_own_data(response->object, "destroyed", 9, kiln_c99_boolean(0));
+            status = kiln_c99_own_data_hot_key(response->object, KILN_C99_HOT_KEY_DESTROYED, kiln_c99_boolean(0));
         if (status != KILN_C99_OK) return status;
         response->request = request;
         response->next = socket->responses;

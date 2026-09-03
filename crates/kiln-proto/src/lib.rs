@@ -33,7 +33,7 @@ pub enum StepBudget {
 
 /// Bumped whenever old and new peers could interpret the wire contract differently. The daemon
 /// refuses a client that does not match.
-pub const PROTOCOL_VERSION: u32 = 26;
+pub const PROTOCOL_VERSION: u32 = 27;
 
 /// SHA-256 of a source file's exact UTF-8 bytes.
 ///
@@ -643,6 +643,8 @@ pub enum NativeProfile {
     Dev,
     Check,
     Release,
+    /// Release, plus profiler instrumentation. A wire-shape change, so PROTOCOL_VERSION moves.
+    Profile,
 }
 
 /// Measurements and cache observability for one native build.
@@ -903,7 +905,7 @@ mod tests {
 
     #[test]
     fn protocol_v25_run_step_budget_wire_contract_round_trips() {
-        assert_eq!(PROTOCOL_VERSION, 26);
+        assert_eq!(PROTOCOL_VERSION, 27);
 
         let requests = [
             (

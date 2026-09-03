@@ -248,6 +248,9 @@ static int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key
                                   const char *ikey, kiln_property **out);
 static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
                              kiln_value value);
+static int kiln_c99_own_data_hot_key(kiln_value target, int id, kiln_value value);
+static int kiln_c99_put_hot_key(kiln_host *host, kiln_value target, int id, kiln_value value,
+                                int depth, kiln_value *thrown);
 static int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len,
                         kiln_value value, int depth, kiln_value *thrown);
 static int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len,
@@ -1010,6 +1013,47 @@ typedef struct kiln_key_table {
     size_t count;
 } kiln_key_table;
 
+/* The literal keys one request costs, every time: the request and response objects, and the
+ * `URL` a router builds from `req.url`.
+ *
+ * Interning is a hash of the bytes and a probe. These are the same twenty-odd strings on every
+ * request, so ADR 0047's own "next step" applies: intern each once per heap and let the per-request
+ * cost become an array index. The X-macro keeps the spelling and its length in one place, because
+ * a key whose length disagrees with its text is a bug that hashes cleanly and looks up nothing.
+ */
+#define KILN_C99_HOT_KEYS(X)                     \
+    X(METHOD, "method")                           \
+    X(URL, "url")                                 \
+    X(HTTP_VERSION, "httpVersion")                \
+    X(HTTP_VERSION_MAJOR, "httpVersionMajor")     \
+    X(HTTP_VERSION_MINOR, "httpVersionMinor")     \
+    X(ABORTED, "aborted")                         \
+    X(COMPLETE, "complete")                       \
+    X(DESTROYED, "destroyed")                     \
+    X(SOCKET, "socket")                           \
+    X(CONNECTION, "connection")                   \
+    X(HEADERS, "headers")                         \
+    X(STATUS_CODE, "statusCode")                  \
+    X(PATHNAME, "pathname")                       \
+    X(GET, "get")                                 \
+    X(SEARCH_PARAMS, "searchParams")
+
+#define KILN_C99_HOT_KEY_ENUM(id, text) KILN_C99_HOT_KEY_##id,
+enum kiln_c99_http_key {
+    KILN_C99_HOT_KEYS(KILN_C99_HOT_KEY_ENUM) KILN_C99_HOT_KEY_COUNT
+};
+#undef KILN_C99_HOT_KEY_ENUM
+
+#define KILN_C99_HOT_KEY_TEXT(id, text) text,
+static const char *const kiln_c99_hot_key_text[KILN_C99_HOT_KEY_COUNT] = {
+    KILN_C99_HOT_KEYS(KILN_C99_HOT_KEY_TEXT)};
+#undef KILN_C99_HOT_KEY_TEXT
+
+#define KILN_C99_HOT_KEY_LEN(id, text) sizeof(text) - 1,
+static const size_t kiln_c99_hot_key_len[KILN_C99_HOT_KEY_COUNT] = {
+    KILN_C99_HOT_KEYS(KILN_C99_HOT_KEY_LEN)};
+#undef KILN_C99_HOT_KEY_LEN
+
 typedef struct kiln_gc_heap {
     const kiln_gc_hooks *hooks;
     kiln_gc_block *head; /* large blocks only; slab blocks are found by walking slabs */
@@ -1038,6 +1082,10 @@ typedef struct kiln_gc_heap {
     uint64_t freed_blocks;
     uint64_t freed_bytes;
     kiln_key_table keys;
+    /* Canonical pointers for the keys the HTTP path writes on every request and response. See
+     * KILN_C99_HOT_KEYS. NULL means "not interned in this heap yet"; the table is per-heap
+     * because a canonical pointer from one realm means nothing in another. */
+    const char *hot_keys[KILN_C99_HOT_KEY_COUNT];
 } kiln_gc_heap;
 
 static const kiln_gc_hooks kiln_c99_gc_hooks;
@@ -3568,6 +3616,51 @@ static int kiln_c99_own_data(kiln_value target, const char *key, size_t key_len,
     return KILN_C99_OK;
 }
 
+/* The canonical pointer for one of KILN_C99_HOT_KEYS in the active heap, interned on first use.
+ *
+ * Lazy rather than filled at heap init, so nothing depends on the order in which a realm brings
+ * its heap up; a NULL slot simply means "not yet", and the first request through pays for it. */
+static const char *kiln_c99_hot_key(int id) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    /* A `@@` name is a reserved slot reached through a Symbol, not a string key, and it is
+     * resolved by a path this table knows nothing about. Interning one as a string and handing the
+     * canonical pointer to `put` writes a property nothing later finds: measured as 5,793 wrong
+     * answers out of 15k when `@@url:query` was briefly listed here. Refusing returns NULL, which
+     * every caller already treats as "not interned, do it the ordinary way".
+     *
+     * The check is here rather than in a comment on the table because the table is the tempting
+     * place to add one. */
+    if (kiln_c99_hot_key_len[id] >= 2 && kiln_c99_hot_key_text[id][0] == '@' &&
+        kiln_c99_hot_key_text[id][1] == '@') {
+        return NULL;
+    }
+    if (heap == NULL) return NULL;
+    if (heap->hot_keys[id] == NULL) {
+        heap->hot_keys[id] =
+            kiln_c99_intern(kiln_c99_hot_key_text[id], kiln_c99_hot_key_len[id]);
+    }
+    return heap->hot_keys[id];
+}
+
+/* `kiln_c99_put` for one of those keys, so a fresh object's members skip the hash too. */
+static int kiln_c99_put_hot_key(kiln_host *host, kiln_value target, int id, kiln_value value,
+                                int depth, kiln_value *thrown) {
+    return kiln_c99_put_mode_ikey(host, target, kiln_c99_hot_key_text[id], kiln_c99_hot_key_len[id],
+                                  kiln_c99_hot_key(id), value, 0, depth, thrown);
+}
+
+/* `kiln_c99_own_data` for a key the HTTP path already knows the canonical pointer for. */
+static int kiln_c99_own_data_hot_key(kiln_value target, int id, kiln_value value) {
+    kiln_property *slot;
+    int status = kiln_c99_own_slot_ikey(target, kiln_c99_hot_key_text[id],
+                                        kiln_c99_hot_key_len[id], kiln_c99_hot_key(id), &slot);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    slot->value = value;
+    return KILN_C99_OK;
+}
+
 static kiln_generator *kiln_c99_generator_of(kiln_value value) {
     return (kiln_generator *)(uintptr_t)value.bits;
 }
@@ -4159,7 +4252,7 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
     if (fragment != NULL && (query == NULL || fragment < query)) query = NULL;
     status = kiln_c99_new_object(out);
     if (status != KILN_C99_OK) return status;
-    status = kiln_c99_put(NULL, *out, "pathname", 8,
+    status = kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_PATHNAME,
                           kiln_c99_copy_text(start, (size_t)((query != NULL ? query :
                               (fragment != NULL ? fragment : end)) - start)), 0, NULL);
     if (status != KILN_C99_OK) return status;
@@ -4170,10 +4263,10 @@ static int kiln_c99_url_construct(kiln_value *out, const kiln_value *args, size_
                           kiln_c99_copy_text(query + 1, (size_t)((fragment != NULL ? fragment : end) - query - 1)),
                           0, NULL);
     if (status != KILN_C99_OK) return status;
-    status = kiln_c99_put(NULL, params, "get", 3,
+    status = kiln_c99_put_hot_key(NULL, params, KILN_C99_HOT_KEY_GET,
                           kiln_c99_method(KILN_C99_METHOD_URL_SEARCH_PARAMS_GET), 0, NULL);
     if (status != KILN_C99_OK) return status;
-    return kiln_c99_put(NULL, *out, "searchParams", 12, params, 0, NULL);
+    return kiln_c99_put_hot_key(NULL, *out, KILN_C99_HOT_KEY_SEARCH_PARAMS, params, 0, NULL);
 }
 
 static int kiln_c99_url_search_params_get(kiln_value *out, kiln_value receiver,

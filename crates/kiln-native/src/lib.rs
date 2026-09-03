@@ -75,6 +75,8 @@ pub enum NativeProfile {
     Dev,
     Check,
     Release,
+    /// Release, instrumented for `gprof`. See `scripts/profile-native.sh`.
+    Profile,
 }
 
 impl NativeProfile {
@@ -83,6 +85,7 @@ impl NativeProfile {
             Self::Dev => "native-dev",
             Self::Check => "native-check",
             Self::Release => "native-release",
+            Self::Profile => "native-profile",
         }
     }
 
@@ -91,6 +94,8 @@ impl NativeProfile {
             Self::Dev => CacheProfile::Debug,
             Self::Check => CacheProfile::Check,
             Self::Release => CacheProfile::Release,
+            // Its own cache bucket: an instrumented object must never satisfy a release build.
+            Self::Profile => CacheProfile::Profile,
         }
     }
 
@@ -99,6 +104,7 @@ impl NativeProfile {
             Self::Dev => ToolchainProfile::NativeDev,
             Self::Check => ToolchainProfile::NativeCheck,
             Self::Release => ToolchainProfile::NativeRelease,
+            Self::Profile => ToolchainProfile::NativeProfile,
         }
     }
 }
