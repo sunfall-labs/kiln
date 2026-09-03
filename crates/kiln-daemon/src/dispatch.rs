@@ -63,6 +63,7 @@ pub(crate) struct OwnedGraphSource {
     pub(crate) revision: Revision,
 }
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum GraphRunPlan {
     Cached {
         graph: Arc<ModuleGraph>,
@@ -407,6 +408,7 @@ pub(crate) fn prepare_run_with_cache<E: QueryEngine>(
 /// Capture all active source bytes under the daemon lock and return a graph build plan. The
 /// first implementation snapshots the complete active set for correctness; a future refinement
 /// can narrow the copy once graph reachability and cancellation are explicit APIs.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn graph_run_plan<E: QueryEngine>(
     engine: &E,
     cache: &mut GraphCache,
@@ -500,10 +502,11 @@ pub(crate) fn graph_run_plan<E: QueryEngine>(
 
 fn canonical_source_path(path: &str, project_root: &Path) -> Option<PathBuf> {
     let path = Path::new(path);
-    let absolute = path
-        .is_absolute()
-        .then(|| path.to_path_buf())
-        .unwrap_or_else(|| project_root.join(path));
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
     std::fs::canonicalize(absolute).ok()
 }
 

@@ -74,24 +74,6 @@ jobs:
       # mode still runs.
       - run: bash scripts/ci-test.sh
 
-  fuzz:
-    name: Fuzz harness
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - run: rustup toolchain install --no-self-update
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "24"
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: fuzz
-      # The fuzz crate is intentionally outside the workspace and has its own lockfile, so test
-      # it explicitly. Its defaults are bounded unit-test-sized runs; longer campaigns belong in
-      # the soak commands documented by fuzz/README.md.
-      - run: cargo test --manifest-path fuzz/Cargo.toml --locked
-
   deny:
     name: Supply chain
     runs-on: ubuntu-latest

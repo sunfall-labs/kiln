@@ -2064,7 +2064,7 @@ mod tests {
         let runner: Arc<dyn ProcessRunner> = runner_impl.clone();
 
         let toolchain = Toolchain::discover_in_path_entries_with_cc(
-            &[directory.clone()],
+            std::slice::from_ref(&directory),
             Some(std::ffi::OsStr::new("gcc")),
             runner,
         )
@@ -2075,7 +2075,7 @@ mod tests {
 
         let runner_empty: Arc<dyn ProcessRunner> = Arc::new(FakeRunner::new([], false));
         let error = Toolchain::discover_in_path_entries_with_cc(
-            &[directory.clone()],
+            std::slice::from_ref(&directory),
             Some(std::ffi::OsStr::new("nonexistent-cc")),
             runner_empty,
         )
@@ -2136,7 +2136,7 @@ mod tests {
         let detected = detect_linker(
             CompilerKind::Clang,
             TargetPlatform::Linux,
-            &[directory.clone()],
+            std::slice::from_ref(&directory),
         );
         assert_eq!(detected, LinkerKind::Mold);
 
@@ -2145,7 +2145,7 @@ mod tests {
         let detected_lld = detect_linker(
             CompilerKind::Clang,
             TargetPlatform::Linux,
-            &[directory.clone()],
+            std::slice::from_ref(&directory),
         );
         assert_eq!(detected_lld, LinkerKind::Lld);
 
@@ -2154,7 +2154,7 @@ mod tests {
             detect_linker(
                 CompilerKind::Zig,
                 TargetPlatform::Linux,
-                &[directory.clone()]
+                std::slice::from_ref(&directory),
             ),
             LinkerKind::Default
         );
@@ -2164,7 +2164,7 @@ mod tests {
             detect_linker(
                 CompilerKind::Clang,
                 TargetPlatform::Macos,
-                &[directory.clone()]
+                std::slice::from_ref(&directory),
             ),
             LinkerKind::Default
         );
