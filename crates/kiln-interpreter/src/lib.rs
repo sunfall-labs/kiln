@@ -16211,6 +16211,31 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 parts.push(Value::String(utf16_slice(&subject, copied..subject.len())));
                 Ok(Value::Array(ArrayData::new(parts)))
             }
+            // `SetTypedArrayFromArrayLike`: a source that is neither an array nor a view is
+            // still read as one, through `length` and its indices. The machine-free
+            // implementation recognised only those two kinds and answered an empty list for
+            // everything else, so `view.set({ length: 2, 0: 7, 1: 8 })` and `view.set("12")`
+            // both copied nothing at all and reported success by returning `undefined`.
+            //
+            // It needs a machine because those reads are the program's: `length` may be an
+            // accessor, and so may any index. Collected here and handed on as a dense array, the
+            // existing copy then does the bounds check and the per-element conversion unchanged.
+            Native::TypedArraySet
+                if arguments.first().is_some_and(|source| {
+                    !matches!(source, Value::Array(_) | Value::TypedArray(_))
+                        && (is_an_object(source) || matches!(source, Value::String(_)))
+                }) =>
+            {
+                let source = arguments.first().cloned().unwrap_or(Value::Undefined);
+                let length = self.array_like_length(&source, instruction)?;
+                let mut collected = Vec::with_capacity(length.min(1 << 20) as usize);
+                for index in 0..length {
+                    collected.push(self.read_property(&source, &index.to_string(), instruction)?);
+                }
+                let mut converted = arguments.to_vec();
+                converted[0] = Value::Array(ArrayData::new(collected));
+                return self.dispatch_native(native, receiver, &converted, instruction);
+            }
             // `subarray` builds a second view over the same bytes, and it is specified over
             // `TypedArraySpeciesCreate` like `slice` and `map` -- so a subclass gets its own type
             // back and `@@species` is read. The machine-free implementation stamped out an
