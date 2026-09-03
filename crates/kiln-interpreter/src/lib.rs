@@ -26778,15 +26778,17 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// rearranges in place writes back through the view and answers with it. Everything else --
     /// `join`, `indexOf`, `reduce` -- produces something that is not an array and passes through.
     fn typed_result(
-        &self,
+        &mut self,
         original: &Value,
         produced: Value,
         in_place: bool,
         new_array: bool,
+        instruction: usize,
     ) -> Result<Value, ExecutionError> {
         let Value::TypedArray(view) = original else {
             return Ok(produced);
         };
+        let kind = view.kind;
         let Value::Array(items) = &produced else {
             return Ok(produced);
         };
@@ -26798,9 +26800,85 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         }
         if new_array {
             let elements = dense_items(&items.borrow());
-            return construct_typed_array(view.kind, &[Value::Array(ArrayData::new(elements))]);
+            return self.typed_array_species_create(original, kind, elements, instruction);
         }
         Ok(produced)
+    }
+
+    /// `TypedArraySpeciesCreate(exemplar, «count»)`, then fill.
+    ///
+    /// The result of `slice`, `map` or `filter` on a view is built *through* the exemplar's
+    /// species, not stamped out of its kind. Every step is observable and every step is taken:
+    /// `constructor` off the exemplar, `@@species` off that, and the construction itself -- so a
+    /// subclass gets its own type back, which is the whole point of declaring one.
+    ///
+    /// Building an intrinsic of the exemplar's kind instead was not a smaller answer, it was a
+    /// different one: a subclass received the base type, `@@species` was never read, and a
+    /// species that answers something which is not a typed array -- which the specification makes
+    /// a `TypeError` -- was accepted and quietly ignored.
+    fn typed_array_species_create(
+        &mut self,
+        exemplar: &Value,
+        kind: TypedKind,
+        elements: Vec<Value>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let count = elements.len();
+        let constructor = self.read_property(exemplar, "constructor", instruction)?;
+        let species = match &constructor {
+            // `SpeciesConstructor` step 2: an absent `constructor` is the default, and anything
+            // that is not an object is a `TypeError` rather than a silent fallback.
+            Value::Undefined => Value::Undefined,
+            other if is_an_object(other) || is_callable(other) => {
+                self.read_property(other, WellKnown::Species.property_key(), instruction)?
+            }
+            other => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "{} is not an object and cannot be a constructor",
+                        other.to_display_string()
+                    ),
+                });
+            }
+        };
+        let built = match species {
+            // `null` and `undefined` both mean "use the default", which is how a subclass opts
+            // out of this and gets the intrinsic back.
+            Value::Undefined | Value::Null => {
+                construct_typed_array(kind, &[Value::Array(ArrayData::new(elements.clone()))])?
+            }
+            species if is_constructor(&species) => {
+                let out = self.construct_value(
+                    species.clone(),
+                    vec![Value::Number(count as f64)],
+                    species,
+                    instruction,
+                )?;
+                // `ValidateTypedArray` on what it handed back: a species that answers an
+                // ordinary array, or a view too short to hold the result, is a `TypeError`.
+                let Value::TypedArray(target) = &out else {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "a typed array species must answer a typed array".to_owned(),
+                    });
+                };
+                if target.len() < count {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "a typed array species answered a view that is too short"
+                            .to_owned(),
+                    });
+                }
+                for (index, item) in elements.iter().enumerate() {
+                    target.set(index, item)?;
+                }
+                return Ok(out);
+            }
+            other => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!("{} is not a constructor", other.to_display_string()),
+                });
+            }
+        };
+        Ok(built)
     }
 
     /// The key a trap is handed.
@@ -28422,6 +28500,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     produced,
                     native.rearranges_in_place(),
                     native.returns_a_new_array(),
+                    instruction,
                 )?))
             }
             // `next` on an async generator answers with a promise rather than a result: the
@@ -28572,7 +28651,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 let original = receiver.clone();
                 let receiver = self.as_array_like(&method, receiver, instruction)?;
                 let produced = self.array_sort(&receiver, &arguments, instruction)?;
-                Ok(Some(self.typed_result(&original, produced, true, false)?))
+                Ok(Some(self.typed_result(
+                    &original,
+                    produced,
+                    true,
+                    false,
+                    instruction,
+                )?))
             }
             Value::Callback(callback, _) => {
                 let original = receiver.clone();
@@ -28585,6 +28670,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     produced,
                     false,
                     matches!(callback, CallbackMethod::Map | CallbackMethod::Filter),
+                    instruction,
                 )?))
             }
             // A bound function ignores the receiver the call site offers, whichever way it is
