@@ -15650,6 +15650,23 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
         return KILN_C99_OK;
     }
     object = kiln_c99_object_of(named);
+    {
+        kiln_object *target_obj = kiln_c99_object_of(target);
+        if (target_obj->count == 0 && object->accessor_count == 0 && object->count > 0) {
+            size_t cap = object->count + 8;
+            target_obj->properties = (kiln_property *)malloc(cap * sizeof(kiln_property));
+            if (target_obj->properties == NULL) return KILN_C99_OUT_OF_MEMORY;
+            target_obj->capacity = cap;
+            size_t copied_count = 0;
+            for (index = 0; index < object->count; ++index) {
+                if (object->properties[index].enumerable) {
+                    target_obj->properties[copied_count++] = object->properties[index];
+                }
+            }
+            target_obj->count = copied_count;
+            return KILN_C99_OK;
+        }
+    }
     /* The count is read each time round because a getter can add a property to the source; the
      * bound is the source's *original* length, so a property the getter appends is not copied,
      * which is what stops an appending getter from looping. */
