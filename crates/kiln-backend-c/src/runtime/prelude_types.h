@@ -19,6 +19,18 @@ typedef struct kiln_value {
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
+static double kiln_c99_bits_to_double(uint64_t bits) {
+    union { uint64_t u; double d; } pun;
+    pun.u = bits;
+    return pun.d;
+}
+
+static uint64_t kiln_c99_double_to_bits(double d) {
+    union { double d; uint64_t u; } pun;
+    pun.d = d;
+    return pun.u;
+}
+
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
     KILN_TYPED_UINT8,
