@@ -318,6 +318,41 @@ fn assert_numeric_id_invariants(prelude: &str) {
     // global to be implemented would put an implemented one inside the unimplemented range.
     const RETIRED_BUILTINS: &[u64] = &[77];
 
+    // Two builtins may not share a code, and until a `URIError` that read as an object went
+    // looking for a reason, nothing said so. The density check below cannot see a collision: it
+    // asks `builtins` -- keyed *by value* -- whether each number is present, so two names on one
+    // number look exactly like one name on one number, and the run stays dense and green.
+    //
+    // What it cost: `SYMBOL_PROTOTYPE` and `URI_ERROR` were both 65. `kiln_c99_is_namespace(65)`
+    // is true, correctly, for the prototype -- so `URIError` became a namespace. `typeof URIError`
+    // answered `"object"` where the interpreter says `"function"`, and `URIError.name` answered
+    // `undefined`, which is the silent shape: `typeof X === "undefined"` is how real code
+    // feature-detects, so the compiled program takes the other branch rather than failing.
+    //
+    // The identical guard has existed for *method* codes for as long as the density check has.
+    // Only the builtin half was missing, so this is that half, not a new idea.
+    //
+    // The one intended alias is a range marker naming the member at the end of its range:
+    // `UNAVAILABLE_FIRST` is `INTL` and `UNAVAILABLE_LAST` is `EVAL`, by construction.
+    for (value, names) in &builtins {
+        if names.len() > 1 {
+            let mut sorted = names.clone();
+            sorted.sort();
+            let markers = sorted
+                .iter()
+                .filter(|n| {
+                    *n == "KILN_C99_BUILTIN_UNAVAILABLE_FIRST"
+                        || *n == "KILN_C99_BUILTIN_UNAVAILABLE_LAST"
+                })
+                .count();
+            assert!(
+                sorted.len() == 2 && markers == 1,
+                "duplicate builtin ID {value} is claimed by {}. Two builtins sharing a code make                  the later one read as the earlier: whichever predicate answers for one answers                  for both, and the wrong one is a wrong answer rather than a refusal. The only                  intended aliases are UNAVAILABLE_FIRST and UNAVAILABLE_LAST naming the builtins                  at the ends of their range.",
+                sorted.join(", ")
+            );
+        }
+    }
+
     let builtin_values: Vec<_> = builtins.keys().copied().collect();
     let builtin_max = *builtin_values
         .last()
