@@ -1,8 +1,8 @@
 # `postcss` diverges natively: a function's `.parse` is undefined
 
-Status: needs bisect
+Status: resolved
 
-The only *wrong answer* in the corpus, and therefore the most serious item here.
+Root cause: `postcss.parse` called `new Input` which called `new PreviousMap` which invoked `dirname` from `require("path")`. `node:path` natively lacked `dirname` (along with `basename`, `extname`, and `relative`), leaving `dirname` undefined and throwing `TypeError: a undefined is not a function`. Once path methods and `String.fromCharCode` and callable object spreading were implemented, PostCSS matches Node 100% byte-for-byte natively.
 
     node:   nodes 18|types atrule:4,comment:1,decl:9,rule:4|...
     native: uncaught TypeError: a undefined is not a function

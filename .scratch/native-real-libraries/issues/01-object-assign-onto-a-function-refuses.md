@@ -1,6 +1,6 @@
 # `Object.assign` refuses when the target is a function
 
-Status: ready
+Status: resolved
 
 Attaching statics to an exported function is one of the most common shapes in a bundle. Natively it
 refuses; the same call with an object target succeeds, so this is the target check and not the
