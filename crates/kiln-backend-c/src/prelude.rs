@@ -1037,6 +1037,14 @@ method_ids! {
     (KILN_C99_METHOD_NODE_BUILTIN_UNMATERIALIZED, 482, Direct),
     (KILN_C99_METHOD_REFLECT_GET_PROTOTYPE_OF, 484, Generic),
     (KILN_C99_METHOD_GENERATOR_THROW, 485, Generic),
+    (KILN_C99_METHOD_TEXT_DECODER_DECODE, 486, Generic),
+    (KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE, 487, Direct),
+    (KILN_C99_METHOD_NODE_ALS_GET_STORE, 488, Direct),
+    (KILN_C99_METHOD_NODE_ALS_RUN, 489, Direct),
+    (KILN_C99_METHOD_NODE_ALS_ENTER_WITH, 490, Direct),
+    (KILN_C99_METHOD_NODE_ALS_EXIT, 491, Direct),
+    (KILN_C99_METHOD_NODE_ALS_DISABLE, 492, Direct),
+    (KILN_C99_METHOD_STRING_FROM_CODE_POINT, 493, Generic),
 }
 
 /// The hook a host installs when it lets a program make a second realm.
@@ -1270,6 +1278,7 @@ builtin_surface! {
 
     (KILN_C99_BUILTIN_STRING, "String", "raw", code(KILN_C99_METHOD_STRING_RAW)),
     (KILN_C99_BUILTIN_STRING, "String", "fromCharCode", code(KILN_C99_METHOD_STRING_FROM_CHAR_CODE)),
+    (KILN_C99_BUILTIN_STRING, "String", "fromCodePoint", code(KILN_C99_METHOD_STRING_FROM_CODE_POINT)),
 
     (KILN_C99_BUILTIN_NUMBER, "Number", "isInteger", code(KILN_C99_METHOD_IS_INTEGER)),
     (KILN_C99_BUILTIN_NUMBER, "Number", "isSafeInteger", code(KILN_C99_METHOD_IS_SAFE_INTEGER)),
@@ -1470,8 +1479,6 @@ builtin_backlog! {
      "sealing is weaker than freezing; answering isFrozen would be a silent wrong answer"),
     ("Array", "fromAsync",
      "not implemented; needs the async-iterator protocol"),
-    ("String", "fromCodePoint",
-     "not implemented; builds a string from scalar values"),
     ("Promise", "try",
      "not implemented"),
     ("JSON", "rawJSON",
@@ -1816,7 +1823,7 @@ pub const ABSENT_ANSWER_SITES: &[AbsentAnswer] = &[
     },
     AbsentAnswer {
         function: "kiln_c99_get_own_kind",
-        sites: 25,
+        sites: 26,
         proved_by: "one membership predicate per receiver kind -- kiln_c99_is_array_member, \
                     kiln_c99_is_string_member, kiln_c99_is_date_member, \
                     kiln_c99_is_collection_member, kiln_c99_is_array_buffer_member, \
@@ -2208,7 +2215,20 @@ int kiln_c99_internal_status(const char *converted_by);
 macro_rules! header_rest {
     () => {
         concat!(
-            r#"/* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
+            r#"static inline void kiln_c99_reset_diagnostics(void) {
+    kiln_c99_diagnostic_site = NULL;
+    kiln_c99_diagnostic_operation = NULL;
+    kiln_c99_diagnostic_instruction = 0;
+    kiln_c99_diagnostic_depth = 0;
+    kiln_c99_diagnostic_method = 0;
+    kiln_c99_diagnostic_receiver_tag = 0;
+    kiln_c99_diagnostic_has_method = 0;
+    kiln_c99_diagnostic_detail = NULL;
+    kiln_c99_diagnostic_function = NULL;
+    kiln_c99_diagnostic_function_len = 0;
+}
+
+/* THE OTHER HALF OF A REFUSAL, AND THE ONE THAT HAD NO CEREMONY.
  *
  * A refusal says "the language puts a member here and this backend has not built it" and stops
  * the program at the cause. This says the opposite: "the language puts nothing here", whose
@@ -2901,6 +2921,14 @@ enum kiln_value_tag {
     emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_SETTLE),
     emit_method_define!(KILN_C99_METHOD_ABORT_SIGNAL_FOLLOW),
     emit_method_define!(KILN_C99_METHOD_TEXT_ENCODER_ENCODE),
+    emit_method_define!(KILN_C99_METHOD_TEXT_DECODER_DECODE),
+    emit_method_define!(KILN_C99_METHOD_NODE_ASYNC_LOCAL_STORAGE),
+    emit_method_define!(KILN_C99_METHOD_NODE_ALS_GET_STORE),
+    emit_method_define!(KILN_C99_METHOD_NODE_ALS_RUN),
+    emit_method_define!(KILN_C99_METHOD_NODE_ALS_ENTER_WITH),
+    emit_method_define!(KILN_C99_METHOD_NODE_ALS_EXIT),
+    emit_method_define!(KILN_C99_METHOD_NODE_ALS_DISABLE),
+    emit_method_define!(KILN_C99_METHOD_STRING_FROM_CODE_POINT),
     emit_method_define!(KILN_C99_METHOD_NODE_HTTP_SERVER_RESPONSE),
     emit_method_define!(KILN_C99_METHOD_NODE_QUERYSTRING_PARSE),
     r#"
@@ -3654,6 +3682,12 @@ static uint64_t kiln_c99_string_method(const char *key, size_t key_len) {
     }
     if (kiln_c99_same_name(key, key_len, "toLocaleString")) {
         return KILN_C99_METHOD_OBJECT_TO_LOCALE_STRING;
+    }
+    if (kiln_c99_same_name(key, key_len, "trimRight")) {
+        return KILN_C99_METHOD_TRIM_END;
+    }
+    if (kiln_c99_same_name(key, key_len, "trimLeft")) {
+        return KILN_C99_METHOD_TRIM_START;
     }
     return kiln_c99_lookup_method_group(key, key_len, KILN_C99_GROUP_STRING_DISPATCH);
 }

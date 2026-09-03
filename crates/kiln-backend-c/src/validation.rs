@@ -339,6 +339,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::AbortController
             | kiln_ir::Builtin::AbortSignal
             | kiln_ir::Builtin::TextEncoder
+            | kiln_ir::Builtin::TextDecoder
             | kiln_ir::Builtin::Performance,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
