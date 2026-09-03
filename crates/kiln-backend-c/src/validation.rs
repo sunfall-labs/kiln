@@ -261,6 +261,38 @@ pub(crate) fn validate_code(
     Ok(max_height.max(1))
 }
 
+pub(crate) fn compute_stack_heights(code: &[Instruction]) -> Vec<usize> {
+    let mut heights: Vec<Option<usize>> = vec![None; code.len()];
+    let mut work = vec![(0usize, 0usize)];
+    while let Some((index, height)) = work.pop() {
+        if index >= code.len() || heights[index].is_some() {
+            continue;
+        }
+        heights[index] = Some(height);
+        let (next_height, terminal) = match stack_effect(&code[index], height, index) {
+            Ok(res) => res,
+            Err(_) => continue,
+        };
+        if terminal {
+            continue;
+        }
+        match &code[index] {
+            Instruction::Jump(target) => work.push((*target as usize, next_height)),
+            Instruction::JumpIfFalse(target)
+            | Instruction::JumpIfTruthy(target)
+            | Instruction::JumpIfNotNullish(target) => {
+                work.push((*target as usize, next_height));
+                if index + 1 < code.len() {
+                    work.push((index + 1, next_height));
+                }
+            }
+            _ if index + 1 < code.len() => work.push((index + 1, next_height)),
+            _ => {}
+        }
+    }
+    heights.into_iter().map(|h| h.unwrap_or(0)).collect()
+}
+
 /// Whether the backend can emit this instruction.
 ///
 /// There is no catch-all arm any more: **every instruction in the set is emitted**, and the match
