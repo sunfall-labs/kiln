@@ -1522,13 +1522,39 @@ static const char *kiln_c99_temporal_now_name(uint64_t code) {
 #define KILN_C99_TEMPORAL_OPTION_TEXT_SLOTS 9
 #define KILN_C99_TEMPORAL_OPTION_NUMBER_SLOTS 2
 static const kiln_temporal_key KILN_C99_TEMPORAL_OPTION_KEYS[KILN_C99_TEMPORAL_OPTION_COUNT] = {
+#define KILN_C99_TEMPORAL_OPT_CALENDAR_NAME (1u << 0)
+#define KILN_C99_TEMPORAL_OPT_DISAMBIGUATION (1u << 1)
+#define KILN_C99_TEMPORAL_OPT_FRACTIONAL (1u << 2)
+#define KILN_C99_TEMPORAL_OPT_LARGEST_UNIT (1u << 3)
+#define KILN_C99_TEMPORAL_OPT_OFFSET (1u << 4)
+#define KILN_C99_TEMPORAL_OPT_OVERFLOW (1u << 5)
+#define KILN_C99_TEMPORAL_OPT_RELATIVE_TO (1u << 6)
+#define KILN_C99_TEMPORAL_OPT_ROUNDING_INCREMENT (1u << 7)
+#define KILN_C99_TEMPORAL_OPT_ROUNDING_MODE (1u << 8)
+#define KILN_C99_TEMPORAL_OPT_SMALLEST_UNIT (1u << 9)
+#define KILN_C99_TEMPORAL_OPT_TIME_ZONE_NAME (1u << 10)
+#define KILN_C99_TEMPORAL_OPTS_OVERFLOW KILN_C99_TEMPORAL_OPT_OVERFLOW
+#define KILN_C99_TEMPORAL_OPTS_ZONED_OVERFLOW                                                      \
+#define KILN_C99_TEMPORAL_OPTS_DIFFERENCE                                                          \
+#define KILN_C99_TEMPORAL_OPTS_ROUND                                                               \
+#define KILN_C99_TEMPORAL_OPTS_DURATION_ROUND                                                      \
+#define KILN_C99_TEMPORAL_OPTS_RELATIVE_TO KILN_C99_TEMPORAL_OPT_RELATIVE_TO
+#define KILN_C99_TEMPORAL_OPTS_DISAMBIGUATION KILN_C99_TEMPORAL_OPT_DISAMBIGUATION
+#define KILN_C99_TEMPORAL_OPTS_CALENDAR_NAME KILN_C99_TEMPORAL_OPT_CALENDAR_NAME
+#define KILN_C99_TEMPORAL_OPTS_TIME_PRECISION                                                      \
+#define KILN_C99_TEMPORAL_OPTS_DATE_TIME_STRING                                                    \
+#define KILN_C99_TEMPORAL_OPTS_ZONED_STRING                                                        \
+#define KILN_C99_TEMPORAL_OPTS_NONE 0u
+static unsigned kiln_c99_temporal_overflow_keys(int32_t kind) {
+static unsigned kiln_c99_temporal_string_keys(int32_t kind) {
+static int kiln_c99_temporal_takes_arithmetic_options(int32_t kind) {
 #define KILN_C99_TEMPORAL_FIELD_TEXT_SLOTS 5
 typedef struct kiln_temporal_text {
 static char *kiln_c99_temporal_pack(const kiln_temporal_text *texts, size_t count,
 static int kiln_c99_temporal_coerce(kiln_host *host, int32_t kind, kiln_value item,
 typedef struct kiln_temporal_options {
 static void kiln_c99_temporal_options_init(kiln_temporal_options *options) {
-static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag,
+static int kiln_c99_temporal_read_options(kiln_host *host, kiln_value bag, unsigned keys,
 static int kiln_c99_temporal_read_bag(kiln_host *host, kiln_value bag, int duration,
 static int kiln_c99_temporal_build(int32_t kind, const double *numbers,
 static int kiln_c99_temporal_argument(kiln_host *host, const kiln_value *args, size_t argc,

@@ -68,6 +68,126 @@ impl Kind {
             Self::ZonedDateTime => "Temporal.ZonedDateTime",
         }
     }
+
+    /// The field names this type publishes, in the order its field table answers them.
+    ///
+    /// [`TemporalValue::get`] answers a name for a value that already exists; a *prototype* has
+    /// no value to ask, and the language still has to publish a getter under each of these names.
+    /// So the list lives here, beside the table it mirrors, rather than in the embedder -- a
+    /// second copy over there would answer `undefined` for a field this one had grown, and the
+    /// unit test below is what keeps the two halves the same fact.
+    pub const fn fields(self) -> &'static [&'static str] {
+        match self {
+            Self::PlainDate => &[
+                "calendarId",
+                "era",
+                "eraYear",
+                "year",
+                "month",
+                "monthCode",
+                "day",
+                "dayOfWeek",
+                "dayOfYear",
+                "weekOfYear",
+                "yearOfWeek",
+                "daysInWeek",
+                "daysInMonth",
+                "daysInYear",
+                "monthsInYear",
+                "inLeapYear",
+            ],
+            Self::PlainTime => &[
+                "hour",
+                "minute",
+                "second",
+                "millisecond",
+                "microsecond",
+                "nanosecond",
+            ],
+            Self::PlainDateTime => &[
+                "calendarId",
+                "era",
+                "eraYear",
+                "year",
+                "month",
+                "monthCode",
+                "day",
+                "hour",
+                "minute",
+                "second",
+                "millisecond",
+                "microsecond",
+                "nanosecond",
+                "dayOfWeek",
+                "dayOfYear",
+                "weekOfYear",
+                "yearOfWeek",
+                "daysInWeek",
+                "daysInMonth",
+                "daysInYear",
+                "monthsInYear",
+                "inLeapYear",
+            ],
+            Self::PlainYearMonth => &[
+                "calendarId",
+                "era",
+                "eraYear",
+                "year",
+                "month",
+                "monthCode",
+                "daysInMonth",
+                "daysInYear",
+                "monthsInYear",
+                "inLeapYear",
+            ],
+            Self::PlainMonthDay => &["calendarId", "monthCode", "day"],
+            Self::Duration => &[
+                "years",
+                "months",
+                "weeks",
+                "days",
+                "hours",
+                "minutes",
+                "seconds",
+                "milliseconds",
+                "microseconds",
+                "nanoseconds",
+                "sign",
+                "blank",
+            ],
+            Self::Instant => &["epochMilliseconds", "epochNanoseconds"],
+            Self::ZonedDateTime => &[
+                "calendarId",
+                "timeZoneId",
+                "era",
+                "eraYear",
+                "year",
+                "month",
+                "monthCode",
+                "day",
+                "hour",
+                "minute",
+                "second",
+                "millisecond",
+                "microsecond",
+                "nanosecond",
+                "epochMilliseconds",
+                "epochNanoseconds",
+                "offset",
+                "offsetNanoseconds",
+                "hoursInDay",
+                "dayOfWeek",
+                "dayOfYear",
+                "weekOfYear",
+                "yearOfWeek",
+                "daysInWeek",
+                "daysInMonth",
+                "daysInYear",
+                "monthsInYear",
+                "inLeapYear",
+            ],
+        }
+    }
 }
 
 /// Which JavaScript error a failed operation should become.
@@ -2107,5 +2227,34 @@ mod tests {
             date.equals(&time).expect_err("mismatch").kind,
             ErrorKind::Type
         );
+    }
+
+    #[test]
+    fn every_published_field_is_one_the_table_answers() {
+        // The list `Kind::fields` hands the embedder and the tables `get` dispatches to are two
+        // spellings of one fact, and the embedder publishes a getter for each name whether or not
+        // the table has an arm for it. A name here the table cannot answer is a prototype getter
+        // that reads `undefined` on every instance -- silent, and exactly the failure mode a
+        // second copy of a list produces.
+        let samples = [
+            plain_date(2024.0, 3.0, 5.0, None).expect("date"),
+            plain_time(1.0, 2.0, 3.0, 4.0, 5.0, 6.0).expect("time"),
+            plain_date_time(2024.0, 3.0, 5.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, None)
+                .expect("datetime"),
+            plain_year_month(2024.0, 3.0, None, None).expect("year month"),
+            plain_month_day(3.0, 5.0, None, None).expect("month day"),
+            days(2.0),
+            instant(0).expect("instant"),
+            zoned_date_time(0, "UTC", None).expect("zoned"),
+        ];
+        for value in &samples {
+            for name in value.kind().fields() {
+                assert!(
+                    value.get(name).is_some(),
+                    "{} publishes {name}, which its field table does not answer",
+                    value.kind().tag()
+                );
+            }
+        }
     }
 }
