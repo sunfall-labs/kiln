@@ -155,9 +155,19 @@ const BUILTINS: &[BuiltinAbi] = &[
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {
+        // `require("node:module")` is the `Module` class, not a namespace: node answers
+        // `typeof` "function" and `.name` "Module", and `Module.createRequire` hangs off it.
+        // Measured against node v25.9.0, one probe per specifier -- the same measurement that
+        // put `module` and `stream` on the interpreter's callable side of `typeof`. Declaring
+        // the projection here is what lets the native backend agree: it published a fresh
+        // namespace object for this name, so `typeof require("node:module")` was "object" in
+        // one engine and "function" in the other, from the same bytecode.
         specifier: "node:module",
         exports: &["createRequire", "default"],
-        commonjs: CommonJsProjection::Namespace,
+        commonjs: CommonJsProjection::Callable {
+            export: "default",
+            properties: &[],
+        },
     },
     BuiltinAbi {
         specifier: "node:path",
@@ -232,6 +242,11 @@ const BUILTINS: &[BuiltinAbi] = &[
         commonjs: CommonJsProjection::Namespace,
     },
     BuiltinAbi {
+        // `require("node:stream")` is the `Stream` class for the same reason `node:module` is
+        // `Module`: node answers "function", names it "Stream", and hangs `Readable`, `Writable`,
+        // `addAbortSignal` and `finished` off it. Both engines already build that callable as
+        // the module's `default`; only the CommonJS projection disagreed, and it disagreed by
+        // wrapping the callable in a namespace object nobody can call.
         specifier: "node:stream",
         exports: &[
             "Readable",
@@ -240,7 +255,10 @@ const BUILTINS: &[BuiltinAbi] = &[
             "default",
             "finished",
         ],
-        commonjs: CommonJsProjection::Namespace,
+        commonjs: CommonJsProjection::Callable {
+            export: "default",
+            properties: &[],
+        },
     },
     BuiltinAbi {
         specifier: "node:string_decoder",
@@ -334,6 +352,11 @@ pub const HTTP_METHODS: &[&str] = &[
     "PROPPATCH",
     "PURGE",
     "PUT",
+    // node v25.9.0 publishes 35 methods; this list had 34 because `QUERY` (RFC 9110's safe,
+    // body-carrying search method) was added to llhttp after the list was copied. One word here
+    // reaches both engines: the interpreter reads this slice and the native materializer writes
+    // its C array out of it.
+    "QUERY",
     "REBIND",
     "REPORT",
     "SEARCH",
