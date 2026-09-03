@@ -30,6 +30,15 @@
 //! already spell a reserved store key that way. `length`, `name` and `prototype` are not listed --
 //! they belong to every callable rather than to any particular one, and each engine supplies them
 //! from its own knowledge of what a function is.
+//!
+//! # Order is observable
+//!
+//! A string-keyed member enumerates in the order it is defined, so this list is the order
+//! `Object.getOwnPropertyNames` and `Reflect.ownKeys` report -- in both engines, since both read
+//! it from here. Match the reference implementation rather than grouping by what reads well:
+//! `Array` carried `fromAsync` before `of` and a differential probe caught it, because V8 defines
+//! `of` first and a proxy's `ownKeys` prints the difference. Appending a new member to the end of
+//! a list is therefore a claim about where the reference implementation defines it.
 
 #![forbid(unsafe_code)]
 
@@ -77,7 +86,7 @@ pub const SURFACE: &[Builtin] = &[
     },
     Builtin {
         global: "Array",
-        members: &["isArray", "from", "fromAsync", "of", "@@species"],
+        members: &["isArray", "from", "of", "fromAsync", "@@species"],
     },
     Builtin {
         global: "String",
