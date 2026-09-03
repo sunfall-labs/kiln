@@ -928,8 +928,12 @@ typedef enum kiln_gc_kind {
 #define KILN_GC_PHASE_TEARDOWN 1
 #define KILN_GC_PHASE_RESET 2
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1u
-#define KILN_GC_HOOKS_VERSION 1u
+#define KILN_GC_HOOKS_VERSION 2u
 #define KILN_GC_DEFAULT_FLOOR ((size_t)256 * 1024)
+/* What the `introspect` hook reports back, as a bitmask. `ARMED` is what tells the drive to keep
+ * its park short enough to notice a signal; `DUMPED` says a request was pending and was served. */
+#define KILN_C99_INTROSPECT_ARMED 1
+#define KILN_C99_INTROSPECT_DUMPED 2
 
 /* `kind` carries `kiln_gc_kind` in its low bits and, for a `KILN_GC_STRING` block only, a cached
  * answer to "is this string all ASCII" (ADR 0022: ASCII is exactly the case where a code-unit
@@ -1130,6 +1134,187 @@ static void kiln_c99_gc_trace_count(uint64_t count) {
     fputs(&digits[at], stderr);
 }
 
+/* ---- SIGUSR1 runtime introspection ------------------------------------------------------
+ *
+ * A compiled server has no REPL, no inspector and no admin port, so `kill -USR1` is how a
+ * production process is asked what it is doing. It answers with three lines on stderr and keeps
+ * serving.
+ *
+ * The handler does the one thing a handler may do -- assign to a `volatile sig_atomic_t` -- and
+ * the dump runs at the next turn boundary, the safepoint ADR 0041 already collects at, where no
+ * generated frame is on the stack. Deferring is not merely stylish here: the kernel runs a
+ * process-directed signal on whichever thread has not blocked it, Tokio's blocking pool included,
+ * so the handler may be on a thread that has never touched this heap. Setting a process-global
+ * flag is sound from there; reading the heap would not be. One realm per process (KILN_WORKERS
+ * forks rather than threads) is what makes the flag unambiguous, but it does not make the
+ * delivering thread predictable.
+ *
+ * The formatter below obeys the async-signal-safe rules anyway -- a stack buffer, hand-rolled
+ * base-ten spelling, one write(2) per line, no malloc and no stdio. Only the `heap` line could
+ * actually be produced from the handler; `runtime` and `connections` cross into the archive. The
+ * discipline is kept because stdio is the wrong tool here for the locale reason recorded beside
+ * kiln_number_to_js_string, and because one write per line means a dump racing another writer on
+ * fd 2 interleaves lines rather than characters. */
+
+/* Fields kiln_realm_runtime_report fills, in its documented order. */
+#define KILN_C99_RUNTIME_REPORT_FIELDS 9
+
+#if defined(__unix__) || defined(__APPLE__)
+
+/* Set by the handler on an arbitrary thread, read and cleared at the turn boundary. Process
+ * state, not realm state: it names a request that has arrived, and it outlives any one realm. */
+static volatile sig_atomic_t kiln_c99_introspect_pending;
+static int kiln_c99_introspect_armed;
+
+static void kiln_c99_introspect_handler(int signal_number) {
+    (void)signal_number;
+    kiln_c99_introspect_pending = 1;
+}
+
+/* SA_RESTART so an interrupted accept or read resumes: a diagnostic must not be able to fail the
+ * server it is diagnosing with EINTR. */
+static int kiln_c99_introspect_arm(void) {
+    struct sigaction action;
+    const char *setting = getenv("KILN_INTROSPECT");
+    if (setting != NULL && setting[0] == '0' && setting[1] == '\0') return 0;
+    memset(&action, 0, sizeof action);
+    action.sa_handler = kiln_c99_introspect_handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    return sigaction(SIGUSR1, &action, NULL) == 0;
+}
+
+typedef struct kiln_c99_introspect_line {
+    char bytes[512];
+    size_t len;
+} kiln_c99_introspect_line;
+
+static void kiln_c99_introspect_text(kiln_c99_introspect_line *line, const char *text) {
+    while (*text != '\0' && line->len + 1 < sizeof line->bytes) line->bytes[line->len++] = *text++;
+}
+
+static void kiln_c99_introspect_number(kiln_c99_introspect_line *line, uint64_t value) {
+    char digits[24];
+    size_t at = sizeof digits;
+    do {
+        digits[--at] = (char)('0' + (int)(value % 10));
+        value /= 10;
+    } while (value != 0 && at != 0);
+    while (at < sizeof digits && line->len + 1 < sizeof line->bytes)
+        line->bytes[line->len++] = digits[at++];
+}
+
+static void kiln_c99_introspect_field(kiln_c99_introspect_line *line, const char *name,
+                                      uint64_t value) {
+    kiln_c99_introspect_text(line, " ");
+    kiln_c99_introspect_text(line, name);
+    kiln_c99_introspect_text(line, "=");
+    kiln_c99_introspect_number(line, value);
+}
+
+/* The pid leads every line because KILN_WORKERS forks: a signal sent to the process group
+ * produces one three-line group per worker, and they have to be separable. */
+static void kiln_c99_introspect_begin(kiln_c99_introspect_line *line, const char *section) {
+    line->len = 0;
+    kiln_c99_introspect_text(line, "kiln introspect pid=");
+    kiln_c99_introspect_number(line, (uint64_t)getpid());
+    kiln_c99_introspect_text(line, " ");
+    kiln_c99_introspect_text(line, section);
+}
+
+/* One write per line. A short write is retried a bounded number of times rather than by reading
+ * errno, which a handler would have to save and restore. */
+static void kiln_c99_introspect_flush(kiln_c99_introspect_line *line) {
+    size_t at = 0;
+    int retries = 0;
+    if (line->len < sizeof line->bytes) line->bytes[line->len++] = '\n';
+    else line->bytes[sizeof line->bytes - 1] = '\n';
+    while (at < line->len) {
+        ssize_t written = write(2, line->bytes + at, line->len - at);
+        if (written < 0) {
+            if (++retries > 8) break;
+            continue;
+        }
+        if (written == 0) break;
+        at += (size_t)written;
+    }
+}
+
+static void kiln_c99_introspect_dump(kiln_gc_heap *heap) {
+    kiln_c99_introspect_line line;
+    uint64_t fields[KILN_C99_RUNTIME_REPORT_FIELDS];
+    uint64_t reported = 0;
+    size_t index;
+
+    kiln_c99_introspect_begin(&line, "heap");
+    kiln_c99_introspect_field(&line, "bytes", (uint64_t)heap->bytes);
+    kiln_c99_introspect_field(&line, "count", (uint64_t)heap->count);
+    kiln_c99_introspect_field(&line, "since_collection", (uint64_t)heap->since_collection);
+    kiln_c99_introspect_field(&line, "survived", (uint64_t)heap->survived);
+    kiln_c99_introspect_field(&line, "floor", (uint64_t)heap->floor);
+    kiln_c99_introspect_field(&line, "epoch", (uint64_t)heap->epoch);
+    kiln_c99_introspect_field(&line, "collections", heap->collections);
+    kiln_c99_introspect_field(&line, "freed_bytes", heap->freed_bytes);
+    kiln_c99_introspect_field(&line, "enabled", (uint64_t)(heap->enabled != 0));
+    kiln_c99_introspect_field(&line, "collecting", (uint64_t)(heap->collecting != 0));
+    kiln_c99_introspect_flush(&line);
+
+    for (index = 0; index < KILN_C99_RUNTIME_REPORT_FIELDS; ++index) fields[index] = 0;
+    if (kiln_realm_runtime_report(fields, (uint64_t)KILN_C99_RUNTIME_REPORT_FIELDS, &reported) !=
+        KILN_C99_OK) {
+        return;
+    }
+    /* Fields 0-5 are interval counters covering the time since the previous dump; 6-8 are
+     * instantaneous. A shorter report than this prelude knows about prints the prefix it got. */
+    if (reported >= 6) {
+        kiln_c99_introspect_begin(&line, "runtime");
+        kiln_c99_introspect_field(&line, "live_tasks", fields[0]);
+        kiln_c99_introspect_field(&line, "park_count", fields[1]);
+        kiln_c99_introspect_field(&line, "busy_us", fields[2]);
+        kiln_c99_introspect_field(&line, "elapsed_us", fields[3]);
+        kiln_c99_introspect_field(&line, "queue_depth", fields[4]);
+        kiln_c99_introspect_field(&line, "workers", fields[5]);
+        kiln_c99_introspect_flush(&line);
+    }
+    if (reported >= 9) {
+        kiln_c99_introspect_begin(&line, "connections");
+        kiln_c99_introspect_field(&line, "server", fields[6]);
+        kiln_c99_introspect_field(&line, "client", fields[7]);
+        kiln_c99_introspect_field(&line, "requests_in_flight", fields[8]);
+        kiln_c99_introspect_flush(&line);
+    }
+}
+
+static int kiln_c99_gc_hook_introspect(void *opaque) {
+    kiln_gc_heap *heap = (kiln_gc_heap *)opaque;
+    int status;
+    if (heap == NULL || heap->fallback) return 0;
+    status = kiln_c99_introspect_armed ? KILN_C99_INTROSPECT_ARMED : 0;
+    if (kiln_c99_introspect_pending) {
+        kiln_c99_introspect_pending = 0;
+        kiln_c99_introspect_dump(heap);
+        status |= KILN_C99_INTROSPECT_DUMPED;
+    }
+    return status;
+}
+
+#else
+
+/* A target without POSIX signals compiles the same prelude with the dump inert; the two statics
+ * stay declared so the ownership guard sees one shape on every platform. */
+static volatile int kiln_c99_introspect_pending;
+static int kiln_c99_introspect_armed;
+
+static int kiln_c99_introspect_arm(void) { return 0; }
+
+static int kiln_c99_gc_hook_introspect(void *opaque) {
+    (void)opaque;
+    (void)kiln_c99_introspect_pending;
+    return 0;
+}
+
+#endif
+
 static kiln_gc_heap *kiln_c99_gc_heap(void) {
     void *attached = kiln_realm_gc_current_heap();
     kiln_gc_heap *candidate;
@@ -1154,6 +1339,11 @@ static kiln_gc_heap *kiln_c99_gc_heap(void) {
         return NULL;
     }
     if (attached != candidate) free(candidate);
+    /* Arm here, in the unit whose candidate won: the heap now carries *this* unit's static
+     * kiln_c99_gc_hooks, so the `introspect` hook the archive calls reads the same copy of
+     * kiln_c99_introspect_pending that this unit's handler writes. The prelude is emitted per
+     * unit with internal linkage, so arming anywhere else would arm one flag and poll another. */
+    else kiln_c99_introspect_armed = kiln_c99_introspect_arm();
     return (kiln_gc_heap *)attached;
 }
 
@@ -2263,6 +2453,7 @@ static const kiln_gc_hooks kiln_c99_gc_hooks = {
     kiln_c99_gc_teardown_end,
     kiln_c99_gc_hook_mark_value,
     kiln_c99_gc_hook_mark_block,
+    kiln_c99_gc_hook_introspect,
 };
 
 /* A borrowed result slot: marked during collection and again at teardown, so the value a caller

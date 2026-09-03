@@ -61,6 +61,9 @@ typedef struct kiln_gc_hooks {
     void (*teardown_end)(void *heap);
     void (*mark_value)(void *heap, const void *value);
     void (*mark_block)(void *heap, void *pointer);
+    /* Offer the prelude the turn boundary the collector already sweeps at, so a pending SIGUSR1
+     * dump runs where ordinary code may run. Returns KILN_C99_INTROSPECT_* as a bitmask. */
+    int (*introspect)(void *heap);
 } kiln_gc_hooks;
 extern void *kiln_realm_gc_current_heap(void);
 extern int kiln_realm_gc_attach(const kiln_gc_hooks *hooks, void *candidate, void **out_heap);

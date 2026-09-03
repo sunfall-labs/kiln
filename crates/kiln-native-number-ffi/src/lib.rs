@@ -569,6 +569,10 @@ mod realm {
         /// Which clock this realm keeps (ADR 0044): the deterministic virtual clock unless the
         /// launcher asked for the host's wall clock before entering the realm.
         clock: Cell<NativeClock>,
+        /// Whether the prelude has a `SIGUSR1` handler installed, as of the last turn boundary.
+        /// A wall-clock realm bounds its park when this is set, so an idle server answers a
+        /// signal promptly instead of at its next request.
+        introspect_armed: Cell<bool>,
         /// Declared last so it is dropped last: `Drop for NativeRealm` tears the heap down only
         /// after every field above has released what it held.
         gc: RefCell<GcState>,
@@ -662,9 +666,15 @@ mod realm {
         teardown_end: Option<unsafe extern "C" fn(*mut c_void)>,
         mark_value: Option<unsafe extern "C" fn(*mut c_void, *const c_void)>,
         mark_block: Option<unsafe extern "C" fn(*mut c_void, *mut c_void)>,
+        /// Offer the prelude the same turn boundary the collector sweeps at, for the `SIGUSR1`
+        /// dump. Returns a bitmask; [`INTROSPECT_ARMED`] is the only bit the archive reads, the
+        /// rest saying what the prelude did with the offer.
+        introspect: Option<unsafe extern "C" fn(*mut c_void) -> i32>,
     }
 
-    const GC_HOOKS_VERSION: u32 = 1;
+    const GC_HOOKS_VERSION: u32 = 2;
+    /// The process installed a `SIGUSR1` handler, so a park has to stay short enough to notice it.
+    const INTROSPECT_ARMED: i32 = 1;
     const GC_PHASE_MARK: i32 = 0;
     const GC_PHASE_TEARDOWN: i32 = 1;
     const GC_PHASE_RESET: i32 = 2;
@@ -790,6 +800,30 @@ mod realm {
         unsafe { collect(heap, 0) };
     }
 
+    /// Offers the prelude the same turn boundary, for the `SIGUSR1` dump. The prelude owns both
+    /// the flag the handler set and the format; all this decides is when it is safe to ask.
+    ///
+    /// The answer also says whether a handler is installed at all, which the park below needs:
+    /// an idle server that parks forever would answer a signal only once it stopped being idle.
+    fn introspect_if_requested(realm: &NativeRealm) {
+        let (heap, introspect) = {
+            let gc = realm.gc.borrow();
+            match (
+                gc.heap,
+                gc.hooks.as_ref().and_then(|hooks| hooks.introspect),
+            ) {
+                (heap, Some(introspect)) if !heap.is_null() => (heap, introspect),
+                _ => return,
+            }
+        };
+        // SAFETY: the prelude installed this hook for this heap, and the dump calls back into
+        // this archive, so no RefCell of the realm may be borrowed across the call.
+        let status = unsafe { introspect(heap) };
+        realm
+            .introspect_armed
+            .set(status & INTROSPECT_ARMED == INTROSPECT_ARMED);
+    }
+
     impl Drop for NativeRealm {
         fn drop(&mut self) {
             // Release what the archive holds first, while the heap is still alive: a queued work
@@ -857,6 +891,7 @@ mod realm {
                 diagnostic: RefCell::new(RealmDiagnostic::default()),
                 drive_context: Cell::new((std::ptr::null_mut(), std::ptr::null_mut())),
                 clock: Cell::new(NativeClock::Virtual),
+                introspect_armed: Cell::new(false),
                 gc: RefCell::new(GcState::default()),
             })
         }
@@ -1090,6 +1125,7 @@ mod realm {
         loop {
             tick_clock(realm);
             collect_if_due(realm);
+            introspect_if_requested(realm);
             let status = drain_realm_queues(realm);
             if status != 0 {
                 return status;
@@ -1173,7 +1209,8 @@ mod realm {
                     let Some(signal) = signal else {
                         return RUNTIME_ERROR;
                     };
-                    kiln_runtime::wait_for_turn(signal, Some(deadline.saturating_sub(now))).await;
+                    let delay = introspect_park(realm, Some(deadline.saturating_sub(now)));
+                    kiln_runtime::wait_for_turn(signal, delay).await;
                     continue;
                 }
                 let timer = realm.work.borrow_mut().run_next_timer();
@@ -1192,7 +1229,8 @@ mod realm {
             // Yield first: a task woken by the last turn (a Hyper connection with a request to
             // dispatch, a completion about to land) runs now, before anything parks.
             kiln_runtime::yield_to_tasks().await;
-            let delay = deadline.map(|deadline| deadline.saturating_sub(now));
+            let delay =
+                introspect_park(realm, deadline.map(|deadline| deadline.saturating_sub(now)));
             if kiln_runtime::wait_for_turn(signal, delay).await == kiln_runtime::DriveWake::Timer {
                 let timer = realm.work.borrow_mut().run_next_timer();
                 if let Some(WorkItem::Timer { work, .. }) = timer {
@@ -1204,6 +1242,29 @@ mod realm {
                 }
             }
         }
+    }
+
+    /// The longest a wall-clock realm parks while a `SIGUSR1` handler is armed.
+    ///
+    /// Without a cap an idle server parks on its completion signal until the next connection
+    /// arrives, so it would answer a signal only once it stopped being idle -- which inverts the
+    /// feature, since the process most worth interrogating is the one that has gone quiet. Five
+    /// wakeups a second is what that costs a process that is by hypothesis doing nothing.
+    const INTROSPECT_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+    /// Caps a park so the turn boundary comes round often enough to notice a `SIGUSR1`.
+    ///
+    /// A virtual-clock realm is never capped. Its park costs no wall time by construction (ADR
+    /// 0012, ADR 0028) and capping it would make deterministic execution depend on real time,
+    /// which would surface as flake in the corpora rather than as a wrong number here.
+    fn introspect_park(
+        realm: &NativeRealm,
+        delay: Option<std::time::Duration>,
+    ) -> Option<std::time::Duration> {
+        if !realm.introspect_armed.get() || !matches!(realm.clock.get(), NativeClock::Wall { .. }) {
+            return delay;
+        }
+        Some(delay.map_or(INTROSPECT_POLL, |delay| delay.min(INTROSPECT_POLL)))
     }
 
     /// Route one host completion to its continuation, which runs as a microtask. `Some` is a
@@ -1789,6 +1850,77 @@ mod realm {
         })
     }
 
+    /// How many fields [`kiln_realm_runtime_report`] writes.
+    const RUNTIME_REPORT_FIELDS: usize = 9;
+
+    /// Reports whole-runtime and HTTP-connection counters for the `SIGUSR1` dump.
+    ///
+    /// The prelude assembles the dump because it owns the heap layout, and these numbers are on
+    /// the other side of the archive boundary from it, so they cross as a slot array rather than
+    /// as a struct nothing would keep identical in both languages. `capacity` in and a count out
+    /// means a prelude built against a shorter report still reads the prefix it knows.
+    ///
+    /// | # | Field |
+    /// | --- | --- |
+    /// | 0 | live tasks |
+    /// | 1 | park count |
+    /// | 2 | busy duration, microseconds |
+    /// | 3 | elapsed, microseconds |
+    /// | 4 | global queue depth |
+    /// | 5 | worker threads |
+    /// | 6 | open server connections |
+    /// | 7 | open client connections |
+    /// | 8 | requests in flight |
+    ///
+    /// Fields 0 to 5 come from one `sample_runtime_metrics` call and are *interval* counters:
+    /// they cover the time since the previous report, or since the runtime was built for the
+    /// first one. Fields 6 to 8 are instantaneous.
+    ///
+    /// # Safety
+    ///
+    /// `out_fields` must be writable for `capacity` `uint64_t`, and `out_count` for one.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn kiln_realm_runtime_report(
+        out_fields: *mut u64,
+        capacity: u64,
+        out_count: *mut u64,
+    ) -> i32 {
+        ffi(|| {
+            if out_fields.is_null() || out_count.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: checked non-null; the caller owns the output slot.
+            unsafe { out_count.write(0) };
+            let (Some(_realm), Some(runtime)) = (active_realm(), active_runtime()) else {
+                return INVALID_ARGUMENT;
+            };
+            // SAFETY: the drive installed this pointer for the realm it is driving, and the
+            // turn boundary this is called from holds no borrow of it.
+            let runtime = unsafe { &mut *runtime };
+            let metrics = runtime.sample_runtime_metrics();
+            let fields: [u64; RUNTIME_REPORT_FIELDS] = [
+                metrics.live_tasks as u64,
+                metrics.park_count,
+                metrics.busy_duration.as_micros().min(u128::from(u64::MAX)) as u64,
+                metrics.elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+                metrics.global_queue_depth as u64,
+                metrics.workers as u64,
+                runtime.open_server_connections() as u64,
+                runtime.open_client_connections() as u64,
+                runtime.requests_in_flight() as u64,
+            ];
+            let written = usize::try_from(capacity)
+                .unwrap_or(RUNTIME_REPORT_FIELDS)
+                .min(RUNTIME_REPORT_FIELDS);
+            // SAFETY: the caller promised `capacity` writable slots and this writes no more.
+            unsafe {
+                std::ptr::copy_nonoverlapping(fields.as_ptr(), out_fields, written);
+                out_count.write(written as u64);
+            }
+            0
+        })
+    }
+
     /// Attaches the prelude's collector to the active realm (ADR 0041).
     ///
     /// With a null `candidate` this only reports the realm's heap: the existing one, or null when
@@ -1831,6 +1963,7 @@ mod realm {
                     || table.teardown_end.is_none()
                     || table.mark_value.is_none()
                     || table.mark_block.is_none()
+                    || table.introspect.is_none()
                 {
                     return INVALID_ARGUMENT;
                 }
@@ -3424,6 +3557,9 @@ mod realm {
                 MARKED_VALUES.fetch_add(1, AtomicOrdering::SeqCst);
             }
             unsafe extern "C" fn mark_block(_heap: *mut c_void, _pointer: *mut c_void) {}
+            unsafe extern "C" fn introspect(_heap: *mut c_void) -> i32 {
+                0
+            }
             unsafe extern "C" fn roots(heap: *mut c_void, context: *mut c_void, phase: i32) {
                 ROOT_PHASES.lock().unwrap().push(phase);
                 if phase == GC_PHASE_MARK || phase == GC_PHASE_TEARDOWN {
@@ -3440,6 +3576,7 @@ mod realm {
                 teardown_end: Some(teardown_end),
                 mark_value: Some(mark_value),
                 mark_block: Some(mark_block),
+                introspect: Some(introspect),
             };
 
             unsafe extern "C" fn enter(context: *mut c_void) -> i32 {
@@ -3508,6 +3645,111 @@ mod realm {
             );
             assert_eq!(MARKED_VALUES.load(AtomicOrdering::SeqCst), 2);
             assert_eq!(COLLECTS.load(AtomicOrdering::SeqCst), 0);
+        }
+
+        /// The dump has to be offered where the collector sweeps, and the numbers it prints have
+        /// to be readable from there: the prelude calls back into this archive in the middle of
+        /// the hook, so anything the drive still had borrowed would panic instead of printing.
+        #[test]
+        fn the_turn_boundary_offers_the_dump_and_the_report_reads_the_runtime() {
+            use std::sync::atomic::AtomicUsize;
+            static OFFERS: AtomicUsize = AtomicUsize::new(0);
+            static REPORT: std::sync::Mutex<Option<(i32, u64, [u64; 9])>> =
+                std::sync::Mutex::new(None);
+
+            unsafe extern "C" fn collect(_heap: *mut c_void, _force: i32) {}
+            unsafe extern "C" fn teardown_begin(_heap: *mut c_void) {}
+            unsafe extern "C" fn teardown_end(heap: *mut c_void) {
+                // SAFETY: the test allocated this heap as one Box below.
+                drop(unsafe { Box::from_raw(heap.cast::<[*const GcHooks; 2]>()) });
+            }
+            unsafe extern "C" fn mark_value(_heap: *mut c_void, _value: *const c_void) {}
+            unsafe extern "C" fn mark_block(_heap: *mut c_void, _pointer: *mut c_void) {}
+            unsafe extern "C" fn introspect(_heap: *mut c_void) -> i32 {
+                OFFERS.fetch_add(1, AtomicOrdering::SeqCst);
+                let mut fields = [u64::MAX; 9];
+                let mut count = u64::MAX;
+                // SAFETY: both output spans are this frame's, and the hook runs at the turn
+                // boundary with the realm active.
+                let status =
+                    unsafe { kiln_realm_runtime_report(fields.as_mut_ptr(), 9, &raw mut count) };
+                *REPORT.lock().unwrap() = Some((status, count, fields));
+                INTROSPECT_ARMED
+            }
+            static HOOKS: GcHooks = GcHooks {
+                version: GC_HOOKS_VERSION,
+                size: std::mem::size_of::<GcHooks>() as u32,
+                collect: Some(collect),
+                teardown_begin: Some(teardown_begin),
+                teardown_end: Some(teardown_end),
+                mark_value: Some(mark_value),
+                mark_block: Some(mark_block),
+                introspect: Some(introspect),
+            };
+
+            unsafe extern "C" fn enter(_context: *mut c_void) -> i32 {
+                let mut heap = std::ptr::null_mut();
+                let candidate =
+                    Box::into_raw(Box::new([&raw const HOOKS, std::ptr::null()])).cast::<c_void>();
+                // SAFETY: the candidate stays live until teardown frees it.
+                unsafe { kiln_realm_gc_attach(&raw const HOOKS, candidate, &raw mut heap) }
+            }
+
+            let mut handle = 0;
+            // SAFETY: the output slot stays live through the call.
+            assert_eq!(unsafe { kiln_realm_create(&raw mut handle) }, 0);
+            assert_eq!(
+                unsafe { kiln_realm_enter(handle, Some(enter), std::ptr::null_mut()) },
+                0
+            );
+            assert_eq!(
+                unsafe { kiln_realm_drive(handle, std::ptr::null_mut(), std::ptr::null_mut()) },
+                0
+            );
+            assert_eq!(OFFERS.load(AtomicOrdering::SeqCst), 1);
+
+            let (status, count, fields) = REPORT.lock().unwrap().expect("the hook reported");
+            assert_eq!(status, 0);
+            assert_eq!(count, RUNTIME_REPORT_FIELDS as u64);
+            // A realm runtime owns exactly one worker, and this one served nothing.
+            assert_eq!(fields[5], 1, "workers");
+            assert_eq!(
+                &fields[6..9],
+                &[0, 0, 0],
+                "connections and requests in flight"
+            );
+            assert_eq!(kiln_realm_destroy(handle), 0);
+        }
+
+        /// The park cap exists so an idle server answers a signal; it must not touch a
+        /// virtual-clock realm, whose park is free by construction and whose determinism would
+        /// otherwise start depending on real time.
+        #[test]
+        fn a_park_is_capped_only_for_an_armed_wall_clock_realm() {
+            let realm = NativeRealm::new().expect("a realm builds");
+            let brief = std::time::Duration::from_millis(5);
+            let hour = std::time::Duration::from_secs(3600);
+
+            assert_eq!(introspect_park(&realm, None), None);
+            realm.introspect_armed.set(true);
+            assert_eq!(introspect_park(&realm, None), None, "virtual clock");
+            assert_eq!(
+                introspect_park(&realm, Some(hour)),
+                Some(hour),
+                "virtual clock"
+            );
+
+            realm.clock.set(NativeClock::Wall {
+                epoch: std::time::Duration::ZERO,
+                started: std::time::Instant::now(),
+            });
+            assert_eq!(introspect_park(&realm, None), Some(INTROSPECT_POLL));
+            assert_eq!(introspect_park(&realm, Some(hour)), Some(INTROSPECT_POLL));
+            assert_eq!(introspect_park(&realm, Some(brief)), Some(brief));
+
+            realm.introspect_armed.set(false);
+            assert_eq!(introspect_park(&realm, None), None);
+            assert_eq!(introspect_park(&realm, Some(hour)), Some(hour));
         }
 
         struct RecordedWork {
@@ -5250,6 +5492,9 @@ mod realm {
         };
         (realm, kiln_realm_entropy_word, realm_entropy_word) => {
             const _: unsafe extern "C" fn(u64, *mut u64) -> i32 = kiln_realm_entropy_word;
+        };
+        (realm, kiln_realm_runtime_report, realm_runtime_report) => {
+            const _: unsafe extern "C" fn(*mut u64, u64, *mut u64) -> i32 = kiln_realm_runtime_report;
         };
         (realm, kiln_realm_gc_current_heap, realm_gc_current_heap) => {
             const _: extern "C" fn() -> *mut c_void = kiln_realm_gc_current_heap;
