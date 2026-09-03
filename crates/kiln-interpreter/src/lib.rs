@@ -1112,7 +1112,8 @@ fn is_extensible_target(intrinsics: &Intrinsics, target: &Value) -> bool {
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
-        | Value::Capability(..) => intrinsics.extensible(target),
+        | Value::Capability(..)
+        | Value::Element(_) => intrinsics.extensible(target),
         // An exotic object carries an ordinary store for its named properties, and closing it is
         // what `Object.preventExtensions(sample)` has to mean: the elements are not properties
         // of that store and are unaffected, which is what the specification says too.
@@ -1183,7 +1184,8 @@ fn own_property_state(
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
-        | Value::Capability(..) => {
+        | Value::Capability(..)
+        | Value::Element(_) => {
             match intrinsics.overridden(target, key) {
                 Overridden::Held(property, _) => Some(property),
                 // Unreachable: `own_attributes` answered `None` for a removed property, so the
@@ -3823,6 +3825,11 @@ pub enum Value {
     /// arrive -- and `Settler` was the only one the machine had, so every static that owes a
     /// capability ignored `this` and built an intrinsic promise instead.
     Capability(Rc<CapabilityRecord>),
+    /// A `Promise.all` Resolve Element Function, or the `allSettled`/`any` equivalent.
+    ///
+    /// Handed to a program -- `then` receives it -- so it has to be a value, and it carries the
+    /// index it fills and the walk it belongs to, which neither `Native` nor `Closure` can hold.
+    Element(Rc<ElementFunction>),
     /// An array. Separate from `Object` rather than an object with numeric keys: `Array.isArray`
     /// has to be able to tell them apart, `length` is not an ordinary property, and a dense
     /// `Vec` is the representation that makes indexing the common case it is.
@@ -4144,7 +4151,7 @@ impl Value {
             | Self::Temporal(_) => "object",
             Self::BigInt(_) => "bigint",
             // A settler is a function the program can call, hold and pass on, so it says so.
-            Self::Settler(..) | Self::Capability(_) => "function",
+            Self::Settler(..) | Self::Capability(_) | Self::Element(_) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => unreachable!("a cell is never used as a value"),
         }
@@ -4218,7 +4225,7 @@ impl Value {
             Self::Date(_) => "date",
             Self::Temporal(built) => built.kind().tag(),
             Self::BigInt(_) => "bigint",
-            Self::Settler(..) | Self::Capability(_) => "function",
+            Self::Settler(..) | Self::Capability(_) | Self::Element(_) => "function",
             Self::Symbol(_) => "symbol",
             Self::Cell(_) => "cell",
         }
@@ -4253,6 +4260,7 @@ impl Value {
             | Self::RegExp(_)
             | Self::Settler(..)
             | Self::Capability(_)
+            | Self::Element(_)
             | Self::Bound(_)
             | Self::Wrapped(_)
             | Self::CommonJsRequire(_)
@@ -4311,6 +4319,7 @@ impl Value {
             | Self::Date(_)
             | Self::Settler(..)
             | Self::Capability(_)
+            | Self::Element(_)
             | Self::Bound(_)
             | Self::Wrapped(_)
             | Self::CommonJsRequire(_)
@@ -4386,9 +4395,11 @@ impl Value {
             },
             // No `n` suffix: that is the literal's spelling, not the value's.
             Self::BigInt(value) => value.to_string(),
-            Self::Settler(..) | Self::Capability(_) | Self::Bound(_) | Self::Wrapped(_) => {
-                "function () { [native code] }".to_owned()
-            }
+            Self::Settler(..)
+            | Self::Capability(_)
+            | Self::Element(_)
+            | Self::Bound(_)
+            | Self::Wrapped(_) => "function () { [native code] }".to_owned(),
             Self::CommonJsRequire(_) => "function require() { [native code] }".to_owned(),
             Self::CommonJsResolve(_) => "function resolve() { [native code] }".to_owned(),
             // A proxy of a *function* has no source text of its own, and answering with the
@@ -6729,9 +6740,6 @@ struct Reaction {
 enum Sink {
     /// The promise `then` returned.
     Promise(Rc<PromiseData>),
-    /// One input of a combinator. `Promise.all` and its siblings have to count and collect, which
-    /// is bookkeeping no JavaScript handler performs -- so their inputs feed this instead.
-    Combinator(Native, usize, Rc<Combinator>),
     /// Settle a promise with a *recorded* outcome once something else has settled, unless that
     /// something rejected. `finally` waits on its handler's result and then restores the outcome
     /// it was passing through.
@@ -6837,17 +6845,38 @@ enum FromAsyncStage {
     Mapped,
 }
 
-/// The shared state of one `Promise.all`, `allSettled`, `race` or `any`.
+/// The state one `Promise.all`/`allSettled`/`any` walk shares across its element functions.
 ///
-/// On the heap because each input settles later and has to find it, and behind `Cell`s because
-/// several reactions reach it and none of them holds it for longer than a step.
-#[derive(Debug, PartialEq)]
-struct Combinator {
-    /// One slot per input, filled as they settle -- so the result keeps the *input* order rather
-    /// than the order they finished in.
-    slots: RefCell<Vec<Value>>,
-    outstanding: std::cell::Cell<usize>,
-    result: Rc<PromiseData>,
+/// The specification keeps this in the element functions' internal slots, all of them pointing
+/// at the same `values` list and the same `remainingElementsCount`. That sharing is the whole
+/// mechanism: the count starts at one for the walk itself, rises once per input, and whichever
+/// element brings it to zero is the one that resolves the capability -- which is what makes the
+/// walk finishing and the last input settling the same event, in either order.
+struct CombinatorWalk {
+    native: Native,
+    values: RefCell<Vec<Value>>,
+    remaining: std::cell::Cell<usize>,
+    resolve: Value,
+    reject: Value,
+}
+
+/// One `Promise.all` Resolve Element Function, and its `allSettled`/`any` counterparts.
+///
+/// A real function object rather than a Rust closure because a program is handed it and may do
+/// anything with it: a thenable's `then` receives it, keeps it, calls it twice. `alreadyCalled`
+/// is per element and the rest is shared -- see [`CombinatorWalk`].
+struct ElementFunction {
+    walk: Rc<CombinatorWalk>,
+    index: usize,
+    /// Whether this is the *reject* half, which only `allSettled` and `any` have.
+    rejects: bool,
+    already_called: std::cell::Cell<bool>,
+}
+
+impl std::fmt::Debug for ElementFunction {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ElementFunction")
+    }
 }
 
 impl PromiseState {
@@ -12360,7 +12389,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         }
                         // A promise executor's `resolve`/`reject`: an ordinary callable value,
                         // which reaches the program as one and so has to be callable here.
-                        Value::Settler(..) | Value::Capability(..) => {
+                        Value::Settler(..) | Value::Capability(..) | Value::Element(_) => {
                             let callee = callee.clone();
                             let arguments = self.take_arguments(argc, current)?;
                             let called =
@@ -15001,30 +15030,49 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | Native::PromiseRace
             | Native::PromiseAny => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
-                // `IfAbruptRejectPromise`. A combinator builds the promise it will return
-                // *before* it looks at its argument, so every failure after that point -- an
+                // `NewPromiseCapability(C)` is step 2, and it is deliberately *outside* the
+                // `IfAbruptRejectPromise` below: with no capability there is no promise to
+                // reject with, so `Promise.all.call(null, [])` throws where
+                // `Promise.all(null)` rejects.
+                let (promise, resolve, reject) =
+                    self.new_promise_capability(receiver, instruction)?;
+                // `IfAbruptRejectPromise` for everything after it. A combinator reports an
                 // argument that is not iterable, a `Symbol.iterator` that throws, a `next` that
-                // does, a `then` that does -- is reported by rejecting that promise rather than
-                // by throwing out of the call. Throwing synchronously is a different shape of
-                // answer: `Promise.all(null).catch(f)` never reaches `f`, and code written the
-                // way the specification says it may be written saw an exception where it had
-                // been promised a rejection.
-                let derived = self.promise_subclass_prototype(receiver);
-                let combined = match self.drain_iterable(&source, instruction) {
-                    Ok(items) => self.combine(native, items),
-                    Err(error) => Err(error),
-                };
-                match combined {
-                    Ok(promise) => Ok(Self::as_promise_of(promise, derived)),
-                    // A failure the machine cannot express as a value -- a step limit, a
-                    // bytecode defect -- is not a rejection and `thrown_value` hands it back.
-                    Err(error) => {
-                        let reason = self.thrown_value(error)?;
-                        let rejected = PromiseState::pending();
-                        self.settle(&rejected, &Settled::Rejected(reason));
-                        Ok(Value::Promise(rejected))
+                // does, a `resolve` that is not callable -- all of it -- by rejecting the
+                // promise it already built. Throwing instead is a different shape of answer:
+                // `Promise.all(null).catch(f)` would never reach `f`.
+                //
+                // The handler is installed by hand rather than through `catching`, which turns
+                // *every* failure into a value: a step limit would become a rejected promise
+                // holding its own message, and a runaway walk would look like a program that
+                // merely failed. Machine failures still propagate; only what a program could
+                // have caught becomes a rejection.
+                let installed = self.handlers.len();
+                self.handlers.push(Handler {
+                    target: HOST_HANDLER,
+                    frame_depth: self.frames.len(),
+                    stack_height: self.stack.len(),
+                    native_depth: self.native_depth,
+                });
+                let walked = self.perform_promise_combinator(
+                    native,
+                    receiver,
+                    &source,
+                    &resolve,
+                    &reject,
+                    instruction,
+                );
+                self.handlers.truncate(installed);
+                let reason = match walked {
+                    Ok(()) => return Ok(promise),
+                    Err(ExecutionError::CaughtByHost) => {
+                        self.caught.take().unwrap_or(Value::Undefined)
                     }
-                }
+                    // Not something a program threw: `thrown_value` hands a machine failure back.
+                    Err(error) => self.thrown_value(error)?,
+                };
+                self.call_value(&reject, Value::Undefined, vec![reason], instruction)?;
+                Ok(promise)
             }
             // `Object.getOwnPropertySymbols`: the symbol-keyed own properties, and only those.
             //
@@ -15854,7 +15902,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     | Value::Callback(_, _)
                     | Value::Bound(_)
                     | Value::Settler(..)
-                    | Value::Capability(..) => {
+                    | Value::Capability(..)
+                    | Value::Element(_) => {
                         self.intrinsics.close(&target, false);
                         true
                     }
@@ -19952,6 +20001,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 *reject = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 Ok(Value::Undefined)
             }
+            // A `Promise.all` Resolve Element Function and its `allSettled`/`any` counterparts.
+            //
+            // `alreadyCalled` is the first step and it is not an optimisation: a thenable may
+            // call its `onFulfilled` twice -- test262 has one that does exactly that -- and the
+            // second call must not fill the slot again or decrement the count a second time,
+            // which would resolve the whole combinator early with a half-filled list.
+            Value::Element(element) => {
+                let element = Rc::clone(element);
+                if element.already_called.get() {
+                    return Ok(Value::Undefined);
+                }
+                element.already_called.set(true);
+                let argument = arguments.first().cloned().unwrap_or(Value::Undefined);
+                self.settle_combinator_element(&element, argument, instruction)
+            }
             // A callback method reaches here when a built-in drives another built-in -- a spread
             // over a generator, for instance. `invoke` is the one place that knows how to run
             // each kind, so this defers to it rather than repeating the dispatch.
@@ -20922,9 +20986,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     fn run_reaction(&mut self, outcome: Settled, reaction: Reaction) -> Result<(), ExecutionError> {
         // Neither of these carries handlers: the bookkeeping *is* the reaction.
         match &reaction.sink {
-            Sink::Combinator(native, index, state) => {
-                return self.combine_step(*native, *index, &Rc::clone(state), outcome);
-            }
             Sink::FromAsync(state) => {
                 let state = Rc::clone(state);
                 self.async_resume(&state, outcome, self.instruction);
@@ -21061,141 +21122,202 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
-    /// `Promise.all`, `allSettled`, `race` and `any` over an already-collected list.
+    /// `PerformPromiseAll` and its three siblings: one lazy walk over the inputs.
     ///
-    /// One implementation because the four differ only in when they settle: `race` and `any` on
-    /// the first input to do the right thing, `all` and `allSettled` when every input has. The
-    /// tracker object carries the counters, and lives on the heap because each input's reaction
-    /// runs later and has to find it.
-    fn combine(&mut self, native: Native, items: Vec<Value>) -> Result<Value, ExecutionError> {
-        let result = PromiseState::pending();
-        let total = items.len();
-
-        if total == 0 {
-            // An empty `all` or `allSettled` is already done; an empty `any` has no input that
-            // could succeed, so it rejects, and an empty `race` never settles at all.
-            match native {
-                Native::PromiseAll | Native::PromiseAllSettled => {
-                    let empty = Value::Array(ArrayData::new(Vec::new()));
-                    self.settle(&result, &Settled::Fulfilled(empty));
-                }
-                Native::PromiseAny => {
-                    let error = self.aggregate_error(Vec::new());
-                    self.settle(&result, &Settled::Rejected(error));
-                }
-                _ => {}
-            }
-            return Ok(Value::Promise(result));
-        }
-
-        let state = Rc::new(Combinator {
-            slots: RefCell::new(vec![Value::Undefined; total]),
-            outstanding: std::cell::Cell::new(total),
-            result: Rc::clone(&result),
-        });
-        for (index, item) in items.into_iter().enumerate() {
-            // Every input goes through the same resolution a `Promise.resolve` would, so a plain
-            // value participates on the same terms as a promise -- one tick later, like
-            // everything else.
-            let input = match item {
-                Value::Promise(promise) => promise,
-                other => {
-                    let promise = PromiseState::pending();
-                    self.resolve_promise(&promise, other);
-                    promise
-                }
-            };
-            self.react(
-                &input,
-                Value::Undefined,
-                Value::Undefined,
-                Sink::Combinator(native, index, Rc::clone(&state)),
-                false,
-            );
-        }
-        Ok(Value::Promise(result))
-    }
-
-    /// One input of a combinator settling.
+    /// Lazy, not a drain, and that is the whole difference from what stood here before. The
+    /// specification reads one value, hands it to `C.resolve`, and subscribes -- so a `resolve`
+    /// that throws stops the walk at the first input and closes the iterator. Draining first
+    /// asked an infinite iterator for every element it had, which is not a slow answer but no
+    /// answer: test262 pairs a throwing `resolve` with an iterator that never ends precisely to
+    /// catch an engine that does this, and each such test cost a step-limit abort.
     ///
-    /// The four rules in one place, because they differ only in which outcome ends the whole
-    /// thing and what it collects:
-    ///
-    /// - `all` fails on the first rejection and collects fulfilments.
-    /// - `any` succeeds on the first fulfilment and collects rejections.
-    /// - `race` takes the first outcome of either kind.
-    /// - `allSettled` never fails and collects a descriptor for each.
-    fn combine_step(
+    /// `C` is read for real too. `Promise.all.call(NotPromise, ...)` must build its promise
+    /// through `NotPromise` and route every input through `NotPromise.resolve`, which is how a
+    /// subclass takes part at all.
+    fn perform_promise_combinator(
         &mut self,
         native: Native,
-        index: usize,
-        state: &Rc<Combinator>,
-        outcome: Settled,
+        constructor: &Value,
+        source: &Value,
+        resolve: &Value,
+        reject: &Value,
+        instruction: usize,
     ) -> Result<(), ExecutionError> {
-        // The first input to decide the answer settles the result, and `settle` ignores the rest
-        // -- so there is no separate "already done" flag to keep in step with it.
-        match (native, &outcome) {
-            (Native::PromiseRace, _) => {
-                self.settle(&state.result, &outcome);
-                return Ok(());
+        // `GetPromiseResolve(C)`, read once before the walk rather than once per input: the
+        // specification captures it up front, and a getter here would otherwise run per element.
+        let promise_resolve = self.read_property(constructor, "resolve", instruction)?;
+        if !is_callable(&promise_resolve) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Promise resolve is not a function".to_owned(),
+            });
+        }
+        let method = self.read_property(source, WellKnown::Iterator.property_key(), instruction)?;
+        if !is_callable(&method) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not iterable", source.to_display_string()),
+            });
+        }
+        let iterator = self.call_value(&method, source.clone(), Vec::new(), instruction)?;
+        let next = self.read_property(&iterator, "next", instruction)?;
+
+        let walk = Rc::new(CombinatorWalk {
+            native,
+            values: RefCell::new(Vec::new()),
+            remaining: std::cell::Cell::new(1),
+            resolve: resolve.clone(),
+            reject: reject.clone(),
+        });
+
+        let mut index = 0usize;
+        loop {
+            // A `next` that throws leaves the iterator already done, and the specification does
+            // not close one it could not step -- so this propagates without closing.
+            let Some(item) = self.iterator_step(&iterator, &next, instruction)? else {
+                break;
+            };
+            // Everything from here to the subscription is inside the iterator's close window.
+            let stepped = self.subscribe_combinator_input(
+                &walk,
+                constructor,
+                &promise_resolve,
+                item,
+                index,
+                instruction,
+            );
+            if let Err(error) = stepped {
+                // Best effort, and deliberately not allowed to replace the original failure:
+                // what the program needs to know is why the walk stopped.
+                let _ = self.close_iterator(&iterator, instruction);
+                return Err(error);
             }
-            (Native::PromiseAll, Settled::Rejected(_))
-            | (Native::PromiseAny, Settled::Fulfilled(_)) => {
-                self.settle(&state.result, &outcome);
-                return Ok(());
+            index += 1;
+            if index > self.limits.max_steps as usize {
+                return Err(ExecutionError::StepLimitExceeded {
+                    steps: index as u64,
+                    limit: self.limits.max_steps,
+                });
             }
-            _ => {}
         }
 
-        let collected = match (native, &outcome) {
-            (Native::PromiseAllSettled, Settled::Fulfilled(value)) => {
-                let mut data = ObjectData::default();
-                data.set("status", Value::String("fulfilled".to_owned()));
-                data.set("value", value.clone());
-                Value::Object(Rc::new(RefCell::new(data)))
-            }
-            (Native::PromiseAllSettled, Settled::Rejected(reason)) => {
-                let mut data = ObjectData::default();
-                data.set("status", Value::String("rejected".to_owned()));
-                data.set("reason", reason.clone());
-                Value::Object(Rc::new(RefCell::new(data)))
-            }
-            (_, Settled::Fulfilled(value)) => value.clone(),
-            (_, Settled::Rejected(reason)) => reason.clone(),
-        };
-        if let Some(slot) = state.slots.borrow_mut().get_mut(index) {
-            *slot = collected;
-        }
-
-        state
-            .outstanding
-            .set(state.outstanding.get().saturating_sub(1));
-        if state.outstanding.get() > 0 {
-            return Ok(());
-        }
-        let gathered = Value::Array(ArrayData::new(state.slots.borrow().clone()));
-        match native {
-            // Every input rejected, and `any` reports them together rather than picking one.
-            Native::PromiseAny => {
-                let error = self.aggregate_error(state.slots.borrow().clone());
-                self.settle(&state.result, &Settled::Rejected(error));
-            }
-            _ => self.settle(&state.result, &Settled::Fulfilled(gathered)),
+        // The walk itself held one count, so that an input settling before the last one is read
+        // cannot resolve the whole combinator early. Releasing it here is what makes an empty
+        // input settle immediately, and a fully-settled one settle on the last release instead.
+        walk.remaining.set(walk.remaining.get().saturating_sub(1));
+        if walk.remaining.get() == 0 {
+            self.finish_combinator(&walk, instruction)?;
         }
         Ok(())
     }
 
-    /// The prototype a promise built by one of `Promise`'s statics should carry, or `None` when
-    /// the static was reached through `Promise` itself.
-    ///
-    /// `Promise.resolve` and its siblings build "a promise of the constructor they were called
-    /// on". That is what makes `class P extends Promise {}`'s `P.resolve(1) instanceof P` true,
-    /// and it is the whole reason a cancellable-promise or bluebird-interop layer subclasses
-    /// `Promise` at all: without it the layer's own methods are missing from everything its
-    /// factories hand back.
-    ///
-    /// `None` for the intrinsic and for anything that is not a `Promise` subclass, because those
-    /// want the prototype the new promise already has.
+    /// One input: `C.resolve(value).then(onFulfilled, onRejected)`.
+    fn subscribe_combinator_input(
+        &mut self,
+        walk: &Rc<CombinatorWalk>,
+        constructor: &Value,
+        promise_resolve: &Value,
+        item: Value,
+        index: usize,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let next_promise = self.call_value(
+            promise_resolve,
+            constructor.clone(),
+            vec![item],
+            instruction,
+        )?;
+        // `race` keeps no list and no count: its reactions are the capability's own functions,
+        // and the first to be called wins.
+        let element = |rejects: bool| {
+            Value::Element(Rc::new(ElementFunction {
+                walk: Rc::clone(walk),
+                index,
+                rejects,
+                already_called: std::cell::Cell::new(false),
+            }))
+        };
+        let (on_fulfilled, on_rejected) = match walk.native {
+            Native::PromiseAll => (element(false), walk.reject.clone()),
+            Native::PromiseAllSettled => (element(false), element(true)),
+            Native::PromiseAny => (walk.resolve.clone(), element(true)),
+            _ => (walk.resolve.clone(), walk.reject.clone()),
+        };
+        if !matches!(walk.native, Native::PromiseRace) {
+            walk.values.borrow_mut().push(Value::Undefined);
+            walk.remaining.set(walk.remaining.get() + 1);
+        }
+        let then = self.read_property(&next_promise, "then", instruction)?;
+        if !is_callable(&then) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not a function", then.to_display_string()),
+            });
+        }
+        self.call_value(
+            &then,
+            next_promise,
+            vec![on_fulfilled, on_rejected],
+            instruction,
+        )?;
+        Ok(())
+    }
+
+    /// The last count released: settle the capability with what the walk collected.
+    fn finish_combinator(
+        &mut self,
+        walk: &Rc<CombinatorWalk>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let collected = walk.values.borrow().clone();
+        match walk.native {
+            // An empty `any` has no input that could succeed, and a full one has had them all
+            // fail; both reject with the errors in input order.
+            Native::PromiseAny => {
+                let error = self.aggregate_error(collected);
+                self.call_value(&walk.reject, Value::Undefined, vec![error], instruction)?;
+            }
+            // An empty `race` never settles at all -- there is no input to settle it, and the
+            // specification says so rather than leaving it undefined.
+            Native::PromiseRace => {}
+            _ => {
+                let values = Value::Array(ArrayData::new(collected));
+                self.call_value(&walk.resolve, Value::Undefined, vec![values], instruction)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A resolve or reject element function being called: fill its slot, and release its count.
+    fn settle_combinator_element(
+        &mut self,
+        element: &Rc<ElementFunction>,
+        argument: Value,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let walk = Rc::clone(&element.walk);
+        let collected = match (walk.native, element.rejects) {
+            (Native::PromiseAllSettled, false) => {
+                let mut data = ObjectData::default();
+                data.set("status", Value::String("fulfilled".to_owned()));
+                data.set("value", argument);
+                Value::Object(Rc::new(RefCell::new(data)))
+            }
+            (Native::PromiseAllSettled, true) => {
+                let mut data = ObjectData::default();
+                data.set("status", Value::String("rejected".to_owned()));
+                data.set("reason", argument);
+                Value::Object(Rc::new(RefCell::new(data)))
+            }
+            _ => argument,
+        };
+        if let Some(slot) = walk.values.borrow_mut().get_mut(element.index) {
+            *slot = collected;
+        }
+        walk.remaining.set(walk.remaining.get().saturating_sub(1));
+        if walk.remaining.get() == 0 {
+            self.finish_combinator(&walk, instruction)?;
+        }
+        Ok(Value::Undefined)
+    }
+
     fn promise_subclass_prototype(&mut self, receiver: &Value) -> Option<Value> {
         let Value::Function(closure) = receiver else {
             return None;
@@ -27817,18 +27939,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             // Every other callable answers to the same three, and to nothing else: none of them
             // has a property store to shadow them with.
-            Value::Callback(_, _) | Value::Settler(..) | Value::Capability(..) => {
-                match self.intrinsics.overridden(target, name) {
-                    Overridden::Held(Property::Value(value), _) => value,
-                    Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
-                    Overridden::Removed => {
-                        function_property(&self.intrinsics, name, value_realm(target))
-                    }
-                    Overridden::Untouched => identity_property(target, name).unwrap_or_else(|| {
-                        function_property(&self.intrinsics, name, value_realm(target))
-                    }),
+            Value::Callback(_, _)
+            | Value::Settler(..)
+            | Value::Capability(..)
+            | Value::Element(_) => match self.intrinsics.overridden(target, name) {
+                Overridden::Held(Property::Value(value), _) => value,
+                Overridden::Held(Property::Accessor { .. }, _) => Value::Undefined,
+                Overridden::Removed => {
+                    function_property(&self.intrinsics, name, value_realm(target))
                 }
-            }
+                Overridden::Untouched => identity_property(target, name).unwrap_or_else(|| {
+                    function_property(&self.intrinsics, name, value_realm(target))
+                }),
+            },
             Value::Function(closure) if name == "prototype" => prototype_object(closure),
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
@@ -28422,10 +28545,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // reached, so both go through one path.
             // A wrapped function ignores it too, and for a stronger reason: a receiver would be
             // one more object crossing the boundary, which the wrapping does not permit.
-            Value::Settler(..) | Value::Capability(..) | Value::Bound(_) | Value::Wrapped(_) => {
-                self.call_value(&method, receiver, arguments, instruction)
-                    .map(Some)
-            }
+            Value::Settler(..)
+            | Value::Capability(..)
+            | Value::Element(_)
+            | Value::Bound(_)
+            | Value::Wrapped(_) => self
+                .call_value(&method, receiver, arguments, instruction)
+                .map(Some),
             Value::Function(closure) => {
                 // The receiver becomes `this`. Pushing a placeholder plus the arguments is how
                 // the shared call path receives them; it pops the placeholder as the callee.
@@ -32631,6 +32757,7 @@ fn json_stringify(
         | Value::Function(_)
         | Value::Native(_, _)
         | Value::Callback(_, _)
+        | Value::Element(_)
         | Value::CommonJsRequire(_)
         | Value::CommonJsResolve(_) => None,
         // A symbol is dropped like a function, unlike `String(symbol)`, which throws.
@@ -32742,7 +32869,11 @@ fn json_stringify(
             None => "null".to_owned(),
         }),
         // A function has no JSON spelling, and a settler is one.
-        Value::Settler(..) | Value::Capability(..) | Value::Bound(_) | Value::Wrapped(_) => None,
+        Value::Settler(..)
+        | Value::Capability(..)
+        | Value::Element(_)
+        | Value::Bound(_)
+        | Value::Wrapped(_) => None,
         // Serialising a proxy means reading its properties, which means running its traps, which
         // this pure walk cannot do. Refused rather than silently serialising the target.
         Value::Proxy(_) => return Err(ExecutionError::ProxyNotSerialisable),
@@ -33069,7 +33200,7 @@ fn call_native(
                 Value::Function(_)
                 | Value::Native(_, _)
                 | Value::Callback(_, _)
-                | Value::Settler(..) | Value::Capability(..)
+                | Value::Settler(..) | Value::Capability(..) | Value::Element(_)
                 | Value::Bound(_)
                 | Value::Wrapped(_) => "Function",
                 // `IsArray` looks through a proxy, and this tag is built on `IsArray` rather
@@ -33338,7 +33469,7 @@ fn call_native(
                 }
                 // A built-in has no store of its own; the realm keeps one for it, and that is
                 // where the closure has to be recorded or the next `isExtensible` undoes it.
-                Value::Native(_, _) | Value::Callback(_, _) | Value::Settler(..) | Value::Capability(..) => {
+                Value::Native(_, _) | Value::Callback(_, _) | Value::Settler(..) | Value::Capability(..) | Value::Element(_) => {
                     intrinsics.close(&target, sealing);
                 }
                 // An exotic object closes its named store. Its elements are not slots of that
@@ -36010,7 +36141,7 @@ fn prototype_of(value: &Value) -> Value {
         | Value::Callback(_, _)
         | Value::Function(_)
         | Value::Settler(..)
-        | Value::Capability(_) => {
+        | Value::Capability(_) | Value::Element(_) => {
             Value::Native(Native::PrototypeOf(PrototypeTable::Function), realm)
         }
         Value::Array(_) => Value::Native(Native::PrototypeOf(PrototypeTable::Array), realm),
@@ -38353,7 +38484,9 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
         }
         Value::Generator(_) => "Object [Generator] {}".to_owned(),
         Value::Intl(value) => format!("{} {{}}", value.service().tag()),
-        Value::Settler(..) | Value::Capability(..) => "[Function (anonymous)]".to_owned(),
+        Value::Settler(..) | Value::Capability(..) | Value::Element(_) => {
+            "[Function (anonymous)]".to_owned()
+        }
         // Node prints the target's name with a "bound " prefix; without a name to prefix, the
         // fact that it is bound is the whole of what there is to say.
         Value::Bound(_) => "[Function: bound]".to_owned(),
@@ -39493,6 +39626,8 @@ fn is_callable(value: &Value) -> bool {
             | Value::Callback(_, _)
             | Value::Settler(..)
             | Value::Capability(..)
+            | Value::Element(_)
+            | Value::Element(_)
             | Value::Bound(_)
             | Value::Wrapped(_)
             | Value::CommonJsRequire(_)
@@ -41319,6 +41454,11 @@ fn intrinsic_identity(value: &Value) -> Option<(String, f64)> {
         // The `GetCapabilitiesExecutor` takes the pair, so its `length` is 2. Anonymous like the
         // settlers, and for the same reason: the specification gives it no name.
         Value::Capability(_) => Some((String::new(), 2.0)),
+        // A combinator's resolve or reject element function: one argument, and anonymous. The
+        // specification is explicit that these are anonymous built-ins, and test262 checks the
+        // descriptor rather than the value -- so this has to be an own, non-writable,
+        // non-enumerable, configurable property, which is what this table produces.
+        Value::Element(_) => Some((String::new(), 1.0)),
         _ => None,
     }
 }
@@ -42383,7 +42523,8 @@ fn own_property_keys(intrinsics: &Intrinsics, target: &Value) -> Vec<String> {
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
-        | Value::Capability(..) => {
+        | Value::Capability(..)
+        | Value::Element(_) => {
             let mut keys = Vec::new();
             if intrinsic_identity(target).is_some() {
                 keys.push("length".to_owned());
@@ -42657,7 +42798,8 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
-        | Value::Capability(..) => intrinsic_key(target)
+        | Value::Capability(..)
+        | Value::Element(_) => intrinsic_key(target)
             .and_then(|identity| {
                 intrinsics
                     .entries
@@ -42782,7 +42924,8 @@ fn own_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> Option<
         Value::Native(_, _)
         | Value::Callback(_, _)
         | Value::Settler(..)
-        | Value::Capability(..) => match intrinsics.overridden(target, key) {
+        | Value::Capability(..)
+        | Value::Element(_) => match intrinsics.overridden(target, key) {
             Overridden::Held(_, attributes) => Some(attributes),
             Overridden::Removed => None,
             Overridden::Untouched => tabulated_attributes(intrinsics, target, key),
@@ -43407,6 +43550,8 @@ fn strict_equal(left: &Value, right: &Value) -> bool {
             right,
             Value::Settler(b, other) if Rc::ptr_eq(a, b) && one == other
         ),
+        // Identity, like every other function: a program may hold one and compare it later.
+        Value::Element(a) => matches!(right, Value::Element(b) if Rc::ptr_eq(a, b)),
         Value::Array(a) => matches!(right, Value::Array(b) if Rc::ptr_eq(a, b)),
         Value::TypedArray(a) => matches!(right, Value::TypedArray(b) if Rc::ptr_eq(a, b)),
         Value::ArrayBuffer(a) => matches!(right, Value::ArrayBuffer(b) if Rc::ptr_eq(a, b)),
