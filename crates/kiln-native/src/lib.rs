@@ -3441,7 +3441,12 @@ fn graph_launcher_source(
 #include <locale.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 enum kiln_value_tag {
     KILN_VALUE_UNDEFINED = 0,
@@ -3829,7 +3834,24 @@ static int kiln_graph_enter(void *opaque) {
     }
     output.push_str(&evaluation);
     output.push_str(
-        "    return 0;\n}\n\n/* argc/argv reach the realm before it is entered, so the first `process` a module builds\n * already has the command line. The strings are copied on the other side of this call. */\nint main(int argc, char **argv) {\n    kiln_graph_context graph = {0};\n    uint64_t realm = 0;\n    int status;\n    int destroy_status;\n    graph.result.tag = KILN_VALUE_UNDEFINED;\n    graph.entry_result.tag = KILN_VALUE_UNDEFINED;\n    if (setlocale(LC_NUMERIC, \"C\") == NULL) return 1;\n    graph.host.call = kiln_cli_host_call;\n    graph.host.context = NULL;\n    status = kiln_realm_create(&realm);\n    if (status == 0 && argc > 0)\n        status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);\n",
+        r#"    return 0;
+}
+
+/* argc/argv reach the realm before it is entered, so the first `process` a module builds
+ * already has the command line. The strings are copied on the other side of this call. */
+static int kiln_cli_run_realm(int argc, char **argv, int writes_result) {
+    kiln_graph_context graph = {0};
+    uint64_t realm = 0;
+    int status;
+    int destroy_status;
+    graph.result.tag = KILN_VALUE_UNDEFINED;
+    graph.entry_result.tag = KILN_VALUE_UNDEFINED;
+    graph.host.call = kiln_cli_host_call;
+    graph.host.context = NULL;
+    status = kiln_realm_create(&realm);
+    if (status == 0 && argc > 0)
+        status = kiln_realm_set_argv(realm, (uint64_t)argc, (const char *const *)argv);
+"#,
     );
     if policy.host_clock {
         // ADR 0044: a shipped realm keeps wall time, and the switch happens before the realm is
@@ -3837,7 +3859,82 @@ static int kiln_graph_enter(void *opaque) {
         output.push_str("    if (status == 0) status = kiln_realm_use_wall_clock(realm);\n");
     }
     output.push_str(
-        "    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);\n    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);\n    if (status != 0) kiln_cli_report_failure(status, graph.result);\n    if (status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;\n    destroy_status = kiln_realm_destroy(realm);\n    if (status == 0) status = destroy_status;\n    return status == 0 ? 0 : 1;\n}\n",
+        r##"    if (status == 0) status = kiln_realm_enter(realm, kiln_graph_enter, &graph);
+    if (status == 0) status = kiln_realm_drive(realm, &graph.host, &graph.result);
+    if (status != 0) kiln_cli_report_failure(status, graph.result);
+    if (writes_result && status == 0 && kiln_cli_write_result(graph.entry_result) != 0) status = 1;
+    destroy_status = kiln_realm_destroy(realm);
+    if (status == 0) status = destroy_status;
+    return status;
+}
+
+/* How many realms to run, read from the environment rather than fixed at build time.
+ *
+ * A server binds with SO_REUSEPORT, so N of these share a port and the kernel spreads the accepts
+ * across them. Reading the count at startup keeps one artifact correct on every machine it is
+ * copied to, which is the point of shipping a binary; baking it in at `kiln build` would tie the
+ * artifact to the box that built it.
+ *
+ * Absent, unparseable or below one means one realm -- exactly the behaviour before this existed. */
+static long kiln_cli_worker_count(void) {
+    const char *setting = getenv("KILN_WORKERS");
+    char *end = NULL;
+    long count;
+    if (setting == NULL || *setting == '\0') return 1;
+    count = strtol(setting, &end, 10);
+    if (end == setting || *end != '\0' || count < 1) return 1;
+    if (count > 1024) count = 1024;
+    return count;
+}
+
+/* Extra realms are separate *processes*, not threads, and that is a constraint rather than a
+ * preference. A module's namespaces live in `kiln_namespaces`, which is process-global, while the
+ * values inside it belong to the realm that made them (ADR 0038). Two realms in one address space
+ * therefore write one array and then read each other's values, which presents as
+ * `undefined is not a function` at the first import -- measured, before this used fork.
+ *
+ * A process per realm is also what `node`'s cluster does, for the same reason, and the text
+ * segment is shared copy-on-write so the cost is the heaps, which were never shareable anyway. */
+int main(int argc, char **argv) {
+    long workers;
+    int status;
+#ifndef _WIN32
+    long index = 0;
+    long joined;
+    pid_t *children;
+#endif
+    if (setlocale(LC_NUMERIC, "C") == NULL) return 1;
+    workers = kiln_cli_worker_count();
+#ifdef _WIN32
+    (void)workers;
+    return kiln_cli_run_realm(argc, argv, 1) == 0 ? 0 : 1;
+#else
+    if (workers <= 1) return kiln_cli_run_realm(argc, argv, 1) == 0 ? 0 : 1;
+    children = (pid_t *)calloc((size_t)(workers - 1), sizeof *children);
+    if (children == NULL) return 1;
+    for (index = 0; index < workers - 1; ++index) {
+        pid_t child = fork();
+        if (child == 0) {
+            /* A child forked before any realm exists, so it inherits no realm state to trip over.
+             * It never writes the result file: one path, one writer. */
+            free(children);
+            _exit(kiln_cli_run_realm(argc, argv, 0) == 0 ? 0 : 1);
+        }
+        if (child < 0) break; /* Fewer realms than asked for still serves. None does not. */
+        children[index] = child;
+    }
+    status = kiln_cli_run_realm(argc, argv, 1);
+    for (joined = 0; joined < index; ++joined) {
+        int child_status = 0;
+        if (waitpid(children[joined], &child_status, 0) < 0) continue;
+        if (status == 0 && WIFEXITED(child_status) && WEXITSTATUS(child_status) != 0)
+            status = WEXITSTATUS(child_status);
+    }
+    free(children);
+    return status == 0 ? 0 : 1;
+#endif
+}
+"##,
     );
     Ok(output)
 }
