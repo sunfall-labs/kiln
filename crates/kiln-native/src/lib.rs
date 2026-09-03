@@ -14,8 +14,8 @@ use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use kiln_artifact_cache::{
@@ -694,7 +694,10 @@ impl NativeBuilder {
             .map_err(|message| NativeError::NumberProvider { message })
     }
 
-    fn cached_number_provider(&self, target: &str) -> Result<(Vec<u8>, Digest, bool), NativeError> {
+    fn cached_number_provider(
+        &self,
+        target: &str,
+    ) -> Result<(Arc<[u8]>, Digest, bool), NativeError> {
         let provider = self.number_provider()?;
         let provider_key = key(
             ArtifactKind::RuntimeLibrary,
@@ -712,7 +715,16 @@ impl NativeBuilder {
             ),
             [provider.archive_digest],
         );
-        self.cached_payload(&provider_key, &provider.archive)
+        match self.lookup_digest(&provider_key)? {
+            Some((digest, _size)) => {
+                debug_assert_eq!(digest, provider.archive_digest);
+                Ok((Arc::clone(&provider.archive), digest, true))
+            }
+            None => {
+                let stored = self.cache.put(&provider_key, &provider.archive)?;
+                Ok((Arc::clone(&provider.archive), stored.digest, false))
+            }
+        }
     }
 
     /// Build one bytecode module and its separate host runtime into an executable.
@@ -3110,18 +3122,28 @@ fn cached_payload(
     key: &ArtifactKey,
     expected: &[u8],
 ) -> Result<(Vec<u8>, Digest, bool), NativeError> {
-    match cache.lookup(key)? {
-        Lookup::Hit(artifact) if artifact.bytes != expected => Err(CacheError::Corrupt {
-            path: artifact.path,
-            reason: format!(
-                "cached payload digest {} does not match deterministic expected digest {}",
-                artifact.digest.to_hex(),
-                Digest::hash(expected).to_hex()
-            ),
+    match cache.lookup_digest(key)? {
+        Some((digest, size)) => {
+            let expected_digest = Digest::hash(expected);
+            if digest != expected_digest || size != expected.len() as u64 {
+                match cache.lookup(key)? {
+                    Lookup::Hit(artifact) if artifact.bytes != expected => {
+                        return Err(CacheError::Corrupt {
+                            path: artifact.path,
+                            reason: format!(
+                                "cached payload digest {} does not match deterministic expected digest {}",
+                                artifact.digest.to_hex(),
+                                expected_digest.to_hex()
+                            ),
+                        }
+                        .into());
+                    }
+                    _ => {}
+                }
+            }
+            Ok((expected.to_vec(), digest, true))
         }
-        .into()),
-        Lookup::Hit(artifact) => Ok((artifact.bytes, artifact.digest, true)),
-        Lookup::Miss => {
+        None => {
             let stored = cache.put(key, expected)?;
             Ok((expected.to_vec(), stored.digest, false))
         }
