@@ -533,6 +533,7 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
                                size_t current_len, int *serialised, int depth,
                                const kiln_json_frame *parents, kiln_value *thrown);
 static int kiln_c99_json_read(kiln_json_reader *reader, kiln_value *out);
+static int kiln_c99_json_clone(kiln_value val, kiln_value *out);
 static int kiln_c99_json_document(const char *bytes, size_t len, kiln_value *out);
 static void kiln_c99_json_space(kiln_json_reader *reader);
 static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
