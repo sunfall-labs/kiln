@@ -15390,6 +15390,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )
                     }
                 };
+                let wrapper = {
+                    let mut data = ObjectData::default();
+                    data.set("", value.clone());
+                    Value::Object(Rc::new(RefCell::new(data)))
+                };
                 Ok(
                     match json_stringify(
                         &value,
@@ -15399,6 +15404,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         &mut resolve,
                         allowed.as_deref(),
                         "",
+                        &wrapper,
                     )? {
                         Some(text) => Value::String(text),
                         // `JSON.stringify(undefined)` is `undefined`, not the string.
@@ -33561,11 +33567,17 @@ fn json_stringify(
     resolve: JsonResolver<'_>,
     allowed: Option<&[String]>,
     key: &str,
+    holder: &Value,
 ) -> Result<Option<String>, ExecutionError> {
     // `toJSON` runs before anything else is decided about the value, which is how a `Date`
     // serialises as its ISO string and how a library controls its own JSON form. It is looked
     // up on the value, prototype chain included, so a class method counts.
     let replaced = resolve(JsonCall::ToJson(value, key))?;
+    // Then the replacer, in that order, on every value including the root: `SerializeJSONProperty`
+    // does both and the replacer sees what `toJSON` produced. Applying it at the call sites
+    // instead put it *before* `toJSON`, skipped array elements entirely, and never reached the
+    // root at all -- so a replacer that rewrites the whole document was never asked about it.
+    let replaced = resolve(JsonCall::Replace(holder, key, replaced))?;
     let value = &replaced;
     let nested = format!("{current}{indent}");
     // With no indent every separator is empty, which collapses the pretty form to the compact
@@ -33640,7 +33652,7 @@ fn json_stringify(
                     // An element that is not representable becomes null rather than vanishing,
                     // because dropping it would renumber every element after it.
                     let at = index.to_string();
-                    json_stringify(item, indent, &nested, guard.seen, resolve, allowed, &at)
+                    json_stringify(item, indent, &nested, guard.seen, resolve, allowed, &at, value)
                         .map(|part| part.unwrap_or_else(|| "null".to_owned()))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -33663,7 +33675,9 @@ fn json_stringify(
         {
             let inner = object.borrow().primitive().cloned();
             return match inner {
-                Some(inner) => json_stringify(&inner, indent, current, seen, resolve, allowed, key),
+                Some(inner) => {
+                    json_stringify(&inner, indent, current, seen, resolve, allowed, key, holder)
+                }
                 None => Ok(None),
             };
         }
@@ -33716,15 +33730,10 @@ fn json_stringify(
                         None => continue,
                     },
                 };
-                // The replacer sees `(holder, key, value)` and may answer anything, including
-                // `undefined` to drop the property.
-                let property = resolve(JsonCall::Replace(value, &key, property))?;
-                let property = match Some(property) {
-                    Some(replaced) => replaced,
-                    None => continue,
-                };
+                // The replacer is applied inside the recursive call, where `toJSON` runs first
+                // and the object beneath is the holder it is given.
                 if let Some(part) = json_stringify(
-                    &property, indent, &nested, guard.seen, resolve, allowed, &key,
+                    &property, indent, &nested, guard.seen, resolve, allowed, &key, value,
                 )? {
                     parts.push(format!("{}{colon}{part}", json_quote(&key)));
                 }
@@ -33780,6 +33789,7 @@ fn json_stringify(
                 resolve,
                 allowed,
                 key,
+                holder,
             );
         }
         Value::ArrayBuffer(_) | Value::DataView(_) => Some("{}".to_owned()),
