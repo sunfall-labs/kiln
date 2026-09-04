@@ -378,19 +378,19 @@ static kiln_closure *kiln_c99_closure_of(kiln_value value) {
 }
 
 
-static kiln_value *kiln_c99_cell_of(kiln_value value) {
-    return (kiln_value *)(uintptr_t)value.bits;
+static kiln_val *kiln_c99_cell_of(kiln_value value) {
+    return (kiln_val *)(uintptr_t)value.bits;
 }
+
+static int kiln_c99_val_make_cell(kiln_val *slot);
 
 /* Turn a slot into a box in place.  Whatever the slot already held becomes the box's first
  * contents, which is what makes `let x = 1;` followed by a closure over `x` see the 1. */
 static int kiln_c99_make_cell(kiln_value *slot) {
-    kiln_value *box = (kiln_value *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *box);
-    if (box == NULL) {
-        return KILN_C99_OUT_OF_MEMORY;
-    }
-    *box = *slot;
-    *slot = kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)box, NULL, 0);
+    kiln_val val = kiln_val_from_boundary(*slot);
+    int status = kiln_c99_val_make_cell(&val);
+    if (status != KILN_C99_OK) return status;
+    *slot = kiln_val_to_boundary(val);
     return KILN_C99_OK;
 }
 
@@ -399,7 +399,7 @@ static int kiln_c99_make_cell(kiln_value *slot) {
  * overwriting the slot here would drop the box every capture already points at. */
 static void kiln_c99_mark_uninitialized(kiln_value *slot) {
     if (slot->tag == KILN_VALUE_CELL) {
-        *kiln_c99_cell_of(*slot) = kiln_c99_uninitialized();
+        *kiln_c99_cell_of(*slot) = KILN_VAL_UNINITIALIZED;
     } else {
         *slot = kiln_c99_uninitialized();
     }
@@ -412,20 +412,20 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
                                  const char *diagnostic_source,
                                  uint32_t proto, uint32_t arity, int generator,
                                  int asynchronous,
-                                 int async_generator, int arrow, int strict, kiln_value receiver,
-                                 kiln_value new_target, uint32_t local_count,
+                                 int async_generator, int arrow, int strict, kiln_val receiver,
+                                 kiln_val new_target, uint32_t local_count,
                                  uint32_t stack_size,
                                  uint32_t handler_depth, uint32_t prologue_resume,
-                                 const kiln_value *captured,
+                                 const kiln_val *captured,
                                  uint32_t count) {
     kiln_closure *closure = (kiln_closure *)kiln_c99_gc_alloc(KILN_GC_CLOSURE, sizeof *closure);
-    kiln_value *upvalues = NULL;
+    kiln_val *upvalues = NULL;
     uint32_t index;
     if (closure == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
     if (count != 0) {
-        upvalues = (kiln_value *)malloc((size_t)count * sizeof *upvalues);
+        upvalues = (kiln_val *)malloc((size_t)count * sizeof *upvalues);
         if (upvalues == NULL) {
             kiln_c99_gc_release(closure);
             return KILN_C99_OUT_OF_MEMORY;
@@ -443,7 +443,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
     closure->arrow = arrow;
     closure->strict = strict;
     closure->publishes_frame = 1;
-    closure->captured_this = arrow ? receiver : kiln_c99_undefined();
+    closure->captured_this = arrow ? receiver : KILN_VAL_UNDEFINED;
     closure->async_generator = async_generator;
     /* Captured whether or not it is wanted, because whether it is wanted is a property of the
      * closure and the value is a property of *here*. */
@@ -454,6 +454,7 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
          * before the arrow is called, so it has to be copied out now rather than pointed at. */
         int captured = kiln_c99_visible_arguments(&closure->captured_arguments);
         if (captured != KILN_C99_OK) {
+            free(upvalues);
             kiln_c99_gc_release(closure);
             return captured;
         }
@@ -493,13 +494,13 @@ static int kiln_c99_make_closure(kiln_value *out, kiln_body_fn body, const char 
  * overlapping subsets of this dynamic frame state before calling `closure->body` directly. That
  * made the newest path the easiest place to forget `arguments`, lexical `this`, `new.target`, or
  * diagnostic depth. Keep the mutable process globals behind one save/restore scope instead. */
-static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
-                                        kiln_closure *closure, kiln_value receiver,
-                                        const kiln_value *args, size_t argc, int depth,
+static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_val *result,
+                                        kiln_closure *closure, kiln_val receiver,
+                                        const kiln_val *args, size_t argc, int depth,
                                         kiln_value *thrown, kiln_generator *frame,
                                         int inherit_new_target) {
     kiln_value saved_target = kiln_c99_new_target;
-    const kiln_value *saved_args = kiln_c99_frame_args;
+    const kiln_val *saved_args = kiln_c99_frame_args;
     size_t saved_argc = kiln_c99_frame_argc;
     kiln_value saved_captured = kiln_c99_captured_arguments;
     kiln_value saved_arguments_object = kiln_c99_frame_arguments_object;
@@ -510,7 +511,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
     int status;
     if (!inherit_new_target) {
         kiln_c99_new_target =
-            closure->arrow ? closure->captured_new_target : kiln_c99_undefined();
+            closure->arrow ? kiln_val_to_boundary(closure->captured_new_target) : kiln_c99_undefined();
     }
     kiln_c99_frame_is_arrow = closure->arrow;
     kiln_c99_frame_arguments_object = kiln_c99_undefined();
@@ -545,7 +546,7 @@ static int kiln_c99_invoke_closure_body(kiln_host *host, kiln_value *result,
      * Its diagnostic globals are private there, so preserve the owned refusal in the existing
      * call-result channel before returning to a caller whose globals describe another module. */
     if (status == KILN_C99_CONTROL_ERROR) {
-        *result = kiln_c99_control_diagnostic();
+        *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());
     }
     kiln_c99_new_target = saved_target;
     kiln_c99_frame_args = saved_args;
@@ -576,9 +577,9 @@ static void kiln_c99_attribute_body_refusal(const kiln_closure *closure, int dep
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((always_inline))
 #endif
-static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_value *result,
-                                          kiln_closure *closure, kiln_value receiver,
-                                          const kiln_value *args, size_t argc, int depth,
+static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_val *result,
+                                          kiln_closure *closure, kiln_val receiver,
+                                          const kiln_val *args, size_t argc, int depth,
                                           kiln_value *thrown, kiln_generator *frame,
                                           int inherit_new_target) {
     if (!closure->publishes_frame && !inherit_new_target) {
@@ -613,10 +614,10 @@ static inline int kiln_c99_invoke_closure(kiln_host *host, kiln_value *result,
  * is captured at the call: `...rest` is taken from the *caller's* argument list, and by the time
  * `next` runs those globals belong to whoever is stepping the generator. */
 static int kiln_c99_bind_parameters(kiln_host *host, kiln_value generator, kiln_closure *closure,
-                                    kiln_value receiver, const kiln_value *args, size_t argc,
+                                    kiln_val receiver, const kiln_val *args, size_t argc,
                                     int depth, kiln_value *thrown) {
     kiln_generator *frame = kiln_c99_generator_of(generator);
-    kiln_value produced = kiln_c99_undefined();
+    kiln_val produced = KILN_VAL_UNDEFINED;
     int status;
     frame->binding = 1;
     status = kiln_c99_invoke_closure_body(host, &produced, closure, receiver, args, argc, depth,
@@ -887,7 +888,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     }
     closure = kiln_c99_closure_of(callee);
     if (closure->arrow) {
-        receiver = closure->captured_this;
+        receiver = kiln_val_to_boundary(closure->captured_this);
     } else if (!closure->strict &&
                (receiver.tag == KILN_VALUE_UNDEFINED || receiver.tag == KILN_VALUE_NULL)) {
         /* `OrdinaryCallBindThis`: sloppy code never sees `undefined` or `null` as `this`. The
@@ -909,7 +910,7 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
     if (closure->generator) {
         /* Calling a generator function does not run it: it builds the object that will. An
          * async function is compiled as one -- `await` suspends exactly as `yield` does -- and
-        * differs only in who drives it, which is this rather than the program. */
+         * differs only in who drives it, which is this rather than the program. */
         kiln_value built;
         int status = kiln_c99_new_generator(&built, callee, receiver, args, argc);
         if (status != KILN_C99_OK) {
@@ -921,8 +922,11 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         /* Parameter binding belongs to the call, not to the first resumption -- so it runs
          * before the object is handed over, and its throw leaves from here. */
         if (closure->prologue_resume != 0) {
+            kiln_val vrec = kiln_val_from_boundary(receiver);
+            kiln_val vargs[argc > 0 ? argc : 1];
+            for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(args[i]);
             status =
-                kiln_c99_bind_parameters(host, built, closure, receiver, args, argc, depth, thrown);
+                kiln_c99_bind_parameters(host, built, closure, vrec, argc > 0 ? vargs : NULL, argc, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -954,8 +958,14 @@ static int kiln_c99_call(kiln_host *host, kiln_value *result, kiln_value callee,
         if (kiln_c99_inheriting_new_target) {
             kiln_c99_inheriting_new_target = 0;
         }
-        return kiln_c99_invoke_closure_body(host, result, closure, receiver, args, argc, depth,
-                                            thrown, NULL, inherit_new_target);
+        kiln_val vrec = kiln_val_from_boundary(receiver);
+        kiln_val vargs[argc > 0 ? argc : 1];
+        for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(args[i]);
+        kiln_val vres = KILN_VAL_UNDEFINED;
+        int status = kiln_c99_invoke_closure_body(host, &vres, closure, vrec, argc > 0 ? vargs : NULL, argc, depth,
+                                                  thrown, NULL, inherit_new_target);
+        *result = kiln_val_to_boundary(vres);
+        return status;
     }
 }
 
@@ -13918,8 +13928,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                         frame->sent = kiln_c99_undefined();
                         closure = kiln_c99_closure_of(frame->function);
                         frame->running = 1;
+                        kiln_val vproduced = KILN_VAL_UNDEFINED;
                         (void)kiln_c99_invoke_closure_body(
-                            host, &produced, closure, frame->receiver, NULL, 0, depth, thrown, frame, 0);
+                            host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
+                        produced = kiln_val_to_boundary(vproduced);
                         frame->running = 0;
                     }
                     frame->done = 1;
@@ -13948,8 +13960,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                     frame->sent = kiln_c99_undefined();
                     closure = kiln_c99_closure_of(frame->function);
                     frame->running = 1;
+                    kiln_val vproduced = KILN_VAL_UNDEFINED;
                     (void)kiln_c99_invoke_closure_body(
-                        host, &produced, closure, frame->receiver, NULL, 0, depth, thrown, frame, 0);
+                        host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
+                    produced = kiln_val_to_boundary(vproduced);
                     frame->running = 0;
                 }
                 frame->done = 1;
@@ -13958,8 +13972,10 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 frame->sent = argc > 0 ? args[0] : kiln_c99_undefined();
                 closure = kiln_c99_closure_of(frame->function);
                 frame->running = 1;
+                kiln_val vproduced = KILN_VAL_UNDEFINED;
                 status = kiln_c99_invoke_closure_body(
-                    host, &produced, closure, frame->receiver, NULL, 0, depth, thrown, frame, 0);
+                    host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0, depth, thrown, frame, 0);
+                produced = kiln_val_to_boundary(vproduced);
                 frame->running = 0;
                 if (status == KILN_C99_YIELDED) {
                     frame->started = 1;
@@ -21250,8 +21266,10 @@ static int kiln_c99_async_generator_step(kiln_host *host, kiln_value generator, 
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    status = kiln_c99_invoke_closure_body(host, &produced, closure, frame->receiver, NULL, 0,
+    kiln_val vproduced = KILN_VAL_UNDEFINED;
+    status = kiln_c99_invoke_closure_body(host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0,
                                           depth, thrown, frame, 0);
+    produced = kiln_val_to_boundary(vproduced);
     if (status == KILN_C99_YIELDED) {
         frame->started = 1;
         if (frame->awaiting) {
@@ -21357,8 +21375,10 @@ static int kiln_c99_async_step(kiln_host *host, kiln_value generator, kiln_value
     frame->sent = sent;
     frame->raising = rejected;
     closure = kiln_c99_closure_of(frame->function);
-    status = kiln_c99_invoke_closure_body(host, &produced, closure, frame->receiver, NULL, 0,
+    kiln_val vproduced = KILN_VAL_UNDEFINED;
+    status = kiln_c99_invoke_closure_body(host, &vproduced, closure, kiln_val_from_boundary(frame->receiver), NULL, 0,
                                           depth, thrown, frame, 0);
+    produced = kiln_val_to_boundary(vproduced);
     if (status == KILN_C99_YIELDED) {
         kiln_value awaited = produced;
         kiln_value resume;
@@ -22035,8 +22055,8 @@ static int kiln_dyn_eval_expr(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
                               kiln_value receiver, const kiln_value *args, size_t argc,
                               int depth, kiln_value *out, kiln_value *thrown);
 
-static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
-                                            const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);
+static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                                            const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);
 
 static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_scope *scope,
                                 kiln_value receiver, const kiln_value *args, size_t argc,
@@ -22271,14 +22291,19 @@ static int kiln_dyn_eval_primary(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_
             s = s->parent;
         }
         upvals[2] = env_obj;
+        kiln_val val_upvals[3] = {
+            kiln_val_from_boundary(upvals[0]),
+            kiln_val_from_boundary(upvals[1]),
+            kiln_val_from_boundary(upvals[2])
+        };
 
         status = kiln_c99_make_closure(out, kiln_c99_dynamic_body_trampoline,
                                        fn_name, fn_name_len,
                                        (upvals[1].tag == KILN_VALUE_STRING) ? upvals[1].ptr : "",
                                        (upvals[1].tag == KILN_VALUE_STRING) ? upvals[1].len : 0,
                                        "eval", 0, 0, 0, 0, 0, 0, 0,
-                                       kiln_c99_undefined(), kiln_c99_undefined(),
-                                       0, 16, 0, 0, upvals, 3);
+                                       KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED,
+                                       0, 16, 0, 0, val_upvals, 3);
         if (status != KILN_C99_OK) return status;
         if (fn_name_len > 0 && strncmp(fn_name, "anonymous", 9) != 0) {
             (void)kiln_dyn_scope_set(scope, fn_name, fn_name_len, *out);
@@ -23153,22 +23178,27 @@ static int kiln_dyn_eval_stmt(kiln_host *host, kiln_dyn_lexer *lex, kiln_dyn_sco
     return KILN_C99_OK;
 }
 
-static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
-                                            const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                                            const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
     kiln_host *host = ctx ? ctx->host : NULL;
     kiln_value *thrown = ctx ? ctx->thrown : NULL;
     struct kiln_generator *frame = ctx ? ctx->frame : NULL;
     int depth = ctx ? ctx->depth : 0;
-    kiln_value receiver = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
+    kiln_value receiver = receiver_ptr ? kiln_val_to_boundary(*receiver_ptr) : kiln_c99_undefined();
     (void)frame;
-    kiln_value params_val = upvalues[0];
-    kiln_value body_val = upvalues[1];
+    kiln_value params_val = kiln_val_to_boundary(upvalues[0]);
+    kiln_value body_val = kiln_val_to_boundary(upvalues[1]);
+    kiln_value env_val = kiln_val_to_boundary(upvalues[2]);
+    kiln_value bargs[argc > 0 ? argc : 1];
+    for (size_t i = 0; i < argc; ++i) {
+        bargs[i] = kiln_val_to_boundary(args[i]);
+    }
 
     kiln_dyn_scope scope;
     kiln_dyn_scope_init(&scope, NULL);
 
-    if (upvalues[2].tag == KILN_VALUE_OBJECT) {
-        kiln_object *pobj = kiln_c99_object_of(upvalues[2]);
+    if (env_val.tag == KILN_VALUE_OBJECT) {
+        kiln_object *pobj = kiln_c99_object_of(env_val);
         for (size_t i = 0; i < pobj->count; ++i) {
             kiln_dyn_scope_set(&scope, pobj->properties[i].key, strlen(pobj->properties[i].key), pobj->properties[i].value);
         }
@@ -23185,7 +23215,7 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *
             while (ppos < plen && (p[ppos] == ' ' || p[ppos] == '\t' || p[ppos] == ',')) ppos++;
             if (ppos >= plen) break;
             if (p[ppos] == '{') {
-                kiln_value options_arg = (arg_idx < argc) ? args[arg_idx] : kiln_c99_undefined();
+                kiln_value options_arg = (arg_idx < argc) ? bargs[arg_idx] : kiln_c99_undefined();
                 ppos++;
                 while (ppos < plen && p[ppos] != '}') {
                     while (ppos < plen && (p[ppos] == ' ' || p[ppos] == '\t' || p[ppos] == ',')) ppos++;
@@ -23221,15 +23251,17 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *
                         actual_val = dval;
                     }
                     kiln_dyn_scope_set(&scope, &p[istart], iname_len, actual_val);
+                    while (ppos < plen && (p[ppos] == ' ' || p[ppos] == '\t')) ppos++;
+                    if (ppos < plen && p[ppos] == ',') ppos++;
                 }
-                while (ppos < plen && p[ppos] != ',') ppos++;
+                if (ppos < plen && p[ppos] == '}') ppos++;
                 arg_idx++;
                 continue;
             }
             size_t pstart = ppos;
             while (ppos < plen && p[ppos] != ' ' && p[ppos] != '\t' && p[ppos] != ',' && p[ppos] != '=') ppos++;
             size_t pname_len = ppos - pstart;
-            kiln_value arg_val = (arg_idx < argc) ? args[arg_idx] : kiln_c99_undefined();
+            kiln_value arg_val = (arg_idx < argc) ? bargs[arg_idx] : kiln_c99_undefined();
             kiln_dyn_scope_set(&scope, &p[pstart], pname_len, arg_val);
             while (ppos < plen && p[ppos] != ',') ppos++;
             arg_idx++;
@@ -23246,16 +23278,17 @@ static int kiln_c99_dynamic_body_trampoline(kiln_call_context *ctx, kiln_value *
     kiln_dyn_lexer_next(&lex);
 
     int returned = 0;
-    *result = kiln_c99_undefined();
+    kiln_value bresult = kiln_c99_undefined();
     int status = KILN_C99_OK;
 
     while (lex.curr.kind != KILN_DYN_EOF) {
-        status = kiln_dyn_eval_stmt(host, &lex, &scope, receiver, args, argc, depth, result, &returned, thrown);
+        status = kiln_dyn_eval_stmt(host, &lex, &scope, receiver, argc > 0 ? bargs : NULL, argc, depth, &bresult, &returned, thrown);
         if (status != KILN_C99_OK || returned == 1) {
             break;
         }
     }
 
+    *result = kiln_val_from_boundary(bresult);
     kiln_dyn_token_free(&lex.curr);
     kiln_dyn_scope_destroy(&scope);
     return status;
@@ -23304,12 +23337,18 @@ static int kiln_c99_dynamic_new_function(kiln_host *host, kiln_value *result,
     const char *body_src = (upvalues[1].tag == KILN_VALUE_STRING && upvalues[1].ptr != NULL) ? upvalues[1].ptr : "";
     size_t body_len = (upvalues[1].tag == KILN_VALUE_STRING && upvalues[1].ptr != NULL) ? upvalues[1].len : 0;
 
+    kiln_val val_upvalues[3] = {
+        kiln_val_from_boundary(upvalues[0]),
+        kiln_val_from_boundary(upvalues[1]),
+        kiln_val_from_boundary(upvalues[2])
+    };
+
     return kiln_c99_make_closure(result, kiln_c99_dynamic_body_trampoline,
                                  "anonymous", 9, body_src, body_len,
                                  "eval", 0, (uint32_t)(argc > 1 ? argc - 1 : 0),
-                                 0, 0, 0, 0, 0, kiln_c99_undefined(),
-                                 kiln_c99_undefined(), 0, 16, 0, 0,
-                                 upvalues, 3);
+                                 0, 0, 0, 0, 0, KILN_VAL_UNDEFINED,
+                                 KILN_VAL_UNDEFINED, 0, 16, 0, 0,
+                                 val_upvalues, 3);
 }
 
 static int kiln_c99_construct(kiln_host *host, kiln_value *result, kiln_value callee,
@@ -23862,6 +23901,35 @@ static int kiln_c99_adopt_super(kiln_value *receiver, kiln_value produced) {
     *receiver = produced;
     kiln_c99_adopted_this = produced;
     return KILN_C99_OK;
+}
+
+static int kiln_c99_super_call_val(kiln_host *host, kiln_val *produced, kiln_val parent,
+                                   kiln_val receiver, const kiln_val *args, size_t argc,
+                                   int depth, kiln_value *thrown) {
+    kiln_value bparent = kiln_val_to_boundary(parent);
+    kiln_value breceiver = kiln_val_to_boundary(receiver);
+    kiln_value bargs_buf[argc > 0 ? argc : 1];
+    if (args != NULL) {
+        for (size_t i = 0; i < argc; ++i) {
+            bargs_buf[i] = kiln_val_to_boundary(args[i]);
+        }
+    }
+    kiln_value bproduced = kiln_c99_undefined();
+    int status = kiln_c99_super_call(host, &bproduced, bparent, breceiver, (argc > 0 && args != NULL) ? bargs_buf : NULL, argc, depth, thrown);
+    if (status == KILN_C99_OK) {
+        *produced = kiln_val_from_boundary(bproduced);
+    }
+    return status;
+}
+
+static int kiln_c99_adopt_super_val(kiln_val *receiver, kiln_val produced) {
+    kiln_value breceiver = kiln_val_to_boundary(*receiver);
+    kiln_value bproduced = kiln_val_to_boundary(produced);
+    int status = kiln_c99_adopt_super(&breceiver, bproduced);
+    if (status == KILN_C99_OK) {
+        *receiver = kiln_val_from_boundary(breceiver);
+    }
+    return status;
 }
 
 /* Whether a value may *be* a prototype: an object of some kind, or null. Everything else is a
@@ -25127,7 +25195,12 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
     {
         kiln_closure *plain = method.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(method) : NULL;
         if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
-            status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : self_value, call_args, argc, depth, thrown, NULL, 0);
+            kiln_val vreceiver = plain->arrow ? plain->captured_this : kiln_val_from_boundary(self_value);
+            kiln_val vargs[argc > 0 ? argc : 1];
+            for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(call_args[i]);
+            kiln_val vres = KILN_VAL_UNDEFINED;
+            status = kiln_c99_invoke_closure(host, &vres, plain, vreceiver, argc > 0 ? vargs : NULL, argc, depth, thrown, NULL, 0);
+            call_result = kiln_val_to_boundary(vres);
         } else if (method.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
             status = kiln_c99_invoke_method(host, &call_result, method.bits, self_value, call_args, argc, depth, thrown);
         } else {
@@ -25135,7 +25208,7 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
         }
     }
     if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
-        *result = call_result;
+        if (result != NULL) *result = call_result;
         return status;
     }
     if (status == KILN_C99_CONTROL_ERROR) {
@@ -25169,7 +25242,12 @@ static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size
     {
         kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL;
         if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
-            status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, argc, depth, thrown, NULL, 0);
+            kiln_val vreceiver = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
+            kiln_val vargs[argc > 0 ? argc : 1];
+            for (size_t i = 0; i < argc; ++i) vargs[i] = kiln_val_from_boundary(call_args[i]);
+            kiln_val vres = KILN_VAL_UNDEFINED;
+            status = kiln_c99_invoke_closure(host, &vres, plain, vreceiver, argc > 0 ? vargs : NULL, argc, depth, thrown, NULL, 0);
+            call_result = kiln_val_to_boundary(vres);
         } else if (callee.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
             status = kiln_c99_invoke_method(host, &call_result, callee.bits, kiln_c99_undefined(), call_args, argc, depth, thrown);
         } else {
@@ -25178,7 +25256,7 @@ static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size
     }
 
     if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
-        *result = call_result;
+        if (result != NULL) *result = call_result;
         return status;
     }
     if (status == KILN_C99_CONTROL_ERROR) {
@@ -25227,11 +25305,11 @@ static int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_
 }
 
 static int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp, kiln_value *thrown) {
-    kiln_value *target = kiln_c99_cell_of(cell);
-    if (target->tag == KILN_VALUE_UNINITIALIZED) {
+    kiln_val *target = kiln_c99_cell_of(cell);
+    if (*target == KILN_VAL_UNINITIALIZED) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
     }
-    stack[(*sp)++] = *target;
+    stack[(*sp)++] = kiln_val_to_boundary(*target);
     return KILN_C99_OK;
 }
 
@@ -25305,15 +25383,16 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
         memcpy(&idx, &key, sizeof(idx));
         if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
             size_t slot = (size_t)idx;
-            kiln_value t = kiln_val_to_boundary(target);
-            if (t.tag == KILN_VALUE_ARRAY) {
-                const kiln_array *array = kiln_c99_array_of(t);
+            void *ptr = KILN_VAL_PTR(target);
+            uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
+            if (gc_kind == KILN_GC_ARRAY) {
+                const kiln_array *array = (const kiln_array *)ptr;
                 if (KILN_LIKELY(slot < array->count && !kiln_c99_is_hole(array->elements[slot]))) {
                     *out = kiln_val_from_boundary(array->elements[slot]);
                     return KILN_C99_OK;
                 }
-            } else if (t.tag == KILN_VALUE_OBJECT) {
-                const kiln_object *object = kiln_c99_object_of(t);
+            } else if (gc_kind == KILN_GC_OBJECT) {
+                const kiln_object *object = (const kiln_object *)ptr;
                 if (object->elements != NULL && slot < object->element_count && !kiln_c99_is_hole(object->elements[slot])) {
                     *out = kiln_val_from_boundary(object->elements[slot]);
                     return KILN_C99_OK;
@@ -25331,6 +25410,29 @@ static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val 
 
 static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key,
                                       kiln_val value, int strict, int depth, kiln_value *thrown) {
+    if (KILN_LIKELY((KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) && KILN_VAL_IS_NUMBER(key))) {
+        double idx;
+        memcpy(&idx, &key, sizeof(idx));
+        if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
+            size_t slot = (size_t)idx;
+            void *ptr = KILN_VAL_PTR(target);
+            uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
+            if (gc_kind == KILN_GC_ARRAY) {
+                kiln_array *array = (kiln_array *)ptr;
+                if (KILN_LIKELY(!array->frozen && slot < array->count)) {
+                    array->elements[slot] = kiln_val_to_boundary(value);
+                    return KILN_C99_OK;
+                }
+            } else if (gc_kind == KILN_GC_OBJECT) {
+                kiln_object *object = (kiln_object *)ptr;
+                if (KILN_LIKELY(object->shape != NULL && !object->frozen && object->elements != NULL &&
+                                slot < object->element_count && object->elements[slot].tag != KILN_VALUE_HOLE)) {
+                    object->elements[slot] = kiln_val_to_boundary(value);
+                    return KILN_C99_OK;
+                }
+            }
+        }
+    }
     kiln_value t = kiln_val_to_boundary(target);
     kiln_value k = kiln_val_to_boundary(key);
     kiln_value v = kiln_val_to_boundary(value);
@@ -25365,14 +25467,13 @@ static int kiln_c99_op_val_set_computed(kiln_host *host, kiln_val *stack, size_t
 static int kiln_c99_op_val_call_method(kiln_host *host, kiln_val *stack, size_t *sp,
                                        const char *key, size_t key_len, size_t argc,
                                        int depth, kiln_value *thrown, kiln_c99_site *site,
-                                       const char *inst_site, size_t inst_idx, const char *inst_op,
-                                       kiln_value *result) {
+                                       const char *inst_site, size_t inst_idx, const char *inst_op) {
     kiln_value bstack[argc + 1];
     for (size_t i = 0; i < argc + 1; ++i) {
         bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
     }
     size_t bsp = argc + 1;
-    int status = kiln_c99_op_call_method(host, bstack, &bsp, key, key_len, argc, depth, thrown, site, inst_site, inst_idx, inst_op, result);
+    int status = kiln_c99_op_call_method(host, bstack, &bsp, key, key_len, argc, depth, thrown, site, inst_site, inst_idx, inst_op, NULL);
     if (status != KILN_C99_OK) return status;
     *sp -= (argc + 1);
     stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
@@ -25381,14 +25482,40 @@ static int kiln_c99_op_val_call_method(kiln_host *host, kiln_val *stack, size_t 
 
 static int kiln_c99_op_val_call(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc,
                                 int depth, kiln_value *thrown,
-                                const char *inst_site, size_t inst_idx, const char *inst_op,
-                                kiln_value *result) {
+                                const char *inst_site, size_t inst_idx, const char *inst_op) {
+    kiln_val callee_val = stack[*sp - argc - 1];
+    kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee_val) ? (kiln_closure *)KILN_VAL_PTR(callee_val) : NULL;
+    if (plain != NULL && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
+        kiln_val call_result = KILN_VAL_UNDEFINED;
+        const kiln_val *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
+        kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED;
+        if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv);
+        int status = kiln_c99_invoke_closure(host, &call_result, plain, recv, call_args, argc, depth, thrown, NULL, 0);
+        if (status == KILN_C99_CONTROL_ERROR && (call_result & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
+            return status;
+        }
+        if (status == KILN_C99_CONTROL_ERROR) {
+            if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+            if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "Call invocation refused";
+            kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+        } else if (status == KILN_C99_THROWN) {
+            if (kiln_c99_diagnostic_detail == NULL) {
+                kiln_c99_diagnostic_receiver_tag = KILN_VALUE_FUNCTION;
+                kiln_c99_diagnostic_detail = "Call invocation threw";
+            }
+            kiln_c99_note_refusal(inst_site, inst_idx, inst_op, (size_t)kiln_c99_diagnostic_active_depth);
+        }
+        if (status != KILN_C99_OK) return status;
+        *sp -= (argc + 1);
+        stack[(*sp)++] = call_result;
+        return KILN_C99_OK;
+    }
     kiln_value bstack[argc + 1];
     for (size_t i = 0; i < argc + 1; ++i) {
         bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
     }
     size_t bsp = argc + 1;
-    int status = kiln_c99_op_call(host, bstack, &bsp, argc, depth, thrown, inst_site, inst_idx, inst_op, result);
+    int status = kiln_c99_op_call(host, bstack, &bsp, argc, depth, thrown, inst_site, inst_idx, inst_op, NULL);
     if (status != KILN_C99_OK) return status;
     *sp -= (argc + 1);
     stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
@@ -25410,12 +25537,11 @@ static int kiln_c99_op_val_new(kiln_host *host, kiln_val *stack, size_t *sp, siz
 }
 
 static int kiln_c99_op_val_load_cell(kiln_val cell, kiln_val *stack, size_t *sp, kiln_value *thrown) {
-    kiln_value c = kiln_val_to_boundary(cell);
-    kiln_value *target = kiln_c99_cell_of(c);
-    if (target->tag == KILN_VALUE_UNINITIALIZED) {
+    kiln_val *target = (kiln_val *)KILN_VAL_PTR(cell);
+    if (*target == KILN_VAL_UNINITIALIZED) {
         return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
     }
-    stack[(*sp)++] = kiln_val_from_boundary(*target);
+    stack[(*sp)++] = *target;
     return KILN_C99_OK;
 }
 
@@ -25427,10 +25553,12 @@ static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
 }
 
 static int kiln_c99_val_make_cell(kiln_val *slot) {
-    kiln_value b = kiln_val_to_boundary(*slot);
-    int status = kiln_c99_make_cell(&b);
-    if (status != KILN_C99_OK) return status;
-    *slot = kiln_val_from_boundary(b);
+    kiln_val *box = (kiln_val *)kiln_c99_gc_alloc(KILN_GC_CELL, sizeof *box);
+    if (box == NULL) {
+        return KILN_C99_OUT_OF_MEMORY;
+    }
+    *box = *slot;
+    *slot = KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, box);
     return KILN_C99_OK;
 }
 

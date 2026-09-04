@@ -208,8 +208,8 @@ typedef struct kiln_call_context {
     int depth;
 } kiln_call_context;
 
-typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
-                            const kiln_value *receiver, const kiln_value *args, size_t argc);
+typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                            const kiln_val *receiver, const kiln_val *args, size_t argc);
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
@@ -221,8 +221,8 @@ typedef struct kiln_closure {
      * global` finds the realm; a strict one runs with the `undefined` it was passed. */
     int strict;
     int publishes_frame;
-    kiln_value captured_this;
-    kiln_value captured_new_target;
+    kiln_val captured_this;
+    kiln_val captured_new_target;
     /* ...and its `arguments`, which is the enclosing function's list rather than its own. */
     kiln_value captured_arguments;
     /* Calling this builds a generator object instead of running the body. */
@@ -275,7 +275,7 @@ typedef struct kiln_closure {
     uint32_t prologue_resume;
     uint32_t proto;
     uint32_t upvalue_count;
-    kiln_value *upvalues;
+    kiln_val *upvalues;
 } kiln_closure;
 
 /* Properties attached to runtime-provided callables. Method identity is its append-only numeric

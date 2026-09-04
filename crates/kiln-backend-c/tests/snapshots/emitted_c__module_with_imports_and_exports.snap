@@ -23,13 +23,13 @@ static int kiln_module_659cb65dc1a991aa4093bd7539036ba1_body(kiln_host *host, ki
     locals[0] = kiln_val_from_boundary(imports[0]);
     if ((locals[0] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[0]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;
 kiln_label_0:;
-    stack[sp++] = kiln_val_from_boundary(*kiln_c99_cell_of(kiln_val_to_boundary(locals[0])));
+    stack[sp++] = *(kiln_val *)KILN_VAL_PTR(locals[0]);
 kiln_label_1:;
     stack[sp++] = UINT64_C(4607182418800017408);
 kiln_label_2:;
     stack[sp++] = UINT64_C(4607182418800017408);
 kiln_label_3:;
-    { kiln_val callee_val = stack[sp - (size_t)2 - 1]; kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee_val) ? (kiln_closure *)KILN_VAL_PTR(callee_val) : NULL; int status = kiln_c99_op_val_call(host, stack, &sp, (size_t)2, depth, thrown, "kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call", result); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; locals[2] = stack[--sp]; }
+    { kiln_val callee_val = stack[sp - (size_t)2 - 1]; kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee_val) ? (kiln_closure *)KILN_VAL_PTR(callee_val) : NULL; int status = kiln_c99_op_val_call(host, stack, &sp, (size_t)2, depth, thrown, "kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call"); if (status == KILN_C99_THROWN) goto kiln_uncaught; if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) { kiln_c99_note_refusal("kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); goto kiln_refusal; } if (status != KILN_C99_OK) return status; locals[2] = stack[--sp]; }
 kiln_label_4:;
 kiln_label_5:;
     stack[sp++] = locals[2];
@@ -119,7 +119,7 @@ int kiln_module_659cb65dc1a991aa4093bd7539036ba1_namespace_wrapper(kiln_value *r
                 status = KILN_C99_CONTROL_ERROR;
                 goto namespace_failure;
             }
-            value = *kiln_c99_cell_of(value);
+            value = kiln_val_to_boundary(*kiln_c99_cell_of(value));
         }
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);

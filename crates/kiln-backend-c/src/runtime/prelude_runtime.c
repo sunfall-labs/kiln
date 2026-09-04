@@ -198,7 +198,7 @@ static int kiln_c99_temporal_method(kiln_host *host, kiln_value *result, uint64_
 static kiln_value kiln_c99_method(uint64_t code);
 static kiln_value kiln_c99_function(kiln_closure *closure);
 static kiln_closure *kiln_c99_closure_of(kiln_value value);
-static kiln_value *kiln_c99_cell_of(kiln_value value);
+static kiln_val *kiln_c99_cell_of(kiln_value value);
 static kiln_object *kiln_c99_object_of(kiln_value value);
 static kiln_proxy *kiln_c99_proxy_of(kiln_value value);
 static kiln_value kiln_c99_proxy_inner(kiln_value value);
@@ -348,6 +348,7 @@ static int kiln_c99_expand_replacement(kiln_text *out, const uint16_t *pattern,
                                        size_t subject_count, const int64_t *ranges, size_t groups);
 static kiln_regexp *kiln_c99_regexp_of(kiln_value value);
 static int kiln_c99_global_object(kiln_value *out);
+static int kiln_c99_global_object_val(kiln_val *out);
 static int kiln_c99_new_regexp(kiln_value *out, const char *source, size_t source_len,
                                const char *flags, size_t flags_len, kiln_value *thrown);
 static int kiln_c99_string_compare(kiln_value left, kiln_value right);
@@ -2062,16 +2063,16 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     }
     case KILN_GC_CLOSURE: {
         kiln_closure *closure = (kiln_closure *)payload;
-        kiln_c99_gc_mark_values(heap, closure->upvalues, closure->upvalue_count);
-        kiln_c99_gc_mark_value(heap, &closure->captured_this);
-        kiln_c99_gc_mark_value(heap, &closure->captured_new_target);
+        kiln_c99_gc_mark_vals(heap, closure->upvalues, closure->upvalue_count);
+        kiln_c99_gc_mark_val(heap, closure->captured_this);
+        kiln_c99_gc_mark_val(heap, closure->captured_new_target);
         kiln_c99_gc_mark_value(heap, &closure->captured_arguments);
         kiln_c99_gc_mark_value(heap, &closure->prototype);
         kiln_c99_gc_mark_value(heap, &closure->properties);
         break;
     }
     case KILN_GC_CELL:
-        kiln_c99_gc_mark_value(heap, (const kiln_value *)payload);
+        kiln_c99_gc_mark_val(heap, *(const kiln_val *)payload);
         break;
     case KILN_GC_ARRAY: {
         kiln_array *array = (kiln_array *)payload;
@@ -6014,7 +6015,7 @@ static kiln_value kiln_c99_adopted_this;
  *
  * The raw pointer and count rather than an array, because a call must not pay to materialise an
  * `arguments` nothing asked for; the array is built where one is actually read. */
-static const kiln_value *kiln_c99_frame_args;
+static const kiln_val *kiln_c99_frame_args;
 static size_t kiln_c99_frame_argc;
 static kiln_value kiln_c99_captured_arguments;
 static int kiln_c99_frame_is_arrow;
@@ -6080,7 +6081,7 @@ static int kiln_c99_build_arguments_object(kiln_value *out) {
             return status;
         }
         slot->accessor = 0;
-        slot->value = kiln_c99_frame_args[at];
+        slot->value = kiln_val_to_boundary(kiln_c99_frame_args[at]);
         slot->enumerable = 1;
         slot->writable = 1;
         slot->configurable = 1;
@@ -6544,6 +6545,14 @@ static int kiln_c99_global_object(kiln_value *out) {
         }
     }
     *out = *globals;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_global_object_val(kiln_val *out) {
+    kiln_value g;
+    int status = kiln_c99_global_object(&g);
+    if (status != KILN_C99_OK) return status;
+    *out = kiln_val_from_boundary(g);
     return KILN_C99_OK;
 }
 
