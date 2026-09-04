@@ -485,6 +485,7 @@ static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_valu
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
+static void kiln_c99_collection_hash_remove(kiln_collection *collection, size_t entry_idx, kiln_value key);
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right);
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
                             kiln_value *thrown);
@@ -1853,29 +1854,20 @@ static const char *kiln_c99_intern(const char *bytes, size_t len) {
     kiln_gc_heap *heap;
     uint64_t hash;
     kiln_key_entry *entry;
-    kiln_gc_block *block;
-    const char *canonical;
+    char *copy;
     if (len == 0) return kiln_c99_key_empty;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return NULL;
     hash = kiln_c99_key_hash(bytes, len);
     entry = kiln_c99_key_probe(&heap->keys, bytes, len, hash);
     if (entry != NULL) return entry->bytes;
-    /* A string block of exactly this size is adopted as the canonical bytes: the properties
-     * that hold the key keep it marked, and nothing is copied. Anything else -- a constant this
-     * unit did not register, a slice, foreign memory borrowed for a callback -- is copied into a
-     * block of its own, because a weak entry has to name something the collector can see die. */
-    block = kiln_c99_gc_lookup(heap, bytes);
-    if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING &&
-        block->size == len) {
-        canonical = bytes;
-    } else {
-        char *copy = (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len);
-        if (copy == NULL) return NULL;
-        memcpy(copy, bytes, len);
-        canonical = copy;
-    }
-    return kiln_c99_key_insert(&heap->keys, canonical, len, hash, 0);
+    /* A key must be null-terminated because shape keys and property lookups call strlen(ikey),
+     * and string blocks are not otherwise null-terminated. We allocate len + 1 bytes. */
+    copy = (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len + 1);
+    if (copy == NULL) return NULL;
+    memcpy(copy, bytes, len);
+    copy[len] = '\0';
+    return kiln_c99_key_insert(&heap->keys, copy, len, hash, 0);
 }
 
 /* For bytes that outlive the heap. NULL only when the table cannot grow; a unit that gets NULL
@@ -2258,6 +2250,7 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         break;
     case KILN_GC_COLLECTION:
         free(((kiln_collection *)payload)->entries);
+        free(((kiln_collection *)payload)->hash_table);
         break;
     case KILN_GC_TYPED_BUFFER:
         free(((kiln_typed_buffer *)payload)->bytes);
@@ -2532,6 +2525,7 @@ static void kiln_c99_pin_interned_key(const char *ikey) {
     kiln_gc_heap *heap;
     kiln_key_entry *entry;
     size_t len;
+    size_t i;
     if (ikey == NULL || ikey == kiln_c99_key_empty) return;
     heap = kiln_c99_gc_heap();
     if (heap == NULL) return;
@@ -2539,6 +2533,13 @@ static void kiln_c99_pin_interned_key(const char *ikey) {
     entry = kiln_c99_key_probe(&heap->keys, ikey, len, kiln_c99_key_hash(ikey, len));
     if (entry != NULL) {
         entry->pinned = 1;
+        return;
+    }
+    for (i = 0; i < heap->keys.capacity; ++i) {
+        if (heap->keys.entries[i].bytes == ikey) {
+            heap->keys.entries[i].pinned = 1;
+            return;
+        }
     }
 }
 

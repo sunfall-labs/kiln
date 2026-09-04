@@ -3585,6 +3585,7 @@ impl PartialEq for Closure {
 /// `exec` result, or anything a program assigns by name, are ordinary properties that do not.
 /// Keeping one store would mean deciding which a numeric-looking key is on every access.
 #[derive(Debug, Default)]
+#[allow(clippy::mutable_key_type)]
 pub struct ArrayData {
     /// The `length` the language reports, which the dense storage below does not have to reach.
     /// See [`ArrayData::length`].
@@ -3613,6 +3614,7 @@ pub struct ArrayData {
     /// other object with a `length` is, and the fast paths keep the case they are for. Set
     /// conservatively: claiming a hole an array no longer has costs speed, never correctness.
     sparse: std::cell::Cell<bool>,
+    collection_index: RefCell<Option<std::collections::HashMap<CollectionKey, usize>>>,
 }
 
 /// One index property of an array that is not an ordinary element.
@@ -3643,6 +3645,7 @@ impl ArrayData {
             properties: RefCell::new(ObjectData::default()),
             length_writable: std::cell::Cell::new(true),
             elements: RefCell::new(Vec::new()),
+            collection_index: RefCell::new(None),
         })
     }
 
@@ -30891,24 +30894,26 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // The callback may have inserted the key itself, or emptied the map, or both. What the
         // specification does here is look again rather than trust the miss above -- so a
         // callback that inserted the key sees its entry *updated* instead of duplicated.
-        if let Some(index) = find_entry(&entries.borrow(), &key, is_map) {
+        if let Some(index) = find_collection_entry(&entries, &key, is_map) {
             if let Some(Value::Array(pair)) = entries.borrow().get(index) {
                 pair.borrow_mut()[1] = value.clone();
             }
             return Ok(value);
         }
-        entries
-            .borrow_mut()
-            .push(Value::Array(ArrayData::new(vec![key, value.clone()])));
+        let new_idx = entries.borrow().len();
+        entries.borrow_mut().push(Value::Array(ArrayData::new(vec![
+            key.clone(),
+            value.clone(),
+        ])));
+        collection_entry_inserted(&entries, &key, new_idx);
         bump_size(receiver, 1.0);
         Ok(value)
     }
 
     /// The value a map holds under `key`, if it holds one.
     fn collection_value(entries: &Rc<ArrayData>, key: &Value, is_map: bool) -> Option<Value> {
-        let entries = entries.borrow();
-        let index = find_entry(&entries, key, is_map)?;
-        match entries.get(index) {
+        let index = find_collection_entry(entries, key, is_map)?;
+        match entries.borrow().get(index) {
             Some(Value::Array(pair)) => {
                 Some(pair.borrow().get(1).cloned().unwrap_or(Value::Undefined))
             }
@@ -37102,7 +37107,7 @@ fn call_native(
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
             let value = arguments.get(1).cloned().unwrap_or(Value::Undefined);
-            let existing = find_entry(&entries.borrow(), &key, is_map);
+            let existing = find_collection_entry(&entries, &key, is_map);
             match existing {
                 Some(index) if is_map => {
                     // Re-setting a key keeps its insertion position, which iteration order shows.
@@ -37113,11 +37118,13 @@ fn call_native(
                 Some(_) => {}
                 None => {
                     let entry = if is_map {
-                        Value::Array(ArrayData::new(vec![key, value]))
+                        Value::Array(ArrayData::new(vec![key.clone(), value]))
                     } else {
-                        key
+                        key.clone()
                     };
+                    let new_idx = entries.borrow().len();
                     entries.borrow_mut().push(entry);
+                    collection_entry_inserted(&entries, &key, new_idx);
                     bump_size(receiver, 1.0);
                 }
             }
@@ -37126,15 +37133,14 @@ fn call_native(
         Native::SetHas | Native::MapHas | Native::WeakSetHas | Native::WeakMapHas => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
-            let found = find_entry(&entries.borrow(), &key, is_map).is_some();
+            let found = find_collection_entry(&entries, &key, is_map).is_some();
             Value::Boolean(found)
         }
         Native::MapGet | Native::WeakMapGet => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
-            let entries = entries.borrow();
-            match find_entry(&entries, &key, is_map) {
-                Some(index) => match entries.get(index) {
+            match find_collection_entry(&entries, &key, is_map) {
+                Some(index) => match entries.borrow().get(index) {
                     Some(Value::Array(pair)) => {
                         pair.borrow().get(1).cloned().unwrap_or(Value::Undefined)
                     }
@@ -37152,18 +37158,20 @@ fn call_native(
             for index in 0..count {
                 entries.borrow_mut()[index] = Value::Native(Native::Tombstone, RealmId::PRIMARY);
             }
+            collection_cleared(&entries);
             set_size(receiver, 0.0);
             Value::Undefined
         }
         Native::SetDelete | Native::MapDelete | Native::WeakSetDelete | Native::WeakMapDelete => {
             let (entries, is_map) = require_collection(receiver, native)?;
             let key = arguments.first().cloned().unwrap_or(Value::Undefined);
-            let index = find_entry(&entries.borrow(), &key, is_map);
+            let index = find_collection_entry(&entries, &key, is_map);
             match index {
                 Some(index) => {
                     // A hole, not a removal: compacting here would shift every later element
                     // past a live iterator's cursor and skip one.
                     entries.borrow_mut()[index] = Value::Native(Native::Tombstone, RealmId::PRIMARY);
+                    collection_entry_deleted(&entries, &key);
                     bump_size(receiver, -1.0);
                     Value::Boolean(true)
                 }
@@ -38181,6 +38189,125 @@ fn has_property(intrinsics: &Intrinsics, target: &Value, key: &Value) -> bool {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct CollectionKey(pub Value);
+
+impl PartialEq for CollectionKey {
+    fn eq(&self, other: &Self) -> bool {
+        same_value_zero(&self.0, &other.0)
+    }
+}
+
+impl Eq for CollectionKey {}
+
+impl std::hash::Hash for CollectionKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(&self.0).hash(state);
+        match &self.0 {
+            Value::Undefined | Value::Null => {}
+            Value::Boolean(b) => b.hash(state),
+            Value::Number(n) => {
+                if n.is_nan() {
+                    0x7ff8_0000_0000_0000_u64.hash(state);
+                } else if *n == 0.0 {
+                    0.0_f64.to_bits().hash(state);
+                } else {
+                    n.to_bits().hash(state);
+                }
+            }
+            Value::String(s) => s.hash(state),
+            Value::BigInt(b) => b.hash(state),
+            Value::Symbol(Symbol::WellKnown(wk)) => {
+                std::mem::discriminant(wk).hash(state);
+            }
+            Value::Symbol(Symbol::Unique(u)) => {
+                (Rc::as_ptr(u) as usize).hash(state);
+            }
+            Value::Native(nat, realm) => {
+                std::mem::discriminant(nat).hash(state);
+                realm.hash(state);
+            }
+            Value::Callback(cb, realm) => {
+                std::mem::discriminant(cb).hash(state);
+                realm.hash(state);
+            }
+            Value::Settler(p, one) => {
+                (Rc::as_ptr(p) as usize).hash(state);
+                one.hash(state);
+            }
+            Value::Cell(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Generator(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Promise(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::RegExp(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Date(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Temporal(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Intl(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Capability(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Element(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Array(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::TypedArray(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::ArrayBuffer(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::DataView(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Proxy(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Bound(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Wrapped(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::CommonJsRequire(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::CommonJsResolve(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Object(a) => (Rc::as_ptr(a) as usize).hash(state),
+            Value::Function(a) => (Rc::as_ptr(a) as usize).hash(state),
+        }
+    }
+}
+
+/// Where a collection's backing entries hold this key, or `None`.
+#[allow(clippy::mutable_key_type)]
+fn find_collection_entry(entries: &Rc<ArrayData>, key: &Value, is_map: bool) -> Option<usize> {
+    if entries.borrow().len() < 16 {
+        return find_entry(&entries.borrow(), key, is_map);
+    }
+    let mut index_opt = entries.collection_index.borrow_mut();
+    let index_map = index_opt.get_or_insert_with(|| {
+        let mut map = std::collections::HashMap::new();
+        for (idx, entry) in entries.borrow().iter().enumerate() {
+            match entry {
+                Value::Native(Native::Tombstone, _) => {}
+                Value::Array(pair) if is_map => {
+                    if let Some(k) = pair.borrow().first() {
+                        map.entry(CollectionKey(k.clone())).or_insert(idx);
+                    }
+                }
+                other if !is_map => {
+                    map.entry(CollectionKey(other.clone())).or_insert(idx);
+                }
+                _ => {}
+            }
+        }
+        map
+    });
+    index_map.get(&CollectionKey(key.clone())).copied()
+}
+
+#[allow(clippy::mutable_key_type)]
+fn collection_entry_inserted(entries: &Rc<ArrayData>, key: &Value, index: usize) {
+    if let Some(index_map) = entries.collection_index.borrow_mut().as_mut() {
+        index_map.insert(CollectionKey(key.clone()), index);
+    }
+}
+
+#[allow(clippy::mutable_key_type)]
+fn collection_entry_deleted(entries: &Rc<ArrayData>, key: &Value) {
+    if let Some(index_map) = entries.collection_index.borrow_mut().as_mut() {
+        index_map.remove(&CollectionKey(key.clone()));
+    }
+}
+
+#[allow(clippy::mutable_key_type)]
+fn collection_cleared(entries: &Rc<ArrayData>) {
+    if let Some(index_map) = entries.collection_index.borrow_mut().as_mut() {
+        index_map.clear();
+    }
+}
+
 /// The properties an array exposes, shared by reads and by `in` so the two cannot disagree.
 /// The index of `key` among live entries, or `None`.
 fn find_entry(entries: &[Value], key: &Value, is_map: bool) -> Option<usize> {
@@ -38878,9 +39005,7 @@ fn set_data_has(entries: &Rc<ArrayData>, value: &Value) -> bool {
 
 /// Where a set's backing entries hold this value, or `None`.
 fn set_data_index(entries: &Rc<ArrayData>, value: &Value) -> Option<usize> {
-    entries.borrow().iter().position(|entry| {
-        !matches!(entry, Value::Native(Native::Tombstone, _)) && same_value_zero(entry, value)
-    })
+    find_collection_entry(entries, value, false)
 }
 
 /// The live values of a set's backing entries, in insertion order.

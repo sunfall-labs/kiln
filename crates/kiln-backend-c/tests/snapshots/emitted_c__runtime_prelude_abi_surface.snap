@@ -1073,6 +1073,7 @@ static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_valu
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items);
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key);
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value);
+static void kiln_c99_collection_hash_remove(kiln_collection *collection, size_t entry_idx, kiln_value key);
 static int kiln_c99_same_value_zero(kiln_value left, kiln_value right);
 static int kiln_c99_iterate(kiln_host *host, kiln_value target, kiln_value source, int depth,
 static kiln_value kiln_c99_hole(void);
@@ -1682,6 +1683,9 @@ static kiln_proxy *kiln_c99_proxy_of(kiln_value value) {
 static kiln_value kiln_c99_proxy_inner(kiln_value value) {
 static int kiln_c99_new_proxy(kiln_value *out, kiln_value target, kiln_value handler) {
 static int kiln_c99_new_collection(kiln_value *out, int is_map, int is_weak) {
+static uint64_t kiln_c99_value_hash(kiln_value v) {
+static int kiln_c99_collection_rehash(kiln_collection *collection, size_t new_cap) {
+static void kiln_c99_collection_hash_remove(kiln_collection *collection, size_t entry_idx, kiln_value key) {
 static double kiln_c99_collection_find(kiln_collection *collection, kiln_value key) {
 static int kiln_c99_collection_put(kiln_value target, kiln_value key, kiln_value value) {
 static int kiln_c99_new_iterator(kiln_value *out, kiln_value items) {

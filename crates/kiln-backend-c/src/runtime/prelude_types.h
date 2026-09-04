@@ -543,6 +543,8 @@ typedef struct kiln_collection {
     /* How many are still there, which is what `size` reports. */
     size_t live;
     size_t capacity;
+    uint32_t *hash_table;
+    size_t hash_capacity;
     int is_map;
     /* Weak collections share the identity-keyed storage and methods, but deliberately expose
      * neither size nor iteration. The native runtime has no tracing collector yet, so entries
