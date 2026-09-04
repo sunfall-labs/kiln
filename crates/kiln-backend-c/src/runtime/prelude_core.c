@@ -2731,6 +2731,17 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
                         }
                     }
                 }
+                if (object->elements != NULL) {
+                    double index_num = kiln_c99_key_index(key, key_len);
+                    if (index_num >= 0.0 && index_num < 100000.0) {
+                        size_t elem_idx = (size_t)index_num;
+                        if (elem_idx < object->element_count &&
+                            !kiln_c99_is_hole(object->elements[elem_idx])) {
+                            *out = object->elements[elem_idx];
+                            return KILN_C99_OK;
+                        }
+                    }
+                }
                 if (object->properties == NULL) {
                     current = object->prototype;
                     continue;
@@ -11809,6 +11820,26 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             }
             if (object->properties == NULL && object->shape != NULL) {
                 status = kiln_c99_new_array(&built);
+                if (object->elements != NULL) {
+                    for (index = 0; index < object->element_count && status == KILN_C99_OK; ++index) {
+                        if (kiln_c99_is_hole(object->elements[index])) continue;
+                        char num_buf[32];
+                        int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                        kiln_value key = kiln_c99_copy_text(num_buf, (size_t)nlen);
+                        kiln_value val = object->elements[index];
+                        if (code == KILN_C99_METHOD_OBJECT_KEYS) {
+                            status = kiln_c99_array_push(built, key);
+                        } else if (code == KILN_C99_METHOD_OBJECT_VALUES) {
+                            status = kiln_c99_array_push(built, val);
+                        } else {
+                            kiln_value pair;
+                            status = kiln_c99_new_array(&pair);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, key);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(pair, val);
+                            if (status == KILN_C99_OK) status = kiln_c99_array_push(built, pair);
+                        }
+                    }
+                }
                 for (index = 0; index < object->shape->property_count && status == KILN_C99_OK; ++index) {
                     const char *skey = object->shape->keys[index];
                     size_t key_len = strlen(skey);
@@ -11908,6 +11939,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 }
                 source = kiln_c99_object_of(src_val);
                 if (source->properties == NULL && source->shape != NULL) {
+                    if (source->elements != NULL) {
+                        for (index = 0; index < source->element_count; ++index) {
+                            if (kiln_c99_is_hole(source->elements[index])) continue;
+                            char num_buf[32];
+                            int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                            status = kiln_c99_put(host, target, num_buf, (size_t)nlen, source->elements[index], depth, thrown);
+                            if (status != KILN_C99_OK) return status;
+                        }
+                    }
                     for (index = 0; index < source->shape->property_count; ++index) {
                         const char *skey = source->shape->keys[index];
                         size_t skey_len = strlen(skey);
@@ -15776,6 +15816,21 @@ static int kiln_c99_delete(kiln_host *host, kiln_value target, const char *key, 
         return KILN_C99_OK;
     }
     object = kiln_c99_object_of(target);
+    if (object->elements != NULL) {
+        double index_num = kiln_c99_key_index(key, key_len);
+        if (index_num >= 0.0 && index_num < 100000.0) {
+            size_t elem_idx = (size_t)index_num;
+            if (object->frozen) {
+                *answer = (elem_idx >= object->element_count || kiln_c99_is_hole(object->elements[elem_idx]));
+                return KILN_C99_OK;
+            }
+            if (elem_idx < object->element_count) {
+                object->elements[elem_idx] = kiln_c99_hole();
+            }
+            *answer = 1;
+            return KILN_C99_OK;
+        }
+    }
     if (object->shape != NULL) {
         kiln_c99_ensure_dictionary(object);
         object->shape = NULL;
@@ -16189,6 +16244,15 @@ static int kiln_c99_spread_object(kiln_host *host, kiln_value target, kiln_value
     }
     object = kiln_c99_object_of(named);
     if (object->properties == NULL && object->shape != NULL) {
+        if (object->elements != NULL) {
+            for (index = 0; index < object->element_count; ++index) {
+                if (kiln_c99_is_hole(object->elements[index])) continue;
+                char num_buf[32];
+                int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                int status = kiln_c99_put(host, target, num_buf, (size_t)nlen, object->elements[index], depth, thrown);
+                if (status != KILN_C99_OK) return status;
+            }
+        }
         size_t length = object->shape->property_count;
         for (index = 0; index < length && object->shape != NULL && index < object->shape->property_count; ++index) {
             const char *skey = object->shape->keys[index];
@@ -17007,6 +17071,17 @@ static int kiln_c99_own_property_present(kiln_host *host, kiln_value target, kil
                 *found = 1;
                 return KILN_C99_OK;
             }
+            if (object->elements != NULL) {
+                double index_num = kiln_c99_key_index(name.ptr, name.len);
+                if (index_num >= 0.0 && index_num < 100000.0) {
+                    size_t elem_idx = (size_t)index_num;
+                    if (elem_idx < object->element_count &&
+                        !kiln_c99_is_hole(object->elements[elem_idx])) {
+                        *found = 1;
+                        return KILN_C99_OK;
+                    }
+                }
+            }
             if (object->properties == NULL) {
                 *found = 0;
                 return KILN_C99_OK;
@@ -17636,6 +17711,37 @@ static int kiln_c99_json_value(kiln_host *host, kiln_text *text, kiln_value valu
         frame.container = (const void *)object;
         KILN_JSON_OPEN("{");
         if (object->properties == NULL && object->shape != NULL) {
+            if (object->elements != NULL) {
+                for (index = 0; index < object->element_count; ++index) {
+                    if (kiln_c99_is_hole(object->elements[index])) continue;
+                    char num_buf[32];
+                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                    kiln_value member = object->elements[index];
+                    kiln_text member_text = {NULL, 0, 0};
+                    int wrote;
+                    status = kiln_c99_json_value(host, &member_text, member, indent, indent_len,
+                                                 nested.bytes, nested.len, &wrote, depth, &frame, thrown);
+                    if (status != KILN_C99_OK) {
+                        free(nested.bytes);
+                        free(member_text.bytes);
+                        return status;
+                    }
+                    if (!wrote) {
+                        free(member_text.bytes);
+                        continue;
+                    }
+                    KILN_JSON_BREAK(written == 0);
+                    if (kiln_c99_json_quote(text, num_buf, (size_t)nlen) != KILN_C99_OK ||
+                        kiln_c99_text_append_c(text, indent_len != 0 ? ": " : ":") != KILN_C99_OK ||
+                        kiln_c99_text_append(text, member_text.bytes, member_text.len) != KILN_C99_OK) {
+                        free(nested.bytes);
+                        free(member_text.bytes);
+                        return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    free(member_text.bytes);
+                    written += 1;
+                }
+            }
             length = object->shape->property_count;
             for (index = 0; index < length && object->shape != NULL && index < object->shape->property_count; ++index) {
                 const char *skey = object->shape->keys[index];

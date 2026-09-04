@@ -2032,6 +2032,9 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
                 kiln_c99_gc_mark_value(heap, &object->slots[index]);
             }
         }
+        if (object->elements != NULL) {
+            kiln_c99_gc_mark_values(heap, object->elements, object->element_count);
+        }
         for (index = 0; index < object->count; ++index) {
             const kiln_property *property = &object->properties[index];
             kiln_c99_gc_mark_block(heap, property->key);
@@ -2226,6 +2229,7 @@ static void kiln_c99_gc_finalize(kiln_gc_block *block) {
         if (((kiln_object *)payload)->slots != ((kiln_object *)payload)->inline_slots) {
             free(((kiln_object *)payload)->slots);
         }
+        free(((kiln_object *)payload)->elements);
         break;
     case KILN_GC_CLOSURE:
         free(((kiln_closure *)payload)->upvalues);
@@ -2553,6 +2557,9 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     kiln_shape *shape;
     size_t i;
     int status;
+    size_t active_elements = 0;
+    size_t total_properties;
+    size_t pos = 0;
     if (object == NULL) {
         return KILN_C99_OK;
     }
@@ -2560,31 +2567,64 @@ static int kiln_c99_ensure_dictionary(kiln_object *object) {
     if (shape == NULL) {
         return KILN_C99_OK;
     }
-    if (shape->property_count > object->capacity) {
+    if (object->elements != NULL) {
+        for (i = 0; i < object->element_count; ++i) {
+            if (object->elements[i].tag != KILN_VALUE_HOLE) {
+                active_elements++;
+            }
+        }
+    }
+    total_properties = shape->property_count + active_elements;
+    if (total_properties > object->capacity) {
         status = kiln_c99_reserve((void **)&object->properties, &object->capacity,
-                                  shape->property_count, sizeof *object->properties);
+                                  total_properties, sizeof *object->properties);
         if (status != KILN_C99_OK) {
             return status;
         }
     }
+    if (object->elements != NULL) {
+        for (i = 0; i < object->element_count; ++i) {
+            if (object->elements[i].tag == KILN_VALUE_HOLE) continue;
+            char num_buf[32];
+            int nlen = kiln_number_to_js_string((double)i, num_buf, sizeof num_buf);
+            const char *ikey = kiln_c99_intern(num_buf, (size_t)nlen);
+            object->properties[pos].key = ikey;
+            object->properties[pos].key_len = (size_t)nlen;
+            object->properties[pos].enumerable = 1;
+            object->properties[pos].writable = 1;
+            object->properties[pos].configurable = 1;
+            object->properties[pos].symbol_hidden = 0;
+            object->properties[pos].accessor = 0;
+            object->properties[pos].refused = 0;
+            object->properties[pos].value = object->elements[i];
+            object->properties[pos].getter = kiln_c99_undefined();
+            object->properties[pos].setter = kiln_c99_undefined();
+            pos++;
+        }
+        free(object->elements);
+        object->elements = NULL;
+        object->element_count = 0;
+        object->element_capacity = 0;
+    }
     for (i = 0; i < shape->property_count; ++i) {
         const char *key = shape->keys[i];
         size_t key_len = strlen(key);
-        object->properties[i].key = key;
-        object->properties[i].key_len = key_len;
-        object->properties[i].enumerable = !(key_len >= 2 && key[0] == '@' && key[1] == '@');
-        object->properties[i].writable = 1;
-        object->properties[i].configurable = 1;
-        object->properties[i].symbol_hidden = 0;
-        object->properties[i].accessor = 0;
-        object->properties[i].refused = 0;
-        object->properties[i].value = (object->slots != NULL && i < object->slot_capacity)
+        object->properties[pos].key = key;
+        object->properties[pos].key_len = key_len;
+        object->properties[pos].enumerable = !(key_len >= 2 && key[0] == '@' && key[1] == '@');
+        object->properties[pos].writable = 1;
+        object->properties[pos].configurable = 1;
+        object->properties[pos].symbol_hidden = 0;
+        object->properties[pos].accessor = 0;
+        object->properties[pos].refused = 0;
+        object->properties[pos].value = (object->slots != NULL && i < object->slot_capacity)
                                           ? object->slots[i]
                                           : kiln_c99_undefined();
-        object->properties[i].getter = kiln_c99_undefined();
-        object->properties[i].setter = kiln_c99_undefined();
+        object->properties[pos].getter = kiln_c99_undefined();
+        object->properties[pos].setter = kiln_c99_undefined();
+        pos++;
     }
-    object->count = shape->property_count;
+    object->count = pos;
     return KILN_C99_OK;
 }
 
@@ -2610,6 +2650,9 @@ static int kiln_c99_new_object(kiln_value *out) {
     for (size_t slot_i = 0; slot_i < KILN_C99_INLINE_SLOTS; ++slot_i) {
         object->inline_slots[slot_i] = kiln_c99_undefined();
     }
+    object->elements = NULL;
+    object->element_count = 0;
+    object->element_capacity = 0;
     *out = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)object, NULL, 0);
     return KILN_C99_OK;
 }
@@ -4012,6 +4055,16 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
      * That is most writes on a request or response past its first: the key is already there. */
     /* Fast path for shape-based objects (ADR 0050) */
     if (object->shape != NULL && object->prototype.tag == KILN_VALUE_UNDEFINED) {
+        if (object->elements != NULL) {
+            double index_num = kiln_c99_key_index(key, key_len);
+            if (index_num >= 0.0 && index_num < 100000.0) {
+                size_t elem_idx = (size_t)index_num;
+                if (elem_idx < object->element_count && object->elements[elem_idx].tag != KILN_VALUE_HOLE) {
+                    object->elements[elem_idx] = value;
+                    return KILN_C99_OK;
+                }
+            }
+        }
         uint32_t slot;
         if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
             if (slot < object->slot_capacity) {
@@ -4052,6 +4105,25 @@ static int kiln_c99_put_mode_ikey(kiln_host *host, kiln_value target, const char
                     object->shape = next_shape;
                     return KILN_C99_OK;
                 }
+            } else if (index_num < 100000.0) {
+                size_t elem_idx = (size_t)index_num;
+                if (elem_idx >= object->element_capacity) {
+                    size_t new_cap = object->element_capacity == 0 ? 8 : object->element_capacity * 2;
+                    kiln_value *new_elements;
+                    while (elem_idx >= new_cap) new_cap *= 2;
+                    new_elements = (kiln_value *)realloc(object->elements, new_cap * sizeof(kiln_value));
+                    if (new_elements == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    for (size_t fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
+                        new_elements[fill_i] = kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0);
+                    }
+                    object->elements = new_elements;
+                    object->element_capacity = new_cap;
+                }
+                object->elements[elem_idx] = value;
+                if (elem_idx >= object->element_count) {
+                    object->element_count = elem_idx + 1;
+                }
+                return KILN_C99_OK;
             }
         }
     }
