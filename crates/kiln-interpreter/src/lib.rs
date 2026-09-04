@@ -13136,6 +13136,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             | BuiltinAccessor::TypedArrayByteLength
             | BuiltinAccessor::TypedArrayByteOffset
             | BuiltinAccessor::TypedArrayLength => matches!(receiver, Value::TypedArray(_)),
+            // `thisSymbolValue`: a symbol, or a symbol in a wrapper.
+            BuiltinAccessor::SymbolDescription => {
+                matches!(receiver, Value::Symbol(_))
+                    || matches!(wrapped_primitive(receiver), Some(Value::Symbol(_)))
+            }
             BuiltinAccessor::CollectionSize(is_map) => {
                 !is_weak_collection(receiver)
                     && collection_state(receiver)
@@ -13154,6 +13159,16 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // A collection's count lives in a reserved slot rather than under its own name, so that
         // it is not an own property of every instance -- which is what
         // `Object.getOwnPropertyNames(new Map())` reported before this accessor existed.
+        // A symbol's description is a slot on the symbol, so a *wrapper* has to be opened to
+        // reach it: reading `description` off the wrapper object finds nothing, and answering
+        // `undefined` there is indistinguishable from a symbol that genuinely has none.
+        if matches!(accessor, BuiltinAccessor::SymbolDescription) {
+            let symbol = match receiver {
+                Value::Symbol(_) => receiver.clone(),
+                other => wrapped_primitive(other).unwrap_or(Value::Undefined),
+            };
+            return self.read_property(&symbol, "description", instruction);
+        }
         if matches!(accessor, BuiltinAccessor::CollectionSize(_)) {
             let Value::Object(object) = receiver else {
                 unreachable!("the brand check passed, so this is a collection object");
@@ -41747,6 +41762,8 @@ pub enum BuiltinAccessor {
     DisposableStackDisposed,
     /// `AsyncDisposableStack.prototype.disposed`.
     AsyncDisposableStackDisposed,
+    /// `Symbol.prototype.description`, which is an accessor and not a slot on the instance.
+    SymbolDescription,
 }
 
 impl BuiltinAccessor {
@@ -41765,6 +41782,7 @@ impl BuiltinAccessor {
             Self::DataViewBuffer | Self::TypedArrayBuffer => "buffer",
             Self::DataViewByteOffset | Self::TypedArrayByteOffset => "byteOffset",
             Self::TypedArrayLength => "length",
+            Self::SymbolDescription => "description",
             Self::CollectionSize(_) => "size",
             Self::DisposableStackDisposed | Self::AsyncDisposableStackDisposed => "disposed",
             Self::Species => WellKnown::Species.property_key(),
@@ -41786,6 +41804,7 @@ fn prototype_accessor_names(table: PrototypeTable) -> &'static [&'static str] {
         PrototypeTable::DataView => &["buffer", "byteLength", "byteOffset"],
         PrototypeTable::TypedArray => &["buffer", "byteLength", "byteOffset", "length"],
         PrototypeTable::Map | PrototypeTable::Set => &["size"],
+        PrototypeTable::Symbol => &["description"],
         PrototypeTable::DisposableStack | PrototypeTable::AsyncDisposableStack => &["disposed"],
         _ => &[],
     }
@@ -41812,6 +41831,7 @@ fn prototype_accessor(table: PrototypeTable, key: &str) -> Option<BuiltinAccesso
         (PrototypeTable::TypedArray, "byteLength") => BuiltinAccessor::TypedArrayByteLength,
         (PrototypeTable::TypedArray, "byteOffset") => BuiltinAccessor::TypedArrayByteOffset,
         (PrototypeTable::TypedArray, "length") => BuiltinAccessor::TypedArrayLength,
+        (PrototypeTable::Symbol, "description") => BuiltinAccessor::SymbolDescription,
         (PrototypeTable::Map, "size") => BuiltinAccessor::CollectionSize(true),
         (PrototypeTable::Set, "size") => BuiltinAccessor::CollectionSize(false),
         (PrototypeTable::DisposableStack, "disposed") => BuiltinAccessor::DisposableStackDisposed,
