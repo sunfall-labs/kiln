@@ -86,3 +86,18 @@ In `prelude_declarations.h`:
 - [x] **Milestone 3**: Overhaul `kiln_body_fn` calling convention with `kiln_call_context` across `prelude_types.h`, `prelude_declarations.h`, `prelude_core.c`, and `lib.rs` (ADR 0052: zero argument spills on SysV AMD64 & AArch64).
 - [x] **Milestone 4**: Zero-copy call argument passing: eliminated temporary argument array copying and heap allocations in `kiln_c99_op_call` and `kiln_c99_op_call_method`.
 - [x] **Milestone 5**: Stack traffic reduction via instruction fusion: fused `Const` + `StoreLocal`, `LoadLocal` + `StoreLocal`, and `Binary` + `StoreLocal` into direct register/local writes, eliminating stack push/pop churn in loops.
+- [x] **Milestone 6**: Multi-instruction operand-level fusion: 4-instruction sequences (`LoadLocal` + `Const`/`LoadLocal` + `Binary` + `JumpIf*`/`StoreLocal`) bypass the operand stack entirely, generating pure C scalar arithmetic.
+- [x] **Milestone 7**: Diagnostic reset hoisting: lifted 10 global variable memory writes out of instruction loops into the function prologue, eliminating billions of redundant writes in tight loops and enabling Clang auto-vectorization.
+- [x] **Milestone 8**: Direct static call devirtualization across all module functions: emitted static inline prototypes and direct static calls for internal helper functions, enabling Clang/LLVM to inline callees.
+- [x] **Milestone 9**: Expression-level binary fusion: fused `LoadLocal` + `Const`/`LoadLocal` + `Binary` expressions directly into register-level evaluation.
+- [x] **Milestone 10**: Call result assignment fusion: fused `Call` + `Dup` + `StoreLocal` + `Pop` sequences (`y = f(x)`) directly into `locals[dst] = call_result`.
+
+## Benchmark Results (Empirical Release Measurements, 5 runs median)
+
+| Benchmark | Baseline (`85f8aeb`) | After Initial Wasmi 2.0 | **After Full Inlining & Expression Fusion** | Total Speedup vs Baseline |
+| :--- | :--- | :--- | :--- | :--- |
+| **Numerical Loop (`50M` iterations)** | `1553.9 ms` | `1195.1 ms` | **`793.0 ms`** | **1.96x (+49.0% runtime cut)** |
+| **Recursive Fibonacci (`fib(30) × 5`)** | `751.7 ms` | `549.9 ms` | **`426.0 ms`** | **1.76x (+43.3% runtime cut)** |
+| **Collatz Conjecture (`300k` sequence)** | `1936.1 ms` | `1613.2 ms` | **`1116.3 ms`** | **1.73x (+42.3% runtime cut)** |
+| **Function Dispatch (`15M` calls)** | `1007.5 ms` | `782.7 ms` | **`731.2 ms`** | **1.38x (+27.4% runtime cut)** |
+

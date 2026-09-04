@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 20;
+pub const C_GENERATOR_VERSION: u32 = 24;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -604,7 +604,7 @@ fn render_functions(
     for index in 0..program.functions.len() {
         writeln!(
             output,
-            "static int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);"
+            "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);"
         )
         .unwrap();
     }
@@ -734,6 +734,11 @@ fn relational_op_symbol(operator: BinaryOp) -> Option<&'static str> {
     }
 }
 
+fn is_fusible_binary(operator: BinaryOp) -> bool {
+    !matches!(operator, BinaryOp::In | BinaryOp::InstanceOf)
+        && relational_op_symbol(operator).is_none()
+}
+
 fn can_fuse_compare_jump(
     code: &[Instruction],
     index: usize,
@@ -762,6 +767,9 @@ fn can_fuse_binary_store(
     let Instruction::Binary(op) = code.get(index)? else {
         return None;
     };
+    if !is_fusible_binary(*op) {
+        return None;
+    }
     if can_fuse_compare_jump(code, index, jump_targets).is_some() {
         return None;
     }
@@ -895,7 +903,7 @@ fn can_fuse_load_const_binary_store(
     let Instruction::Binary(op) = code.get(index + 2)? else {
         return None;
     };
-    if relational_op_symbol(*op).is_some() {
+    if !is_fusible_binary(*op) {
         return None;
     }
     let Instruction::StoreLocal(dst) = code.get(index + 3)? else {
@@ -924,13 +932,130 @@ fn can_fuse_load_load_binary_store(
     let Instruction::Binary(op) = code.get(index + 2)? else {
         return None;
     };
-    if relational_op_symbol(*op).is_some() {
+    if !is_fusible_binary(*op) {
         return None;
     }
     let Instruction::StoreLocal(dst) = code.get(index + 3)? else {
         return None;
     };
     Some((*src1, *src2, *op, *dst))
+}
+
+fn can_fuse_call_store(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<u32> {
+    if !matches!(code.get(index)?, Instruction::Call { .. }) {
+        return None;
+    }
+    let next_index = index + 1;
+    if jump_targets.contains(&(next_index as u32)) {
+        return None;
+    }
+    match code.get(next_index)? {
+        Instruction::StoreLocal(dst) => Some(*dst),
+        _ => None,
+    }
+}
+
+fn can_fuse_call_pop(code: &[Instruction], index: usize, jump_targets: &HashSet<u32>) -> bool {
+    if !matches!(code.get(index), Some(Instruction::Call { .. })) {
+        return false;
+    }
+    let next_index = index + 1;
+    if jump_targets.contains(&(next_index as u32)) {
+        return false;
+    }
+    matches!(code.get(next_index), Some(Instruction::Pop))
+}
+
+fn can_fuse_call_dup_store_pop(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<u32> {
+    if !matches!(code.get(index), Some(Instruction::Call { .. })) {
+        return None;
+    }
+    if jump_targets.contains(&((index + 1) as u32))
+        || jump_targets.contains(&((index + 2) as u32))
+        || jump_targets.contains(&((index + 3) as u32))
+    {
+        return None;
+    }
+    if !matches!(code.get(index + 1), Some(Instruction::Dup)) {
+        return None;
+    }
+    let Instruction::StoreLocal(dst) = code.get(index + 2)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 3), Some(Instruction::Pop)) {
+        return None;
+    }
+    Some(*dst)
+}
+
+fn can_fuse_load_const_binary(
+    code: &[Instruction],
+    constants: &[Constant],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u64, BinaryOp)> {
+    if can_fuse_load_const_compare_jump(code, constants, index, jump_targets).is_some()
+        || can_fuse_load_const_binary_store(code, constants, index, jump_targets).is_some()
+    {
+        return None;
+    }
+    let Instruction::LoadLocal(src) = code.get(index)? else {
+        return None;
+    };
+    if jump_targets.contains(&((index + 1) as u32)) || jump_targets.contains(&((index + 2) as u32))
+    {
+        return None;
+    }
+    let Instruction::Const(c) = code.get(index + 1)? else {
+        return None;
+    };
+    let Constant::Number(bits) = constants.get(*c as usize)? else {
+        return None;
+    };
+    let Instruction::Binary(op) = code.get(index + 2)? else {
+        return None;
+    };
+    if !is_fusible_binary(*op) {
+        return None;
+    }
+    Some((*src, *bits, *op))
+}
+
+fn can_fuse_load_load_binary(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, BinaryOp)> {
+    if can_fuse_load_load_compare_jump(code, index, jump_targets).is_some()
+        || can_fuse_load_load_binary_store(code, index, jump_targets).is_some()
+    {
+        return None;
+    }
+    let Instruction::LoadLocal(src1) = code.get(index)? else {
+        return None;
+    };
+    if jump_targets.contains(&((index + 1) as u32)) || jump_targets.contains(&((index + 2) as u32))
+    {
+        return None;
+    }
+    let Instruction::LoadLocal(src2) = code.get(index + 1)? else {
+        return None;
+    };
+    let Instruction::Binary(op) = code.get(index + 2)? else {
+        return None;
+    };
+    if !is_fusible_binary(*op) {
+        return None;
+    }
+    Some((*src1, *src2, *op))
 }
 
 fn is_fused_with_previous(
@@ -947,8 +1072,20 @@ fn is_fused_with_previous(
         || can_fuse_binary_store(code, prev, jump_targets).is_some()
         || can_fuse_const_store(code, prev, jump_targets).is_some()
         || can_fuse_load_store(code, prev, jump_targets).is_some()
+        || can_fuse_call_store(code, prev, jump_targets).is_some()
+        || can_fuse_call_pop(code, prev, jump_targets)
     {
         return true;
+    }
+    for offset in 1..=2 {
+        if index >= offset {
+            let start = index - offset;
+            if can_fuse_load_const_binary(code, constants, start, jump_targets).is_some()
+                || can_fuse_load_load_binary(code, start, jump_targets).is_some()
+            {
+                return true;
+            }
+        }
     }
     for offset in 1..=3 {
         if index >= offset {
@@ -957,6 +1094,7 @@ fn is_fused_with_previous(
                 || can_fuse_load_load_compare_jump(code, start, jump_targets).is_some()
                 || can_fuse_load_const_binary_store(code, constants, start, jump_targets).is_some()
                 || can_fuse_load_load_binary_store(code, start, jump_targets).is_some()
+                || can_fuse_call_dup_store_pop(code, start, jump_targets).is_some()
             {
                 return true;
             }
@@ -990,7 +1128,7 @@ fn render_function(
     }
     writeln!(
         output,
-        "static int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{"
+        "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
@@ -1114,7 +1252,6 @@ fn render_function(
         guarded: dead_zone_slots(&proto.code),
         code: &proto.code,
         jump_targets,
-        self_fn: Some(format!("{symbol}_fn_{index}")),
     };
     for position in 0..proto.code.len() {
         writeln!(output, "kiln_label_{position}:;").unwrap();
@@ -1669,6 +1806,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         false,
     );
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
+    output.push_str("    kiln_c99_reset_diagnostics();\n");
     for local in 0..program.local_count {
         writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
     }
@@ -1690,7 +1828,6 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         guarded: dead_zone_slots(&program.code),
         code: &program.code,
         jump_targets,
-        self_fn: None,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -1879,7 +2016,6 @@ fn render_module(
         guarded: dead_zone_slots(&program.code),
         code: &program.code,
         jump_targets,
-        self_fn: None,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -1993,7 +2129,6 @@ struct Emitter<'a> {
     guarded: HashSet<u32>,
     code: &'a [Instruction],
     jump_targets: HashSet<u32>,
-    self_fn: Option<String>,
 }
 
 enum ReturnSite<'a> {
@@ -2032,14 +2167,7 @@ fn emit_instruction(
         guarded,
         code: _,
         jump_targets: _,
-        self_fn: _,
     } = emitter;
-    // A public scalar instruction starts a fresh diagnostic attempt. Function bodies do not
-    // clear this state: when one calls another, the deepest failing body owns the refusal
-    // provenance and every caller preserves it while unwinding.
-    if matches!(site, ReturnSite::Entry { exports: None, .. }) {
-        output.push_str("    kiln_c99_reset_diagnostics();\n");
-    }
     let before = output.len();
     let instruction_site = c_string(diagnostic_site);
     let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
@@ -2444,13 +2572,50 @@ fn emit_instruction(
         Instruction::Call { argc } => {
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
-            let direct_call = if let Some(self_fn) = &emitter.self_fn {
+            let mut static_branches = String::new();
+            if emitter.functions.len() <= 32 {
+                for (i, _) in emitter.functions.iter().enumerate() {
+                    let fn_name = format!("{}_fn_{i}", emitter.symbol);
+                    if static_branches.is_empty() {
+                        static_branches.push_str(&format!(
+                            "if (plain->body == (kiln_body_fn){fn_name}) {{ status = {fn_name}(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
+                        ));
+                    } else {
+                        static_branches.push_str(&format!(
+                            " else if (plain->body == (kiln_body_fn){fn_name}) {{ status = {fn_name}(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }}"
+                        ));
+                    }
+                }
+            }
+            let (success_action, fallback_action) =
+                if let Some(dst) = can_fuse_call_dup_store_pop(emitter.code, index, &emitter.jump_targets) {
+                    (
+                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = call_result;"),
+                        format!("locals[{dst}] = stack[--sp];"),
+                    )
+                } else if let Some(dst) = can_fuse_call_store(emitter.code, index, &emitter.jump_targets) {
+                    (
+                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = call_result;"),
+                        format!("locals[{dst}] = stack[--sp];"),
+                    )
+                } else if can_fuse_call_pop(emitter.code, index, &emitter.jump_targets) {
+                    (
+                        format!("sp -= ((size_t){argc} + 1);"),
+                        "--sp;".to_string(),
+                    )
+                } else {
+                    (
+                        format!("sp -= ((size_t){argc} + 1); stack[sp++] = call_result;"),
+                        String::new(),
+                    )
+                };
+            let direct_call = if static_branches.is_empty() {
                 format!(
-                    "if (KILN_LIKELY(plain != NULL && plain->body == (kiln_body_fn){self_fn} && !plain->publishes_frame && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_value call_result = kiln_c99_undefined(); const kiln_value *call_args = {argc} > 0 ? &stack[sp - (size_t){argc}] : NULL; kiln_value recv = plain->arrow ? plain->captured_this : kiln_c99_undefined(); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status = {self_fn}(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); if (KILN_LIKELY(status == KILN_C99_OK)) {{ sp -= ((size_t){argc} + 1); stack[sp++] = call_result; }} else {{ if (status == KILN_C99_THROWN) {unwind} return status; }} }} else {{ int status = kiln_c99_op_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "int status = kiln_c99_op_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action}"
                 )
             } else {
                 format!(
-                    "int status = kiln_c99_op_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;"
+                    "if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_value call_result = kiln_c99_undefined(); const kiln_value *call_args = {argc} > 0 ? &stack[sp - (size_t){argc}] : NULL; kiln_value recv = plain->arrow ? plain->captured_this : kiln_c99_undefined(); if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }} if (KILN_LIKELY(status == KILN_C99_OK)) {{ {success_action} }} else {{ if (status == KILN_C99_THROWN) {unwind} return status; }} }} else {{ int status = kiln_c99_op_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action} }}"
                 )
             };
             writeln!(
@@ -2595,6 +2760,79 @@ fn emit_instruction(
                     writeln!(
                         output,
                         "    {{ kiln_value left = locals[{src1}]; kiln_value right = locals[{src2}]; kiln_value answer; {op_body} locals[{dst}] = answer; }}"
+                    )
+                    .unwrap();
+                }
+            } else if let Some((src, bits, op)) =
+                can_fuse_load_const_binary(emitter.code, emitter.constants, index, &emitter.jump_targets)
+            {
+                let unwind = unwind_or_return(handlers, site);
+                let op_body = match numeric_fast_body(op) {
+                    Some(fast) => {
+                        if !*callables {
+                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); uint64_t b_bits = UINT64_C({bits}); memcpy(&b, &b_bits, sizeof(b)); {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                        } else {
+                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); uint64_t b_bits = UINT64_C({bits}); memcpy(&b, &b_bits, sizeof(b)); {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                        }
+                    }
+                    None => {
+                        if !*callables {
+                            format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                        } else {
+                            format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                        }
+                    }
+                };
+                if numeric_fast_body(op).is_some() {
+                    writeln!(
+                        output,
+                        "    {{ kiln_value left = locals[{src}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {op_body} stack[sp++] = answer; }}"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        output,
+                        "    {{ kiln_value left = locals[{src}]; kiln_value answer; {op_body} stack[sp++] = answer; }}"
+                    )
+                    .unwrap();
+                }
+            } else if let Some((src1, src2, op)) =
+                can_fuse_load_load_binary(emitter.code, index, &emitter.jump_targets)
+            {
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&src2) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                let op_body = match numeric_fast_body(op) {
+                    Some(fast) => {
+                        if !*callables {
+                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                        } else {
+                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                        }
+                    }
+                    None => {
+                        if !*callables {
+                            format!("{{ answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                        } else {
+                            format!("{{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                        }
+                    }
+                };
+                if numeric_fast_body(op).is_some() {
+                    writeln!(
+                        output,
+                        "    {{ kiln_value left = locals[{src1}]; kiln_value right = locals[{src2}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {op_body} stack[sp++] = answer; }}"
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        output,
+                        "    {{ kiln_value left = locals[{src1}]; kiln_value right = locals[{src2}]; kiln_value answer; {op_body} stack[sp++] = answer; }}"
                     )
                     .unwrap();
                 }
