@@ -14975,15 +14975,33 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // constructor. Both baked the kind in and ignored the receiver, so the first answered
             // an Int8Array and the second answered an ordinary object.
             Native::TypedArrayFrom(kind) => {
-                let collected = self.array_from(arguments, instruction)?;
+                // The mapper is checked before the source is read, and then held back: the view
+                // is built first and each value passes through the mapper as it is written. The
+                // collection below therefore asks for the values *unmapped*, which is why the
+                // source is handed on alone.
+                let mapper = match arguments.get(1) {
+                    None | Some(Value::Undefined) => None,
+                    Some(value) if is_callable(value) => Some((
+                        value.clone(),
+                        arguments.get(2).cloned().unwrap_or(Value::Undefined),
+                    )),
+                    Some(value) => {
+                        return Err(ExecutionError::NotCallable {
+                            instruction,
+                            value: value.type_name(),
+                        });
+                    }
+                };
+                let source = [arguments.first().cloned().unwrap_or(Value::Undefined)];
+                let collected = self.array_from(&source, instruction)?;
                 let Value::Array(items) = &collected else {
                     return construct_typed_array(kind, &[collected]);
                 };
                 let elements = dense_items(&items.borrow());
-                self.typed_array_through(receiver, kind, elements, instruction)
+                self.typed_array_through(receiver, kind, elements, mapper, instruction)
             }
             Native::TypedArrayOf(kind) => {
-                self.typed_array_through(receiver, kind, arguments.to_vec(), instruction)
+                self.typed_array_through(receiver, kind, arguments.to_vec(), None, instruction)
             }
             // `Math.random` advances state that lives on the machine, so it cannot be a pure
             // function of its arguments either.
@@ -27450,14 +27468,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         constructor: &Value,
         kind: TypedKind,
         elements: Vec<Value>,
+        mapper: Option<(Value, Value)>,
         instruction: usize,
     ) -> Result<Value, ExecutionError> {
         // Only an *absent* receiver falls back to the intrinsic, which is how these are reached
         // internally. A receiver the program supplied is held to the specification's rule even
         // when it is a plain object: `Int8Array.of.call({}, 1)` is a `TypeError`, not an Int8Array
         // and not an ordinary object with a `0` property.
+        // A view of the right length, filled below -- not a view built *from* the values. The
+        // mapper has to run after the view exists, which is the order `%TypedArray%.from`
+        // specifies and the order a mapper that detaches the buffer can tell apart.
         if matches!(constructor, Value::Undefined) {
-            return construct_typed_array(kind, &[Value::Array(ArrayData::new(elements))]);
+            let out = construct_typed_array(kind, &[Value::Number(elements.len() as f64)])?;
+            return self.fill_typed_array_through(out, elements, mapper, instruction);
         }
         if !is_constructor(constructor) {
             return Err(ExecutionError::TypeErrorMessage {
@@ -27481,8 +27504,38 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "a typed array constructor answered a view that is too short".to_owned(),
             });
         }
-        for (index, item) in elements.iter().enumerate() {
-            target.set(index, item)?;
+        self.fill_typed_array_through(out, elements, mapper, instruction)
+    }
+
+    /// Fill a freshly built view, running the mapper where `%TypedArray%.from` runs it.
+    ///
+    /// After the view exists, never before: a mapper is the program's own code and may detach
+    /// the buffer or resize it, and the specification lets it see a view that is already there.
+    /// Mapping first and building afterwards made `from` refuse a result the language accepts.
+    fn fill_typed_array_through(
+        &mut self,
+        out: Value,
+        elements: Vec<Value>,
+        mapper: Option<(Value, Value)>,
+        instruction: usize,
+    ) -> Result<Value, ExecutionError> {
+        let Value::TypedArray(target) = &out else {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "a typed array constructor must answer a typed array".to_owned(),
+            });
+        };
+        let target = Rc::clone(target);
+        for (index, item) in elements.into_iter().enumerate() {
+            let item = match &mapper {
+                Some((function, this_argument)) => self.call_value(
+                    function,
+                    this_argument.clone(),
+                    Vec::from([item, Value::Number(index as f64)]),
+                    instruction,
+                )?,
+                None => item,
+            };
+            target.set(index, &item)?;
         }
         Ok(out)
     }
