@@ -14716,6 +14716,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             converted[index] = coerced;
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
+        // `ToString` for every argument a built-in reads as text, on the same terms and in the
+        // same place as the numeric pass above: after the receiver, because that is the order a
+        // `toString` counting its calls can see.
+        let textual = textual_arguments(native);
+        if !textual.is_empty()
+            && textual
+                .iter()
+                .any(|&index| arguments.get(index).is_some_and(needs_text_conversion))
+        {
+            let mut converted = arguments.to_vec();
+            for &index in textual {
+                let Some(argument) = converted.get(index) else {
+                    continue;
+                };
+                if !needs_text_conversion(argument) {
+                    continue;
+                }
+                let text = self.as_text(&argument.clone(), instruction)?;
+                converted[index] = Value::String(text);
+            }
+            return self.dispatch_native(native, receiver, &converted, instruction);
+        }
         // `ToNumber` for every argument a built-in reads as a number. Done once here, after the
         // receiver has been validated and coerced -- which is the order the specification uses,
         // and which a `valueOf` that counts its calls can see -- rather than inside fifty
@@ -14737,28 +14759,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let number = self.as_number_argument(Some(&argument.clone()), instruction)?;
                 converted[index] = Value::Number(number);
-            }
-            return self.dispatch_native(native, receiver, &converted, instruction);
-        }
-        // `ToString` for every argument a built-in reads as text, on the same terms and in the
-        // same place as the numeric pass above: after the receiver, because that is the order a
-        // `toString` counting its calls can see.
-        let textual = textual_arguments(native);
-        if !textual.is_empty()
-            && textual
-                .iter()
-                .any(|&index| arguments.get(index).is_some_and(needs_text_conversion))
-        {
-            let mut converted = arguments.to_vec();
-            for &index in textual {
-                let Some(argument) = converted.get(index) else {
-                    continue;
-                };
-                if !needs_text_conversion(argument) {
-                    continue;
-                }
-                let text = self.as_text(&argument.clone(), instruction)?;
-                converted[index] = Value::String(text);
             }
             return self.dispatch_native(native, receiver, &converted, instruction);
         }
@@ -41918,6 +41918,14 @@ const fn textual_arguments(native: Native) -> &'static [usize] {
         )
         | N::Escape
         | N::Unescape => &[0],
+        // The search string converts before the position does: `"s".indexOf(a, b)` is
+        // `ToString(a)` then `ToIntegerOrInfinity(b)`, and running the numeric pass first
+        // reversed a pair of conversions a program counting its own `toString` calls can see.
+        N::StringIndexOf
+        | N::StringLastIndexOf
+        | N::StringIncludes
+        | N::StringStartsWith
+        | N::StringEndsWith => &[0],
         _ => &[],
     }
 }
@@ -42022,6 +42030,11 @@ const fn numeric_arguments(native: Native) -> &'static [usize] {
         | N::StringStartsWith
         | N::StringEndsWith
         | N::TypedArraySet => &[1],
+        // `split` reads its *limit* before its separator: `ToUint32(limit)` happens first, and a
+        // limit of zero answers the empty array without the string ever being cut. Leaving the
+        // limit to the pure read meant the separator converted first, which a `toString`
+        // counting its calls can see.
+        N::StringSplit => &[1],
         N::ArrayAt
         | N::ArrayCopy(ArrayCopy::With)
         | N::StringAt
