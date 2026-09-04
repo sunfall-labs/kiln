@@ -452,6 +452,15 @@ pub enum Instruction {
     /// that, which is why lowering a class body needs an instruction of its own where an object
     /// literal does not.
     DefineMethod,
+    /// `{ [key]: function () {} }`: define an *enumerable* property and name the function after
+    /// the key, the way `NamedEvaluation` does.
+    ///
+    /// Separate from [`Instruction::DefineMethod`], which names the same way but defines a
+    /// method -- not enumerated, because a class's methods are not. An object literal's are, so
+    /// the two cannot share one instruction. Emitted only where the value is a *syntactically*
+    /// anonymous function: `{ [k]: (0, function () {}) }` is a parenthesised reference and keeps
+    /// the empty name, which a runtime test for "has no name yet" could not tell apart.
+    DefineNamedProperty,
     /// Put the dead-zone marker in a slot, for a `let` or `const` whose declaration has not run.
     ///
     /// Reading it is a `ReferenceError`. Emitted for lexical bindings as they enter scope, which

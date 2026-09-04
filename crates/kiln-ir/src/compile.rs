@@ -4502,6 +4502,29 @@ impl Compiler {
                     self.code.push(Instruction::SetPrototype);
                 }
                 ObjectMember::Property(property) => {
+                    // `{ [k]: function () {} }` names the function after the key, which is only
+                    // knowable once the key has been evaluated. The pairs waiting to become an
+                    // object are flushed first so the object exists to define on -- the shape a
+                    // spread already uses -- and the key is then evaluated in its own place, so
+                    // the source order of its side effects is unchanged.
+                    if let ObjectKey::Computed(key) = &property.key
+                        && anonymous_function_value(&property.value)
+                    {
+                        let method = property.form == kiln_hir::PropertyForm::Method;
+                        self.emit_object_segment(&mut pending, accumulating);
+                        accumulating = true;
+                        self.expression(key);
+                        if method && let Some(home) = &home {
+                            self.home_bindings.push(home.clone());
+                        }
+                        self.next_is_method = method && home.is_some();
+                        self.expression(&property.value);
+                        if method && home.is_some() {
+                            self.home_bindings.pop();
+                        }
+                        self.code.push(Instruction::DefineNamedProperty);
+                        continue;
+                    }
                     match &property.key {
                         // Only a class body can declare one, so a literal never has one.
                         ObjectKey::Private(name) => self.error(
@@ -8380,5 +8403,20 @@ fn collect_lexical_names(statement: &Statement, names: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Whether a property's value is a *syntactically* anonymous function definition.
+///
+/// `NamedEvaluation` names one of these after the property key; it does not name a reference to
+/// a function that happens to have no name, which is why this asks the shape of the expression
+/// rather than the name of the value. `{ [k]: (0, function () {}) }` is a parenthesised
+/// reference and keeps the empty name. An arrow is a `Function` with the flag set and is always
+/// anonymous, so it needs no arm of its own.
+fn anonymous_function_value(value: &kiln_hir::Expression) -> bool {
+    match &value.kind {
+        kiln_hir::ExpressionKind::Function(function) => function.name.is_none(),
+        kiln_hir::ExpressionKind::Class(class) => class.name.is_none(),
+        _ => false,
     }
 }
