@@ -1654,13 +1654,13 @@ fn fused_property_read_and_write_emission() {
     let unit = emit(&p).expect("fused property program emits");
     let b = body(&unit);
     // Verified: No intermediate stack traffic for fused property read
-    assert!(b.contains("kiln_c99_read_property(host, locals[0]"));
+    assert!(b.contains("kiln_c99_val_read_property(host, locals[0]"));
     assert!(b.contains("locals[1] = read;"));
     // Verified: No stack pushes for fused local property write
-    assert!(b.contains("kiln_c99_write_property(host, locals[0],"));
+    assert!(b.contains("kiln_c99_val_write_property(host, locals[0],"));
     assert!(b.contains("locals[1], 0,"));
     // Verified: No stack pushes for fused const property write
-    assert!(b.contains("kiln_c99_number_bits(UINT64_C(4631107791820423168)), 1,"));
+    assert!(b.contains("UINT64_C(4631107791820423168), 1,"));
 }
 
 #[test]
@@ -1690,7 +1690,7 @@ fn fused_call_method_statement_and_assignment() {
     let unit = emit(&p).expect("fused call_method program emits");
     let b = body(&unit);
     // CallMethod + Pop emits inline drop --sp
-    assert!(b.contains("kiln_c99_op_call_method(host, stack, &sp,") && b.contains("--sp; }"));
+    assert!(b.contains("kiln_c99_op_val_call_method(host, stack, &sp,") && b.contains("--sp; }"));
     // CallMethod + StoreLocal emits direct local write
     assert!(b.contains("locals[1] = stack[--sp]; }"));
     // CallMethod + Dup + StoreLocal + Pop fuses out Dup and Pop
@@ -1722,8 +1722,8 @@ fn in_place_induction_variable_loop_emission() {
     let unit = emit(&p).expect("induction variable program emits");
     let b = body(&unit);
     // In-place bit update without locals[0] whole struct re-creation
-    assert!(b.contains("if (KILN_LIKELY(locals[0].tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &locals[0].bits, sizeof(a)); locals[0].bits = ((union { double d; uint64_t u; }){ .d = a + 1.0 }).u; }"));
-    assert!(b.contains("if (KILN_LIKELY(locals[0].tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &locals[0].bits, sizeof(a)); locals[0].bits = ((union { double d; uint64_t u; }){ .d = a - 2.0 }).u; }"));
+    assert!(b.contains("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(locals[0]))) { double a; memcpy(&a, &locals[0], sizeof(a)); locals[0] = kiln_c99_val_from_double(a + 1.0); }"));
+    assert!(b.contains("if (KILN_LIKELY(KILN_VAL_IS_NUMBER(locals[0]))) { double a; memcpy(&a, &locals[0], sizeof(a)); locals[0] = kiln_c99_val_from_double(a - 2.0); }"));
 }
 
 #[test]
@@ -1777,12 +1777,14 @@ fn fused_computed_read_and_write_emission() {
     let unit = emit(&p).expect("fused computed program emits");
     let b = body(&unit);
     // Verified: No intermediate stack traffic for fused computed read
-    assert!(b.contains("kiln_c99_read_element(host, locals[0], locals[1]"));
+    assert!(b.contains("kiln_c99_val_read_element(host, locals[0], locals[1]"));
     assert!(b.contains("locals[2] = read;"));
     // Verified: No stack pushes for fused local computed write
-    assert!(b.contains("kiln_c99_write_element(host, locals[0], locals[1], locals[2], 0,"));
+    assert!(b.contains("kiln_c99_val_write_element(host, locals[0], locals[1], locals[2], 0,"));
     // Verified: No stack pushes for fused const computed write
-    assert!(b.contains("kiln_c99_write_element(host, locals[0], locals[1], kiln_c99_number_bits(UINT64_C(4631107791820423168)), 1,"));
+    assert!(b.contains(
+        "kiln_c99_val_write_element(host, locals[0], locals[1], UINT64_C(4631107791820423168), 1,"
+    ));
 }
 
 #[test]

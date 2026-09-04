@@ -1607,6 +1607,14 @@ static kiln_gc_block *kiln_c99_gc_lookup(const kiln_gc_heap *heap, const void *p
     return kiln_c99_gc_lookup_slab(heap, payload, NULL);
 }
 
+static uint32_t kiln_c99_gc_kind_of_ptr(const void *ptr) {
+    kiln_gc_heap *heap = kiln_c99_gc_heap();
+    if (heap == NULL || ptr == NULL) return 0;
+    kiln_gc_block *block = kiln_c99_gc_lookup(heap, ptr);
+    if (block == NULL) return 0;
+    return block->kind & KILN_GC_KIND_MASK;
+}
+
 /* A branch-light ASCII test, 8 bytes at a time: ASCII is exactly the bytes with their top bit
  * clear, so a single mask-and-compare per word answers for all eight at once. The tail below
  * 8 bytes falls back to one byte at a time. */
@@ -2013,6 +2021,18 @@ static void kiln_c99_gc_mark_values(kiln_gc_heap *heap, const kiln_value *values
     for (index = 0; index < count; ++index) kiln_c99_gc_mark_value(heap, &values[index]);
 }
 
+static void kiln_c99_gc_mark_val(kiln_gc_heap *heap, kiln_val v) {
+    if (KILN_VAL_IS_NUMBER(v) || v < KILN_TAG_STRING_PREFIX) return;
+    kiln_c99_gc_mark_block(heap, (const void *)KILN_VAL_PTR(v));
+}
+
+static void kiln_c99_gc_mark_vals(kiln_gc_heap *heap, const kiln_val *values,
+                                  size_t count) {
+    size_t index;
+    if (values == NULL) return;
+    for (index = 0; index < count; ++index) kiln_c99_gc_mark_val(heap, values[index]);
+}
+
 static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     void *payload = block + 1;
     switch (block->kind & KILN_GC_KIND_MASK) {
@@ -2067,8 +2087,8 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
         kiln_c99_gc_mark_value(heap, &frame->sent);
         if (frame->function.tag == KILN_VALUE_FUNCTION) {
             const kiln_closure *closure = (const kiln_closure *)(uintptr_t)frame->function.bits;
-            kiln_c99_gc_mark_values(heap, frame->locals, closure->local_count);
-            kiln_c99_gc_mark_values(heap, frame->stack, closure->stack_size);
+            kiln_c99_gc_mark_vals(heap, frame->locals, closure->local_count);
+            kiln_c99_gc_mark_vals(heap, frame->stack, closure->stack_size);
         }
         if (frame->queue_promises != NULL) {
             kiln_c99_gc_mark_values(heap, frame->queue_promises, frame->queue_count);
@@ -2480,7 +2500,7 @@ static void kiln_c99_gc_result_roots(void *opaque, void *context, int phase) {
 
 /* Allocation helpers for the kinds whose bytes are the value: strings and raw byte payloads. */
 static char *kiln_c99_gc_alloc_text(size_t len) {
-    return (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len == 0 ? 1 : len);
+    return (char *)kiln_c99_gc_alloc(KILN_GC_STRING, len);
 }
 
 static kiln_shape kiln_c99_root_shape = {
@@ -4507,8 +4527,8 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     if (frame == NULL) {
         return KILN_C99_OUT_OF_MEMORY;
     }
-    frame->locals = (kiln_value *)malloc(locals * sizeof *frame->locals);
-    frame->stack = (kiln_value *)malloc(depth * sizeof *frame->stack);
+    frame->locals = (kiln_val *)malloc(locals * sizeof *frame->locals);
+    frame->stack = (kiln_val *)malloc(depth * sizeof *frame->stack);
     /* One handler slot per instruction is the bound the emitter uses for an automatic frame, and
      * it is the same bound here: a body cannot register more handlers than it has instructions. */
     frame->handlers = (size_t *)malloc((closure->handler_depth == 0 ? 1 : closure->handler_depth) *
@@ -4525,10 +4545,10 @@ static int kiln_c99_new_generator(kiln_value *out, kiln_value function, kiln_val
     }
     frame->handler_top = 0;
     for (index = 0; index < locals; ++index) {
-        frame->locals[index] = kiln_c99_undefined();
+        frame->locals[index] = KILN_VAL_UNDEFINED;
     }
     for (index = 0; index < argc && index < locals; ++index) {
-        frame->locals[index] = args[index];
+        frame->locals[index] = kiln_val_from_boundary(args[index]);
     }
     frame->function = function;
     frame->receiver = receiver;

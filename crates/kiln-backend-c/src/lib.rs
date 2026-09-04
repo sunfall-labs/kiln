@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 27;
+pub const C_GENERATOR_VERSION: u32 = 28;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -696,7 +696,7 @@ fn render_unwind(output: &mut String, handlers: &[u32], suspends: bool, uncaught
     output.push_str("    --kiln_handler_top;\n");
     output.push_str("    kiln_c99_forget_handled_throw();\n");
     output.push_str("    sp = kiln_handler_stack[kiln_handler_top];\n");
-    output.push_str("    stack[sp++] = *thrown;\n");
+    output.push_str("    stack[sp++] = kiln_val_from_boundary(*thrown);\n");
     output.push_str("    switch (kiln_handlers[kiln_handler_top]) {\n");
     for target in handlers {
         writeln!(output, "    case {target}: goto kiln_label_{target};").unwrap();
@@ -1319,14 +1319,23 @@ fn can_fuse_load_load_const_set_computed_pop(
 
 fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -> Option<String> {
     match constant {
-        Constant::Undefined => Some("kiln_c99_undefined()".to_string()),
-        Constant::Null => Some("kiln_c99_null()".to_string()),
-        Constant::Boolean(val) => Some(format!("kiln_c99_boolean({})", i32::from(*val))),
-        Constant::Number(bits) => Some(format!("kiln_c99_number_bits(UINT64_C({bits}))")),
-        Constant::String(val) => Some(format!(
-            "kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{constant_idx}, {})",
-            val.len()
-        )),
+        Constant::Undefined => Some("KILN_VAL_UNDEFINED".to_string()),
+        Constant::Null => Some("KILN_VAL_NULL".to_string()),
+        Constant::Boolean(val) => Some(if *val {
+            "KILN_VAL_TRUE".to_string()
+        } else {
+            "KILN_VAL_FALSE".to_string()
+        }),
+        Constant::Number(bits) => Some(format!("UINT64_C({bits})")),
+        Constant::String(value) => {
+            if value.contains('\0') {
+                None
+            } else {
+                Some(format!(
+                    "KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{constant_idx})"
+                ))
+            }
+        }
         Constant::BigInt(_) => None,
     }
 }
@@ -1628,8 +1637,8 @@ fn render_function(
     if proto.generator || proto.asynchronous {
         // The frame outlives this call, so neither array can be automatic: both belong to the
         // generator, and every `locals[i]` and `stack[sp]` below reads through them unchanged.
-        output.push_str("    kiln_value *stack = frame->stack;\n");
-        output.push_str("    kiln_value *locals = frame->locals;\n");
+        output.push_str("    kiln_val *stack = frame->stack;\n");
+        output.push_str("    kiln_val *locals = frame->locals;\n");
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown;\n");
@@ -1678,15 +1687,15 @@ fn render_function(
             output.push_str("        default: return KILN_C99_CONTROL_ERROR;\n        }\n    }\n");
         }
     } else {
-        writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
-        writeln!(output, "    kiln_value locals[{locals}];").unwrap();
+        writeln!(output, "    kiln_val stack[{}];", max_stack.max(1)).unwrap();
+        writeln!(output, "    kiln_val locals[{locals}];").unwrap();
         render_handler_prologue(output, &handlers, proto.code.len(), suspends);
         output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
         output.push_str("    (void)thrown; (void)frame;\n");
         output.push_str("    (void)host; (void)upvalues; (void)depth; (void)receiver;\n");
         writeln!(
             output,
-            "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_c99_undefined();"
+            "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = KILN_VAL_UNDEFINED;"
         )
         .unwrap();
         if proto.parameter_count == 0 {
@@ -1696,7 +1705,7 @@ fn render_function(
             // passed leaves its slot undefined, which is what a missing argument is.
             writeln!(
                 output,
-                "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
+                "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = kiln_val_from_boundary(args[slot]);",
                 proto.parameter_count
             )
             .unwrap();
@@ -1745,12 +1754,17 @@ fn render_function(
 fn render_constant_declarations(output: &mut String, program: &Program, symbol: &str) {
     for (index, constant) in program.constants.iter().enumerate() {
         match constant {
-            Constant::String(value) => writeln!(
-                output,
-                "static const char {symbol}_constant_{index}[] = {};",
-                c_string(value)
-            )
-            .unwrap(),
+            Constant::String(value) => {
+                writeln!(
+                    output,
+                    "static const char {symbol}_constant_{index}[] = {};",
+                    c_string(value)
+                )
+                .unwrap();
+                if value.contains('\0') {
+                    writeln!(output, "static void *{symbol}_string_{index} = NULL;").unwrap();
+                }
+            }
             Constant::BigInt(digits) => {
                 writeln!(
                     output,
@@ -1859,7 +1873,7 @@ fn render_unit_roots(
     if module_scope {
         writeln!(
             output,
-            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((struct kiln_gc_heap *)heap, {symbol}_globals, {});",
+            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_vals((struct kiln_gc_heap *)heap, {symbol}_globals, {});",
             usize::try_from(local_count).unwrap().max(1)
         )
         .unwrap();
@@ -2208,7 +2222,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     if uses_module_scope(program) {
         writeln!(
             output,
-            "static kiln_value {symbol}_globals[{}];",
+            "static kiln_val {symbol}_globals[{}];",
             usize::try_from(program.local_count).unwrap().max(1)
         )
         .unwrap();
@@ -2252,15 +2266,15 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
-    writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
+    writeln!(output, "    kiln_val stack[{}];", max_stack.max(1)).unwrap();
     if uses_module_scope(program) {
         // Named rather than automatic: an exported closure reads module scope after the entry
         // point has returned, and a frame that has returned is not somewhere to read from.
-        writeln!(output, "    kiln_value *locals = {symbol}_globals;").unwrap();
+        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
     } else {
         writeln!(
             output,
-            "    kiln_value locals[{}];",
+            "    kiln_val locals[{}];",
             usize::try_from(program.local_count).unwrap().max(1)
         )
         .unwrap();
@@ -2274,7 +2288,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     output.push_str("    kiln_c99_reset_diagnostics();\n");
     for local in 0..program.local_count {
-        writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
+        writeln!(output, "    locals[{local}] = KILN_VAL_UNDEFINED;").unwrap();
     }
     let jump_targets = all_jump_targets(&program.code);
     let emitter = Emitter {
@@ -2369,7 +2383,7 @@ fn render_module(
     if uses_module_scope(program) {
         writeln!(
             output,
-            "static kiln_value {symbol}_globals[{}];",
+            "static kiln_val {symbol}_globals[{}];",
             usize::try_from(program.local_count).unwrap().max(1)
         )
         .unwrap();
@@ -2413,15 +2427,15 @@ fn render_module(
         output.push_str("    kiln_value thrown_value = kiln_c99_undefined();\n");
         output.push_str("    kiln_value *thrown = &thrown_value;\n");
     }
-    writeln!(output, "    kiln_value stack[{}];", max_stack.max(1)).unwrap();
+    writeln!(output, "    kiln_val stack[{}];", max_stack.max(1)).unwrap();
     if uses_module_scope(program) {
         // Named rather than automatic: an exported closure reads module scope after the entry
         // point has returned, and a frame that has returned is not somewhere to read from.
-        writeln!(output, "    kiln_value *locals = {symbol}_globals;").unwrap();
+        writeln!(output, "    kiln_val *locals = {symbol}_globals;").unwrap();
     } else {
         writeln!(
             output,
-            "    kiln_value locals[{}];",
+            "    kiln_val locals[{}];",
             usize::try_from(program.local_count).unwrap().max(1)
         )
         .unwrap();
@@ -2446,12 +2460,16 @@ fn render_module(
     )
     .unwrap();
     for local in 0..program.local_count {
-        writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
+        writeln!(output, "    locals[{local}] = KILN_VAL_UNDEFINED;").unwrap();
     }
     let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
     for (index, binding) in module.imports.iter().enumerate() {
         let slot = binding.local_slot;
-        writeln!(output, "    locals[{slot}] = imports[{index}];").unwrap();
+        writeln!(
+            output,
+            "    locals[{slot}] = kiln_val_from_boundary(imports[{index}]);"
+        )
+        .unwrap();
         // The exporter boxes only what can change, so an immutable export arrives as a plain
         // value where the body expects a cell. Wrapping it here is the same thing
         // `execute_module` does on the interpreter side, and for the same reason: the body has
@@ -2459,7 +2477,7 @@ fn render_module(
         if boxed_imports.contains(&slot) {
             writeln!(
                 output,
-                "    if (locals[{slot}].tag != KILN_VALUE_CELL && kiln_c99_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
+                "    if ((locals[{slot}] & KILN_TAG_MASK) != KILN_TAG_CELL_PREFIX && kiln_c99_val_make_cell(&locals[{slot}]) != KILN_C99_OK) return KILN_C99_OUT_OF_MEMORY;"
             )
             .unwrap();
         }
@@ -2647,7 +2665,7 @@ fn emit_instruction(
         // Rejected by `verify` before emission begins, so reaching here means the two passes
         // disagree about the instruction set -- a compiler bug, not a program error.
         Instruction::LoadNewTarget => {
-            output.push_str("    stack[sp++] = kiln_c99_new_target;\n");
+            output.push_str("    stack[sp++] = kiln_val_from_boundary(kiln_c99_new_target);\n");
         }
         // `validate_supported_instruction` refuses this, so reaching here means verification and
         // emission disagree about the instruction set -- a compiler bug rather than a program
@@ -2672,7 +2690,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_new_regexp(&stack[sp], {symbol}_constant_{pattern}, {}, {symbol}_constant_{flags}, {}, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; ++sp; }}",
+                "    {{ kiln_value built; int status = kiln_c99_new_regexp(&built, {symbol}_constant_{pattern}, {}, {symbol}_constant_{flags}, {}, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}",
                 source.len(),
                 letters.len()
             )
@@ -2690,7 +2708,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = stack[sp - {argc} - 1]; kiln_value self_value = stack[sp - {argc} - 2]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = kiln_val_to_boundary(stack[sp - {argc} - 1]); kiln_value self_value = kiln_val_to_boundary(stack[sp - {argc} - 2]); kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = kiln_val_from_boundary(call_result); }}",
                 argc + 2
             )
             .unwrap();
@@ -2702,7 +2720,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value built; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_construct(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = built; }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value callee = kiln_val_to_boundary(stack[--sp]); kiln_value built; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_construct(host, &built, callee, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(built); }}"
             )
             .unwrap();
         }
@@ -2713,7 +2731,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value brand = stack[--sp]; kiln_value receiver = stack[sp - 1]; if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }} else {{ stack[sp - 1] = slot->value; }} }}",
+                "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(produced); }} else {{ stack[sp - 1] = kiln_val_from_boundary(slot->value); }} }}",
                 len = text.len(),
                 brand_key = private_brand_key_of(text),
                 brand_len = private_brand_key_of(text).len()
@@ -2727,7 +2745,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value brand = stack[--sp]; kiln_value member = stack[--sp]; kiln_value receiver = stack[sp - 1]; if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = member; }}",
+                "    {{ kiln_value brand = kiln_val_to_boundary(stack[--sp]); kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value receiver = kiln_val_to_boundary(stack[sp - 1]); if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = kiln_val_from_boundary(member); }}",
                 len = text.len(),
                 brand_key = private_brand_key_of(text),
                 brand_len = private_brand_key_of(text).len()
@@ -2751,7 +2769,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; int status = kiln_c99_global_binding(&stack[sp], kiln_missing_name_{index}, {}, &found); if (status != KILN_C99_OK) return status; if (found) {{ ++sp; }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
+                "    {{ static const char kiln_missing_name_{index}[] = {}; static const char kiln_missing_{index}[] = {}; int found = 0; kiln_value val; int status = kiln_c99_global_binding(&val, kiln_missing_name_{index}, {}, &found); if (status != KILN_C99_OK) return status; if (found) {{ stack[sp++] = kiln_val_from_boundary(val); }} else {{ status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_missing_{index}); {} }} }}",
                 c_string(text),
                 c_string(&format!("{text} is not defined")),
                 text.len(),
@@ -2782,7 +2800,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; int answer; status = kiln_c99_delete(host, globals, {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = kiln_c99_boolean(answer); }}",
+                "    {{ kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; int answer; status = kiln_c99_delete(host, globals, {symbol}_constant_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
                 text.len()
             )
             .unwrap();
@@ -2793,7 +2811,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {}, &found); if (status != KILN_C99_OK) return status; stack[sp++] = found ? existing : kiln_c99_undefined(); }}",
+                "    {{ kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {}, &found); if (status != KILN_C99_OK) return status; stack[sp++] = found ? kiln_val_from_boundary(existing) : KILN_VAL_UNDEFINED; }}",
                 text.len()
             )
             .unwrap();
@@ -2821,7 +2839,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {len}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {len}, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
+                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value existing; int found = 0; int status = kiln_c99_global_binding(&existing, {symbol}_constant_{name}, {len}, &found); if (status != KILN_C99_OK) return status; if (!found) {{ static const char kiln_unbound_{index}[] = {}; status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, kiln_unbound_{index}); {unwind} }} {{ kiln_value globals; status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {len}, member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} }}",
                 c_string(&format!("{text} is not defined")),
                 len = text.len()
             )
@@ -2838,7 +2856,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {}, member, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                "    {{ kiln_value member = kiln_val_to_boundary(stack[--sp]); kiln_value globals; int status = kiln_c99_global_object(&globals); if (status != KILN_C99_OK) return status; status = kiln_c99_put_mode(host, globals, {symbol}_constant_{name}, {}, member, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 text.len()
             )
             .unwrap();
@@ -2851,7 +2869,7 @@ fn emit_instruction(
                 if guarded.contains(&slot) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{slot}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{slot}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
@@ -2862,18 +2880,18 @@ fn emit_instruction(
                     format!("{} {sym} {}", "a", "b")
                 };
                 let fallback_cond = if is_jump_if_false {
-                    "!kiln_c99_truthy(answer)"
+                    "!kiln_c99_val_truthy(answer)"
                 } else {
-                    "kiln_c99_truthy(answer)"
+                    "kiln_c99_val_truthy(answer)"
                 };
                 let fallback_eval = if !*callables {
-                    format!("kiln_value answer = kiln_c99_binary({}, left, right);", binary_code(op))
+                    format!("kiln_val answer = kiln_c99_val_binary_fast({}, left, right);", binary_code(op))
                 } else {
-                    format!("kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
+                    format!("int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value right = locals[{slot}]; if (KILN_LIKELY(right.tag == KILN_VALUE_NUMBER)) {{ double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
+                    "    {{ kiln_val right = locals[{slot}]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(right))) {{ double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ kiln_val left = UINT64_C({bits}); {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
                 )
                 .unwrap();
             } else if let Some((bits, src, op, dst)) =
@@ -2883,36 +2901,36 @@ fn emit_instruction(
                 if guarded.contains(&src) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 let op_body = match const_left_numeric_fast_body(op, bits) {
                     Some(fast) => {
                         if !*callables {
-                            format!("{{ {fast} }} else {{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ {fast} }} else {{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                     None => {
                         if !*callables {
-                            format!("{{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                 };
                 if const_left_numeric_fast_body(op, bits).is_some() {
                     writeln!(
                         output,
-                        "    {{ kiln_value right = locals[{src}]; kiln_value answer; if (KILN_LIKELY(right.tag == KILN_VALUE_NUMBER)) {op_body} locals[{dst}] = answer; }}"
+                        "    {{ kiln_val right = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(right))) {op_body} locals[{dst}] = answer; }}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    {{ kiln_value right = locals[{src}]; kiln_value answer; {op_body} locals[{dst}] = answer; }}"
+                        "    {{ kiln_val right = locals[{src}]; kiln_val answer; {op_body} locals[{dst}] = answer; }}"
                     )
                     .unwrap();
                 }
@@ -2923,75 +2941,101 @@ fn emit_instruction(
                 if guarded.contains(&src) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 let op_body = match const_left_numeric_fast_body(op, bits) {
                     Some(fast) => {
                         if !*callables {
-                            format!("{{ {fast} }} else {{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ {fast} }} else {{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ {fast} }} else {{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                     None => {
                         if !*callables {
-                            format!("{{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ kiln_val left = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ kiln_value left = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ kiln_val left = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                 };
                 if const_left_numeric_fast_body(op, bits).is_some() {
                     writeln!(
                         output,
-                        "    {{ kiln_value right = locals[{src}]; kiln_value answer; if (KILN_LIKELY(right.tag == KILN_VALUE_NUMBER)) {op_body} stack[sp++] = answer; }}"
+                        "    {{ kiln_val right = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(right))) {op_body} stack[sp++] = answer; }}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    {{ kiln_value right = locals[{src}]; kiln_value answer; {op_body} stack[sp++] = answer; }}"
+                        "    {{ kiln_val right = locals[{src}]; kiln_val answer; {op_body} stack[sp++] = answer; }}"
                     )
                     .unwrap();
                 }
             } else if let Some((_, slot)) = can_fuse_const_store(emitter.code, index, &emitter.jump_targets) {
                 match &constants[*constant as usize] {
-                    Constant::Undefined => writeln!(output, "    locals[{slot}] = kiln_c99_undefined();").unwrap(),
-                    Constant::Null => writeln!(output, "    locals[{slot}] = kiln_c99_null();").unwrap(),
+                    Constant::Undefined => writeln!(output, "    locals[{slot}] = KILN_VAL_UNDEFINED;").unwrap(),
+                    Constant::Null => writeln!(output, "    locals[{slot}] = KILN_VAL_NULL;").unwrap(),
                     Constant::Boolean(value) => {
-                        writeln!(output, "    locals[{slot}] = kiln_c99_boolean({});", i32::from(*value)).unwrap()
+                        writeln!(output, "    locals[{slot}] = {};", if *value { "KILN_VAL_TRUE" } else { "KILN_VAL_FALSE" }).unwrap()
                     }
                     Constant::Number(bits) => {
-                        writeln!(output, "    locals[{slot}] = kiln_c99_number_bits(UINT64_C({bits}));").unwrap()
+                        writeln!(output, "    locals[{slot}] = UINT64_C({bits});").unwrap()
                     }
                     Constant::String(value) => {
-                        writeln!(output, "    locals[{slot}] = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{constant}, {});", value.len()).unwrap()
+                        if value.contains('\0') {
+                            writeln!(
+                                output,
+                                "    locals[{slot}] = kiln_c99_string_constant(&{symbol}_string_{constant}, {symbol}_constant_{constant}, {});",
+                                value.len()
+                            )
+                            .unwrap()
+                        } else {
+                            writeln!(
+                                output,
+                                "    locals[{slot}] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{constant});"
+                            )
+                            .unwrap()
+                        }
                     }
                     Constant::BigInt(digits) => writeln!(
                         output,
-                        "    {{ int status = kiln_c99_bigint_constant(&{symbol}_bigint_{constant}, {symbol}_constant_{constant}, {}, &locals[{slot}]); if (status != KILN_C99_OK) return status; }}",
+                        "    {{ kiln_value tmp; int status = kiln_c99_bigint_constant(&{symbol}_bigint_{constant}, {symbol}_constant_{constant}, {}, &tmp); if (status != KILN_C99_OK) return status; locals[{slot}] = kiln_val_from_boundary(tmp); }}",
                         digits.len()
                     )
                     .unwrap(),
                 }
             } else {
                 match &constants[*constant as usize] {
-                    Constant::Undefined => output.push_str("    stack[sp++] = kiln_c99_undefined();\n"),
-                    Constant::Null => output.push_str("    stack[sp++] = kiln_c99_null();\n"),
+                    Constant::Undefined => output.push_str("    stack[sp++] = KILN_VAL_UNDEFINED;\n"),
+                    Constant::Null => output.push_str("    stack[sp++] = KILN_VAL_NULL;\n"),
                     Constant::Boolean(value) => {
-                        writeln!(output, "    stack[sp++] = kiln_c99_boolean({});", i32::from(*value)).unwrap()
+                        writeln!(output, "    stack[sp++] = {};", if *value { "KILN_VAL_TRUE" } else { "KILN_VAL_FALSE" }).unwrap()
                     }
                     Constant::Number(bits) => {
-                        writeln!(output, "    stack[sp++] = kiln_c99_number_bits(UINT64_C({bits}));").unwrap()
+                        writeln!(output, "    stack[sp++] = UINT64_C({bits});").unwrap()
                     }
                     Constant::String(value) => {
-                        writeln!(output, "    stack[sp++] = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{constant}, {});", value.len()).unwrap()
+                        if value.contains('\0') {
+                            writeln!(
+                                output,
+                                "    stack[sp++] = kiln_c99_string_constant(&{symbol}_string_{constant}, {symbol}_constant_{constant}, {});",
+                                value.len()
+                            )
+                            .unwrap()
+                        } else {
+                            writeln!(
+                                output,
+                                "    stack[sp++] = KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, {symbol}_constant_{constant});"
+                            )
+                            .unwrap()
+                        }
                     }
                     Constant::BigInt(digits) => writeln!(
                         output,
-                        "    {{ int status = kiln_c99_bigint_constant(&{symbol}_bigint_{constant}, {symbol}_constant_{constant}, {}, &stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }}",
+                        "    {{ kiln_value tmp; int status = kiln_c99_bigint_constant(&{symbol}_bigint_{constant}, {symbol}_constant_{constant}, {}, &tmp); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(tmp); }}",
                         digits.len()
                     )
                     .unwrap(),
@@ -3005,7 +3049,7 @@ fn emit_instruction(
         Instruction::NewCell(local) => {
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_make_cell(&locals[{local}]); if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_val_make_cell(&locals[{local}]); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -3014,15 +3058,15 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    {{ int status = kiln_c99_op_load_cell(locals[{local}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    {{ int status = kiln_c99_op_val_load_cell(locals[{local}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             } else {
-                writeln!(output, "    stack[sp++] = *kiln_c99_cell_of(locals[{local}]);").unwrap();
+                writeln!(output, "    stack[sp++] = kiln_val_from_boundary(*kiln_c99_cell_of(kiln_val_to_boundary(locals[{local}])));").unwrap();
             }
         }
         Instruction::StoreCell(local) => {
-            writeln!(output, "    *kiln_c99_cell_of(locals[{local}]) = stack[--sp];").unwrap();
+            writeln!(output, "    *kiln_c99_cell_of(kiln_val_to_boundary(locals[{local}])) = kiln_val_to_boundary(stack[--sp]);").unwrap();
         }
         // A `let` or `const` slot is in the temporal dead zone until its declaration runs.
         // Reading one is an error rather than `undefined`, and only the slots a program marks
@@ -3034,7 +3078,7 @@ fn emit_instruction(
             // address-escaped, and an escaped array cannot be promoted to registers *anywhere in
             // the function* -- so one TDZ mark in the prologue costs every loop in the body. The
             // body it replaces is two lines and is kept verbatim.
-            writeln!(output, "    if (locals[{local}].tag == KILN_VALUE_CELL) {{ *kiln_c99_cell_of(locals[{local}]) = kiln_c99_uninitialized(); }} else {{ locals[{local}] = kiln_c99_uninitialized(); }}").unwrap();
+            writeln!(output, "    if ((locals[{local}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *kiln_c99_cell_of(kiln_val_to_boundary(locals[{local}])) = kiln_c99_uninitialized(); }} else {{ locals[{local}] = KILN_VAL_UNINITIALIZED; }}").unwrap();
         }
         // An upvalue slot always holds a cell -- that is what capturing means -- but the cell can
         // still be in its owner's temporal dead zone. The owner may be a module or an enclosing
@@ -3045,12 +3089,12 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_load_cell(upvalues[{upvalue}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_op_val_load_cell(kiln_val_from_boundary(upvalues[{upvalue}]), stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
         Instruction::StoreUpvalue(upvalue) => {
-            writeln!(output, "    *kiln_c99_cell_of(upvalues[{upvalue}]) = stack[--sp];").unwrap();
+            writeln!(output, "    *kiln_c99_cell_of(upvalues[{upvalue}]) = kiln_val_to_boundary(stack[--sp]);").unwrap();
         }
         Instruction::MakeFunction(proto) => {
             let target = &functions[*proto as usize];
@@ -3116,11 +3160,11 @@ fn emit_instruction(
                 "kiln_c99_undefined()"
             };
             let diagnostic_source = c_string(diagnostic_site);
-            output.push_str("    {\n        int status;\n");
+            output.push_str("    {\n        kiln_value built; int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
@@ -3130,7 +3174,7 @@ fn emit_instruction(
                     // variable have to observe each other's writes.
                     match upvalue {
                         Upvalue::ParentLocal(slot) => {
-                            writeln!(output, "        captured[{position}] = locals[{slot}];")
+                            writeln!(output, "        captured[{position}] = kiln_val_to_boundary(locals[{slot}]);")
                         }
                         Upvalue::ParentUpvalue(slot) => {
                             writeln!(output, "        captured[{position}] = upvalues[{slot}];")
@@ -3140,15 +3184,15 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&stack[sp], {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
             }
             if proto_publishes_frame(target) {
-                output.push_str("        if (status != KILN_C99_OK) return status;\n        ++sp;\n    }\n");
+                output.push_str("        if (status != KILN_C99_OK) return status;\n        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
             } else {
-                output.push_str("        if (status != KILN_C99_OK) return status;\n        kiln_c99_closure_of(stack[sp])->publishes_frame = 0;\n        ++sp;\n    }\n");
+                output.push_str("        if (status != KILN_C99_OK) return status;\n        kiln_c99_closure_of(built)->publishes_frame = 0;\n        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
             }
         }
         Instruction::Call { argc } => {
@@ -3172,12 +3216,12 @@ fn emit_instruction(
             let (success_action, fallback_action) =
                 if let Some(dst) = can_fuse_call_dup_store_pop(emitter.code, index, &emitter.jump_targets) {
                     (
-                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = call_result;"),
+                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = kiln_val_from_boundary(call_result);"),
                         format!("locals[{dst}] = stack[--sp];"),
                     )
                 } else if let Some(dst) = can_fuse_call_store(emitter.code, index, &emitter.jump_targets) {
                     (
-                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = call_result;"),
+                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = kiln_val_from_boundary(call_result);"),
                         format!("locals[{dst}] = stack[--sp];"),
                     )
                 } else if can_fuse_call_pop(emitter.code, index, &emitter.jump_targets) {
@@ -3187,22 +3231,22 @@ fn emit_instruction(
                     )
                 } else {
                     (
-                        format!("sp -= ((size_t){argc} + 1); stack[sp++] = call_result;"),
+                        format!("sp -= ((size_t){argc} + 1); stack[sp++] = kiln_val_from_boundary(call_result);"),
                         String::new(),
                     )
                 };
             let direct_call = if static_branches.is_empty() {
                 format!(
-                    "int status = kiln_c99_op_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action}"
+                    "int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action}"
                 )
             } else {
                 format!(
-                    "if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_value call_result = kiln_c99_undefined(); const kiln_value *call_args = {argc} > 0 ? &stack[sp - (size_t){argc}] : NULL; kiln_value recv = plain->arrow ? plain->captured_this : kiln_c99_undefined(); if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }} if (KILN_LIKELY(status == KILN_C99_OK)) {{ {success_action} }} else {{ if (status == KILN_C99_THROWN) {unwind} return status; }} }} else {{ int status = kiln_c99_op_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action} }}"
+                    "if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_value call_result = kiln_c99_undefined(); kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} > 0 ? call_argbuf : NULL; kiln_value recv = plain->arrow ? plain->captured_this : kiln_c99_undefined(); if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }} if (KILN_LIKELY(status == KILN_C99_OK)) {{ {success_action} }} else {{ if (status == KILN_C99_THROWN) {unwind} return status; }} }} else {{ int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action} }}"
                 )
             };
             writeln!(
                 output,
-                "    {{ kiln_value callee = stack[sp - (size_t){argc} - 1]; kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; {direct_call} }}"
+                "    {{ kiln_val callee_val = stack[sp - (size_t){argc} - 1]; kiln_closure *plain = KILN_VAL_IS_CLOSURE(callee_val) ? (kiln_closure *)KILN_VAL_PTR(callee_val) : NULL; {direct_call} }}"
             )
             .unwrap();
         }
@@ -3211,7 +3255,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    {{ int status = kiln_c99_check_tdz(locals[{local}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    {{ int status = kiln_c99_val_check_tdz(locals[{local}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
@@ -3225,19 +3269,19 @@ fn emit_instruction(
                     format!("{} {sym} {}", "a", "b")
                 };
                 let fallback_cond = if is_jump_if_false {
-                    "!kiln_c99_truthy(answer)"
+                    "!kiln_c99_val_truthy(answer)"
                 } else {
-                    "kiln_c99_truthy(answer)"
+                    "kiln_c99_val_truthy(answer)"
                 };
                 let unwind = unwind_or_return(handlers, site);
                 let fallback_eval = if !*callables {
-                    format!("kiln_value answer = kiln_c99_binary({}, left, right);", binary_code(op))
+                    format!("kiln_val answer = kiln_c99_val_binary_fast({}, left, right);", binary_code(op))
                 } else {
-                    format!("kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
+                    format!("int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value left = locals[{slot}]; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {{ double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if ({cond}) goto kiln_label_{target}; }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
+                    "    {{ kiln_val left = locals[{slot}]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) {{ double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if ({cond}) goto kiln_label_{target}; }} else {{ kiln_val right = UINT64_C({bits}); {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
                 )
                 .unwrap();
             } else if let Some((slot1, slot2, op, is_jump_if_false, target)) =
@@ -3247,7 +3291,7 @@ fn emit_instruction(
                 if guarded.contains(&slot2) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{slot2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{slot2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
@@ -3258,18 +3302,18 @@ fn emit_instruction(
                     format!("{} {sym} {}", "a", "b")
                 };
                 let fallback_cond = if is_jump_if_false {
-                    "!kiln_c99_truthy(answer)"
+                    "!kiln_c99_val_truthy(answer)"
                 } else {
-                    "kiln_c99_truthy(answer)"
+                    "kiln_c99_val_truthy(answer)"
                 };
                 let fallback_eval = if !*callables {
-                    format!("kiln_value answer = kiln_c99_binary({}, left, right);", binary_code(op))
+                    format!("kiln_val answer = kiln_c99_val_binary_fast({}, left, right);", binary_code(op))
                 } else {
-                    format!("kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
+                    format!("int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;", binary_code(op))
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value left = locals[{slot1}]; kiln_value right = locals[{slot2}]; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
+                    "    {{ kiln_val left = locals[{slot1}]; kiln_val right = locals[{slot2}]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ {fallback_eval} if ({fallback_cond}) goto kiln_label_{target}; }} }}"
                 )
                 .unwrap();
             } else if let Some((src, bits, op, dst)) =
@@ -3279,42 +3323,42 @@ fn emit_instruction(
                 if src == dst && const_numeric_fast_body_in_place(op, bits, dst).is_some() {
                     let in_place = const_numeric_fast_body_in_place(op, bits, dst).unwrap();
                     let fallback = if !*callables {
-                        format!("{{ kiln_value left = locals[{src}]; kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); locals[{dst}] = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                        format!("{{ kiln_val left = locals[{src}]; kiln_val right = UINT64_C({bits}); locals[{dst}] = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                     } else {
-                        format!("{{ kiln_value left = locals[{src}]; kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = answer; }}", binary_code(op))
+                        format!("{{ kiln_val left = locals[{src}]; kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = answer; }}", binary_code(op))
                     };
                     writeln!(
                         output,
-                        "    if (KILN_LIKELY(locals[{dst}].tag == KILN_VALUE_NUMBER)) {{ {in_place} }} else {fallback}"
+                        "    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(locals[{dst}]))) {{ {in_place} }} else {fallback}"
                     )
                     .unwrap();
                 } else {
                     let op_body = match const_numeric_fast_body(op, bits) {
                         Some(fast) => {
                             if !*callables {
-                                format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                                format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                             } else {
-                                format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                                format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                             }
                         }
                         None => {
                             if !*callables {
-                                format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                                format!("{{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                             } else {
-                                format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                                format!("{{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                             }
                         }
                     };
                     if const_numeric_fast_body(op, bits).is_some() {
                         writeln!(
                             output,
-                            "    {{ kiln_value left = locals[{src}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {op_body} locals[{dst}] = answer; }}"
+                            "    {{ kiln_val left = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) {op_body} locals[{dst}] = answer; }}"
                         )
                         .unwrap();
                     } else {
                         writeln!(
                             output,
-                            "    {{ kiln_value left = locals[{src}]; kiln_value answer; {op_body} locals[{dst}] = answer; }}"
+                            "    {{ kiln_val left = locals[{src}]; kiln_val answer; {op_body} locals[{dst}] = answer; }}"
                         )
                         .unwrap();
                     }
@@ -3326,36 +3370,36 @@ fn emit_instruction(
                 if guarded.contains(&src2) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 let op_body = match numeric_fast_body(op) {
                     Some(fast) => {
                         if !*callables {
-                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                     None => {
                         if !*callables {
-                            format!("{{ answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                 };
                 if numeric_fast_body(op).is_some() {
                     writeln!(
                         output,
-                        "    {{ kiln_value left = locals[{src1}]; kiln_value right = locals[{src2}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {op_body} locals[{dst}] = answer; }}"
+                        "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {op_body} locals[{dst}] = answer; }}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    {{ kiln_value left = locals[{src1}]; kiln_value right = locals[{src2}]; kiln_value answer; {op_body} locals[{dst}] = answer; }}"
+                        "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; {op_body} locals[{dst}] = answer; }}"
                     )
                     .unwrap();
                 }
@@ -3366,29 +3410,29 @@ fn emit_instruction(
                 let op_body = match const_numeric_fast_body(op, bits) {
                     Some(fast) => {
                         if !*callables {
-                            format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ {fast} }} else {{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ {fast} }} else {{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                     None => {
                         if !*callables {
-                            format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ kiln_val right = UINT64_C({bits}); answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ kiln_value right = kiln_c99_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ kiln_val right = UINT64_C({bits}); int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                 };
                 if const_numeric_fast_body(op, bits).is_some() {
                     writeln!(
                         output,
-                        "    {{ kiln_value left = locals[{src}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {op_body} stack[sp++] = answer; }}"
+                        "    {{ kiln_val left = locals[{src}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left))) {op_body} stack[sp++] = answer; }}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    {{ kiln_value left = locals[{src}]; kiln_value answer; {op_body} stack[sp++] = answer; }}"
+                        "    {{ kiln_val left = locals[{src}]; kiln_val answer; {op_body} stack[sp++] = answer; }}"
                     )
                     .unwrap();
                 }
@@ -3399,36 +3443,36 @@ fn emit_instruction(
                 if guarded.contains(&src2) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 let op_body = match numeric_fast_body(op) {
                     Some(fast) => {
                         if !*callables {
-                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                     None => {
                         if !*callables {
-                            format!("{{ answer = kiln_c99_binary({}, left, right); }}", binary_code(op))
+                            format!("{{ answer = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op))
                         } else {
-                            format!("{{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
+                            format!("{{ int status = KILN_C99_OK; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}", binary_code(op))
                         }
                     }
                 };
                 if numeric_fast_body(op).is_some() {
                     writeln!(
                         output,
-                        "    {{ kiln_value left = locals[{src1}]; kiln_value right = locals[{src2}]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {op_body} stack[sp++] = answer; }}"
+                        "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {op_body} stack[sp++] = answer; }}"
                     )
                     .unwrap();
                 } else {
                     writeln!(
                         output,
-                        "    {{ kiln_value left = locals[{src1}]; kiln_value right = locals[{src2}]; kiln_value answer; {op_body} stack[sp++] = answer; }}"
+                        "    {{ kiln_val left = locals[{src1}]; kiln_val right = locals[{src2}]; kiln_val answer; {op_body} stack[sp++] = answer; }}"
                     )
                     .unwrap();
                 }
@@ -3446,13 +3490,13 @@ fn emit_instruction(
                 if guarded.contains(&val) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 writeln!(
                     output,
-                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, locals[{val}], {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, locals[{val}], {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                     text.len(),
                     i32::from(strict)
                 )
@@ -3468,7 +3512,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, {const_val}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_val_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, {const_val}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                     text.len(),
                     i32::from(strict)
                 )
@@ -3482,7 +3526,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
                     text.len()
                 )
                 .unwrap();
@@ -3495,7 +3539,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
                     text.len()
                 )
                 .unwrap();
@@ -3508,7 +3552,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                     text.len()
                 )
                 .unwrap();
@@ -3521,7 +3565,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}",
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_val read; int status = kiln_c99_val_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(locals[{src}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}",
                     text.len()
                 )
                 .unwrap();
@@ -3532,13 +3576,13 @@ fn emit_instruction(
                 if guarded.contains(&src2) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 writeln!(
                     output,
-                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
+                    "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
                 )
                 .unwrap();
             } else if let Some((src1, src2, dst)) =
@@ -3548,13 +3592,13 @@ fn emit_instruction(
                 if guarded.contains(&src2) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 writeln!(
                     output,
-                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
+                    "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}"
                 )
                 .unwrap();
             } else if let Some((src1, src2)) =
@@ -3564,13 +3608,13 @@ fn emit_instruction(
                 if guarded.contains(&src2) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 writeln!(
                     output,
-                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             } else if let Some((src1, src2)) =
@@ -3580,13 +3624,13 @@ fn emit_instruction(
                 if guarded.contains(&src2) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{src2}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 writeln!(
                     output,
-                    "    {{ kiln_value read; int status = kiln_c99_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(locals[{src1}], locals[{src2}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}"
+                    "    {{ kiln_val read; int status = kiln_c99_val_read_element(host, locals[{src1}], locals[{src2}], depth, thrown, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(locals[{src1}]), kiln_val_to_boundary(locals[{src2}])); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}"
                 )
                 .unwrap();
             } else if let Some((obj, key, val, strict)) =
@@ -3596,20 +3640,20 @@ fn emit_instruction(
                 if guarded.contains(&key) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 if guarded.contains(&val) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 writeln!(
                     output,
-                    "    {{ int status = kiln_c99_write_element(host, locals[{obj}], locals[{key}], locals[{val}], {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    "    {{ int status = kiln_c99_val_write_element(host, locals[{obj}], locals[{key}], locals[{val}], {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                     i32::from(strict)
                 )
                 .unwrap();
@@ -3622,13 +3666,13 @@ fn emit_instruction(
                 if guarded.contains(&key) {
                     writeln!(
                         output,
-                        "    {{ int status = kiln_c99_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                        "    {{ int status = kiln_c99_val_check_tdz(locals[{key}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                     )
                     .unwrap();
                 }
                 writeln!(
                     output,
-                    "    {{ int status = kiln_c99_write_element(host, locals[{obj}], locals[{key}], {const_val}, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    "    {{ int status = kiln_c99_val_write_element(host, locals[{obj}], locals[{key}], {const_val}, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                     i32::from(strict)
                 )
                 .unwrap();
@@ -3664,14 +3708,14 @@ fn emit_instruction(
             if count > 0 {
                 writeln!(
                     output,
-                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2]; kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1]; status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = kiln_val_to_boundary(stack[sp - (size_t){count} * 2 + pair * 2]); kiln_value member = kiln_val_to_boundary(stack[sp - (size_t){count} * 2 + pair * 2 + 1]); status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
                 writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
             } else {
                 output.push_str("        (void)pair;\n");
             }
-            output.push_str("        stack[sp++] = built;\n    }\n");
+            output.push_str("        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
         }
         Instruction::NewArray { count } => {
             let count = usize::try_from(*count).unwrap();
@@ -3681,14 +3725,14 @@ fn emit_instruction(
             if count > 0 {
                 writeln!(
                     output,
-                    "        for (element = 0; element < (size_t){count}; ++element) {{ status = kiln_c99_array_push(built, stack[sp - (size_t){count} + element]); if (status != KILN_C99_OK) return status; }}"
+                    "        for (element = 0; element < (size_t){count}; ++element) {{ status = kiln_c99_array_push(built, kiln_val_to_boundary(stack[sp - (size_t){count} + element])); if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
                 writeln!(output, "        sp -= (size_t){count};").unwrap();
             } else {
                 output.push_str("        (void)element;\n");
             }
-            output.push_str("        stack[sp++] = built;\n    }\n");
+            output.push_str("        stack[sp++] = kiln_val_from_boundary(built);\n    }\n");
         }
         Instruction::GetProperty(name) => {
             let unwind = unwind_or_return(handlers, site);
@@ -3697,7 +3741,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_get_property(host, stack, &sp, {symbol}_key_{name}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_get_property(host, stack, &sp, {symbol}_key_{name}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}" ,
                 text.len()
             )
             .unwrap();
@@ -3709,7 +3753,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_set_property(host, stack, &sp, {symbol}_key_{name}, {}, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_set_property(host, stack, &sp, {symbol}_key_{name}, {}, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 text.len()
             )
             .unwrap();
@@ -3721,7 +3765,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_set_property(host, stack, &sp, {symbol}_key_{name}, {}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_set_property(host, stack, &sp, {symbol}_key_{name}, {}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 text.len(),
                 i32::from(*strict)
             )
@@ -3731,7 +3775,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_to_property_key(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_op_val_to_property_key(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -3739,7 +3783,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_get_computed(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_op_val_get_computed(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -3747,7 +3791,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_set_computed(host, stack, &sp, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_op_val_set_computed(host, stack, &sp, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -3755,12 +3799,12 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_set_computed(host, stack, &sp, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                "    {{ int status = kiln_c99_op_val_set_computed(host, stack, &sp, {}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
                 i32::from(*strict)
             )
             .unwrap();
         }
-        Instruction::LoadThis => output.push_str("    stack[sp++] = receiver;\n"),
+        Instruction::LoadThis => output.push_str("    stack[sp++] = kiln_val_from_boundary(receiver);\n"),
         // Module scope is one array for the whole module, so a read from a function body names
         // it directly rather than reaching for a frame that may no longer exist.
         Instruction::LoadGlobal(slot) => {
@@ -3768,7 +3812,7 @@ fn emit_instruction(
                 let unwind = unwind_or_return(handlers, site);
                 writeln!(
                     output,
-                    "    if ({symbol}_globals[{slot}].tag == KILN_VALUE_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "    if ({symbol}_globals[{slot}] == KILN_VAL_UNINITIALIZED) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, \"cannot access a binding before its declaration\"); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
                 )
                 .unwrap();
             }
@@ -3779,7 +3823,7 @@ fn emit_instruction(
         }
         Instruction::Binary(BinaryOp::InstanceOf) => {
             output.push_str(
-                "    { kiln_value constructor = stack[--sp]; int answer; int status = kiln_c99_instance_of(stack[sp - 1], constructor, &answer); if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }\n",
+                "    { kiln_value constructor = kiln_val_to_boundary(stack[--sp]); int answer; int status = kiln_c99_instance_of(kiln_val_to_boundary(stack[sp - 1]), constructor, &answer); if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }\n",
             );
         }
         // Both halves of `super` are an ordinary call with `this` threaded through: the parent
@@ -3790,7 +3834,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_super_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                "    {{ kiln_value produced; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_super_call(host, &produced, kiln_val_to_boundary(stack[sp - {argc} - 1]), receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = kiln_val_from_boundary(produced); }}",
                 argc + 1
             )
             .unwrap();
@@ -3802,7 +3846,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status = kiln_c99_super_call(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
+                "    {{ kiln_value produced; int status = kiln_c99_super_call(host, &produced, kiln_val_to_boundary(stack[sp - 1]), receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(produced); }}"
             )
             .unwrap();
         }
@@ -3811,7 +3855,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_new(host, stack, &sp, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_op_val_new(host, stack, &sp, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -3825,7 +3869,7 @@ fn emit_instruction(
             let enumerable = i32::from(*enumerable);
             writeln!(
                 output,
-                "    {{ kiln_value {half} = stack[--sp]; kiln_value key = stack[--sp]; kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(stack[sp - 1], name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value {half} = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_val_to_boundary(stack[--sp]); kiln_value {other} = kiln_c99_undefined(); kiln_value name = kiln_c99_property_key(key); int status; if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} status = kiln_c99_set_function_name({half}, key, \"{prefix}\"); if (status != KILN_C99_OK) return status; status = kiln_c99_define_accessor(kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, getter, setter, {enumerable}); if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -3843,7 +3887,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value function = stack[--sp]; kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private(stack[sp - 1], {symbol}_constant_{name}, {len}, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
+                "    {{ kiln_value function = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{name}, {len}); if (kiln_c99_set_function_name(function, key, {prefix}) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_private(kiln_val_to_boundary(stack[sp - 1]), {symbol}_constant_{name}, {len}, function, {tag}) != KILN_C99_OK) {{ {direct_refusal} }} }}",
                 len = text.len()
             )
             .unwrap();
@@ -3855,14 +3899,14 @@ fn emit_instruction(
         Instruction::DefineNamedProperty => {
             writeln!(
                 output,
-                "    {{ kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_put(host, stack[sp - 1], name.ptr, name.len, method, depth, thrown) != KILN_C99_OK) {{ {direct_refusal} }} }}"
+                "    {{ kiln_value method = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_val_to_boundary(stack[--sp]); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_put(host, kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, method, depth, thrown) != KILN_C99_OK) {{ {direct_refusal} }} }}"
             )
             .unwrap();
         }
         Instruction::DefineMethod => {
             writeln!(
                 output,
-                "    {{ kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_method(stack[sp - 1], name.ptr, name.len, method) != KILN_C99_OK) {{ {direct_refusal} }} }}"
+                "    {{ kiln_value method = kiln_val_to_boundary(stack[--sp]); kiln_value key = kiln_val_to_boundary(stack[--sp]); kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_define_method(kiln_val_to_boundary(stack[sp - 1]), name.ptr, name.len, method) != KILN_C99_OK) {{ {direct_refusal} }} }}"
             )
             .unwrap();
         }
@@ -3876,7 +3920,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value container = stack[--sp]; int answer; if (!kiln_c99_is_reference(container) && container.tag != KILN_VALUE_DATE) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, \"Cannot use 'in' to search for a property in a non-object\"); {unwind} }} int status = kiln_c99_has_computed(host, container, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
+                "    {{ kiln_value container = kiln_val_to_boundary(stack[--sp]); int answer; if (!kiln_c99_is_reference(container) && container.tag != KILN_VALUE_DATE) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, \"Cannot use 'in' to search for a property in a non-object\"); {unwind} }} int status = kiln_c99_has_computed(host, container, kiln_val_to_boundary(stack[sp - 1]), &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}"
             )
             .unwrap();
         }
@@ -3887,7 +3931,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int answer; int status = kiln_c99_delete(host, stack[sp - 1], {symbol}_key_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                "    {{ int answer; int status = kiln_c99_delete(host, kiln_val_to_boundary(stack[sp - 1]), {symbol}_key_{name}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
                 text.len()
             )
             .unwrap();
@@ -3899,7 +3943,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int answer; int status = kiln_c99_delete_or_throw(host, stack[sp - 1], {symbol}_key_{name}, {}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                "    {{ int answer; int status = kiln_c99_delete_or_throw(host, kiln_val_to_boundary(stack[sp - 1]), {symbol}_key_{name}, {}, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
                 text.len(),
                 i32::from(*strict)
             )
@@ -3909,7 +3953,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value key = stack[--sp]; int answer; int status = kiln_c99_delete_computed(host, stack[sp - 1], key, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
+                "    {{ kiln_value key = kiln_val_to_boundary(stack[--sp]); int answer; int status = kiln_c99_delete_computed(host, kiln_val_to_boundary(stack[sp - 1]), key, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}"
             )
             .unwrap();
         }
@@ -3917,7 +3961,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value key = stack[--sp]; int answer; int status = kiln_c99_delete_computed_or_throw(host, stack[sp - 1], key, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}",
+                "    {{ kiln_value key = kiln_val_to_boundary(stack[--sp]); int answer; int status = kiln_c99_delete_computed_or_throw(host, kiln_val_to_boundary(stack[sp - 1]), key, {}, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer ? KILN_VAL_TRUE : KILN_VAL_FALSE; }}",
                 i32::from(*strict)
             )
             .unwrap();
@@ -3929,7 +3973,7 @@ fn emit_instruction(
         // there is the enclosing function's -- a different list entirely.
         Instruction::LoadArguments => {
             output.push_str(
-                "    { kiln_value given; int status = kiln_c99_visible_arguments(&given); if (status != KILN_C99_OK) return status; stack[sp++] = given; }\n",
+                "    { kiln_value given; int status = kiln_c99_visible_arguments(&given); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(given); }\n",
             );
         }
         // `...rest` is every argument past the named parameters, as an array. A generator's
@@ -3937,18 +3981,18 @@ fn emit_instruction(
         Instruction::RestArguments(from) => {
             writeln!(
                 output,
-                "    {{ kiln_value rest; size_t extra; int status = kiln_c99_new_array(&rest); if (status != KILN_C99_OK) return status; for (extra = (size_t){from}; extra < argc; ++extra) {{ status = kiln_c99_array_push(rest, args[extra]); if (status != KILN_C99_OK) return status; }} stack[sp++] = rest; }}"
+                "    {{ kiln_value rest; size_t extra; int status = kiln_c99_new_array(&rest); if (status != KILN_C99_OK) return status; for (extra = (size_t){from}; extra < argc; ++extra) {{ status = kiln_c99_array_push(rest, args[extra]); if (status != KILN_C99_OK) return status; }} stack[sp++] = kiln_val_from_boundary(rest); }}"
             )
             .unwrap();
         }
         // The marker for an element a literal left out. It never escapes into an expression:
         // `NewArray` is the only thing that consumes it.
-        Instruction::PushHole => output.push_str("    stack[sp++] = kiln_c99_hole();\n"),
+        Instruction::PushHole => output.push_str("    stack[sp++] = KILN_VAL_HOLE;\n"),
         Instruction::EnumerateKeys => {
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value keys; int status = kiln_c99_enumerate_keys(host, stack[sp - 1], &keys, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = keys; }}"
+                "    {{ kiln_value keys; int status = kiln_c99_enumerate_keys(host, kiln_val_to_boundary(stack[sp - 1]), &keys, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(keys); }}"
             )
             .unwrap();
         }
@@ -3958,7 +4002,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = stack[--sp]; kiln_value callee = stack[--sp]; kiln_value self_value = stack[sp - 1]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = call_result; }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value callee = kiln_val_to_boundary(stack[--sp]); kiln_value self_value = kiln_val_to_boundary(stack[sp - 1]); kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_call(host, &call_result, callee, self_value, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(call_result); }}"
             )
             .unwrap();
         }
@@ -3968,7 +4012,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = stack[--sp]; kiln_value parent = stack[--sp]; kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = call_result; }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value parent = kiln_val_to_boundary(stack[--sp]); kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(call_result); }}"
             )
             .unwrap();
         }
@@ -3976,7 +4020,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_iterate(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value source = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_iterate(host, kiln_val_to_boundary(stack[sp - 1]), source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -3984,7 +4028,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status; status = kiln_c99_iterate(host, built, stack[sp - 1], depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = built; }}"
+                "    {{ kiln_value built; int status = kiln_c99_new_array(&built); if (status != KILN_C99_OK) return status; status = kiln_c99_iterate(host, built, kiln_val_to_boundary(stack[sp - 1]), depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(built); }}"
             )
             .unwrap();
         }
@@ -3992,7 +4036,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_spread_object(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value source = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_spread_object(host, kiln_val_to_boundary(stack[sp - 1]), source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
@@ -4000,7 +4044,7 @@ fn emit_instruction(
         // of `D` find a method of `C`.
         Instruction::SetPrototype => {
             output.push_str(
-                "    { kiln_value prototype = stack[--sp]; int status = kiln_c99_set_prototype(stack[sp - 1], prototype); if (status != KILN_C99_OK) return status; }\n",
+                "    { kiln_value prototype = kiln_val_to_boundary(stack[--sp]); int status = kiln_c99_set_prototype(kiln_val_to_boundary(stack[sp - 1]), prototype); if (status != KILN_C99_OK) return status; }\n",
             );
         }
         // `super.x` reads the link the method's home object carries *now*, which is the same
@@ -4015,7 +4059,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, stack[sp - 1], kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}",
                 text.len()
             )
             .unwrap();
@@ -4026,7 +4070,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value prototype = stack[--sp]; kiln_value read; int status = kiln_c99_get_with_receiver(host, prototype, stack[sp - 1], receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
+                "    {{ kiln_value prototype = kiln_val_to_boundary(stack[--sp]); kiln_value read; int status = kiln_c99_get_with_receiver(host, prototype, kiln_val_to_boundary(stack[sp - 1]), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}"
             )
             .unwrap();
         }
@@ -4034,7 +4078,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value subject = stack[sp - 1]; int status = kiln_c99_invoke_method(host, &stack[sp - 1], KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, kiln_c99_undefined(), &subject, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ kiln_value subject = kiln_val_to_boundary(stack[sp - 1]); kiln_value proto_out; int status = kiln_c99_invoke_method(host, &proto_out, KILN_C99_METHOD_OBJECT_GET_PROTOTYPE_OF, kiln_c99_undefined(), &subject, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(proto_out); }}"
             )
             .unwrap();
         }
@@ -4051,17 +4095,17 @@ fn emit_instruction(
         Instruction::Yield | Instruction::Await => {
             writeln!(
                 output,
-                "    frame->sp = sp - 1; frame->resume = {index}; frame->awaiting = {}; *result = stack[sp - 1]; return KILN_C99_YIELDED;",
+                "    frame->sp = sp - 1; frame->resume = {index}; frame->awaiting = {}; *result = kiln_val_to_boundary(stack[sp - 1]); return KILN_C99_YIELDED;",
                 i32::from(matches!(instruction, Instruction::Await))
             )
             .unwrap();
             // Where `next` comes back to. What the caller sent becomes the value of the `yield`
             // expression, which is why the height here is one more than it was at the suspension.
             writeln!(output, "kiln_resume_{index}:;").unwrap();
-            output.push_str("    stack[sp++] = frame->sent;\n");
+            output.push_str("    stack[sp++] = kiln_val_from_boundary(frame->sent);\n");
         }
         Instruction::Throw => {
-            output.push_str("    *thrown = stack[--sp];\n");
+            output.push_str("    *thrown = kiln_val_to_boundary(stack[--sp]);\n");
             // Nothing here can catch it, so it leaves immediately -- as a status from a body,
             // and as text through the uncaught epilogue from the entry point. Spelled out rather
             // than shared with `unwind_or_return`, whose propagating arm returns the `status` a
@@ -4094,7 +4138,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{action} }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{action} }}",
                 text.len()
             )
             .unwrap();
@@ -4103,27 +4147,27 @@ fn emit_instruction(
             // The one builtin that is built rather than named: it is a real object, because a
             // program writes to it.
             output.push_str(
-                "    { int status = kiln_c99_global_object(&stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }\n",
+                "    { kiln_value obj; int status = kiln_c99_global_object(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }\n",
             );
         }
         Instruction::LoadBuiltin(kiln_ir::Builtin::Process) => {
             output.push_str(
-                "    { int status = kiln_c99_process_object(&stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }\n",
+                "    { kiln_value obj; int status = kiln_c99_process_object(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }\n",
             );
         }
         Instruction::LoadBuiltin(kiln_ir::Builtin::Atomics) => {
             output.push_str(
-                "    { int status = kiln_c99_atomics_object(&stack[sp]); if (status != KILN_C99_OK) return status; ++sp; }\n",
+                "    { kiln_value obj; int status = kiln_c99_atomics_object(&obj); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(obj); }\n",
             );
         }
         Instruction::LoadBuiltin(kiln_ir::Builtin::SetImmediate) => {
             output.push_str(
-                "    stack[sp++] = kiln_c99_method(KILN_C99_METHOD_SET_IMMEDIATE);\n",
+                "    stack[sp++] = kiln_val_from_boundary(kiln_c99_method(KILN_C99_METHOD_SET_IMMEDIATE));\n",
             );
         }
         Instruction::LoadBuiltin(kiln_ir::Builtin::ClearImmediate) => {
             output.push_str(
-                "    stack[sp++] = kiln_c99_method(KILN_C99_METHOD_CLEAR_IMMEDIATE);\n",
+                "    stack[sp++] = kiln_val_from_boundary(kiln_c99_method(KILN_C99_METHOD_CLEAR_IMMEDIATE));\n",
             );
         }
         Instruction::LoadBuiltin(builtin) => {
@@ -4225,20 +4269,23 @@ fn emit_instruction(
                 }
                 _ => unreachable!("verification rejects every other builtin before emission"),
             };
-            writeln!(output, "    stack[sp++] = {pushed};").unwrap();
+            writeln!(output, "    stack[sp++] = kiln_val_from_boundary({pushed});").unwrap();
         }
         Instruction::Pop => output.push_str("    --sp;\n"),
         Instruction::Dup => output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n"),
         // A scalar program holds no reference to reduce, and has nowhere to put a thrown
         // value either, so its emitted bytes stay what they were.
         Instruction::Unary(operator) if !*callables => {
-            writeln!(output, "    stack[sp - 1] = kiln_c99_unary({}, stack[sp - 1]);", unary_code(*operator)).unwrap()
+            match numeric_fast_unary_body(*operator) {
+                Some(fast) => writeln!(output, "    {{ kiln_val operand = stack[sp - 1]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(operand))) {{ double a; memcpy(&a, &operand, sizeof(a)); {fast} }} else {{ answer = kiln_c99_val_unary_fast({}, operand); }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                None => writeln!(output, "    stack[sp - 1] = kiln_c99_val_unary_fast({}, stack[sp - 1]);", unary_code(*operator)).unwrap(),
+            }
         }
         Instruction::Unary(operator) => {
             let unwind = unwind_or_return(handlers, site);
             match numeric_fast_unary_body(*operator) {
-                Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (KILN_LIKELY(operand.tag == KILN_VALUE_NUMBER)) {{ double a; memcpy(&a, &operand.bits, sizeof(a)); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
-                None => writeln!(output, "    {{ kiln_value answer; int status = kiln_c99_unary_checked({}, host, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                Some(fast) => writeln!(output, "    {{ kiln_val operand = stack[sp - 1]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(operand))) {{ double a; memcpy(&a, &operand, sizeof(a)); {fast} }} else {{ kiln_value ans; int status = kiln_c99_unary_checked({}, host, kiln_val_to_boundary(operand), &ans, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; answer = kiln_val_from_boundary(ans); }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
+                None => writeln!(output, "    {{ kiln_value ans; int status = kiln_c99_unary_checked({}, host, kiln_val_to_boundary(stack[sp - 1]), &ans, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(ans); }}", unary_code(*operator)).unwrap(),
             }
         }
         Instruction::Binary(operator) if !*callables => {
@@ -4253,26 +4300,26 @@ fn emit_instruction(
                     format!("{} {sym} {}", "a", "b")
                 };
                 let fallback_cond = if is_jump_if_false {
-                    "!kiln_c99_truthy(answer)"
+                    "!kiln_c99_val_truthy(answer)"
                 } else {
-                    "kiln_c99_truthy(answer)"
+                    "kiln_c99_val_truthy(answer)"
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ kiln_value answer = kiln_c99_binary({}, left, right); if ({fallback_cond}) goto kiln_label_{target}; }} }}",
+                    "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ kiln_val answer = kiln_c99_val_binary_fast({}, left, right); if ({fallback_cond}) goto kiln_label_{target}; }} }}",
                     binary_code(op)
                 )
                 .unwrap();
             } else if let Some((op, slot)) = can_fuse_binary_store(emitter.code, index, &emitter.jump_targets) {
                 let slot = slot as usize;
                 match numeric_fast_body(op) {
-                    Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
-                    None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; locals[{slot}] = kiln_c99_binary({}, left, right); }}", binary_code(op)).unwrap(),
+                    Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }} locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
+                    None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; locals[{slot}] = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(op)).unwrap(),
                 }
             } else {
                 match numeric_fast_body(*operator) {
-                    Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ answer = kiln_c99_binary({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
-                    None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; stack[sp++] = kiln_c99_binary({}, left, right); }}", binary_code(*operator)).unwrap(),
+                    Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ answer = kiln_c99_val_binary_fast({}, left, right); }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                    None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; stack[sp++] = kiln_c99_val_binary_fast({}, left, right); }}", binary_code(*operator)).unwrap(),
                 }
             }
         }
@@ -4288,46 +4335,43 @@ fn emit_instruction(
                     format!("{} {sym} {}", "a", "b")
                 };
                 let fallback_cond = if is_jump_if_false {
-                    "!kiln_c99_truthy(answer)"
+                    "!kiln_c99_val_truthy(answer)"
                 } else {
-                    "kiln_c99_truthy(answer)"
+                    "kiln_c99_val_truthy(answer)"
                 };
                 writeln!(
                     output,
-                    "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; if ({fallback_cond}) goto kiln_label_{target}; }} }}",
+                    "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); if ({cond}) goto kiln_label_{target}; }} else {{ int status; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; if ({fallback_cond}) goto kiln_label_{target}; }} }}",
                     binary_code(op)
                 )
                 .unwrap();
             } else if let Some((op, slot)) = can_fuse_binary_store(emitter.code, index, &emitter.jump_targets) {
                 let slot = slot as usize;
                 match numeric_fast_body(op) {
-                    Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
-                    None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
+                    Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
+                    None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; int status; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{slot}] = answer; }}", binary_code(op)).unwrap(),
                 }
             } else {
                 match numeric_fast_body(*operator) {
-                    Some(fast) => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER && right.tag == KILN_VALUE_NUMBER)) {{ double a; double b; memcpy(&a, &left.bits, sizeof(a)); memcpy(&b, &right.bits, sizeof(b)); {fast} }} else {{ int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
-                    None => writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; kiln_value answer; int status = kiln_c99_binary_checked({}, host, left, right, &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                    Some(fast) => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; kiln_val answer; if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {{ double a; double b; memcpy(&a, &left, sizeof(a)); memcpy(&b, &right, sizeof(b)); {fast} }} else {{ int status; answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
+                    None => writeln!(output, "    {{ kiln_val right = stack[--sp]; kiln_val left = stack[--sp]; int status; kiln_val answer = kiln_c99_val_binary({}, host, left, right, &status, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = answer; }}", binary_code(*operator)).unwrap(),
                 }
             }
         }
         Instruction::Jump(target) => writeln!(output, "    goto kiln_label_{target};").unwrap(),
         Instruction::JumpIfFalse(target) => {
-            writeln!(output, "    if (!kiln_c99_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
+            writeln!(output, "    if (!kiln_c99_val_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
         }
         Instruction::JumpIfTruthy(target) => {
-            writeln!(output, "    if (kiln_c99_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
+            writeln!(output, "    if (kiln_c99_val_truthy(stack[--sp])) goto kiln_label_{target};").unwrap()
         }
         Instruction::JumpIfNotNullish(target) => {
-            writeln!(output, "    {{ kiln_value value = stack[--sp]; if (value.tag != KILN_VALUE_UNDEFINED && value.tag != KILN_VALUE_NULL) goto kiln_label_{target}; }}").unwrap()
+            writeln!(output, "    {{ kiln_val value = stack[--sp]; if (!KILN_VAL_IS_NULLISH(value)) goto kiln_label_{target}; }}").unwrap()
         }
         Instruction::HostCall { op, argc } => {
             // The embedding boundary carries only the five scalar tags, so a function argument
             // is reduced to its text before the host sees it -- which is also what the
             // interpreter prints for one.
-            if *argc > 0 && *callables {
-                writeln!(output, "    {{ size_t arg; for (arg = sp - {argc}; arg < sp; ++arg) if (kiln_c99_crosses_boundary(stack[arg])) stack[arg] = kiln_c99_inspect(stack[arg]); }}").unwrap();
-            }
             // The arguments are copied into a fresh buffer rather than passed as `&stack[sp - n]`.
             // Pointing into `stack[]` and handing that pointer to the host makes the stack array
             // address-escaped for the entire function, which defeats the promotion the numeric
@@ -4335,31 +4379,33 @@ fn emit_instruction(
             // enough to keep a fifty-million-iteration loop's values in memory. The buffer is a
             // local whose address escaping costs nothing, because nothing else reads it.
             if *argc == 0 {
-                writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+                writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
+            } else if *callables {
+                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ kiln_value arg_val = kiln_val_to_boundary(stack[sp - {argc} + i]); if (kiln_c99_crosses_boundary(arg_val)) arg_val = kiln_c99_inspect(arg_val); host_args[i] = arg_val; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
             } else {
-                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = stack[sp - {argc} + i]; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = kiln_val_from_boundary(host_result); }}", host_op_code(*op)).unwrap()
             }
         }
         Instruction::Return => match site {
             ReturnSite::Body => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: None, ..
             } if !callables => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: None, ..
             } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]);\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: Some(exports),
                 commonjs,
             } => {
                 output.push_str(
-                    "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
+                    "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]);\n",
                 );
                 if *callables {
                     output.push_str(
@@ -4382,7 +4428,7 @@ fn emit_instruction(
                     };
                     writeln!(
                         output,
-                        "    {{ kiln_value module_value = locals[2].tag == KILN_VALUE_CELL ? *kiln_c99_cell_of(locals[2]) : locals[2]; int export_status = kiln_c99_get(host, module_value, \"exports\", 7, &exports[0], {depth}, {thrown}); if (export_status != KILN_C99_OK) return export_status; }}"
+                        "    {{ kiln_value mod_val = kiln_val_to_boundary(locals[2]); kiln_value module_value = mod_val.tag == KILN_VALUE_CELL ? *kiln_c99_cell_of(mod_val) : mod_val; int export_status = kiln_c99_get(host, module_value, \"exports\", 7, &exports[0], {depth}, {thrown}); if (export_status != KILN_C99_OK) return export_status; }}"
                     )
                     .unwrap();
                 }
@@ -4394,7 +4440,7 @@ fn emit_instruction(
                     // an immutable one arrives here as a plain value and stays one.
                     writeln!(
                         output,
-                        "    exports[{index}] = locals[{}];",
+                        "    exports[{index}] = kiln_val_to_boundary(locals[{}]);",
                         binding.local_slot
                     )
                     .unwrap();
@@ -4489,10 +4535,10 @@ fn unary_code(operator: UnaryOp) -> u16 {
 /// `pow`, and the bitwise operators and shifts need ToInt32, which is a separate decision.
 fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
     Some(match operator {
-        BinaryOp::Add => "answer = kiln_c99_number(a + b);",
-        BinaryOp::Subtract => "answer = kiln_c99_number(a - b);",
-        BinaryOp::Multiply => "answer = kiln_c99_number(a * b);",
-        BinaryOp::Divide => "answer = kiln_c99_number(a / b);",
+        BinaryOp::Add => "answer = kiln_c99_val_from_double(a + b);",
+        BinaryOp::Subtract => "answer = kiln_c99_val_from_double(a - b);",
+        BinaryOp::Multiply => "answer = kiln_c99_val_from_double(a * b);",
+        BinaryOp::Divide => "answer = kiln_c99_val_from_double(a / b);",
         // `%` is `fmod` by specification, and `fmod` is a call into libm that measured at 41% of a
         // Collatz benchmark's entire runtime. Two integral operands take the machine instruction
         // instead, which agrees exactly: C truncates toward zero and takes the sign of the
@@ -4500,14 +4546,14 @@ fn numeric_fast_body(operator: BinaryOp) -> Option<&'static str> {
         // double is not exactly an integer, a zero divisor must reach `fmod` for NaN, and a zero
         // dividend must too, because `-0 % 3` is `-0` and integer division would answer `+0`.
         BinaryOp::Remainder => {
-            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_number(fmod(a, b)); }"
+            "if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_val_from_double((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_val_from_double(fmod(a, b)); }"
         }
-        BinaryOp::StrictEqual => "answer = kiln_c99_boolean(a == b);",
-        BinaryOp::StrictNotEqual => "answer = kiln_c99_boolean(a != b);",
-        BinaryOp::LessThan => "answer = kiln_c99_boolean(a < b);",
-        BinaryOp::LessThanOrEqual => "answer = kiln_c99_boolean(a <= b);",
-        BinaryOp::GreaterThan => "answer = kiln_c99_boolean(a > b);",
-        BinaryOp::GreaterThanOrEqual => "answer = kiln_c99_boolean(a >= b);",
+        BinaryOp::StrictEqual => "answer = (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
+        BinaryOp::StrictNotEqual => "answer = (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
+        BinaryOp::LessThan => "answer = (a < b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
+        BinaryOp::LessThanOrEqual => "answer = (a <= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
+        BinaryOp::GreaterThan => "answer = (a > b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
+        BinaryOp::GreaterThanOrEqual => "answer = (a >= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
         _ => return None,
     })
 }
@@ -4521,52 +4567,52 @@ fn const_numeric_fast_body_in_place(operator: BinaryOp, bits: u64, dst: u32) -> 
         BinaryOp::Add => {
             if bits == one_bits {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a + 1.0 }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a + 1.0);"
                 ))
             } else if bits == two_bits {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a + 2.0 }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a + 2.0);"
                 ))
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a + b }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a + b);"
                 ))
             }
         }
         BinaryOp::Subtract => {
             if bits == one_bits {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a - 1.0 }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a - 1.0);"
                 ))
             } else if bits == two_bits {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a - 2.0 }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a - 2.0);"
                 ))
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a - b }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a - b);"
                 ))
             }
         }
         BinaryOp::Multiply => {
             if bits == two_bits {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * 2.0 }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a * 2.0);"
                 ))
             } else if bits == one_bits {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * 1.0 }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a * 1.0);"
                 ))
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * b }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a * b);"
                 ))
             }
         }
         BinaryOp::Divide => {
             if bits == two_bits {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * 0.5 }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); locals[{dst}] = kiln_c99_val_from_double(a * 0.5);"
                 ))
             } else if val > 0.0
                 && val.is_finite()
@@ -4576,11 +4622,11 @@ fn const_numeric_fast_body_in_place(operator: BinaryOp, bits: u64, dst: u32) -> 
                 let inv = 1.0 / val;
                 let inv_bits = inv.to_bits();
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double inv_b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({inv_bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a * inv_b }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double inv_b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({inv_bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a * inv_b);"
                 ))
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &locals[{dst}].bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}].bits = ((union {{ double d; uint64_t u; }}){{ .d = a / b }}).u;"
+                    "double a; memcpy(&a, &locals[{dst}], sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; locals[{dst}] = kiln_c99_val_from_double(a / b);"
                 ))
             }
         }
@@ -4596,40 +4642,40 @@ fn const_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String> {
     match operator {
         BinaryOp::Add => {
             if bits == one_bits {
-                Some("double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a + 1.0);".to_string())
+                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a + 1.0);".to_string())
             } else if bits == two_bits {
-                Some("double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a + 2.0);".to_string())
+                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a + 2.0);".to_string())
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_number(a + b);"
+                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a + b);"
                 ))
             }
         }
         BinaryOp::Subtract => {
             if bits == one_bits {
-                Some("double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a - 1.0);".to_string())
+                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a - 1.0);".to_string())
             } else if bits == two_bits {
-                Some("double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a - 2.0);".to_string())
+                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a - 2.0);".to_string())
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_number(a - b);"
+                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a - b);"
                 ))
             }
         }
         BinaryOp::Multiply => {
             if bits == two_bits {
-                Some("double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a * 2.0);".to_string())
+                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a * 2.0);".to_string())
             } else if bits == one_bits {
-                Some("double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a * 1.0);".to_string())
+                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a * 1.0);".to_string())
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_number(a * b);"
+                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a * b);"
                 ))
             }
         }
         BinaryOp::Divide => {
             if bits == two_bits {
-                Some("double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a * 0.5);".to_string())
+                Some("double a; memcpy(&a, &left, sizeof(a)); answer = kiln_c99_val_from_double(a * 0.5);".to_string())
             } else if val > 0.0
                 && val.is_finite()
                 && val.fract() == 0.0
@@ -4638,11 +4684,11 @@ fn const_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String> {
                 let inv = 1.0 / val;
                 let inv_bits = inv.to_bits();
                 Some(format!(
-                    "double a; memcpy(&a, &left.bits, sizeof(a)); double inv_b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({inv_bits}) }}).d; answer = kiln_c99_number(a * inv_b);"
+                    "double a; memcpy(&a, &left, sizeof(a)); double inv_b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({inv_bits}) }}).d; answer = kiln_c99_val_from_double(a * inv_b);"
                 ))
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_number(a / b);"
+                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_val_from_double(a / b);"
                 ))
             }
         }
@@ -4655,31 +4701,31 @@ fn const_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String> {
             {
                 let mask = (val as u64) - 1;
                 Some(format!(
-                    "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if (KILN_LIKELY(a > 0.0 && a <= 9007199254740992.0 && a == (double)(int64_t)a)) {{ answer = kiln_c99_number((double)((int64_t)a & {mask})); }} else {{ answer = kiln_c99_number(fmod(a, b)); }}"
+                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if (KILN_LIKELY(a > 0.0 && a <= 9007199254740992.0 && a == (double)(int64_t)a)) {{ answer = kiln_c99_val_from_double((double)((int64_t)a & {mask})); }} else {{ answer = kiln_c99_val_from_double(fmod(a, b)); }}"
                 ))
             } else {
                 Some(format!(
-                    "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 && b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a && b == (double)(int64_t)b) {{ answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }} else {{ answer = kiln_c99_number(fmod(a, b)); }}"
+                    "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 && b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a && b == (double)(int64_t)b) {{ answer = kiln_c99_val_from_double((double)((int64_t)a % (int64_t)b)); }} else {{ answer = kiln_c99_val_from_double(fmod(a, b)); }}"
                 ))
             }
         }
         BinaryOp::StrictEqual => Some(format!(
-            "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_boolean(a == b);"
+            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::StrictNotEqual => Some(format!(
-            "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_boolean(a != b);"
+            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::LessThan => Some(format!(
-            "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_boolean(a < b);"
+            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a < b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::LessThanOrEqual => Some(format!(
-            "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_boolean(a <= b);"
+            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a <= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::GreaterThan => Some(format!(
-            "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_boolean(a > b);"
+            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a > b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::GreaterThanOrEqual => Some(format!(
-            "double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = kiln_c99_boolean(a >= b);"
+            "double a; memcpy(&a, &left, sizeof(a)); double b = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; answer = (a >= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         _ => None,
     }
@@ -4692,52 +4738,52 @@ fn const_left_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String>
     match operator {
         BinaryOp::Add => {
             if bits == one_bits {
-                Some("double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(1.0 + b);".to_string())
+                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(1.0 + b);".to_string())
             } else if bits == two_bits {
-                Some("double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(2.0 + b);".to_string())
+                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(2.0 + b);".to_string())
             } else {
                 Some(format!(
-                    "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(a + b);"
+                    "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a + b);"
                 ))
             }
         }
         BinaryOp::Subtract => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(a - b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a - b);"
         )),
         BinaryOp::Multiply => {
             if bits == two_bits {
-                Some("double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(2.0 * b);".to_string())
+                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(2.0 * b);".to_string())
             } else if bits == one_bits {
-                Some("double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(1.0 * b);".to_string())
+                Some("double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(1.0 * b);".to_string())
             } else {
                 Some(format!(
-                    "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(a * b);"
+                    "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a * b);"
                 ))
             }
         }
         BinaryOp::Divide => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_number(a / b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = kiln_c99_val_from_double(a / b);"
         )),
         BinaryOp::Remainder => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 && b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a && b == (double)(int64_t)b) {{ answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }} else {{ answer = kiln_c99_number(fmod(a, b)); }}"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 && b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a && b == (double)(int64_t)b) {{ answer = kiln_c99_val_from_double((double)((int64_t)a % (int64_t)b)); }} else {{ answer = kiln_c99_val_from_double(fmod(a, b)); }}"
         )),
         BinaryOp::StrictEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_boolean(a == b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::StrictNotEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_boolean(a != b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::LessThan => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_boolean(a < b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a < b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::LessThanOrEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_boolean(a <= b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a <= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::GreaterThan => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_boolean(a > b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a > b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         BinaryOp::GreaterThanOrEqual => Some(format!(
-            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right.bits, sizeof(b)); answer = kiln_c99_boolean(a >= b);"
+            "double a = ((union {{ uint64_t u; double d; }}){{ .u = UINT64_C({bits}) }}).d; double b; memcpy(&b, &right, sizeof(b)); answer = (a >= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;"
         )),
         _ => None,
     }
@@ -4748,12 +4794,12 @@ fn const_left_numeric_fast_body(operator: BinaryOp, bits: u64) -> Option<String>
 /// `typeof` and `void` do not touch the value and `~` needs ToInt32, so they keep the generic call.
 fn numeric_fast_unary_body(operator: UnaryOp) -> Option<&'static str> {
     Some(match operator {
-        UnaryOp::Plus | UnaryOp::ToNumeric => "answer = kiln_c99_number(a);",
-        UnaryOp::Negate => "answer = kiln_c99_number(-a);",
+        UnaryOp::Plus | UnaryOp::ToNumeric => "answer = kiln_c99_val_from_double(a);",
+        UnaryOp::Negate => "answer = kiln_c99_val_from_double(-a);",
         // `!x` on a number is false unless the number is zero or NaN.
-        UnaryOp::Not => "answer = kiln_c99_boolean(a == 0.0 || a != a);",
-        UnaryOp::Increment => "answer = kiln_c99_number(a + 1.0);",
-        UnaryOp::Decrement => "answer = kiln_c99_number(a - 1.0);",
+        UnaryOp::Not => "answer = (a == 0.0 || a != a) ? KILN_VAL_TRUE : KILN_VAL_FALSE;",
+        UnaryOp::Increment => "answer = kiln_c99_val_from_double(a + 1.0);",
+        UnaryOp::Decrement => "answer = kiln_c99_val_from_double(a - 1.0);",
         _ => return None,
     })
 }
