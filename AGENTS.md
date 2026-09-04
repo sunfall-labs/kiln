@@ -42,6 +42,35 @@ Two more habits from the same day: check a binary's mtime against `git log -1` b
 someone, and run `git log --oneline A..B` before blaming a commit, because alternating two
 endpoints cannot tell you which of the commits between them did it.
 
+## One command before you land: `mise run gate`
+
+The pieces below all existed as separate scripts; what did not exist was a single thing to run, so
+each agent assembled their own in a scratch directory and got it subtly wrong. `scripts/gate.sh` is
+that assembly, in the repository, and `mise tasks` lists it beside the rest.
+
+| task | what it does |
+| --- | --- |
+| `mise run gate` | crate tests, native parity, thirdparty bundles, the three corpora, the Test262 baseline |
+| `mise run gate-quick` | the first three -- the loop worth running while iterating |
+| `mise run test262` | the Test262 baseline alone, chunk by chunk |
+| `mise run test262-update` | regenerate the baseline; deliberate, and the diff is the record |
+| `mise run test262-fetch` | fetch the pinned corpus into `~/.cache/kiln`, once per machine |
+
+`mise trust` once per checkout, or the tasks are invisible.
+
+`conformance/test262-baseline.json` holds a pass/fail count per chunk. A whole-corpus number is one
+figure and hides everything -- a change that wins forty rows in one chunk while losing forty in
+another reads as no change at all -- so the gate compares chunk by chunk and a regression names the
+chunk it happened in. Moving those numbers is a diff a reviewer has to accept, next to the change
+that caused it, exactly as `update-baseline.sh` intends for the performance baseline.
+
+Two things the gate does that a hand-rolled one keeps getting wrong. It asserts on the *summary
+line* of the crate tests rather than on an exit code, because a broken test build leaves a working
+release binary and a suite that never ran. And it re-execs itself under a bash 4 or newer: macOS
+ships 3.2, `mise run` finds it, and under 3.2 `thirdparty.sh` loses `BASHPID` and its cleanup trap
+deletes the shared results directory instead of its own -- every bundle then reports "missing" and
+the change under test takes the blame.
+
 ## Running the test corpora
 
 Each corpus declares itself either through a `manifest.toml` beside the files or through Test262
