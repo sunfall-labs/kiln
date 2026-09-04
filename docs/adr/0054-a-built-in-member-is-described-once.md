@@ -64,9 +64,39 @@ longer possible. Adding a symbol-keyed member cannot silently corrupt enumeratio
 behaviour-neutral by construction and was gated as such: every measured chunk identical, native
 parity 92/6/0, thirdparty 19/0 on both engines.
 
-What this does **not** yet do is collapse the remaining questions -- attributes, `name`, `length`,
-and existence -- into the same rows. Those still live in their own functions, so the class of bug is
-narrowed rather than closed. The rows are the place to put them, one family at a time.
+### Existence precedes description
+
+Added after the first version of this ADR, because the class it called "narrowed rather than
+closed" reappeared within the hour.
+
+`intrinsic_own_attributes` was a run of early returns, each deciding flags from the member's
+*name*. Attributes are asked before the value is, so a rule that fires for a name the table does
+not publish does not merely mis-describe a property -- it invents one. Generalising a single rule
+from `Date` to every prototype gave every prototype in the realm a phantom own `@@toPrimitive`,
+which cost `Date` ten rows, `language/expressions` seven and `Object` four, none of them anywhere
+near the change. The first fix was to remember an existence check in that rule and the one beside
+it, which is the same discipline that had already failed.
+
+It is now structural. `intrinsic_own_attributes` performs the existence lookup **once, before any
+rule can run**, and the rules live in `published_attributes`, which returns `Attributes` rather
+than `Option<Attributes>`. That function cannot express "and also this does not exist", so a rule
+added to it cannot invent a member however it is written.
+
+Three sweeps in `tests.rs` keep the pair honest across every table, rather than wherever someone
+happened to look: attributes are never reported for an absent member; the filtered listing and the
+description agree in both directions; and no enumeration list carries a symbol's spelling. The
+first was checked by reintroducing the phantom on purpose and confirming it names the table and the
+member -- a test that has never failed is not known to work.
+
+The raw name lists stay deliberate supersets: `Array.prototype` and `%TypedArray%.prototype` share
+one, so the array table names `set`, which only the view has. `intrinsic_prototype_entries` drops
+any name the value tables do not answer, so the listing is right even though the list is not, and
+the sweep asserts that resolution rather than the list.
+
+### Still not collapsed
+
+`name` and `length` remain in their own functions, so that pair can still drift from the rows. The
+rows are the place to put them.
 
 The end state this points at, and deliberately does not attempt here, is materialising the
 intrinsics as real objects at realm setup: build an `ObjectData` per prototype from these rows,
