@@ -814,6 +814,22 @@ fn finish_run(
         }
         Err(error) => {
             let message = error.to_string();
+            // A rejection nothing handled is not a failure of a *synchronous* case. The
+            // interpreter fails the run for one, which is the right judgement for `kiln run` --
+            // a silent rejection is how a program looks like it worked -- but Test262's contract
+            // for a case without `flags: [async]` is that it passes when nothing is thrown, and
+            // a rejection is not thrown. `import('')` in a syntax case is exactly this: the
+            // specifier is valid, the import rejects, and the case never looks at it.
+            // ...unless the rejection is the case's own assertion failing. A `Test262Error`
+            // that surfaced through a promise is the case saying it got a wrong answer, and
+            // passing it because of where it surfaced would hide exactly what the corpus is for.
+            if !is_async
+                && message.contains("(in promise) ")
+                && !message.contains("Test262Error")
+            {
+                let stdout = host.into_stdout();
+                return CaseResult::new(Outcome::Pass, diagnostics, stdout, started);
+            }
             diagnostics.push(runtime_diagnostic(&error));
             // A missing host facility or a missing intrinsic is a gap in this implementation,
             // not a wrong answer from the language, and must not be counted as a failure.
