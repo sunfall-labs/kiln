@@ -276,6 +276,8 @@ typedef struct kiln_property {
     kiln_value setter;
 } kiln_property;
 
+#define KILN_C99_INLINE_SLOTS 4
+
 typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
@@ -339,6 +341,7 @@ typedef struct kiln_object {
     kiln_shape *shape;
     kiln_value *slots;
     size_t slot_capacity;
+    kiln_value inline_slots[KILN_C99_INLINE_SLOTS];
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
