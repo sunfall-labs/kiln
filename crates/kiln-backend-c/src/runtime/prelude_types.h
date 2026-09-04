@@ -403,6 +403,9 @@ typedef struct kiln_c99_site {
     uint32_t misses;
     uint32_t pic_count;
     kiln_c99_pic_entry entries[KILN_C99_PIC_SIZE];
+    uint8_t cached_tag;
+    uint8_t has_cached_method;
+    uint64_t cached_method;
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
