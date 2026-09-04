@@ -1,7 +1,16 @@
 # `in` does not refuse a primitive right-hand side
 
-**Status:** open. Attempted 2026-09-03 and reverted -- the fix is right, my object predicate was
-not.
+**Status:** FIXED 2026-09-03, on the second attempt. +4 rows
+(`language/expressions` 20360 -> 20364). The first attempt is kept below because the mistake is
+the useful part.
+
+The predicate the C backend wanted was `kiln_c99_is_reference(v) || v.tag == KILN_VALUE_DATE`.
+`is_reference` is a *denylist* of primitives and its own comment says a Date is deliberately not
+one -- "`as_number` already gives its instant, which is what `valueOf` would produce" -- a
+shortcut for date arithmetic that makes it the wrong predicate for any other question. Reading
+that comment was what fixed it; guessing from the name is what broke it.
+
+**Original filing:**
 
 ```js
 "x" in 1      // TypeError in every other engine; kiln answers false
