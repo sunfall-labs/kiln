@@ -2065,6 +2065,7 @@ impl Native {
             // takes a different path rather than failing loudly.
             (Self::SymbolConstructor, _) => WellKnown::ALL
                 .into_iter()
+                .filter(|symbol| symbol.published_by_symbol())
                 .find(|symbol| symbol.js_name() == name)
                 .map(|symbol| Value::Symbol(Symbol::WellKnown(symbol))),
             _ => None,
