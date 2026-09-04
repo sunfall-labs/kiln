@@ -33,3 +33,10 @@
 # Ad-hoc differential probes written while chasing a bug. The filings under `.scratch/<feature>/`
 # are deliberate and tracked; these are the scratch paper beside them.
 .scratch/es/
+# What `bench/io/fs-promises.mjs` writes and rewrites while it is being timed, and what
+# `conformance/native/shape-keys-survive-collection.cjs` writes to make the collector run. Both
+# have to live somewhere the program can reach, `.scratch` is otherwise tracked, and the adapter
+# publishes no `unlink` -- so without these, running the benchmarks or the native corpus leaves
+# stray files in everyone's `git status`.
+.scratch/bench-io-test.tmp
+.kiln-shape-keys-probe.tmp
