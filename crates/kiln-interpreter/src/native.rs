@@ -709,6 +709,11 @@ pub enum Native {
     PromiseReject,
     PromiseAll,
     PromiseAllSettled,
+    /// `Promise.allKeyed` and `Promise.allSettledKeyed`: the same two combinators, walking an
+    /// object's own enumerable keys instead of an iterable, and settling with an object keyed the
+    /// same way rather than an array indexed by position.
+    PromiseAllKeyed,
+    PromiseAllSettledKeyed,
     PromiseRace,
     PromiseAny,
     PromiseThen,
@@ -2004,6 +2009,13 @@ impl Native {
             (Self::PromiseConstructor, "allSettled") => {
                 Some(Value::Native(Self::PromiseAllSettled, RealmId::PRIMARY))
             }
+            (Self::PromiseConstructor, "allKeyed") => {
+                Some(Value::Native(Self::PromiseAllKeyed, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "allSettledKeyed") => Some(Value::Native(
+                Self::PromiseAllSettledKeyed,
+                RealmId::PRIMARY,
+            )),
             (Self::PromiseConstructor, "race") => {
                 Some(Value::Native(Self::PromiseRace, RealmId::PRIMARY))
             }
