@@ -42,6 +42,35 @@ Two more habits from the same day: check a binary's mtime against `git log -1` b
 someone, and run `git log --oneline A..B` before blaming a commit, because alternating two
 endpoints cannot tell you which of the commits between them did it.
 
+## One command before you land: `mise run gate`
+
+The pieces below all existed as separate scripts; what did not exist was a single thing to run, so
+each agent assembled their own in a scratch directory and got it subtly wrong. `scripts/gate.sh` is
+that assembly, in the repository, and `mise tasks` lists it beside the rest.
+
+| task | what it does |
+| --- | --- |
+| `mise run gate` | crate tests, native parity, thirdparty bundles, the three corpora, the Test262 baseline |
+| `mise run gate-quick` | the first three -- the loop worth running while iterating |
+| `mise run test262` | the Test262 baseline alone, chunk by chunk |
+| `mise run test262-update` | regenerate the baseline; deliberate, and the diff is the record |
+| `mise run test262-fetch` | fetch the pinned corpus into `~/.cache/kiln`, once per machine |
+
+`mise trust` once per checkout, or the tasks are invisible.
+
+`conformance/test262-baseline.json` holds a pass/fail count per chunk. A whole-corpus number is one
+figure and hides everything -- a change that wins forty rows in one chunk while losing forty in
+another reads as no change at all -- so the gate compares chunk by chunk and a regression names the
+chunk it happened in. Moving those numbers is a diff a reviewer has to accept, next to the change
+that caused it, exactly as `update-baseline.sh` intends for the performance baseline.
+
+Two things the gate does that a hand-rolled one keeps getting wrong. It asserts on the *summary
+line* of the crate tests rather than on an exit code, because a broken test build leaves a working
+release binary and a suite that never ran. And it re-execs itself under a bash 4 or newer: macOS
+ships 3.2, `mise run` finds it, and under 3.2 `thirdparty.sh` loses `BASHPID` and its cleanup trap
+deletes the shared results directory instead of its own -- every bundle then reports "missing" and
+the change under test takes the blame.
+
 ## Running the test corpora
 
 Each corpus declares itself either through a `manifest.toml` beside the files or through Test262
@@ -76,6 +105,20 @@ and points at `scripts/thirdparty.sh`.
 **Test262 runs need a memory cap.** `scripts/test262.sh` pins its own checkout and runs the suite
 in a single `kiln test`, and that one process has repeatedly grown until it filled the disk. Run it
 under an explicit cap and watch it; do not point `kiln test` at the corpus by hand.
+
+**Keep the corpus outside `/tmp`.** A scratchpad checkout under `/private/tmp` is on borrowed time:
+macOS's periodic cleaner empties it on a day boundary, and on 2026-09-04 it took the whole
+checkout, `.git` included, in the middle of a session. Keep one at
+`~/.cache/kiln/test262-<short-commit>` and point work at it -- `scripts/test262.sh` already accepts
+`KILN_TEST262_CHECKOUT` and still verifies the pinned commit, so a durable checkout costs no
+guarantee. A submodule was considered and rejected: 53,874 files multiplied by every worktree is
+exactly the cost the worktree habit above exists to avoid, and the pin is already enforced.
+
+**A vanished corpus reads as a clean run.** `kiln test` on an emptied tree reports
+`discovered 0 / pass 0 / fail 0` and exits 0 -- deliberately, because an empty corpus is not a
+claim about the compiler -- so seven chunks answering `0/0` look like a catastrophic regression in
+whatever you were measuring rather than like a missing corpus. Any gate script of your own must
+refuse to run when the corpus is missing or short, instead of reporting zeros.
 
 ## Changing Node HTTP close behavior
 

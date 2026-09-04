@@ -1,0 +1,44 @@
+# Task definitions for this repository.
+#
+# The toolchain itself stays pinned in the global mise config (`rust` and `mbx`); this file adds
+# only tasks, so that the things worth running have names instead of living in each agent's scratch
+# directory. Run `mise tasks` to list them.
+#
+# Every task shells out to a script under `scripts/`, which is where this repository already keeps
+# its runnable work -- these are a front door, not a second implementation.
+
+[tasks.gate]
+description = "Everything that must hold before a change lands"
+run = "./scripts/gate.sh"
+
+[tasks.gate-quick]
+description = "Crate tests, native parity and thirdparty bundles -- the iteration loop"
+run = "./scripts/gate.sh --quick"
+
+[tasks.test262]
+description = "Check the committed Test262 chunk baseline"
+run = "./scripts/test262-baseline.sh"
+
+[tasks.test262-update]
+description = "Regenerate the Test262 baseline (deliberate: the diff is the record)"
+run = "./scripts/test262-baseline.sh --update"
+
+[tasks.test262-fetch]
+description = "Fetch the pinned Test262 checkout into ~/.cache/kiln (needed once per machine)"
+run = "./scripts/test262-fetch.sh"
+
+[tasks.native]
+description = "Native backend against node, probe by probe"
+run = "./scripts/native.sh"
+
+[tasks.thirdparty]
+description = "Real library bundles, both engines"
+run = "./scripts/thirdparty.sh"
+
+[tasks.http-close]
+description = "The Node HTTP close contract, across all four seams"
+run = "./scripts/check-http-close-contract.sh"
+
+[tasks.silent-undefined]
+description = "The expensive class: a native member read answering undefined (several hundred compiles)"
+run = "./scripts/check-silent-undefined.sh"

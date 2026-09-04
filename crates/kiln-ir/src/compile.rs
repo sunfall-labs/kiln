@@ -602,8 +602,8 @@ enum Resolution {
 /// allocated.
 #[derive(Debug, Clone)]
 struct InstanceElements {
-    private: Vec<(String, PrivateKind, Function)>,
-    fields: Vec<ClassField>,
+    private: Vec<(String, PrivateKind, String)>,
+    fields: Vec<(ClassField, Option<String>)>,
 }
 
 /// What makes a constructor a *class* constructor rather than an ordinary function.
@@ -617,8 +617,8 @@ struct ClassBody<'a> {
     /// A derived class with no constructor of its own, whose synthesized body is
     /// `super(...arguments)` and nothing else.
     forwards_to_super: bool,
-    private_elements: &'a [(String, PrivateKind, Function)],
-    fields: &'a [&'a ClassField],
+    private_elements: &'a [(String, PrivateKind, String)],
+    fields: &'a [(&'a ClassField, Option<String>)],
 }
 
 impl ClassBody<'_> {
@@ -634,7 +634,11 @@ impl ClassBody<'_> {
     fn elements(&self) -> InstanceElements {
         InstanceElements {
             private: self.private_elements.to_vec(),
-            fields: self.fields.iter().map(|field| (*field).clone()).collect(),
+            fields: self
+                .fields
+                .iter()
+                .map(|(field, binding)| ((*field).clone(), binding.clone()))
+                .collect(),
         }
     }
 }
@@ -786,6 +790,11 @@ struct Compiler {
     /// A stack because a class can be declared inside another's method, and each has its own
     /// private names.
     private_scopes: Vec<u32>,
+    /// The hidden binding holding each open class's *brand*: the identity that tells one
+    /// evaluation of a class from another. `private_scopes` distinguishes one class body from
+    /// another and is fixed at compile time; two evaluations of one body share it, which is why
+    /// the brand cannot be part of the key.
+    private_brands: Vec<String>,
     /// The next unused class identity for `private_scopes`.
     next_private_scope: u32,
     /// The private names each of those classes declares, innermost last.
@@ -957,6 +966,7 @@ impl Compiler {
             mapped_arguments: false,
             with_scopes: Vec::new(),
             private_scopes: Vec::new(),
+            private_brands: Vec::new(),
             next_private_scope: 0,
             private_declarations: Vec::new(),
             finalizers: Vec::new(),
@@ -1108,6 +1118,52 @@ impl Compiler {
         // Undeclared anywhere. A syntax error in its own right, reported where the name is used
         // rather than invented into some other class's scope.
         private_key(self.private_scopes.last().copied().unwrap_or(0), name)
+    }
+
+    /// The brand binding of the class that *declares* `name`, mirroring [`Self::private_key`].
+    fn private_brand(&self, name: &str) -> Option<String> {
+        for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
+            if declared.contains(name) {
+                return self.private_brands.get(depth).cloned();
+            }
+        }
+        self.private_brands.last().cloned()
+    }
+
+    /// Push a brand resolved earlier, for the access instruction that follows.
+    fn push_private_brand(&mut self, brand: &Option<String>) {
+        match brand {
+            Some(binding) => self.load_captured_binding(binding),
+            None => self.push_constant(Constant::Undefined),
+        }
+    }
+
+    /// Push the brand of the class declaring `name`, for the access instruction that follows.
+    fn load_private_brand(&mut self, name: &str) {
+        match self.private_brand(name) {
+            Some(binding) => self.load_captured_binding(&binding),
+            // A private name outside any class is a syntax error reported elsewhere; the access
+            // still needs a value here so the stack stays balanced.
+            None => self.push_constant(Constant::Undefined),
+        }
+    }
+
+    /// The reserved name an instance stores its class's brand under.
+    ///
+    /// One per class, not one per member: the brand says which *evaluation* an instance came
+    /// from, and every private member of that class shares the answer.
+    fn private_brand_key(&self, name: &str) -> String {
+        for (depth, declared) in self.private_declarations.iter().enumerate().rev() {
+            if declared.contains(name) {
+                return private_key(self.private_scopes[depth], "%brand");
+            }
+        }
+        private_key(self.private_scopes.last().copied().unwrap_or(0), "%brand")
+    }
+
+    /// The brand key of the class currently being compiled, for the store that installs it.
+    fn own_private_brand_key(&self) -> String {
+        private_key(self.private_scopes.last().copied().unwrap_or(0), "%brand")
     }
 
     fn resolve_module_local(&self, name: &str) -> Option<u32> {
@@ -1370,7 +1426,11 @@ impl Compiler {
                 self.store_through_reference(leaf, self.set_computed_instruction(), span);
             }
             Pattern::PrivateMember { name, .. } => {
+                let brand = self.private_brand(name);
                 let name = self.constant_index(Constant::String(self.private_key(name)));
+                // The store is the first thing `store_through_reference` emits, so the brand
+                // pushed here lands directly beneath it.
+                self.push_private_brand(&brand);
                 self.store_through_reference(leaf, Instruction::SetPrivate(name), span);
             }
             Pattern::WithDefault { inner, default } => {
@@ -3431,6 +3491,102 @@ impl Compiler {
         self.patch_jump(not_null);
     }
 
+    /// `return v` from a *derived* constructor, which `[[Construct]]` does not simply hand back.
+    ///
+    /// An object is the override and wins outright. `undefined` yields `this` instead -- and
+    /// reading `this` is what makes returning before `super()` a ReferenceError, exactly as the
+    /// bare `return` above relies on. Anything else is a TypeError: the specification allows a
+    /// derived constructor to replace its instance with an object, not to answer a primitive.
+    /// `null` is a primitive here, which is why the `typeof` test alone will not do.
+    ///
+    /// Emitted rather than made an instruction, for the reason `this_binding` itself is a
+    /// binding: the C backend implements nothing new, so the two engines cannot disagree.
+    fn guard_derived_return(&mut self, binding: &str) {
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("function".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let callable = self.emit_jump(Instruction::JumpIfTruthy(0));
+
+        self.code.push(Instruction::Dup);
+        self.code.push(Instruction::Unary(UnaryOp::TypeOf));
+        self.push_constant(Constant::String("object".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let primitive = self.emit_jump(Instruction::JumpIfFalse(0));
+
+        // `typeof null` is "object", so null reaches here and falls through to the primitive
+        // handling below rather than counting as the object override.
+        self.code.push(Instruction::Dup);
+        self.push_constant(Constant::Null);
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let object_like = self.emit_jump(Instruction::JumpIfFalse(0));
+
+        self.patch_jump(primitive);
+        self.code.push(Instruction::Dup);
+        self.push_constant(Constant::Undefined);
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let refused = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.code.push(Instruction::Pop);
+        self.load_this_binding(binding);
+        let yielded_this = self.emit_jump(Instruction::Jump(0));
+
+        self.patch_jump(refused);
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "a derived constructor may only return an object or undefined".to_owned(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+
+        self.patch_jump(callable);
+        self.patch_jump(object_like);
+        self.patch_jump(yielded_this);
+    }
+
+    /// A static class element may not be named `prototype`, which is a TypeError rather than a
+    /// quiet overwrite: the constructor's `prototype` is what its instances inherit from, and a
+    /// field that replaced it would leave every instance of the class descending from something
+    /// the class never made.
+    ///
+    /// The name is converted first, so a key object whose `toString` answers "prototype" is
+    /// refused for the same reason a literal one is. The constructor is already beneath the key
+    /// on the stack, which is the shape `ToPropertyKey` reads.
+    fn guard_static_prototype_key(&mut self) {
+        self.code.push(Instruction::ToPropertyKey);
+        self.code.push(Instruction::Dup);
+        self.push_constant(Constant::String("prototype".to_owned()));
+        self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+        let usable = self.emit_jump(Instruction::JumpIfFalse(0));
+        self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
+        self.push_constant(Constant::String(
+            "a static class element may not be named `prototype`".to_owned(),
+        ));
+        self.code.push(Instruction::New { argc: 1 });
+        self.code.push(Instruction::Throw);
+        self.patch_jump(usable);
+    }
+
+    /// Read a hidden binding that an inner function captured, the way the home object is read.
+    ///
+    /// `load_hidden` resolves a local and nothing else, which is right where the binding and the
+    /// reader are the same function. A private method is made where the class is defined and
+    /// installed from inside the constructor, so the read crosses a function boundary and has to
+    /// go through `resolve_or_capture`.
+    fn load_captured_binding(&mut self, binding: &str) {
+        match self.resolve_or_capture(binding) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot));
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
+            Resolution::GlobalObject | Resolution::Unresolved => {
+                self.error(None, format!("`{binding}` went out of scope"));
+                self.push_constant(Constant::Undefined);
+            }
+        }
+    }
+
     /// `throw new TypeError("...")`, spelled in the instructions that already exist.
     fn emit_iterator_result_type_error(&mut self) {
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
@@ -4018,9 +4174,32 @@ impl Compiler {
             // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
             // program can write, so asking whether the key is there *is* the brand check.
             ExpressionKind::PrivateIn { name, object } => {
-                self.push_constant(Constant::String(self.private_key(name)));
+                // The key alone is not the answer: two evaluations of one class share it, so an
+                // instance of a *sibling* evaluation carries the name and must still answer
+                // `false`. Unlike an access, this reports rather than throws -- `#x in o` exists
+                // to ask the question without raising.
+                let brand = self.private_brand(name);
+                let brand_key =
+                    self.constant_index(Constant::String(self.private_brand_key(name)));
+                let key = self.private_key(name);
+                let held = format!("%pin{}", self.hidden_bindings);
+                self.hidden_bindings += 1;
+                self.scopes.push(HashMap::new());
                 self.expression(object);
+                self.declare_hidden(&held, expression.span);
+                self.push_constant(Constant::String(key));
+                self.load_hidden(&held);
                 self.code.push(Instruction::Binary(BinaryOp::In));
+                let absent = self.emit_jump(Instruction::JumpIfFalse(0));
+                self.load_hidden(&held);
+                self.code.push(Instruction::GetProperty(brand_key));
+                self.push_private_brand(&brand);
+                self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+                let done = self.emit_jump(Instruction::Jump(0));
+                self.patch_jump(absent);
+                self.push_constant(Constant::Boolean(false));
+                self.patch_jump(done);
+                self.scopes.pop().expect("private-in scope was just pushed");
             }
             ExpressionKind::SuperMember { property } => {
                 // `super.m` resolves on the prototype of the object this method was defined on,
@@ -4269,6 +4448,7 @@ impl Compiler {
                 // ordinary optional member read does. Without this the brand check ran on
                 // `null` and raised the TypeError the `?.` was written to avoid.
                 self.short_circuit_if_nullish(*optional, expression.span);
+                self.load_private_brand(name);
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.code.push(Instruction::GetPrivate(name));
             }
@@ -4402,6 +4582,29 @@ impl Compiler {
                     self.code.push(Instruction::SetPrototype);
                 }
                 ObjectMember::Property(property) => {
+                    // `{ [k]: function () {} }` names the function after the key, which is only
+                    // knowable once the key has been evaluated. The pairs waiting to become an
+                    // object are flushed first so the object exists to define on -- the shape a
+                    // spread already uses -- and the key is then evaluated in its own place, so
+                    // the source order of its side effects is unchanged.
+                    if let ObjectKey::Computed(key) = &property.key
+                        && anonymous_function_value(&property.value)
+                    {
+                        let method = property.form == kiln_hir::PropertyForm::Method;
+                        self.emit_object_segment(&mut pending, accumulating);
+                        accumulating = true;
+                        self.expression(key);
+                        if method && let Some(home) = &home {
+                            self.home_bindings.push(home.clone());
+                        }
+                        self.next_is_method = method && home.is_some();
+                        self.expression(&property.value);
+                        if method && home.is_some() {
+                            self.home_bindings.pop();
+                        }
+                        self.code.push(Instruction::DefineNamedProperty);
+                        continue;
+                    }
                     match &property.key {
                         // Only a class body can declare one, so a literal never has one.
                         ObjectKey::Private(name) => self.error(
@@ -4798,6 +5001,10 @@ impl Compiler {
         // class nested inside one -- names its private fields in this class's own scope.
         self.private_scopes.push(self.next_private_scope);
         self.next_private_scope += 1;
+        // Declared here so every method compiled below captures it; what it holds is minted
+        // once, where the class is evaluated.
+        let brand = self.declare_home_binding(class.span);
+        self.private_brands.push(brand);
         self.private_declarations.push(
             class
                 .initialisers
@@ -4908,6 +5115,42 @@ impl Compiler {
             .filter(|field| !field.is_static)
             .collect();
         self.home_bindings.push(instance_home.clone());
+        // Each private method and accessor is created *once*, here, where the class is defined,
+        // and kept in a binding the constructor captures. Creating it inside the constructor
+        // made a fresh function per instance, so `a.#m === b.#m` was false and a brand check
+        // written as an identity comparison failed. It also closed over the constructor's
+        // locals rather than the class, which is not the environment the specification gives it.
+        // The brand: one fresh object per *evaluation* of this class. An empty array is the
+        // cheapest thing with an identity, and nothing ever looks inside it -- only whether an
+        // instance's brand is this one.
+        if let Some(brand) = self.private_brands.last().cloned() {
+            self.code.push(Instruction::NewArray { count: 0 });
+            self.store_home_binding(&brand);
+        }
+        let mut private_bindings: Vec<(String, PrivateKind, String)> =
+            Vec::with_capacity(private_elements.len());
+        for (name, kind, function) in &private_elements {
+            self.next_is_method = true;
+            let Some(body) = self.compile_function(function, class.span) else {
+                self.home_bindings.pop();
+                return;
+            };
+            let binding = self.declare_home_binding(class.span);
+            self.code.push(Instruction::MakeFunction(body));
+            self.store_home_binding(&binding);
+            private_bindings.push((name.clone(), *kind, binding));
+        }
+        // A field's *name* is evaluated where the class is defined, once. The binding is
+        // declared here so the constructor compiled below captures it; what it holds is computed
+        // further down, once the class binding exists to be the receiver `ToPropertyKey` reads.
+        let field_bindings: Vec<(&ClassField, Option<String>)> = instance_fields
+            .iter()
+            .map(|field| {
+                let binding = matches!(field.key, ObjectKey::Computed(_))
+                    .then(|| self.declare_home_binding(class.span));
+                (*field, binding)
+            })
+            .collect();
         self.next_is_method = true;
         let compiled = self.compile_constructor(
             &constructor,
@@ -4918,8 +5161,8 @@ impl Compiler {
                 // to the parent. Without that, `class F extends Error {}` would construct an
                 // error with no message.
                 forwards_to_super: synthesized_derived,
-                private_elements: &private_elements,
-                fields: &instance_fields,
+                private_elements: &private_bindings,
+                fields: &field_bindings,
             }),
         );
         self.home_bindings.pop();
@@ -4937,6 +5180,34 @@ impl Compiler {
         } else {
             Instruction::StoreLocal(local.slot)
         });
+
+        // The constructor carries the brand too: a static private member lives on it, and the
+        // check that reads one has to tell this evaluation's constructor from another's.
+        if let Some(brand) = self.private_brands.last().cloned() {
+            let key = self.constant_index(Constant::String(self.own_private_brand_key()));
+            self.load_local_or_cell(local);
+            self.load_captured_binding(&brand);
+            self.code.push(self.set_property_instruction(key));
+            self.code.push(Instruction::Pop);
+        }
+
+        // Now the class binding exists, each computed field name is evaluated and converted --
+        // once, here, where the class is defined. A name whose `toString` has an effect has it
+        // once rather than once per instance, and one that refuses does so when the class is
+        // written rather than when it is first constructed. The class is pushed beneath the key
+        // because that is the pair `ToPropertyKey` reads; storing the name consumes it, and the
+        // receiver is dropped afterwards.
+        for (field, binding) in &field_bindings {
+            let (ObjectKey::Computed(key), Some(binding)) = (&field.key, binding) else {
+                continue;
+            };
+            let binding = binding.clone();
+            self.load_local_or_cell(local);
+            self.expression(key);
+            self.code.push(Instruction::ToPropertyKey);
+            self.store_home_binding(&binding);
+            self.code.push(Instruction::Pop);
+        }
 
         let prototype = self.constant_index(Constant::String("prototype".to_owned()));
 
@@ -5005,6 +5276,7 @@ impl Compiler {
                 }
                 ObjectKey::Computed(key) => {
                     self.expression(key);
+                    self.guard_static_prototype_key();
                     self.emit_field_value(field);
                     self.code.push(self.set_computed_instruction());
                 }
@@ -5088,6 +5360,9 @@ impl Compiler {
         self.private_scopes
             .pop()
             .expect("this class pushed its own private scope");
+        self.private_brands
+            .pop()
+            .expect("this class pushed its own brand");
         self.private_declarations
             .pop()
             .expect("this class pushed its own private names");
@@ -5363,24 +5638,40 @@ impl Compiler {
     /// initialiser.
     fn emit_instance_elements(
         &mut self,
-        private_elements: &[(String, PrivateKind, Function)],
-        fields: &[&ClassField],
+        private_elements: &[(String, PrivateKind, String)],
+        fields: &[(&ClassField, Option<String>)],
         span: Span,
     ) -> Option<()> {
-        for (name, kind, function) in private_elements {
+        // Every instance carries the brand of the evaluation that made it, stored beside its
+        // private members and read by each access to tell one evaluation from another.
+        if let Some(brand) = self.private_brands.last().cloned() {
+            let key = self.constant_index(Constant::String(self.own_private_brand_key()));
+            self.code.push(Instruction::LoadThis);
+            self.load_captured_binding(&brand);
+            self.code.push(self.set_property_instruction(key));
+            self.code.push(Instruction::Pop);
+        }
+        for (name, kind, binding) in private_elements {
             let key = self.private_key(name);
             let name = self.constant_index(Constant::String(key));
-            // A private method is a method: its home object is the one already on the stack.
-            self.next_is_method = true;
-            let body = self.compile_function(function, span)?;
+            // The class made this function once; every instance is given *that* one, which is
+            // what makes `a.#m === b.#m` true.
             self.code.push(Instruction::LoadThis);
-            self.code.push(Instruction::MakeFunction(body));
+            self.load_captured_binding(binding);
             self.code
                 .push(Instruction::DefinePrivate { name, kind: *kind });
             self.code.push(Instruction::Pop);
         }
-        for field in fields {
+        for (field, name_binding) in fields {
             self.code.push(Instruction::LoadThis);
+            if let Some(binding) = name_binding {
+                // The name was computed and converted once, where the class is defined.
+                self.load_captured_binding(binding);
+                self.emit_field_value(field);
+                self.code.push(self.set_computed_instruction());
+                self.code.push(Instruction::Pop);
+                continue;
+            }
             match &field.key {
                 ObjectKey::Private(name) => {
                     let name = self.constant_index(Constant::String(self.private_key(name)));
@@ -5412,7 +5703,11 @@ impl Compiler {
         let Some(Some(elements)) = self.pending_elements.last().cloned() else {
             return;
         };
-        let fields: Vec<&ClassField> = elements.fields.iter().collect();
+        let fields: Vec<(&ClassField, Option<String>)> = elements
+            .fields
+            .iter()
+            .map(|(field, binding)| (field, binding.clone()))
+            .collect();
         self.emit_instance_elements(&elements.private, &fields, span);
     }
 
@@ -5848,6 +6143,9 @@ impl Compiler {
                 .clone()
                 .expect("a deferred `this` has a binding to read");
             self.load_this_binding(&binding);
+        } else if let Some(binding) = self.this_binding.clone() {
+            // `return v` in a derived constructor, where the value is not simply handed back.
+            self.guard_derived_return(&binding);
         }
         self.code.push(Instruction::Return);
     }
@@ -6058,6 +6356,11 @@ impl Compiler {
     /// Both the object and the key are evaluated once, in that order, which is the order the
     /// language specifies and the one a reader assumes. A compound form has to re-read through
     /// the same pair rather than re-evaluating either, so both are duplicated on the stack.
+    ///
+    /// Evaluating the key once is not enough on its own: `ToPropertyKey` is the visible half,
+    /// and leaving it to `GetComputed` and `SetComputed` ran it twice. The compound form converts
+    /// once up front, which is what the specification's Reference Record memoises. The plain form
+    /// must not: there the key converts in `PutValue`, after the right-hand side has run.
     fn computed_assignment(
         &mut self,
         operator: AssignmentOperator,
@@ -6073,6 +6376,7 @@ impl Compiler {
         self.expression(property);
 
         if operator != AssignmentOperator::Assign {
+            self.code.push(Instruction::ToPropertyKey);
             self.code.push(Instruction::Dup2);
             self.code.push(Instruction::GetComputed);
             self.expression(value);
@@ -6117,7 +6421,12 @@ impl Compiler {
         match name {
             Some(name) => self.code.push(Instruction::GetProperty(name)),
             None => {
+                // The key converts once and the binding keeps the converted one, so the write
+                // below reads the same key the read did rather than running `toString` again.
                 self.load_hidden(&key_binding);
+                self.code.push(Instruction::ToPropertyKey);
+                self.code.push(Instruction::Dup);
+                self.store_hidden(&key_binding);
                 self.code.push(Instruction::GetComputed);
             }
         }
@@ -6163,6 +6472,7 @@ impl Compiler {
         // to holding the receiver. Refusing it outright made `this.#n++` a compile error, which
         // is the ordinary way a private counter is incremented.
         if let ObjectKey::Private(name) = property {
+            let brand = self.private_brand(name);
             let key = self.private_key(name);
             let name = self.constant_index(Constant::String(key));
             let receiver = format!("%upd{}", self.hidden_bindings);
@@ -6176,6 +6486,7 @@ impl Compiler {
             // `ToNumeric` for the same reason the general path uses it: the value a postfix
             // update yields is the conversion's result, and a BigInt must not narrow.
             self.load_hidden(&receiver);
+            self.push_private_brand(&brand);
             self.code.push(Instruction::GetPrivate(name));
             self.code.push(Instruction::Unary(UnaryOp::ToNumeric));
             self.declare_hidden(&old_binding, span);
@@ -6187,6 +6498,7 @@ impl Compiler {
             } else {
                 UnaryOp::Decrement
             }));
+            self.push_private_brand(&brand);
             self.code.push(Instruction::SetPrivate(name));
             if !prefix {
                 self.code.push(Instruction::Pop);
@@ -6220,7 +6532,12 @@ impl Compiler {
         match name {
             Some(name) => self.code.push(Instruction::GetProperty(name)),
             None => {
+                // The key converts once and the binding keeps the converted one, so the write
+                // below reads the same key the read did rather than running `toString` again.
                 self.load_hidden(&key_binding);
+                self.code.push(Instruction::ToPropertyKey);
+                self.code.push(Instruction::Dup);
+                self.store_hidden(&key_binding);
                 self.code.push(Instruction::GetComputed);
             }
         }
@@ -6266,14 +6583,16 @@ impl Compiler {
         name: &str,
         value: &Expression,
     ) {
+        let brand = self.private_brand(name);
         let name = self.constant_index(Constant::String(self.private_key(name)));
         if operator.is_short_circuiting() {
-            self.short_circuiting_private(operator, object, name, value);
+            self.short_circuiting_private(operator, object, name, &brand, value);
             return;
         }
         self.expression(object);
         if operator != AssignmentOperator::Assign {
             self.code.push(Instruction::Dup);
+            self.push_private_brand(&brand);
             self.code.push(Instruction::GetPrivate(name));
             self.expression(value);
             self.code
@@ -6281,6 +6600,7 @@ impl Compiler {
         } else {
             self.expression(value);
         }
+        self.push_private_brand(&brand);
         self.code.push(Instruction::SetPrivate(name));
     }
 
@@ -6296,6 +6616,7 @@ impl Compiler {
         operator: AssignmentOperator,
         object: &Expression,
         name: u32,
+        brand: &Option<String>,
         value: &Expression,
     ) {
         let span = object.span;
@@ -6308,6 +6629,7 @@ impl Compiler {
         self.declare_hidden(&receiver, span);
 
         self.load_hidden(&receiver);
+        self.push_private_brand(brand);
         self.code.push(Instruction::GetPrivate(name));
         self.declare_hidden(&current, span);
 
@@ -6316,6 +6638,7 @@ impl Compiler {
 
         self.load_hidden(&receiver);
         self.expression(value);
+        self.push_private_brand(brand);
         self.code.push(Instruction::SetPrivate(name));
         let done = self.emit_jump(Instruction::Jump(0));
 
@@ -6595,10 +6918,12 @@ impl Compiler {
                 name,
                 optional,
             } => {
+                let brand = self.private_brand(name);
                 let name = self.constant_index(Constant::String(self.private_key(name)));
                 self.expression(object);
                 self.short_circuit_if_nullish(*optional, span);
                 self.code.push(Instruction::Dup);
+                self.push_private_brand(&brand);
                 self.code.push(Instruction::GetPrivate(name));
                 self.array_literal(arguments, span);
                 self.code.push(Instruction::Apply);
@@ -8202,5 +8527,20 @@ fn collect_lexical_names(statement: &Statement, names: &mut Vec<String>) {
             }
         }
         _ => {}
+    }
+}
+
+/// Whether a property's value is a *syntactically* anonymous function definition.
+///
+/// `NamedEvaluation` names one of these after the property key; it does not name a reference to
+/// a function that happens to have no name, which is why this asks the shape of the expression
+/// rather than the name of the value. `{ [k]: (0, function () {}) }` is a parenthesised
+/// reference and keeps the empty name. An arrow is a `Function` with the flag set and is always
+/// anonymous, so it needs no arm of its own.
+fn anonymous_function_value(value: &kiln_hir::Expression) -> bool {
+    match &value.kind {
+        kiln_hir::ExpressionKind::Function(function) => function.name.is_none(),
+        kiln_hir::ExpressionKind::Class(class) => class.name.is_none(),
+        _ => false,
     }
 }

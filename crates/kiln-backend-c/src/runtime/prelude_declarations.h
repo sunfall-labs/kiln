@@ -3,7 +3,14 @@
 #define KILN_PRELUDE_DECLARATIONS_H
 
 typedef struct kiln_data_view kiln_data_view;
+#define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_RESET 2
+/* Opaque: a unit marks its module globals through the prelude and never looks inside the heap.
+ * Declared as the bare struct rather than the typedef so this header cannot collide with the
+ * definition in `prelude_runtime.c`. */
+struct kiln_gc_heap;
+extern void kiln_c99_gc_mark_values(struct kiln_gc_heap *heap, const kiln_value *values,
+                                    size_t count);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1
 typedef int (*kiln_native_entry)(void *heap, void *context, kiln_value *result, size_t depth, kiln_value *thrown);
 extern void kiln_c99_gc_release(void *ptr);
@@ -97,6 +104,20 @@ extern uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
 extern kiln_value kiln_c99_builtin(uint64_t code);
 extern int kiln_c99_is_callable(kiln_value value);
 extern int kiln_c99_is_reference(kiln_value value);
+/* The three hints `ToPrimitive` can be asked for. The specification has three, not two, and the
+ * third is not decoration: a `Date` is the one built-in whose `@@toPrimitive` answers a string for
+ * "default" and a number for "number", which is the whole of why `date + date` concatenates while
+ * `date - date` subtracts. For every other value the three coincide, which is why two of them
+ * sufficed here for so long. NUMBER and STRING keep the 0 and 1 the two-valued flag used, so every
+ * call site that already said what it wanted still says it. */
+#ifndef KILN_C99_HINT_NUMBER
+#define KILN_C99_HINT_NUMBER 0
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_HINT_DEFAULT 2
+#endif
+
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_has_intrinsic_text(kiln_value value);
 extern int kiln_c99_crosses_boundary(kiln_value value);
 extern kiln_value kiln_c99_hole(void);
@@ -172,6 +193,7 @@ extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
 extern uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 extern uint64_t kiln_c99_string_method(const char *key, size_t key_len);
 extern int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp, int depth, kiln_value *thrown);
 extern int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp, int depth, kiln_value *thrown);
 extern int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, size_t argc, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);
 extern int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);

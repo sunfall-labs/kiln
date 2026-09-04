@@ -16,7 +16,7 @@ use std::rc::Rc;
 use kiln_host_abi::HostOps;
 use kiln_temporal as engine;
 
-use crate::{ErrorKind, ExecutionError, Native, RealmId, Value, Vm};
+use crate::{ErrorKind, ExecutionError, Native, PrimitiveHint, RealmId, Value, Vm};
 
 /// What a `Native::Temporal` stands for.
 ///
@@ -1369,7 +1369,7 @@ impl<'host, H: HostOps + ?Sized> Vm<'host, H> {
         if matches!(value, Value::Symbol(_)) {
             return Err(ExecutionError::SymbolIsNotAString);
         }
-        let primitive = self.as_primitive(value, true, instruction)?;
+        let primitive = self.as_primitive(value, PrimitiveHint::String, instruction)?;
         if matches!(primitive, Value::Symbol(_)) {
             return Err(ExecutionError::SymbolIsNotAString);
         }
