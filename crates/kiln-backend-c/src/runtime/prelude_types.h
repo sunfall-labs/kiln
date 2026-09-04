@@ -356,14 +356,22 @@ typedef struct kiln_object {
  * whatsoever -- and objects built by the same code put their keys at the same indices, which is
  * what makes one guess right for every instance of a class that does not exist. One of these is
  * a block-scope static at each GetProperty, SetProperty, SetPropertyStrict and CallMethod. */
+#define KILN_C99_PIC_SIZE 4
+
+typedef struct kiln_c99_pic_entry {
+    const kiln_shape *shape;
+    const kiln_shape *transition_to;
+    uint32_t slot;
+} kiln_c99_pic_entry;
+
 typedef struct kiln_c99_site {
     uint32_t own;
     uint32_t proto;
     /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
      * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
     uint32_t misses;
-    const kiln_shape *shape;
-    const kiln_shape *transition_to;
+    uint32_t pic_count;
+    kiln_c99_pic_entry entries[KILN_C99_PIC_SIZE];
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
