@@ -8,9 +8,11 @@ dependency is named.
 ## Goal
 
 Ship the runner that starts in 2.6 ms, holds under 10 MiB, is level with node on every compute
-benchmark, ahead of it on calls and on typed code, and leads on server throughput by a margin node
-cannot close. Every step keeps the generic path bit-for-bit today's output, so a program that
-gains nothing loses nothing.
+benchmark, ahead of it on calls and on typed code, and wins I/O outright: a request that the
+handler touches lightly costs zero heap allocations, zero copies and one syscall per direction.
+Two tracks, in different crates, run in parallel: the compiler (Phases 0 to 5) and I/O (Track
+B). Every step keeps the generic path bit-for-bit today's output, so a program that gains nothing
+loses nothing.
 
 ## Rules for every step
 
@@ -101,6 +103,36 @@ reopens this file first.
 | 5.2 | Partial evaluation of builtins. The graph inlines and specializes a TypeScript builtin at each call site (weval's first Futamura projection, applied to the graph). Migrate hot families one at a time with a measurement each: array, string, JSON, Map/Set, iterator. | 2.4, 4.3 | each migrated family within 1.2x of its C version, then the C version deleted |
 | 5.3 | Regex literals lowered to C matchers at build time; `regress` remains for dynamic patterns. | 1.3 | `regex` within 1.5x of node |
 
+
+## Track B: I/O, parallel to Phases 1 to 5
+
+Different crates from the compiler track: `kiln-runtime` (`http_engine.rs`, `node_http.rs`,
+`node_stream.rs`, the `AsyncHostOp` provider), the node adapter half of `prelude_runtime.c`, and
+`bench/server`. The request path is already Rust with JavaScript as a thin callback (ADR 0032,
+0046); the win is making everything around the callback disappear. Measured with
+`bench/server/compare.sh` at stated client counts, interleaved passes, against node, bun and deno.
+
+Where the cost is today, from the code: request headers are copied into a `malloc` block per
+request and freed by the collector; `res.end(body)` copies the body into hyper's `Bytes`; the
+mixed workload builds a `URL` object per request; `fs.readFile` goes through `tokio::fs`, which
+is a blocking thread pool underneath.
+
+| # | step | depends on | done when |
+| --- | --- | --- | --- |
+| B.0 | Measure first. Extend `bench/server` with: static file, JSON echo at 1 KiB and 64 KiB bodies, chunked streaming response, large upload, connection churn without keep-alive, and an fs suite (many small reads, one large read, a `stat` storm). Baseline them under `server-baseline.sh` with the no-regression rule. Confirm the 2026-09-01 leak is gone with the SIGUSR1 heap line over a sixty-second run. | none | every row has a node, bun and deno column and a client count; a regression names the scenario |
+| B.1 | Zero-allocation request. Headers stay in hyper's `HeaderMap` behind a handle; `req.headers` materializes lazily and only the keys read. `req.url` and `req.method` borrow the request bytes. | 4.3 for borrowed strings; the nursery (4.2) for anything that must allocate | SIGUSR1 heap counters show zero blocks per request on `hello` |
+| B.2 | Zero-copy response. A `Buffer` is backed by `Bytes`; a string body that is already UTF-8 is handed to hyper without a copy; headers and body go out in one vectored write with `Content-Length` set, no chunking. | B.1 | one `writev` per response in `strace`/`dtruss`; `hello` rps up, p99 down, reported |
+| B.3 | Handler specialization. The closed-world analysis (1.6) says which members of `req` and `res` a handler reads; the runtime builds only those. `new URL(req.url, base)` followed by `pathname` or `searchParams.get` is recognized and served from hyper's already-parsed URI, no `URL` object. This is the AOT-only lever: bun and node cannot know what the handler will touch. | 1.6, B.1 | `mixed` allocates no `URL`; JS instructions per request printed by `--explain` and under a few hundred |
+| B.4 | Filesystem on the realm thread. Small files are read with direct `open`/`fstat`/`read` on the realm thread, no pool hop; `tokio::fs` only above a size threshold. Static responses use `sendfile`/`splice`. Linux: an io_uring provider behind `AsyncHostOps` for reads, writes and sends, selected at startup when the kernel has it. | B.0 | `fs-promises` and the small-read row level with or ahead of bun; static file at line rate |
+| B.5 | Turn batching. Drain every ready connection's request into one turn and run one microtask checkpoint per batch, so the nursery reset (4.2) and the turn drive are paid per batch, not per request. | 4.2 | p50 at 64 connections below node's; rps at 16 and 64 reported |
+| B.6 | Streams without JS per chunk. When a handler's only use of a readable is `pipe(res)` (closed world again), the pipe runs entirely in Rust with backpressure; JS sees start and end. | 1.6 | streaming row at line rate; CPU per byte reported |
+| B.7 | Workers by default. `KILN_WORKERS=auto` forks one realm per core under `SO_REUSEPORT` (the mechanism exists; ADR 0049 dumps per worker). Measured at ten client processes, where 4 workers already gave 47k to 108k rps. | none | `auto` documented; the ten-process table in `bench/results` |
+| B.8 | HTTP/2 by default over hyper's `h2`; HTTP/3 over `quinn` and `h3` behind a flag. Node has no stable HTTP/3; bun and deno partial. TLS via rustls. | B.2 | h2 and h3 rows in the table; a lead on h3 is a headline, a loss on h1 is a blocker |
+
+Invariant for the track: the JavaScript handler runs a few hundred instructions per request and
+nothing else on the request path runs in JavaScript. If a step needs the handler to do more, the
+step is wrong.
+
 ## Later, only if needed
 
 - One description of each instruction's semantics generating both the interpreter dispatch and
@@ -118,9 +150,12 @@ reopens this file first.
 | Phase 0 | ~120 ms | < 92 ms | < 50 ms | no regressions; bundles baselined |
 | Phase 2 | ≤ 30 ms | ≤ 5 ms | ≤ 1 ms | class A and B within 1.5x of node |
 | Phase 3 | level | ahead | level | typed real code ahead; bundles within 2x |
-| Phase 5 | level | ahead | level | builtins at parity; startup unchanged at 2.6 ms; server lead structural |
+| Phase 5 | level | ahead | level | builtins at parity; startup unchanged at 2.6 ms |
+| Track B | | | | zero allocations and one syscall per direction on `hello`; ahead of bun on every server row at every client count; fs level with bun |
 
-Reference: node warm 25 / 21 / 0.48 ms; hand-emitted ceiling 28 / 3 / 0.5 ms.
+Reference: node warm 25 / 21 / 0.48 ms; hand-emitted ceiling 28 / 3 / 0.5 ms. Server today at four
+client processes: hello 169.6k rps against node 130.2k; mixed 123.4k against node 105.2k and bun
+125.2k.
 
 ## Do not
 
@@ -130,6 +165,8 @@ Reference: node warm 25 / 21 / 0.48 ms; hand-emitted ceiling 28 / 3 / 0.5 ms.
 - Add a third clone, a heap integer, or remove a bounds check. Reopen the invariants first.
 - Measure on the shared checkout, or report a number without its checksum.
 - Land a speculative path without its off switch, its exit mode, and a differential run.
+- Put work on the request path into JavaScript that Rust could do with what the closed world knows.
+- Report a server number without its client count.
 
 ## Reading, in order
 
