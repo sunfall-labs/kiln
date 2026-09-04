@@ -309,6 +309,13 @@ pub struct ObjectData {
     /// the specification's own, and collapsing it either way is a wrong answer: freezing makes
     /// the descriptor lie, and leaving it ordinary lets a program overwrite an export.
     module_namespace: bool,
+    /// The exporting module's cells, for a namespace built over live bindings.
+    ///
+    /// Held beside the properties rather than *in* them: a `Value::Cell` stored as a property
+    /// value would reach `Object.keys`, a descriptor read, a spread and `JSON.stringify` as
+    /// itself, which is a wrong answer everywhere it appeared. The slots keep ordinary values
+    /// and are caught up from these before a read.
+    namespace_cells: Vec<(String, Value)>,
     /// The `[[Prototype]]` link. Reads fall through it; writes never do -- assigning a property
     /// that exists only on the prototype creates an own property rather than mutating the shared
     /// one, which is what keeps two instances of a class independent.
@@ -515,6 +522,7 @@ impl Default for ObjectData {
             extensible: true,
             frozen: false,
             module_namespace: false,
+            namespace_cells: Vec::new(),
             shadow_realm: None,
             prototype: None,
             primitive: None,
@@ -876,6 +884,44 @@ impl ObjectData {
     pub fn close_as_module_namespace(&mut self) {
         self.extensible = false;
         self.module_namespace = true;
+    }
+
+    /// Record the cell an export is a second name for, so the slot can be caught up later.
+    pub fn track_namespace_cell(&mut self, key: &str, cell: Value) {
+        if matches!(cell, Value::Cell(_)) {
+            self.namespace_cells.push((key.to_owned(), cell));
+        }
+    }
+
+    /// Whether this object is a namespace built over live bindings, and so needs catching up.
+    pub fn tracks_namespace_cells(&self) -> bool {
+        !self.namespace_cells.is_empty()
+    }
+
+    /// Bring a namespace's slots back in step with the bindings they name.
+    ///
+    /// A namespace is a second name for the exporting module's bindings, not a copy of their
+    /// values: `export let n` that the module later increments reads as the new number through
+    /// `ns.n`. This was a snapshot taken when the provider finished, so it answered whatever was
+    /// true at link time for the rest of the program's life.
+    ///
+    /// Cheap when there is nothing to do -- the list is empty for every object that is not a
+    /// namespace over live bindings, which is every object but these.
+    pub fn refresh_namespace(&mut self) {
+        if self.namespace_cells.is_empty() {
+            return;
+        }
+        for index in 0..self.namespace_cells.len() {
+            let (key, cell) = &self.namespace_cells[index];
+            let Value::Cell(cell) = cell else {
+                continue;
+            };
+            let value = cell.borrow().clone();
+            let key = key.clone();
+            if let Some(slot) = self.properties.iter_mut().find(|slot| slot.key == key) {
+                slot.property = Property::Value(value);
+            }
+        }
     }
 
     /// Refuse new properties, leaving the existing ones writable.
@@ -5992,6 +6038,7 @@ pub fn namespace_object(exports: impl IntoIterator<Item = (String, Value)>) -> V
         // built with and the one the specification gives every export: the binding cannot be
         // removed or redefined, and its *value* is expected to change, because the module it
         // came from may still assign to it.
+        data.track_namespace_cell(&name, value.clone());
         data.define_value(
             &name,
             read_through_cell(&value),
@@ -28453,6 +28500,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         if matches!(target, Value::Proxy(_)) {
             return self.proxy_get(target, &Value::String(name.to_owned()), instruction);
+        }
+        // A namespace names the exporting module's bindings, so it is caught up before it is
+        // read: the module may have assigned to an export since the link ran. The shared borrow
+        // decides first, so an ordinary object -- which is every object but these -- never takes
+        // the exclusive one, and a read that re-enters through a getter cannot collide with it.
+        if let Value::Object(object) = target
+            && object.borrow().tracks_namespace_cells()
+        {
+            object.borrow_mut().refresh_namespace();
         }
         // A `DataView` a shrink has left outside its buffer answers neither of its two
         // measurements: the specification checks the view is still in bounds before it reports

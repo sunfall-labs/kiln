@@ -1,6 +1,7 @@
 # A module namespace is a snapshot; the bindings beside it are live
 
-**Status:** open. **72 test262 rows**, all in `language/expressions/dynamic-import/usage`, plus
+**Status:** fixed 2026-09-03, by the third shape below -- refresh on *read*, which the two
+tested shapes had both missed. **72 test262 rows**, all in `language/expressions/dynamic-import/usage`, plus
 the static-import equivalents.
 
 ## What is wrong
@@ -75,3 +76,49 @@ The two shapes that would actually work:
 
 So the row count stands and the difficulty does too. This is the third claim on this branch to be
 tested rather than asserted, and the second to survive.
+
+
+## Fixed 2026-09-03: refresh on read, which is neither shape above
+
+The section above names two shapes and calls both expensive. It missed the cheap one, and missed it
+because it framed the question as *where does a cell get dereferenced* -- which really does have 51
+answers -- rather than *when must the slots be right*. They must be right when someone reads the
+object, and there is one place that happens.
+
+So the namespace keeps holding ordinary values, exactly as before; nothing anywhere learns about
+`Value::Cell`, and none of the 51 `get_own` sites change. Beside the properties -- not in them --
+`ObjectData` now keeps `namespace_cells: Vec<(String, Value)>`, the cells the builder used to throw
+away after dereferencing once. `refresh_namespace` walks that list and writes each cell's current
+value into its property slot, and `read_property_inner` calls it before reading.
+
+That covers reflection for free, which the cells shape would have broken: `Object.keys`,
+`Object.values`, `getOwnPropertyDescriptor`, spread and `for...in` all reach the slots through a
+property read, so all five are live and all five agree with node (`.scratch/es/live/refl.mjs`).
+
+The hot path pays a shared borrow and an `is_empty`, not an exclusive borrow:
+
+```rust
+if let Value::Object(object) = target
+    && object.borrow().tracks_namespace_cells()
+{
+    object.borrow_mut().refresh_namespace();
+}
+```
+
+The shared borrow deciding first is load-bearing rather than tidy -- every object that is not a
+namespace, which is nearly all of them, never takes the exclusive borrow, so a read that re-enters
+through a getter cannot collide with an outstanding one.
+
+The three hazards the original filing raised are all handled by *not* being clever: a TDZ binding's
+cell still reads as it did, because the same `read_through_cell` does the deref it always did; a
+circular import sees whatever the cell holds at the moment it looks, which is the definition; and an
+async module's bindings settle into the cells the namespace already points at.
+
+Measured: `language/expressions` 20408 -> 20482 (+74), `dynamic-import` alone 1548 pass / 56 fail,
+down from ~114 failures -- the 56 that remain are the runner-policy rows filed separately. Gate
+clean: native 91/6/0, thirdparty 19/0 both engines, three corpora green, seven crate suites ok, no
+other chunk moved.
+
+This is the third claim on this branch to be tested rather than asserted **and then retested after
+it failed** -- the "difficulty stands" verdict above was itself wrong, and wrong because it had
+tested two designs rather than the problem.
