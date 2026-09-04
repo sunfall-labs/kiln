@@ -4179,8 +4179,7 @@ impl Compiler {
                 // `false`. Unlike an access, this reports rather than throws -- `#x in o` exists
                 // to ask the question without raising.
                 let brand = self.private_brand(name);
-                let brand_key =
-                    self.constant_index(Constant::String(self.private_brand_key(name)));
+                let brand_key = self.constant_index(Constant::String(self.private_brand_key(name)));
                 let key = self.private_key(name);
                 let held = format!("%pin{}", self.hidden_bindings);
                 self.hidden_bindings += 1;
@@ -5640,7 +5639,7 @@ impl Compiler {
         &mut self,
         private_elements: &[(String, PrivateKind, String)],
         fields: &[(&ClassField, Option<String>)],
-        span: Span,
+        _span: Span,
     ) -> Option<()> {
         // Every instance carries the brand of the evaluation that made it, stored beside its
         // private members and read by each access to tell one evaluation from another.
@@ -8338,7 +8337,7 @@ fn collect_identifiers(expression: &Expression, names: &mut HashSet<String>, col
                         // analysis the important case is a function value: its body is nested
                         // relative to the current owner even when the surrounding expression is
                         // itself already inside another function.
-                        collect_identifiers(&property.value, names, true);
+                        collect_identifiers(&property.value, names, collecting);
                     }
                     ObjectMember::Spread(source) => {
                         collect_identifiers(source, names, collecting);

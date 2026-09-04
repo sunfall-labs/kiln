@@ -29,6 +29,7 @@ set -euo pipefail
 # once under a bash that has them rather than leaving it to the caller's environment.
 if [[ ${BASH_VERSINFO[0]} -lt 4 ]]; then
 	for candidate in /opt/homebrew/bin/bash /usr/local/bin/bash "$(command -v bash)"; do
+		# shellcheck disable=SC2016
 		if [[ -x $candidate ]] && [[ $("$candidate" -c 'echo ${BASH_VERSINFO[0]}') -ge 4 ]]; then
 			exec "$candidate" "${BASH_SOURCE[0]}" "$@"
 		fi
@@ -85,6 +86,7 @@ kiln_cargo build --release --locked -p kiln-cli >/dev/null || {
 #
 # A broken *test* build is the one a release build does not notice: the binary is fine and the
 # suite never ran. Asserting on the summary line rather than the exit code is what catches it.
+# shellcheck disable=SC2016
 step "crate tests" "$BASH" -c '
 	output="$(mbx test --workspace -- --test-threads=4 2>&1)"
 	# The failing *names* as well as the summary: a count says the suite is red and nothing

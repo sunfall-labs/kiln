@@ -16782,7 +16782,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let mut destination = target.bytes.borrow_mut();
                     destination[..length].copy_from_slice(&source[start..end]);
                 }
-                return Ok(out);
+                Ok(out)
             }
             Native::TypedArraySubarray => {
                 let Value::TypedArray(view) = receiver else {
@@ -17386,8 +17386,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ///
     /// An entry that is not an object is a `TypeError`, not a row to skip:
     /// `Object.fromEntries([1])` answered `{}`, so a caller that had built its pairs wrongly got
-    /// an empty object back and no indication of where. Both halves are ordinary `Get`s on
+    /// an empty object back and no indication of where.
+    /// Both halves are ordinary `Get`s on
     /// whatever the iterator handed back, so an accessor at `0` or `1` runs and may throw.
+    #[allow(clippy::wrong_self_convention)]
     fn from_entries_pair(
         &mut self,
         entry: &Value,
@@ -34154,6 +34156,7 @@ type JsonResolver<'a> = &'a mut dyn FnMut(JsonCall<'_>) -> Result<Value, Executi
 
 /// Serialise one value, calling back into the interpreter where the specification says to.
 ///
+#[allow(clippy::too_many_arguments)]
 fn json_stringify(
     value: &Value,
     indent: &str,
@@ -42390,11 +42393,7 @@ impl BuiltinAccessor {
     }
 }
 
-/// The accessors one intrinsic prototype publishes, in the order the specification lists them.
-
-/// Which accessor an intrinsic prototype publishes under `key`, or `None` for a name that is
-/// not one of them.
-/// The getter a built-in prototype publishes under `key`, or `None` if that name is not an
+/// Which accessor an intrinsic prototype publishes under `key`, or `None` if that name is not an
 /// accessor.
 ///
 /// One row in `intrinsic_members` carries both the name and the getter, because they used to be

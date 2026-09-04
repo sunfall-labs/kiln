@@ -33,6 +33,7 @@ pub enum MemberKey {
     /// An ordinary string-keyed member: `map`, `toString`, `byteLength`.
     Named(&'static str),
     /// A well-known-symbol-keyed member: `Symbol.iterator`, `Symbol.hasInstance`.
+    #[allow(dead_code)]
     Symbol(WellKnown),
 }
 

@@ -823,10 +823,7 @@ fn finish_run(
             // ...unless the rejection is the case's own assertion failing. A `Test262Error`
             // that surfaced through a promise is the case saying it got a wrong answer, and
             // passing it because of where it surfaced would hide exactly what the corpus is for.
-            if !is_async
-                && message.contains("(in promise) ")
-                && !message.contains("Test262Error")
-            {
+            if !is_async && message.contains("(in promise) ") && !message.contains("Test262Error") {
                 let stdout = host.into_stdout();
                 return CaseResult::new(Outcome::Pass, diagnostics, stdout, started);
             }

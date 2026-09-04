@@ -40,7 +40,7 @@ die() {
 
 # An emptied checkout is the failure this guard exists for: every chunk answers `pass 0 fail 0`,
 # which is a clean sheet rather than an error, and the change under test takes the blame.
-found="$(find "$CHECKOUT/test/built-ins" -name '*.js' 2>/dev/null -print | wc -l | tr -d ' ')"
+found="$(find "$CHECKOUT/test/built-ins" -name '*.js' -print 2>/dev/null | wc -l | tr -d ' ')"
 [[ $found -gt 1000 ]] || die "Test262 checkout looks empty ($found files under built-ins)"
 
 KILN_BIN="${KILN_TEST262_KILN:-target/release/kiln}"

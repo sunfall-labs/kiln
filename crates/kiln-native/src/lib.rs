@@ -50,7 +50,7 @@ static DISCOVERED_TOOLCHAIN: OnceLock<Result<Toolchain, ToolchainError>> = OnceL
 static SHARED_PUBLICATION_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 const PRIVATE_ASYNC_ABI_VERSION: u32 = 6;
-const NATIVE_PRELUDE_VERSION: u32 = 2;
+const NATIVE_PRELUDE_VERSION: u32 = 3;
 
 /// Inherited variables every supported C driver may consult for C11 search policy.
 ///
