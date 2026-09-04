@@ -199,6 +199,28 @@ typedef struct kiln_native_constructor {
 
 /* KILN_NATIVE_CONSTRUCTOR_TABLE */
 
+/* A shape describes the layout of an object's own properties (ADR 0050):
+ * an ordered list of interned keys and slot indices. Objects with the same
+ * sequence of added properties share the same shape. */
+#define KILN_SHAPE_MAX_FAST_PROPERTIES 32
+
+struct kiln_shape;
+
+typedef struct kiln_shape_transition {
+    const char *ikey;
+    struct kiln_shape *next;
+    struct kiln_shape_transition *next_transition;
+} kiln_shape_transition;
+
+typedef struct kiln_shape {
+    struct kiln_shape *parent;
+    const char *ikey;
+    uint32_t slot_index;
+    uint32_t property_count;
+    const char *keys[KILN_SHAPE_MAX_FAST_PROPERTIES];
+    kiln_shape_transition *transitions;
+} kiln_shape;
+
 /* A plain data object: own string-keyed properties, scanned linearly.
  *
  * There is deliberately no shape here.  A shape identity has to be globally stable and never
@@ -312,6 +334,11 @@ typedef struct kiln_object {
      * with `.kiln/bin` and `.kiln/cache` cleared, in both debug and release. See the issue in
      * `.scratch/native-object-layout/`. Move this up once that is fixed. */
     int error_brand;
+    /* Shape-based layout (ADR 0050). When non-NULL, properties are stored in
+     * the slots array indexed by shape->keys. Appended to preserve member offsets. */
+    kiln_shape *shape;
+    kiln_value *slots;
+    size_t slot_capacity;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -332,6 +359,7 @@ typedef struct kiln_c99_site {
     /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
      * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
     uint32_t misses;
+    const kiln_shape *shape;
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
