@@ -91,13 +91,15 @@ In `prelude_declarations.h`:
 - [x] **Milestone 8**: Direct static call devirtualization across all module functions: emitted static inline prototypes and direct static calls for internal helper functions, enabling Clang/LLVM to inline callees.
 - [x] **Milestone 9**: Expression-level binary fusion: fused `LoadLocal` + `Const`/`LoadLocal` + `Binary` expressions directly into register-level evaluation.
 - [x] **Milestone 10**: Call result assignment fusion: fused `Call` + `Dup` + `StoreLocal` + `Pop` sequences (`y = f(x)`) directly into `locals[dst] = call_result`.
+- [x] **Milestone 11**: Power-of-2 and constant float arithmetic specialization: replaced expensive `fmod(a, 2.0)` with single-cycle bitwise `(int64_t)a & 1`, replaced division by power-of-2 constants with multiplication by their exact reciprocal (`a * 0.5`), and replaced `memcpy` float construction with compound union literals for direct Clang constant folding.
+- [x] **Milestone 12**: Symmetric constant-expression fusion: added `Const` + `LoadLocal` + `Binary` / `StoreLocal` / `CompareJump` multi-instruction patterns, compiling all constant-variable expressions (`3 * n`, `100 - x`, `0 < n`) directly to native C scalar arithmetic.
+- [x] **Milestone 13**: Architectural design and specification for 64-bit NaN-boxed internal value representation (ADR 0053: single GPR mapping, 2x cache density, unboxed doubles, and zero-overhead float checks).
 
 ## Benchmark Results (Empirical Release Measurements, 5 runs median)
 
-| Benchmark | Baseline (`85f8aeb`) | After Initial Wasmi 2.0 | **After Full Inlining & Expression Fusion** | Total Speedup vs Baseline |
-| :--- | :--- | :--- | :--- | :--- |
-| **Numerical Loop (`50M` iterations)** | `1553.9 ms` | `1195.1 ms` | **`793.0 ms`** | **1.96x (+49.0% runtime cut)** |
-| **Recursive Fibonacci (`fib(30) × 5`)** | `751.7 ms` | `549.9 ms` | **`426.0 ms`** | **1.76x (+43.3% runtime cut)** |
-| **Collatz Conjecture (`300k` sequence)** | `1936.1 ms` | `1613.2 ms` | **`1116.3 ms`** | **1.73x (+42.3% runtime cut)** |
-| **Function Dispatch (`15M` calls)** | `1007.5 ms` | `782.7 ms` | **`731.2 ms`** | **1.38x (+27.4% runtime cut)** |
-
+| Benchmark | Baseline (`85f8aeb`) | After Initial Wasmi 2.0 | After Inlining & Expression Fusion | **After Float & Constant Specialization** | Total Speedup vs Baseline |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Numerical Loop (`50M` iterations)** | `1553.9 ms` | `1195.1 ms` | `793.0 ms` | **`680.8 ms`** | **2.28x (+56.2% runtime cut)** |
+| **Recursive Fibonacci (`fib(30) × 5`)** | `751.7 ms` | `549.9 ms` | `426.0 ms` | **`393.0 ms`** | **1.91x (+47.7% runtime cut)** |
+| **Collatz Conjecture (`300k` sequence)** | `1936.1 ms` | `1613.2 ms` | `1116.3 ms` | **`985.2 ms`** | **1.97x (+49.1% runtime cut)** |
+| **Function Dispatch (`15M` calls)** | `1007.5 ms` | `782.7 ms` | `731.2 ms` | **`688.2 ms`** | **1.46x (+31.7% runtime cut)** |
