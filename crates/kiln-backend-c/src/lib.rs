@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 28;
+pub const C_GENERATOR_VERSION: u32 = 29;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -558,9 +558,13 @@ fn render_uncaught(output: &mut String) {
     output.push_str("    return KILN_C99_THROWN;\n");
 }
 
-fn render_refusal(output: &mut String) {
+fn render_refusal(output: &mut String, is_val: bool) {
     output.push_str("kiln_refusal:;\n");
-    output.push_str("    *result = kiln_c99_control_diagnostic();\n");
+    if is_val {
+        output.push_str("    *result = kiln_val_from_boundary(kiln_c99_control_diagnostic());\n");
+    } else {
+        output.push_str("    *result = kiln_c99_control_diagnostic();\n");
+    }
     output.push_str("    return KILN_C99_CONTROL_ERROR;\n");
 }
 
@@ -604,7 +608,7 @@ fn render_functions(
     for index in 0..program.functions.len() {
         writeln!(
             output,
-            "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);"
+            "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc);"
         )
         .unwrap();
     }
@@ -1602,7 +1606,7 @@ fn render_function(
     }
     writeln!(
         output,
-        "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{"
+        "static inline int {symbol}_fn_{index}(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues, const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{"
     )
     .unwrap();
     output.push_str("    size_t sp = 0;\n    size_t slot;\n");
@@ -1610,9 +1614,7 @@ fn render_function(
     output.push_str("    kiln_value *thrown = ctx ? ctx->thrown : NULL;\n");
     output.push_str("    kiln_generator *frame = ctx ? ctx->frame : NULL;\n");
     output.push_str("    int depth = ctx ? ctx->depth : 0;\n");
-    output.push_str(
-        "    kiln_value receiver = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();\n",
-    );
+    output.push_str("    kiln_val receiver = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;\n");
     output.push_str("    (void)receiver_ptr;\n");
     // Which of the two `arguments` objects a mention in this body would build. Set on every
     // entry, a generator's resumptions included, because the frame global it writes is shared
@@ -1705,7 +1707,7 @@ fn render_function(
             // passed leaves its slot undefined, which is what a missing argument is.
             writeln!(
                 output,
-                "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = kiln_val_from_boundary(args[slot]);",
+                "    for (slot = 0; slot < (size_t){} && slot < argc; ++slot) locals[slot] = args[slot];",
                 proto.parameter_count
             )
             .unwrap();
@@ -1742,7 +1744,7 @@ fn render_function(
     // A body whose control reaches the end without a `Return` is a compiler bug, not a program
     // error: the lowering always ends a body with one.
     output.push_str("    goto kiln_refusal;\n");
-    render_refusal(output);
+    render_refusal(output, true);
     output.push_str("}\n");
 }
 
@@ -2092,7 +2094,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
                 status = KILN_C99_CONTROL_ERROR;
                 goto namespace_failure;
             }}
-            value = *kiln_c99_cell_of(value);
+            value = kiln_val_to_boundary(*kiln_c99_cell_of(value));
         }}
         status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
                                   sizeof *data->properties);
@@ -2256,7 +2258,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     .unwrap();
     render_key_prologue(&mut output, symbol, !keys.is_empty());
     if uses_this(&program.code) {
-        output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
+        output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED;\n");
     }
     // The entry point owns the depth counter and the thrown value every body writes into. Both
     // are locals rather than parameters because the embedding signature is fixed and a reference
@@ -2316,7 +2318,7 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
     output.push_str("    goto kiln_refusal;\n");
-    render_refusal(&mut output);
+    render_refusal(&mut output, false);
     output.push_str("}\n");
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
@@ -2417,7 +2419,7 @@ fn render_module(
     .unwrap();
     render_key_prologue(&mut output, symbol, !keys.is_empty());
     if uses_this(&program.code) {
-        output.push_str("    kiln_value receiver = kiln_c99_undefined();\n");
+        output.push_str("    kiln_val receiver = KILN_VAL_UNDEFINED;\n");
     }
     // The entry point owns the depth counter and the thrown value every body writes into. Both
     // are locals rather than parameters because the embedding signature is fixed and a reference
@@ -2508,7 +2510,7 @@ fn render_module(
     render_unwind(&mut output, &emitter.handlers, false, true);
     render_uncaught(&mut output);
     output.push_str("    goto kiln_refusal;\n");
-    render_refusal(&mut output);
+    render_refusal(&mut output, false);
     output.push_str("}\n");
     if commonjs {
         /* The launcher cannot manufacture native objects without coupling itself to this private
@@ -3062,11 +3064,11 @@ fn emit_instruction(
                 )
                 .unwrap();
             } else {
-                writeln!(output, "    stack[sp++] = kiln_val_from_boundary(*kiln_c99_cell_of(kiln_val_to_boundary(locals[{local}])));").unwrap();
+                writeln!(output, "    stack[sp++] = *(kiln_val *)KILN_VAL_PTR(locals[{local}]);").unwrap();
             }
         }
         Instruction::StoreCell(local) => {
-            writeln!(output, "    *kiln_c99_cell_of(kiln_val_to_boundary(locals[{local}])) = kiln_val_to_boundary(stack[--sp]);").unwrap();
+            writeln!(output, "    *(kiln_val *)KILN_VAL_PTR(locals[{local}]) = stack[--sp];").unwrap();
         }
         // A `let` or `const` slot is in the temporal dead zone until its declaration runs.
         // Reading one is an error rather than `undefined`, and only the slots a program marks
@@ -3078,7 +3080,7 @@ fn emit_instruction(
             // address-escaped, and an escaped array cannot be promoted to registers *anywhere in
             // the function* -- so one TDZ mark in the prologue costs every loop in the body. The
             // body it replaces is two lines and is kept verbatim.
-            writeln!(output, "    if ((locals[{local}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *kiln_c99_cell_of(kiln_val_to_boundary(locals[{local}])) = kiln_c99_uninitialized(); }} else {{ locals[{local}] = KILN_VAL_UNINITIALIZED; }}").unwrap();
+            writeln!(output, "    if ((locals[{local}] & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX) {{ *(kiln_val *)KILN_VAL_PTR(locals[{local}]) = KILN_VAL_UNINITIALIZED; }} else {{ locals[{local}] = KILN_VAL_UNINITIALIZED; }}").unwrap();
         }
         // An upvalue slot always holds a cell -- that is what capturing means -- but the cell can
         // still be in its owner's temporal dead zone. The owner may be a module or an enclosing
@@ -3089,12 +3091,12 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ int status = kiln_c99_op_val_load_cell(kiln_val_from_boundary(upvalues[{upvalue}]), stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                "    {{ int status = kiln_c99_op_val_load_cell(upvalues[{upvalue}], stack, &sp, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
             )
             .unwrap();
         }
         Instruction::StoreUpvalue(upvalue) => {
-            writeln!(output, "    *kiln_c99_cell_of(upvalues[{upvalue}]) = kiln_val_to_boundary(stack[--sp]);").unwrap();
+            writeln!(output, "    *(kiln_val *)KILN_VAL_PTR(upvalues[{upvalue}]) = stack[--sp];").unwrap();
         }
         Instruction::MakeFunction(proto) => {
             let target = &functions[*proto as usize];
@@ -3157,24 +3159,24 @@ fn emit_instruction(
             let defining_receiver = if target.arrow && matches!(site, ReturnSite::Body) {
                 "receiver"
             } else {
-                "kiln_c99_undefined()"
+                "KILN_VAL_UNDEFINED"
             };
             let diagnostic_source = c_string(diagnostic_site);
             output.push_str("    {\n        kiln_value built; int status;\n");
             if captures.is_empty() {
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
+                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), NULL, 0);"
                 )
                 .unwrap();
             } else {
-                writeln!(output, "        kiln_value captured[{}];", captures.len()).unwrap();
+                writeln!(output, "        kiln_val captured[{}];", captures.len()).unwrap();
                 for (position, upvalue) in captures.iter().enumerate() {
                     // The box is copied by pointer, which is the point: two closures over one
                     // variable have to observe each other's writes.
                     match upvalue {
                         Upvalue::ParentLocal(slot) => {
-                            writeln!(output, "        captured[{position}] = kiln_val_to_boundary(locals[{slot}]);")
+                            writeln!(output, "        captured[{position}] = locals[{slot}];")
                         }
                         Upvalue::ParentUpvalue(slot) => {
                             writeln!(output, "        captured[{position}] = upvalues[{slot}];")
@@ -3184,7 +3186,7 @@ fn emit_instruction(
                 }
                 writeln!(
                     output,
-                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_c99_new_target, UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
+                    "        status = kiln_c99_make_closure(&built, {symbol}_fn_{proto}, {name}, {name_len}, {source}, {source_len}, {diagnostic_source}, UINT32_C({proto}), UINT32_C({arity}), {generator}, {asynchronous}, {async_generator}, {arrow}, {strict}, {defining_receiver}, kiln_val_from_boundary(kiln_c99_new_target), UINT32_C({frame_locals}), UINT32_C({frame_stack}), UINT32_C({frame_handlers}), UINT32_C({prologue_resume}), captured, UINT32_C({}));",
                     captures.len()
                 )
                 .unwrap();
@@ -3216,12 +3218,12 @@ fn emit_instruction(
             let (success_action, fallback_action) =
                 if let Some(dst) = can_fuse_call_dup_store_pop(emitter.code, index, &emitter.jump_targets) {
                     (
-                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = kiln_val_from_boundary(call_result);"),
+                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = call_result;"),
                         format!("locals[{dst}] = stack[--sp];"),
                     )
                 } else if let Some(dst) = can_fuse_call_store(emitter.code, index, &emitter.jump_targets) {
                     (
-                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = kiln_val_from_boundary(call_result);"),
+                        format!("sp -= ((size_t){argc} + 1); locals[{dst}] = call_result;"),
                         format!("locals[{dst}] = stack[--sp];"),
                     )
                 } else if can_fuse_call_pop(emitter.code, index, &emitter.jump_targets) {
@@ -3231,17 +3233,17 @@ fn emit_instruction(
                     )
                 } else {
                     (
-                        format!("sp -= ((size_t){argc} + 1); stack[sp++] = kiln_val_from_boundary(call_result);"),
+                        format!("sp -= ((size_t){argc} + 1); stack[sp++] = call_result;"),
                         String::new(),
                     )
                 };
             let direct_call = if static_branches.is_empty() {
                 format!(
-                    "int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action}"
+                    "int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action}"
                 )
             } else {
                 format!(
-                    "if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_value call_result = kiln_c99_undefined(); kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} > 0 ? call_argbuf : NULL; kiln_value recv = plain->arrow ? plain->captured_this : kiln_c99_undefined(); if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }} if (KILN_LIKELY(status == KILN_C99_OK)) {{ {success_action} }} else {{ if (status == KILN_C99_THROWN) {unwind} return status; }} }} else {{ int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action} }}"
+                    "if (KILN_LIKELY(plain != NULL && !plain->publishes_frame && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ kiln_val call_result = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} > 0 ? &stack[sp - {argc}] : NULL; kiln_val recv = plain->arrow ? plain->captured_this : KILN_VAL_UNDEFINED; if (!plain->arrow && !plain->strict) (void)kiln_c99_global_object_val(&recv); kiln_call_context ctx_call = {{ host, thrown, NULL, depth + 1 }}; int status; {static_branches} else {{ status = plain->body(&ctx_call, &call_result, plain->upvalues, &recv, call_args, (size_t){argc}); }} if (KILN_LIKELY(status == KILN_C99_OK)) {{ {success_action} }} else {{ if (status == KILN_C99_THROWN) {unwind} return status; }} }} else {{ int status = kiln_c99_op_val_call(host, stack, &sp, (size_t){argc}, depth, thrown, {instruction_site}, (size_t){index}, {instruction_operation}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; {fallback_action} }}"
                 )
             };
             writeln!(
@@ -3804,7 +3806,7 @@ fn emit_instruction(
             )
             .unwrap();
         }
-        Instruction::LoadThis => output.push_str("    stack[sp++] = kiln_val_from_boundary(receiver);\n"),
+        Instruction::LoadThis => output.push_str("    stack[sp++] = receiver;\n"),
         // Module scope is one array for the whole module, so a read from a function body names
         // it directly rather than reaching for a frame that may no longer exist.
         Instruction::LoadGlobal(slot) => {
@@ -3834,7 +3836,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = kiln_val_to_boundary(stack[sp - {argc} + i]); }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_super_call(host, &produced, kiln_val_to_boundary(stack[sp - {argc} - 1]), receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = kiln_val_from_boundary(produced); }}",
+                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; const kiln_val *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; int status = kiln_c99_super_call_val(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
                 argc + 1
             )
             .unwrap();
@@ -3846,7 +3848,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status = kiln_c99_super_call(host, &produced, kiln_val_to_boundary(stack[sp - 1]), receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(produced); }}"
+                "    {{ kiln_val produced = KILN_VAL_UNDEFINED; int status = kiln_c99_super_call_val(host, &produced, stack[sp - 1], receiver, argc == 0 ? NULL : args, argc, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, produced); if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }}"
             )
             .unwrap();
         }
@@ -3981,7 +3983,7 @@ fn emit_instruction(
         Instruction::RestArguments(from) => {
             writeln!(
                 output,
-                "    {{ kiln_value rest; size_t extra; int status = kiln_c99_new_array(&rest); if (status != KILN_C99_OK) return status; for (extra = (size_t){from}; extra < argc; ++extra) {{ status = kiln_c99_array_push(rest, args[extra]); if (status != KILN_C99_OK) return status; }} stack[sp++] = kiln_val_from_boundary(rest); }}"
+                "    {{ kiln_value rest; size_t extra; int status = kiln_c99_new_array(&rest); if (status != KILN_C99_OK) return status; for (extra = (size_t){from}; extra < argc; ++extra) {{ status = kiln_c99_array_push(rest, kiln_val_to_boundary(args[extra])); if (status != KILN_C99_OK) return status; }} stack[sp++] = kiln_val_from_boundary(rest); }}"
             )
             .unwrap();
         }
@@ -4012,7 +4014,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value parent = kiln_val_to_boundary(stack[--sp]); kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, receiver, given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, call_result); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(call_result); }}"
+                "    {{ kiln_value list = kiln_val_to_boundary(stack[--sp]); kiln_value parent = kiln_val_to_boundary(stack[--sp]); kiln_value call_result; kiln_array *given; int status; if (list.tag != KILN_VALUE_ARRAY) {{ {direct_refusal} }} given = kiln_c99_array_of(list); status = kiln_c99_super_call(host, &call_result, parent, kiln_val_to_boundary(receiver), given->count == 0 ? NULL : given->elements, given->count, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super_val(&receiver, kiln_val_from_boundary(call_result)); if (status != KILN_C99_OK) return status; stack[sp++] = kiln_val_from_boundary(call_result); }}"
             )
             .unwrap();
         }
@@ -4059,7 +4061,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}",
+                "    {{ kiln_value read; int status = kiln_c99_get_with_receiver(host, kiln_val_to_boundary(stack[sp - 1]), kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_key_{name}, {}), kiln_val_to_boundary(receiver), &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}",
                 text.len()
             )
             .unwrap();
@@ -4070,7 +4072,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value prototype = kiln_val_to_boundary(stack[--sp]); kiln_value read; int status = kiln_c99_get_with_receiver(host, prototype, kiln_val_to_boundary(stack[sp - 1]), receiver, &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}"
+                "    {{ kiln_value prototype = kiln_val_to_boundary(stack[--sp]); kiln_value read; int status = kiln_c99_get_with_receiver(host, prototype, kiln_val_to_boundary(stack[sp - 1]), kiln_val_to_boundary(receiver), &read, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_val_from_boundary(read); }}"
             )
             .unwrap();
         }
@@ -4093,9 +4095,14 @@ fn emit_instruction(
         }
         Instruction::PopHandler => output.push_str("    --kiln_handler_top;\n"),
         Instruction::Yield | Instruction::Await => {
+            let result_expr = if matches!(site, ReturnSite::Body) {
+                "sp == 0 ? KILN_VAL_UNDEFINED : stack[sp - 1]"
+            } else {
+                "sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[sp - 1])"
+            };
             writeln!(
                 output,
-                "    frame->sp = sp - 1; frame->resume = {index}; frame->awaiting = {}; *result = kiln_val_to_boundary(stack[sp - 1]); return KILN_C99_YIELDED;",
+                "    frame->sp = sp - 1; frame->resume = {index}; frame->awaiting = {}; *result = {result_expr}; return KILN_C99_YIELDED;",
                 i32::from(matches!(instruction, Instruction::Await))
             )
             .unwrap();
@@ -4138,7 +4145,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{action} }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_val_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{action} }}",
                 text.len()
             )
             .unwrap();
@@ -4388,7 +4395,7 @@ fn emit_instruction(
         }
         Instruction::Return => match site {
             ReturnSite::Body => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : kiln_val_to_boundary(stack[--sp]); return KILN_C99_OK;\n",
+                "    *result = sp == 0 ? KILN_VAL_UNDEFINED : stack[--sp]; return KILN_C99_OK;\n",
             ),
             ReturnSite::Entry {
                 exports: None, ..
@@ -4428,7 +4435,7 @@ fn emit_instruction(
                     };
                     writeln!(
                         output,
-                        "    {{ kiln_value mod_val = kiln_val_to_boundary(locals[2]); kiln_value module_value = mod_val.tag == KILN_VALUE_CELL ? *kiln_c99_cell_of(mod_val) : mod_val; int export_status = kiln_c99_get(host, module_value, \"exports\", 7, &exports[0], {depth}, {thrown}); if (export_status != KILN_C99_OK) return export_status; }}"
+                        "    {{ kiln_val mod_val = locals[2]; kiln_val module_val = (mod_val & KILN_TAG_MASK) == KILN_TAG_CELL_PREFIX ? *(kiln_val *)KILN_VAL_PTR(mod_val) : mod_val; int export_status = kiln_c99_get(host, kiln_val_to_boundary(module_val), \"exports\", 7, &exports[0], {depth}, {thrown}); if (export_status != KILN_C99_OK) return export_status; }}"
                     )
                     .unwrap();
                 }

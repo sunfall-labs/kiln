@@ -180,7 +180,7 @@ int main(void) {{
     kiln_value args[3];
     int found;
     if (kiln_c99_make_cell(&cell) != KILN_C99_OK) return 1;
-    *kiln_c99_cell_of(cell) = kiln_c99_number(9.0);
+    *kiln_c99_cell_of(cell) = kiln_c99_val_from_double(9.0);
     values[0] = cell;
     if ({symbol}_namespace_wrapper(&namespace_object, names, lengths, values, 2) != KILN_C99_OK)
         return 2;
@@ -297,18 +297,19 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
     let wrapper = format!(
         r#"
 static int calls = 0;
-static int listener(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
-                    const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{
+static int listener(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                    const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{
     (void)ctx; (void)upvalues; (void)receiver_ptr;
-    if (argc != 1 || args[0].tag != KILN_VALUE_NUMBER) return 91;
-    calls = calls * 10 + (int)kiln_c99_as_number(args[0]);
-    *result = kiln_c99_undefined();
+    if (argc != 1 || !KILN_VAL_IS_NUMBER(args[0])) return 91;
+    double d; memcpy(&d, &args[0], sizeof(d));
+    calls = calls * 10 + (int)d;
+    *result = KILN_VAL_UNDEFINED;
     return KILN_C99_OK;
 }}
-static int child_constructor(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
-                             const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{
+static int child_constructor(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                             const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {{
     (void)ctx; (void)upvalues; (void)args; (void)argc;
-    *result = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
+    *result = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     return KILN_C99_OK;
 }}
 int main(void) {{
@@ -327,7 +328,7 @@ int main(void) {{
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callback, listener, "listener", 8, NULL, 0, "<test>", 0, 1, 0, 0, 0, 0,
-                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if ({symbol}(NULL, &result, NULL, 0, exports, 1) != KILN_C99_OK) return 2;
     if (kiln_c99_construct(NULL, &emitter, exports[0], NULL, 0, 0,
@@ -338,7 +339,7 @@ int main(void) {{
        if (kiln_c99_array_of(keys)->count != 0) return 33;
     }}
     if (kiln_c99_make_closure(&child, child_constructor, "Child", 5, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
-                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 34;
     args[0] = child; args[1] = exports[0];
     if (kiln_c99_node_util(NULL, &result, KILN_C99_METHOD_NODE_UTIL_INHERITS, args, 2, 0,
@@ -389,10 +390,10 @@ fn executable_runtime_readable_has_a_checked_native_prototype_graph() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
-static int readable_child(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
-                          const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+static int readable_child(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                          const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
     (void)ctx; (void)upvalues; (void)args; (void)argc;
-    *result = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
+    *result = receiver_ptr ? *receiver_ptr : KILN_VAL_UNDEFINED;
     return KILN_C99_OK;
 }
 int main(void) {
@@ -418,7 +419,7 @@ int main(void) {
     if (kiln_c99_get(NULL, readable_prototype, "on", 2, &method, 0, &thrown) != KILN_C99_OK ||
         method.tag != KILN_VALUE_METHOD || method.bits != KILN_C99_METHOD_NODE_EVENT_ON) return 5;
     if (kiln_c99_make_closure(&child, readable_child, "Child", 5, "<test>", 6, "<test>", 0, 0, 0, 0, 0, 0,
-                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 6;
     arguments[0] = child;
     arguments[1] = readable;
@@ -1170,9 +1171,9 @@ fn unowned_function_refusal_names_its_generated_source_and_function() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("diagnostic source probe emits");
     let wrapper = r#"
-static int refuses_before_instruction(kiln_call_context *ctx, kiln_value *result,
-                                      kiln_value *upvalues, const kiln_value *receiver_ptr,
-                                      const kiln_value *args, size_t argc) {
+static int refuses_before_instruction(kiln_call_context *ctx, kiln_val *result,
+                                      kiln_val *upvalues, const kiln_val *receiver_ptr,
+                                      const kiln_val *args, size_t argc) {
     (void)ctx; (void)result; (void)upvalues; (void)receiver_ptr; (void)args; (void)argc;
     return KILN_C99_CONTROL_ERROR;
 }
@@ -1186,7 +1187,7 @@ int main(void) {
     kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&function, refuses_before_instruction, "initialize", 10,
                               NULL, 0, "node_modules/example/index.js", 0, 0, 0, 0, 0, 0,
-                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK) return 1;
     if (kiln_c99_call(NULL, &result, function, kiln_c99_undefined(), NULL, 0, 0,
                       &thrown) != KILN_C99_CONTROL_ERROR) return 2;
@@ -4337,20 +4338,22 @@ fn executable_node_support_facades_are_deterministic_and_callback_driven() {
     ))
     .expect("support facade probe emits");
     let wrapper = r#"
-static int callback(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
-                    const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+static int callback(kiln_call_context *ctx, kiln_val *result, kiln_val *upvalues,
+                    const kiln_val *receiver_ptr, const kiln_val *args, size_t argc) {
     (void)ctx; (void)upvalues; (void)receiver_ptr;
-    if (argc == 2 && args[0].tag == KILN_VALUE_NULL && args[1].tag == KILN_VALUE_ARRAY &&
-        kiln_c99_array_of(args[1])->count == 2) {
-        *result = kiln_c99_boolean(1);
+    if (argc == 2 && KILN_VAL_IS_NULL(args[0]) && KILN_VAL_IS_OBJECT(args[1]) &&
+        kiln_c99_array_of(kiln_val_to_boundary(args[1]))->count == 2) {
+        *result = KILN_VAL_TRUE;
         return KILN_C99_OK;
     }
-    if (argc == 1 && args[0].tag == KILN_VALUE_STRING && args[0].len == 7 &&
-        memcmp(args[0].ptr, "forward", 7) == 0) {
-        *result = kiln_c99_boolean(1);
-        return KILN_C99_OK;
+    if (argc == 1 && KILN_VAL_IS_STRING(args[0])) {
+        kiln_value s = kiln_val_to_boundary(args[0]);
+        if (s.len == 7 && memcmp(s.ptr, "forward", 7) == 0) {
+            *result = KILN_VAL_TRUE;
+            return KILN_C99_OK;
+        }
     }
-    *result = kiln_c99_boolean(0);
+    *result = KILN_VAL_FALSE;
     return KILN_C99_OK;
 }
 int main(void) {
@@ -4362,7 +4365,7 @@ int main(void) {
     if (kiln_realm_create(&realm) != KILN_C99_OK) return 1;
     kiln_test_realm_active = 1;
     if (kiln_c99_make_closure(&callable, callback, "callback", 8, NULL, 0, "<test>", 0, 0, 0, 0, 0, 0,
-                              1, kiln_c99_undefined(), kiln_c99_undefined(), 0, 1, 0, 0,
+                              1, KILN_VAL_UNDEFINED, KILN_VAL_UNDEFINED, 0, 1, 0, 0,
                               NULL, 0) != KILN_C99_OK)
         return 1;
     args[0] = kiln_c99_copy_text("%s:%d", 5);
