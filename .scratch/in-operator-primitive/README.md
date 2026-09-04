@@ -35,8 +35,14 @@ So the fix needs the C backend's *own* notion of "is an object", not the ToPrimi
 finding out whether one exists before writing another -- and worth checking what
 `kiln_c99_is_reference` is actually for, because its name suggests a generality it does not have.
 
-## Also noticed while probing
+## Also noticed while probing -- since fixed
 
-`'source' in /x/` answers `true` in the interpreter and `false` in the native backend. That
-divergence is **pre-existing** -- it is there with this change reverted -- and no probe in
-`conformance/native` covers it, which is why the parity gate is green. Small, and its own bug.
+`'source' in /x/` answered `true` in the interpreter and `false` natively, and so did `flags`,
+`lastIndex` and `exec`. `kiln_c99_has_property` has arms for ArrayBuffer, DataView, TypedArray
+and Array and had none for RegExp, so the walk fell through to a generic chain that does not know
+a regexp's prototype. `"exec" in rx` is how a program feature-detects one.
+
+Fixed by listing the accessors and the prototype's members. Two things that did not work on the
+way: a regexp has no property store natively -- `kiln_regexp` has no field for one -- and probing
+by *reading* the member refuses for a name the backend has not implemented, which is right for
+`rx.nope` and wrong for `"nope" in rx`, where the question is answerable and the answer is false.

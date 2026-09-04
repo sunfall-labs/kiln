@@ -15294,6 +15294,40 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
         }
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        /* A regexp answers for its accessors, its own store and its prototype's methods, and
+         * `in` has to agree with the read about all three. Without an arm here the walk fell
+         * through to the generic chain, which does not know a regexp's prototype, so
+         * `"exec" in /x/` and `"source" in /x/` were both false -- the interpreter says true, and
+         * `"exec" in rx` is how a program feature-detects one. */
+        static const char *const own[] = {"source",     "flags",       "lastIndex",  "constructor",
+                                          "hasIndices", "global",      "ignoreCase", "multiline",
+                                          "dotAll",     "unicode",     "unicodeSets", "sticky"};
+        size_t index;
+        for (index = 0; index < sizeof own / sizeof own[0]; ++index) {
+            if (kiln_c99_same_name(key, key_len, own[index])) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+        /* The prototype's members are listed rather than read: a read *refuses* a name this
+         * backend has not implemented, which is right for `rx.nope` and wrong for
+         * `"nope" in rx` -- the question there is answerable and the answer is false. A regexp
+         * carries no property store of its own here, so there is no third place to look. */
+        {
+            static const char *const inherited[] = {"exec",      "test",       "toString",
+                                                    "compile",   "@@match",    "@@matchAll",
+                                                    "@@replace", "@@search",   "@@split"};
+            for (index = 0; index < sizeof inherited / sizeof inherited[0]; ++index) {
+                if (kiln_c99_same_name(key, key_len, inherited[index])) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
+            }
+        }
+        *answer = 0;
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An index is present when it is in range, and `length` always is. */
         double index = kiln_c99_key_index(key, key_len);
