@@ -1257,7 +1257,7 @@ fn render_unit_roots(
     if module_scope {
         writeln!(
             output,
-            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((kiln_gc_heap *)heap, {symbol}_globals, {});",
+            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((struct kiln_gc_heap *)heap, {symbol}_globals, {});",
             usize::try_from(local_count).unwrap().max(1)
         )
         .unwrap();
