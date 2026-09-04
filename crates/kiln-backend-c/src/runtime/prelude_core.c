@@ -15817,6 +15817,17 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
                 break;
             }
             object = kiln_c99_object_of(current);
+            if (object->elements != NULL) {
+                double index_num = kiln_c99_key_index(key, key_len);
+                if (index_num >= 0.0 && index_num < 100000.0) {
+                    size_t elem_idx = (size_t)index_num;
+                    if (elem_idx < object->element_count &&
+                        !kiln_c99_is_hole(object->elements[elem_idx])) {
+                        *answer = 1;
+                        return KILN_C99_OK;
+                    }
+                }
+            }
             if (object->shape != NULL && ikey != NULL) {
                 uint32_t slot;
                 if (kiln_c99_shape_find_slot(object->shape, ikey, &slot)) {
@@ -15824,9 +15835,11 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
                     return KILN_C99_OK;
                 }
             }
-            if (kiln_c99_own_index(object, ikey, key, key_len) != object->count) {
-                *answer = 1;
-                return KILN_C99_OK;
+            if (object->properties != NULL || object->shape == NULL) {
+                if (kiln_c99_own_index(object, ikey, key, key_len) != object->count) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
             }
             current = object->prototype;
         }
@@ -16016,17 +16029,38 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
     }
     if (target.tag == KILN_VALUE_OBJECT) {
         kiln_object *object = kiln_c99_object_of(target);
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-        }
-        for (index = 0; index < object->count; ++index) {
-            if (!object->properties[index].enumerable) {
-                continue;
+        if (object->properties == NULL && object->shape != NULL) {
+            if (object->elements != NULL) {
+                for (index = 0; index < object->element_count; ++index) {
+                    if (kiln_c99_is_hole(object->elements[index])) continue;
+                    char num_buf[32];
+                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                    status = kiln_c99_array_push(built, kiln_c99_copy_text(num_buf, (size_t)nlen));
+                    if (status != KILN_C99_OK) return status;
+                }
             }
-            status = kiln_c99_array_push(built, kiln_c99_copy_text(object->properties[index].key,
-                                                                   object->properties[index].key_len));
-            if (status != KILN_C99_OK) {
-                return status;
+            for (index = 0; index < object->shape->property_count; ++index) {
+                const char *skey = object->shape->keys[index];
+                size_t key_len = strlen(skey);
+                if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') {
+                    continue;
+                }
+                status = kiln_c99_array_push(built, kiln_c99_copy_text(skey, key_len));
+                if (status != KILN_C99_OK) return status;
+            }
+        } else {
+            if (object->shape != NULL) {
+                kiln_c99_ensure_dictionary(object);
+            }
+            for (index = 0; index < object->count; ++index) {
+                if (!object->properties[index].enumerable) {
+                    continue;
+                }
+                status = kiln_c99_array_push(built, kiln_c99_copy_text(object->properties[index].key,
+                                                                       object->properties[index].key_len));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
             }
         }
     } else if (target.tag == KILN_VALUE_ARRAY) {
@@ -16044,18 +16078,28 @@ static int kiln_c99_own_keys(kiln_host *host, kiln_value target, kiln_value *out
         }
         if (array->properties.tag == KILN_VALUE_OBJECT) {
             kiln_object *extra = kiln_c99_object_of(array->properties);
-            if (extra->shape != NULL) {
-                kiln_c99_ensure_dictionary(extra);
-            }
-            for (index = 0; index < extra->count; ++index) {
-                if (!extra->properties[index].enumerable) {
-                    continue;
+            if (extra->properties == NULL && extra->shape != NULL) {
+                for (index = 0; index < extra->shape->property_count; ++index) {
+                    const char *skey = extra->shape->keys[index];
+                    size_t key_len = strlen(skey);
+                    if (key_len >= 2 && skey[0] == '@' && skey[1] == '@') continue;
+                    status = kiln_c99_array_push(built, kiln_c99_copy_text(skey, key_len));
+                    if (status != KILN_C99_OK) return status;
                 }
-                status = kiln_c99_array_push(
-                    built, kiln_c99_copy_text(extra->properties[index].key,
-                                               extra->properties[index].key_len));
-                if (status != KILN_C99_OK) {
-                    return status;
+            } else {
+                if (extra->shape != NULL) {
+                    kiln_c99_ensure_dictionary(extra);
+                }
+                for (index = 0; index < extra->count; ++index) {
+                    if (!extra->properties[index].enumerable) {
+                        continue;
+                    }
+                    status = kiln_c99_array_push(
+                        built, kiln_c99_copy_text(extra->properties[index].key,
+                                                   extra->properties[index].key_len));
+                    if (status != KILN_C99_OK) {
+                        return status;
+                    }
                 }
             }
         }
@@ -16123,15 +16167,33 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
     }
     {
         kiln_object *object = kiln_c99_object_of(target);
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-        }
-        for (index = 0; index < object->count; ++index) {
-            status = kiln_c99_array_push(shadowed,
-                                         kiln_c99_copy_text(object->properties[index].key,
-                                                            object->properties[index].key_len));
-            if (status != KILN_C99_OK) {
-                return status;
+        if (object->properties == NULL && object->shape != NULL) {
+            if (object->elements != NULL) {
+                for (index = 0; index < object->element_count; ++index) {
+                    if (kiln_c99_is_hole(object->elements[index])) continue;
+                    char num_buf[32];
+                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                    status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(num_buf, (size_t)nlen));
+                    if (status != KILN_C99_OK) return status;
+                }
+            }
+            for (index = 0; index < object->shape->property_count; ++index) {
+                const char *skey = object->shape->keys[index];
+                size_t key_len = strlen(skey);
+                status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(skey, key_len));
+                if (status != KILN_C99_OK) return status;
+            }
+        } else {
+            if (object->shape != NULL) {
+                kiln_c99_ensure_dictionary(object);
+            }
+            for (index = 0; index < object->count; ++index) {
+                status = kiln_c99_array_push(shadowed,
+                                             kiln_c99_copy_text(object->properties[index].key,
+                                                                object->properties[index].key_len));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
             }
         }
         current = object->prototype;
@@ -16142,30 +16204,56 @@ static int kiln_c99_enumerate_keys(kiln_host *host, kiln_value target, kiln_valu
             break;
         }
         object = kiln_c99_object_of(current);
-        if (object->shape != NULL) {
-            kiln_c99_ensure_dictionary(object);
-        }
-        for (index = 0; index < object->count; ++index) {
-            const char *key = object->properties[index].key;
-            size_t key_len = object->properties[index].key_len;
-            int enumerable = object->properties[index].enumerable;
-            if (kiln_c99_keys_contain(shadowed, key, key_len)) {
-                continue;
+        if (object->properties == NULL && object->shape != NULL) {
+            if (object->elements != NULL) {
+                for (index = 0; index < object->element_count; ++index) {
+                    if (kiln_c99_is_hole(object->elements[index])) continue;
+                    char num_buf[32];
+                    int nlen = kiln_number_to_js_string((double)index, num_buf, sizeof num_buf);
+                    size_t key_len = (size_t)nlen;
+                    if (kiln_c99_keys_contain(shadowed, num_buf, key_len)) continue;
+                    status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(num_buf, key_len));
+                    if (status != KILN_C99_OK) return status;
+                    status = kiln_c99_array_push(built, kiln_c99_copy_text(num_buf, key_len));
+                    if (status != KILN_C99_OK) return status;
+                }
             }
-            status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(key, key_len));
-            if (status != KILN_C99_OK) {
-                return status;
+            for (index = 0; index < object->shape->property_count; ++index) {
+                const char *key = object->shape->keys[index];
+                size_t key_len = strlen(key);
+                if (key_len >= 2 && key[0] == '@' && key[1] == '@') continue;
+                if (kiln_c99_keys_contain(shadowed, key, key_len)) continue;
+                status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(key, key_len));
+                if (status != KILN_C99_OK) return status;
+                status = kiln_c99_array_push(built, kiln_c99_copy_text(key, key_len));
+                if (status != KILN_C99_OK) return status;
             }
-            if (!enumerable) {
-                continue;
+        } else {
+            if (object->shape != NULL) {
+                kiln_c99_ensure_dictionary(object);
             }
-            status = kiln_c99_array_push(built, kiln_c99_copy_text(key, key_len));
-            if (status != KILN_C99_OK) {
-                return status;
+            for (index = 0; index < object->count; ++index) {
+                const char *key = object->properties[index].key;
+                size_t key_len = object->properties[index].key_len;
+                int enumerable = object->properties[index].enumerable;
+                if (kiln_c99_keys_contain(shadowed, key, key_len)) {
+                    continue;
+                }
+                status = kiln_c99_array_push(shadowed, kiln_c99_copy_text(key, key_len));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                if (!enumerable) {
+                    continue;
+                }
+                status = kiln_c99_array_push(built, kiln_c99_copy_text(key, key_len));
+                if (status != KILN_C99_OK) {
+                    return status;
+                }
+                /* A push may have moved the list this loop is reading, so the object is found again
+                 * rather than kept across the call. */
+                object = kiln_c99_object_of(current);
             }
-            /* A push may have moved the list this loop is reading, so the object is found again
-             * rather than kept across the call. */
-            object = kiln_c99_object_of(current);
         }
         current = object->prototype;
     }
