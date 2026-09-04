@@ -2135,6 +2135,16 @@ impl TypedKind {
         matches!(self, Self::BigInt64 | Self::BigUint64)
     }
 
+    /// The element half of the view's name: `Int8Array` without the `Array`.
+    ///
+    /// What a `DataView` accessor is called after -- `getInt8`, `setFloat64` -- so that the two
+    /// spellings cannot drift from one another.
+    fn element_name(self) -> &'static str {
+        self.name()
+            .strip_suffix("Array")
+            .expect("every typed-array name ends in Array")
+    }
+
     fn name(self) -> &'static str {
         match self {
             Self::Int8 => "Int8Array",
@@ -13613,8 +13623,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // converted, and that order is observable: a `valueOf` handed to a setter on such a view
         // must not run, because there was never a write for it to prepare. Here rather than in
         // the setter itself, because the conversion happens on the way there.
-        if matches!(native, Native::DataViewSet(_) | Native::DataViewSetBig)
-            && let Value::DataView(view) = receiver
+        if matches!(
+            native,
+            Native::DataViewSet(_) | Native::DataViewSetBig { .. }
+        ) && let Value::DataView(view) = receiver
             && view.buffer.immutable
         {
             return Err(ExecutionError::BufferImmutable);
@@ -15139,7 +15151,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Native::DataViewGetBig { signed } => {
                 self.data_view_get_big(signed, receiver, arguments, instruction)
             }
-            Native::DataViewSetBig => self.data_view_set_big(receiver, arguments, instruction),
+            Native::DataViewSetBig { .. } => {
+                self.data_view_set_big(receiver, arguments, instruction)
+            }
             Native::IteratorLazy(kind) => {
                 self.iterator_lazy(kind, receiver, arguments, instruction)
             }
@@ -35234,7 +35248,7 @@ fn call_native(
         | Native::DataViewGet(_)
         | Native::DataViewSet(_)
         | Native::DataViewGetBig { .. }
-        | Native::DataViewSetBig => {
+        | Native::DataViewSetBig { .. } => {
             unreachable!("`DataView` is dispatched by the interpreter")
         }
         // Every iterator method drives another iterator, which means calling code.
@@ -36195,7 +36209,7 @@ fn call_native(
         Native::MathLog10 => Value::Number(argument_number(arguments).log10()),
         Native::MathExp => Value::Number(argument_number(arguments).exp()),
         // `Number(x)` converts; `Number()` with no argument is 0, not NaN.
-        Native::PrimitiveValueOf => receiver.clone(),
+        Native::PrimitiveValueOf | Native::StringToStringMethod => receiver.clone(),
         // Every hint answers the same thing, which is the point: a symbol does not become a
         // number or a string, so the reduction ends here and the caller refuses it.
         Native::SymbolToPrimitive => match receiver {
@@ -38087,12 +38101,13 @@ fn string_property(name: &str) -> Value {
         "trimStart" => Value::Native(Native::StringTrimStart, RealmId::PRIMARY),
         "trimEnd" => Value::Native(Native::StringTrimEnd, RealmId::PRIMARY),
         "concat" => Value::Native(Native::StringConcat, RealmId::PRIMARY),
-        // A string's `toString` and `valueOf` both hand back the string itself. They are
-        // rarely written by hand and constantly reached by library code that calls `toString`
-        // on something it has already coerced.
-        "toString" | "toLocaleString" | "valueOf" => {
-            Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY)
-        }
+        // A string's `toString` and `valueOf` both hand back the string itself. They are rarely
+        // written by hand and constantly reached by library code that calls `toString` on
+        // something it has already coerced -- but they are still two functions with two names,
+        // and `String.prototype.toLocaleString` is neither: it is inherited from
+        // `Object.prototype`, so publishing one here made it an own property that is not one.
+        "toString" => Value::Native(Native::StringToStringMethod, RealmId::PRIMARY),
+        "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
         "match" => Value::Native(Native::StringMatch, RealmId::PRIMARY),
         "matchAll" => Value::Native(Native::StringMatchAll, RealmId::PRIMARY),
         "search" => Value::Native(Native::StringSearch, RealmId::PRIMARY),
@@ -38107,7 +38122,11 @@ fn string_property(name: &str) -> Value {
 /// because with no way to observe collection there would be nothing to stop a program depending
 /// on entries a real engine would already have dropped.
 fn collection_property(is_map: bool, weak: bool, name: &str) -> Value {
-    if weak && matches!(name, "values" | "keys" | "entries" | "forEach") {
+    // `clear` is in this list because a weak collection cannot have one: it would have to
+    // enumerate the entries to drop them, which is the very thing a weak collection refuses to
+    // let a program observe. It was answered anyway, so `WeakMap.prototype.clear` existed here
+    // and nowhere else, and `hasOwnProperty` said so while `getOwnPropertyNames` did not.
+    if weak && matches!(name, "values" | "keys" | "entries" | "forEach" | "clear") {
         return Value::Undefined;
     }
     if weak && name == WellKnown::Iterator.property_key() {
@@ -41838,7 +41857,8 @@ fn data_view_method(name: &str) -> Value {
         "setFloat64" => Value::Native(Native::DataViewSet(TypedKind::Float64), RealmId::PRIMARY),
         "getBigInt64" => Value::Native(Native::DataViewGetBig { signed: true }, RealmId::PRIMARY),
         "getBigUint64" => Value::Native(Native::DataViewGetBig { signed: false }, RealmId::PRIMARY),
-        "setBigInt64" | "setBigUint64" => Value::Native(Native::DataViewSetBig, RealmId::PRIMARY),
+        "setBigInt64" => Value::Native(Native::DataViewSetBig { signed: true }, RealmId::PRIMARY),
+        "setBigUint64" => Value::Native(Native::DataViewSetBig { signed: false }, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("DataView".to_owned()),
         _ => Value::Undefined,
     }
@@ -41916,6 +41936,37 @@ fn inherited_object_property(intrinsics: &Intrinsics, name: &str, realm: RealmId
 /// Kept apart from the read above because [`Native::property`] is the table itself -- the thing
 /// the store is a difference against -- and a table that consulted the difference would answer
 /// with it twice.
+/// What a built-in publishes as its *own* member, or `None` if it has none by that name.
+///
+/// Deliberately not [`Native::property`], which is the *read* path: a prototype table's last step
+/// is up to `Object.prototype`, so a read of `Array.prototype.valueOf` finds one, as it must.
+/// Asking that question about ownership made every built-in prototype in the realm claim all
+/// eleven of `Object.prototype`'s members as its own -- which `getOwnPropertyNames` denied in the
+/// same breath, so the two answers depended on which one you asked.
+///
+/// A member is inherited exactly when the value found *is* the one `Object.prototype` supplies.
+/// Comparing the values rather than asking whether the table's generic arm answered is what keeps
+/// the tables whose members are published by earlier, more specific arms -- `EventEmitter` and the
+/// two stream tables -- owning what they publish.
+fn intrinsic_owns(native: Native, key: &str) -> Option<Value> {
+    let found = native.property(key)?;
+    if matches!(found, Value::Undefined) {
+        return None;
+    }
+    let Native::PrototypeOf(table) = native else {
+        return Some(found);
+    };
+    // `Object.prototype` owns its own members; it is the table every other one inherits from.
+    if matches!(table, PrototypeTable::Object) {
+        return Some(found);
+    }
+    let inherited = tabulated_object_property(key);
+    if !matches!(inherited, Value::Undefined) && strict_equal(&found, &inherited) {
+        return None;
+    }
+    Some(found)
+}
+
 fn tabulated_object_property(name: &str) -> Value {
     match name {
         "constructor" => Value::Native(Native::ObjectConstructor, RealmId::PRIMARY),
@@ -41951,7 +42002,9 @@ fn inherit_from_object(table: PrototypeTable, found: Value, name: &str) -> Value
 /// What `Boolean.prototype` answers, and what a boolean primitive finds through it.
 fn boolean_method(name: &str) -> Value {
     match name {
-        "toString" | "toLocaleString" => Value::Native(Native::BooleanToString, RealmId::PRIMARY),
+        // Not `toLocaleString`: a boolean inherits `Object.prototype`'s, and answering one here
+        // made it an own property of `Boolean.prototype`, which it is not.
+        "toString" => Value::Native(Native::BooleanToString, RealmId::PRIMARY),
         "valueOf" => Value::Native(Native::BooleanValueOf, RealmId::PRIMARY),
         _ => Value::Undefined,
     }
@@ -41964,7 +42017,8 @@ fn boolean_method(name: &str) -> Value {
 /// way past that refusal.
 fn symbol_method(name: &str) -> Value {
     match name {
-        "toString" | "toLocaleString" => Value::Native(Native::PrimitiveToString, RealmId::PRIMARY),
+        // Not `toLocaleString`: a symbol inherits `Object.prototype`'s.
+        "toString" => Value::Native(Native::PrimitiveToString, RealmId::PRIMARY),
         "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("Symbol".to_owned()),
         // `thisSymbolValue`, which answers the symbol itself for every hint. It is what makes
@@ -42622,7 +42676,7 @@ const fn numeric_arguments(native: Native) -> &'static [usize] {
         // BigInt, and coercing it to a number would be the one conversion the language refuses.
         | N::BigIntAsIntN
         | N::BigIntAsUintN
-        | N::DataViewSetBig => &[0],
+        | N::DataViewSetBig { .. } => &[0],
         _ => &[],
     }
 }
@@ -43417,7 +43471,7 @@ const fn native_length(native: Native) -> Option<f64> {
         | N::ArrayBufferSlice
         | N::TypedArraySubarray
         | N::DataViewSet(_)
-        | N::DataViewSetBig
+        | N::DataViewSetBig { .. }
         | N::MapSet
         | N::ObjectGroupBy
         | N::MapGroupBy
@@ -43882,6 +43936,7 @@ const ARRAY_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedM
     "splice",
     "copyWithin",
     "toString",
+    "toLocaleString",
     "values",
     "set",
     "subarray",
@@ -43921,7 +43976,6 @@ const STRING_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Named
     "trimEnd",
     "concat",
     "toString",
-    "toLocaleString",
     "valueOf",
     "match",
     "matchAll",
@@ -43944,6 +43998,7 @@ const STRING_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Named
 ]);
 const NUMBER_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "toString",
+    "toLocaleString",
     "toFixed",
     "toExponential",
     "toPrecision",
@@ -44055,11 +44110,16 @@ const DATA_VIEW_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Na
 ]);
 const ITERATOR_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "map", "filter", "take", "drop", "flatMap", "reduce", "toArray", "forEach", "some", "every",
-    "find",
+    "find", "includes", "join",
 ]);
-/// The three wrapper tables answer to the same three names and nothing else.
-const WRAPPER_MEMBERS: intrinsic_members::NamedMembers =
+/// `BigInt.prototype`, which owns a `toLocaleString` of its own.
+const BIG_INT_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["toString", "toLocaleString", "valueOf"]);
+
+/// `Boolean.prototype` and `Symbol.prototype`, which do not: theirs is inherited from
+/// `Object.prototype`, so listing one made an own property out of something that is not one.
+const WRAPPER_MEMBERS: intrinsic_members::NamedMembers =
+    intrinsic_members::NamedMembers::new(&["toString", "valueOf"]);
 const PROMISE_MEMBERS: intrinsic_members::NamedMembers =
     intrinsic_members::NamedMembers::new(&["then", "catch", "finally"]);
 const MAP_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
@@ -44123,6 +44183,12 @@ const EVENT_EMITTER_MEMBERS: intrinsic_members::NamedMembers =
         "removeAllListeners",
         "setMaxListeners",
     ]);
+/// A stream's own members, the emitter's included.
+///
+/// Node's `Readable.prototype` owns `on` rather than inheriting it, and this table answers it the
+/// same way -- by delegating to the emitter table inside the value lookup, which makes it an own
+/// member here too. Listing it is what makes `getOwnPropertyNames` agree with the
+/// `hasOwnProperty` that delegation already produced; they disagreed on all eight.
 const READABLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
     "push",
     "read",
@@ -44130,9 +44196,28 @@ const READABLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::Nam
     "pause",
     "resume",
     "setEncoding",
+    "on",
+    "addListener",
+    "once",
+    "emit",
+    "listeners",
+    "eventNames",
+    "removeAllListeners",
+    "setMaxListeners",
 ]);
-const WRITABLE_MEMBERS: intrinsic_members::NamedMembers =
-    intrinsic_members::NamedMembers::new(&["write", "end", "destroy"]);
+const WRITABLE_MEMBERS: intrinsic_members::NamedMembers = intrinsic_members::NamedMembers::new(&[
+    "write",
+    "end",
+    "destroy",
+    "on",
+    "addListener",
+    "once",
+    "emit",
+    "listeners",
+    "eventNames",
+    "removeAllListeners",
+    "setMaxListeners",
+]);
 
 /// The string-keyed members each built-in prototype lists.
 ///
@@ -44163,9 +44248,8 @@ fn intrinsic_prototype_method_names(table: PrototypeTable) -> &'static [&'static
         PrototypeTable::SharedArrayBuffer => SHARED_ARRAY_BUFFER_MEMBERS.names(),
         PrototypeTable::DataView => DATA_VIEW_MEMBERS.names(),
         PrototypeTable::Iterator => ITERATOR_MEMBERS.names(),
-        PrototypeTable::Boolean | PrototypeTable::Symbol | PrototypeTable::BigInt => {
-            WRAPPER_MEMBERS.names()
-        }
+        PrototypeTable::Boolean | PrototypeTable::Symbol => WRAPPER_MEMBERS.names(),
+        PrototypeTable::BigInt => BIG_INT_MEMBERS.names(),
         PrototypeTable::Promise => PROMISE_MEMBERS.names(),
         PrototypeTable::Map => MAP_MEMBERS.names(),
         PrototypeTable::Set => SET_MEMBERS.names(),
@@ -44789,10 +44873,53 @@ fn tabulated_attributes(intrinsics: &Intrinsics, target: &Value, key: &str) -> O
 /// The split is the specification's own convention and it falls out of what the property holds:
 /// a method is replaceable and removable, while a *value* an intrinsic publishes -- a limit, a
 /// well-known symbol, an element width -- is a constant, and locked on every axis.
+/// The flags the own member `key` of a built-in carries, or `None` if there is no such member.
+///
+/// The existence test happens **once, here, before any rule can run**, and the rules themselves
+/// live in [`published_attributes`], which returns `Attributes` rather than `Option<Attributes>`
+/// and so cannot describe something that is not there.
+///
+/// That split is not tidiness. This function used to be a run of early returns, each deciding
+/// flags from the *name* alone, and attributes are asked before the value is -- so a rule that
+/// fired for a name the table does not publish did not merely mis-describe a property, it invented
+/// one. Generalising a single rule from `Date` to every prototype gave every prototype in the
+/// realm a phantom own `@@toPrimitive`; the fix at the time was to remember to add an existence
+/// check to that rule and to the one beside it. Remembering is what failed in the first place.
 fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     let Value::Native(native, _) = target else {
         return None;
     };
+    // Accessors are the one kind with no slot to look up -- the "value" is a getter -- so they
+    // are settled before the value lookup rather than by it. Both of these answer only for names
+    // that genuinely are accessors on this target, so neither can invent one.
+    //
+    // An accessor carries no `writable` at all: the flag is not part of its descriptor, so the
+    // `false` is the absence of one rather than a claim about assignment.
+    if intrinsic_accessor(target, key).is_some() || machine_accessor(target, key).is_some() {
+        return Some(Attributes {
+            writable: false,
+            enumerable: false,
+            configurable: true,
+        });
+    }
+    // The single existence test, and it asks about *ownership* rather than about what a read
+    // would find. `Native::property` carries a prototype table its last step up to
+    // `Object.prototype`, which is right for a read and wrong here: asking it made every built-in
+    // prototype in the realm claim `hasOwnProperty`, `valueOf` and the other nine as its own,
+    // which `getOwnPropertyNames` denied in the same breath.
+    let found = match intrinsic_owns(*native, key) {
+        None | Some(Value::Undefined) => return None,
+        Some(value) => value,
+    };
+    Some(published_attributes(target, *native, key, &found))
+}
+
+/// The flags a built-in member carries, given the member.
+///
+/// Total by design: every path answers, because the caller has already established that there is
+/// something to answer about. There is no way to spell "and also this name does not exist" here,
+/// which is the point -- that question has exactly one asker.
+fn published_attributes(target: &Value, native: Native, key: &str, found: &Value) -> Attributes {
     // A Node builtin module's exports are *enumerable*, which is how `{ ...require("path") }`
     // and every `export * from "path"` re-export shim a bundler emits copies them.
     // `Object.keys(require("path"))` was 0 against node's 17 while every individual member read
@@ -44805,74 +44932,50 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     // reported by `getOwnPropertyNames` -- but not enumerable, so the loop found nothing and
     // `safer.Buffer.isBuffer` came out undefined. `iconv-lite` takes its Buffer from there, and
     // express's body reader took the resulting TypeError, having already served a correct 200.
-    if (node_builtin_specifier(*native).is_some() || matches!(native, Native::NodeBufferGlobal))
+    if (node_builtin_specifier(native).is_some() || matches!(native, Native::NodeBufferGlobal))
         && intrinsic_static_property_names(target).contains(&key)
-        && native.property(key).is_some()
     {
-        return Some(Attributes::DEFAULT);
-    }
-    // An accessor carries no `writable` at all -- the flag is not part of its descriptor -- so
-    // the `false` here is the absence of one rather than a claim about assignment.
-    if intrinsic_accessor(target, key).is_some() {
-        return Some(Attributes {
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        });
-    }
-    if machine_accessor(target, key).is_some() {
-        return Some(Attributes {
-            writable: false,
-            enumerable: false,
-            configurable: true,
-        });
+        return Attributes::DEFAULT;
     }
     // `Function.prototype[Symbol.hasInstance]` is the one built-in the specification locks on
     // *both* axes. It decides `instanceof` for every ordinary function in the realm, so a program
     // that could assign over it or delete it could change what every one of them answers.
     if matches!(native, Native::PrototypeOf(PrototypeTable::Function))
         && key == WellKnown::HasInstance.property_key()
-        && !matches!(native.property(key), None | Some(Value::Undefined))
     {
-        return Some(Attributes {
+        return Attributes {
             writable: false,
             enumerable: false,
             configurable: false,
-        });
+        };
     }
     // An `@@toPrimitive` a prototype publishes is read-only wherever it appears -- `Date` and
     // `Symbol` both have one. It is what `ToPrimitive` finds before anything else, so a program
     // that could assign over it could change what every value of that type coerces to.
-    //
-    // Gated on the member actually being there. Generalising this from `Date` to every table
-    // *without* that check gave every prototype in the realm a phantom own `@@toPrimitive`:
-    // attributes are asked before the value is, so answering for a name the table does not
-    // publish invents the property outright.
-    if matches!(native, Native::PrototypeOf(_))
-        && key == WellKnown::ToPrimitive.property_key()
-        && !matches!(native.property(key), None | Some(Value::Undefined))
-    {
-        return Some(Attributes {
+    if matches!(native, Native::PrototypeOf(_)) && key == WellKnown::ToPrimitive.property_key() {
+        return Attributes {
             writable: false,
             enumerable: false,
             configurable: true,
-        });
+        };
     }
-    match native.property(key)? {
-        Value::Undefined => None,
-        found if found.type_of() == "function" => Some(Attributes::BUILT_IN),
-        // `@@toStringTag` is the one built-in *value* the specification leaves configurable, and
-        // it has to be: the tag is what `Object.prototype.toString` reads, and a program that
-        // wants the plain `[object Object]` back has no way to get it except by deleting the
-        // tag. Locked on every axis, `delete Map.prototype[Symbol.toStringTag]` answered false
-        // and recorded nothing.
-        _ if key == WellKnown::ToStringTag.property_key() => Some(Attributes {
+    if found.type_of() == "function" {
+        return Attributes::BUILT_IN;
+    }
+    // `@@toStringTag` is the one built-in *value* the specification leaves configurable, and it
+    // has to be: the tag is what `Object.prototype.toString` reads, and a program that wants the
+    // plain `[object Object]` back has no way to get it except by deleting the tag. Locked on
+    // every axis, `delete Map.prototype[Symbol.toStringTag]` answered false and recorded nothing.
+    // Below the callable test, as it has always been: the tag is a string, so the two cannot both
+    // match, and keeping the order means this reshuffle changes nothing.
+    if key == WellKnown::ToStringTag.property_key() {
+        return Attributes {
             writable: false,
             enumerable: false,
             configurable: true,
-        }),
-        _ => Some(Attributes::NONE),
+        };
     }
+    Attributes::NONE
 }
 
 /// The `prototype` a built-in constructor owns, or `None` for a built-in that is not one.
@@ -45034,6 +45137,20 @@ fn native_js_name(native: &Native) -> String {
         // can see.
         Native::FunctionHasInstance => "[Symbol.hasInstance]".to_owned(),
         Native::SymbolToPrimitive => "[Symbol.toPrimitive]".to_owned(),
+        Native::StringToStringMethod => "toString".to_owned(),
+        // A `DataView` accessor is named for the member it is published under, not for the Rust
+        // variant behind it. Sixteen of them share four variants, so derivation gave all eight
+        // getters the name `dataViewGet` -- which test262 checks by descriptor, and which any
+        // program printing a stack or a method table shows.
+        Native::DataViewGet(kind) => format!("get{}", kind.element_name()),
+        Native::DataViewSet(kind) => format!("set{}", kind.element_name()),
+        Native::DataViewGetBig { signed: true } => "getBigInt64".to_owned(),
+        Native::DataViewGetBig { signed: false } => "getBigUint64".to_owned(),
+        Native::DataViewSetBig { signed: true } => "setBigInt64".to_owned(),
+        Native::DataViewSetBig { signed: false } => "setBigUint64".to_owned(),
+        // `Array.prototype.toString` is `join` with no separator, which is what the variant is
+        // named after -- but the member is `toString`.
+        Native::ArrayJoinDefault => "toString".to_owned(),
         // Derivation cannot reach these: the payload is the whole of the name.
         Native::Intl(op) => intl::js_name(*op),
         Native::Temporal(op) => temporal::js_name(*op),
@@ -45234,8 +45351,13 @@ fn builtin_js_name(variant: &str) -> String {
         return "toString".to_owned();
     }
     // Longest first, so `ArrayBuffer` is not read as `Array` followed by `Buffer`.
-    const TYPES: [&str; 27] = [
+    const TYPES: [&str; 29] = [
         "AsyncGenerator",
+        // Before the bare `Weak`, which is what the ordering rule above is for: `WeakMapGet`
+        // lost only its first word and came out as `mapGet`, so every weak collection method
+        // was named after a Rust variant rather than after itself.
+        "WeakMap",
+        "WeakSet",
         "ArrayBuffer",
         "TypedArray",
         "Collection",
