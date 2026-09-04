@@ -23787,7 +23787,39 @@ static int kiln_c99_read_property(kiln_host *host, kiln_value target,
             }
         }
     }
-    return kiln_c99_get_site(host, target, key, key_len, out, depth, thrown, site);
+    if (KILN_LIKELY(site->has_cached_method && target.tag == site->cached_tag)) {
+        if (target.tag != KILN_VALUE_ARRAY || kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) {
+            *out = kiln_c99_method(site->cached_method);
+            return KILN_C99_OK;
+        }
+    }
+    if (KILN_UNLIKELY(key_len == 6 && key[0] == 'l' && memcmp(key, "length", 6) == 0)) {
+        if (target.tag == KILN_VALUE_ARRAY) {
+            *out = kiln_c99_number((double)kiln_c99_array_of(target)->count);
+            return KILN_C99_OK;
+        }
+        if (target.tag == KILN_VALUE_STRING) {
+            *out = kiln_c99_number((double)kiln_c99_string_length(target));
+            return KILN_C99_OK;
+        }
+        if (target.tag == KILN_VALUE_TYPED_ARRAY) {
+            *out = kiln_c99_number((double)kiln_c99_typed_array_of(target)->length);
+            return KILN_C99_OK;
+        }
+    }
+    int status = kiln_c99_get_site(host, target, key, key_len, out, depth, thrown, site);
+    if (status == KILN_C99_OK && out->tag == KILN_VALUE_METHOD && !site->has_cached_method) {
+        if (target.tag == KILN_VALUE_STRING ||
+            target.tag == KILN_VALUE_NUMBER ||
+            target.tag == KILN_VALUE_BOOLEAN ||
+            (target.tag == KILN_VALUE_ARRAY && kiln_c99_array_of(target)->properties.tag == KILN_VALUE_UNDEFINED) ||
+            target.tag == KILN_VALUE_TYPED_ARRAY) {
+            site->cached_tag = (uint8_t)target.tag;
+            site->cached_method = out->bits;
+            site->has_cached_method = 1;
+        }
+    }
+    return status;
 }
 
 static int kiln_c99_write_property(kiln_host *host, kiln_value target,
@@ -23973,6 +24005,8 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
         kiln_closure *plain = method.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(method) : NULL;
         if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
             status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : self_value, call_args, argc, depth, thrown, NULL, 0);
+        } else if (method.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
+            status = kiln_c99_invoke_method(host, &call_result, method.bits, self_value, call_args, argc, depth, thrown);
         } else {
             status = kiln_c99_call(host, &call_result, method, self_value, call_args, argc, depth, thrown);
         }
@@ -24013,6 +24047,8 @@ static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size
         kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL;
         if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
             status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, argc, depth, thrown, NULL, 0);
+        } else if (callee.tag == KILN_VALUE_METHOD && depth < KILN_C99_MAX_CALL_DEPTH) {
+            status = kiln_c99_invoke_method(host, &call_result, callee.bits, kiln_c99_undefined(), call_args, argc, depth, thrown);
         } else {
             status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, argc, depth, thrown);
         }

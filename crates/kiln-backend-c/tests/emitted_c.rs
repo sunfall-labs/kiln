@@ -1784,3 +1784,14 @@ fn fused_computed_read_and_write_emission() {
     // Verified: No stack pushes for fused const computed write
     assert!(b.contains("kiln_c99_write_element(host, locals[0], locals[1], kiln_c99_number_bits(UINT64_C(4631107791820423168)), 1,"));
 }
+
+#[test]
+fn method_inline_cache_prelude_surface() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    assert!(prelude.contains("uint8_t cached_tag;"));
+    assert!(prelude.contains("uint8_t has_cached_method;"));
+    assert!(prelude.contains("uint64_t cached_method;"));
+    assert!(prelude.contains("site->has_cached_method"));
+    assert!(prelude.contains("kiln_c99_invoke_method(host, &call_result, method.bits, self_value"));
+}
