@@ -1,11 +1,10 @@
 # A value live only in a running async frame is not a GC root
 
-**Status:** open, **on `origin/main` before this branch**, native backend only. Found while merging;
-verified against a clean worktree at `2cd616c1` so it cannot be blamed on the merge.
+**Status:** closed / resolved.
 
 ## Reproduction
 
-`repro.js` beside this file, thirteen lines and no libraries:
+`repro.js` beside this file:
 
 ```js
 const tick = (ms, v) => new Promise((r) => setTimeout(() => r(v), ms));
@@ -20,97 +19,33 @@ async function main() {
 main();
 ```
 
-```
-node:   got: a,b,c,d,e
-native: kiln: native backend refusal: operation=Apply
-        detail=an array iterator whose source is not an array or a typed array
-```
+## True Root Cause
 
-The interpreter is correct. Removing the inner allocation loop makes it pass; making the loop
-synchronous (`repro` with a hand-driven `it.next()` and no `await`) also passes.
+The investigation initially deduced that the snapshot array was collected from under the iterator
+because `items.tag == 0` (`KILN_VALUE_UNDEFINED`) was read for `"@@iterated"`.
 
-## What is actually happening
+However, the snapshot array was NOT collected; the iterator receiver object still held the array in
+`slot[0]` (`slots[0].tag == 10` = `KILN_VALUE_ARRAY`).
 
-The refusal names an array iterator, and the iterator is not the problem -- which is what made this
-expensive to find. Instrumenting the refusal shows the receiver *is* one of ours and holds three of
-its four properties:
+What actually happened:
+1. `kiln_shape` transition trees persist across GC cycles via `kiln_c99_root_shape`. When dynamically
+   interned keys (like `"@@iterated"`) were allocated as GC string blocks, their entries in `heap->keys`
+   were not pinned (`entry->pinned == 0`).
+2. During GC mark, `KILN_GC_OBJECT` marked `object->slots[index]` but did not mark `object->shape->keys[index]`.
+3. Consequently, `kiln_c99_key_purge` identified `"@@iterated"` as an unmarked weak entry and purged it
+   from `heap->keys`, allowing the underlying string block to be freed.
+4. On subsequent `iterator.next()` calls, `kiln_c99_get(host, receiver, "@@iterated", 10, ...)` called
+   `kiln_c99_interned("@@iterated", 10)`. Because the key was purged from `heap->keys`, this returned `NULL`.
+5. With `ikey == NULL`, `walk` was 0, causing `kiln_c99_get` to bypass property lookup and answer `undefined`.
+6. `KILN_C99_METHOD_ITERATOR_NEXT` observed `items = undefined` and threw:
+   `an array iterator whose source is not an array or a typed array`.
 
-```
-@@iterated -> tag 0 (undefined)   <- the only one whose value is a heap object
-@@index    -> tag 3
-next       -> tag 11
-@@iterator -> tag 11
-```
+## Resolution
 
-`kiln_c99_new_iterator` is never called with an undefined source -- checked by instrumenting every
-one of its call sites -- so the property was lost after construction. The snapshot array it pointed
-at was collected while the iterator was still in use.
-
-## It is the collector: `KILN_GC=0` makes it pass
-
-That is the one measurement worth having, and it was cheap: with collection off the program prints
-`a,b,c,d,e`. `KILN_GC_STRESS=1` does not make the synchronous spelling fail, so the sync path is
-rooted and only this one is not.
-
-Instrumenting the mark phase shows the collection happens with **no generated frame running** --
-which matches `collect_if_due`'s comment that it is offered only at a turn boundary. So the frame
-is *suspended* at the moment it dies, and what should be holding it then is the promise it awaits.
-
-## Why it is not rooted
-
-`kiln_c99_gc_unit_roots` marks the realm's statics and nothing else: symbols, native constructor
-prototypes, `new_target`, `adopted_this`, `captured_arguments`, and the two frame globals. It does
-not mark any executing function's operand stack.
-
-A suspended generator *is* traced -- `KILN_GC_GENERATOR` in `kiln_c99_gc_trace` marks
-`frame->locals` and `frame->stack` -- but a generated function runs on a **C-local**
-`kiln_value stack[N]`, and that array is only in step with `frame->stack` at a suspension point.
-Between them, a value reachable only from the operand stack is invisible to the collector. The
-`for await` loop holds its iterator exactly there, across a body that allocates hard.
-
-That is why the synchronous spelling survives and the asynchronous one does not.
-
-## Tried, and did not fix it
-
-Each of these was built and run against the repro, so nobody needs to try them twice:
-
-- **Rooting the running frame.** Added a stack of frames whose bodies are executing, pushed in
-  both `kiln_c99_invoke_closure_body` and the fast path in `kiln_c99_invoke_closure`, marked in
-  `kiln_c99_gc_unit_roots`. It never fires: the count is zero at the one collection, because
-  collection is only offered when no generated frame is on the stack.
-- **The operand-stack marking bound.** `kiln_c99_gc_trace` marks `frame->stack` for
-  `closure->stack_size` entries; widening both the allocation and the marking by 64 changes
-  nothing.
-- **Marking every object slot.** Tracing `slot_capacity` entries, and `inline_slots` when `slots`
-  is NULL, rather than `shape->property_count`: no change.
-
-The chain that *should* hold the frame all traces correctly on inspection: `kiln_reaction` marks
-`on_fulfilled`, `on_rejected` and `derived`; `KILN_GC_BOUND` marks `target`, `receiver`,
-`arguments` and `properties`; the realm marks value slots, callable stores, continuations, queued
-work and timers. `@@resume` is bound to the suspended generator as its receiver, so the generator
-should be reachable through the awaited promise's reaction. Something in that chain is not, and
-finding which link is the remaining work.
-
-## Eliminated, so nobody repeats them
-
-- **Interning.** `KILN_KEYS_CHECK=1` reports no disagreement; `@@iterated` and `@@iterator` are
-  distinct interned keys despite sharing a length and a prefix.
-- **The inline-slot boundary.** Objects of one to eight properties built by assignment read back
-  every property; so do the same keys the iterator uses.
-- **Shape tracing.** Marking `inline_slots` in addition to `slots` in `kiln_c99_gc_trace` changes
-  nothing.
-- **Polymorphic method caches.** One `it.next()` site driven by five receiver kinds is correct.
-- **A stale diagnostic.** Tempting, because the detail names something uninvolved -- but tracing
-  `kiln_c99_forget_handled_throw` shows the iterator refusal fires and is never recovered. The
-  detail is genuine; `Apply` is only the instruction it surfaces through.
-
-## The shape of a fix
-
-Either the operand stack becomes a root for the duration of the call -- a shadow stack the
-collector walks, which costs something on every call and is the thing ADR 0050's work is trying to
-buy back -- or collection is confined to points where the C-local stack has already been spilled to
-`frame->stack`. That is a design call for whoever owns the shape and inline-cache work, which is why
-this is a filing and not a patch.
-
-Worth a `conformance/native` probe with the fix. There is none today that allocates hard inside a
-`for await`, which is why a corpus of nineteen real bundles found it and the probes did not.
+1. Added `kiln_c99_pin_interned_key` to pin shape keys in `heap->keys` upon creating a shape transition
+   in `kiln_c99_shape_transition`. Pinned keys are marked on every GC epoch by `kiln_c99_key_mark_pinned`
+   and are never purged.
+2. In `kiln_c99_gc_mark_block` for `KILN_GC_OBJECT`, also mark `object->shape->keys[index]` to ensure
+   shape key GC blocks remain marked while referenced by active objects.
+3. Added conformance probe `conformance/native/array-iterator-gc.js` testing array iterators across
+   GC allocations and spread/apply operations.
