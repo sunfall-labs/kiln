@@ -1859,7 +1859,7 @@ fn render_unit_roots(
     if module_scope {
         writeln!(
             output,
-            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((kiln_gc_heap *)heap, {symbol}_globals, {});",
+            "    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((struct kiln_gc_heap *)heap, {symbol}_globals, {});",
             usize::try_from(local_count).unwrap().max(1)
         )
         .unwrap();
@@ -2713,8 +2713,10 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value receiver = stack[sp - 1]; kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }} else {{ stack[sp - 1] = slot->value; }} }}",
-                len = text.len()
+                "    {{ kiln_value brand = stack[--sp]; kiln_value receiver = stack[sp - 1]; if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 0); {unwind} }} if (slot->accessor) {{ kiln_value getter = slot->getter; kiln_value produced; int status; if (getter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 2); {unwind} }} status = kiln_c99_call(host, &produced, getter, receiver, NULL, 0, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = produced; }} else {{ stack[sp - 1] = slot->value; }} }}",
+                len = text.len(),
+                brand_key = private_brand_key_of(text),
+                brand_len = private_brand_key_of(text).len()
             )
             .unwrap();
         }
@@ -2725,8 +2727,10 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value member = stack[--sp]; kiln_value receiver = stack[sp - 1]; kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = member; }}",
-                len = text.len()
+                "    {{ kiln_value brand = stack[--sp]; kiln_value member = stack[--sp]; kiln_value receiver = stack[sp - 1]; if (brand.tag != KILN_VALUE_UNDEFINED) {{ kiln_property *brand_slot = kiln_c99_own_private(receiver, \"{brand_key}\", {brand_len}); if (brand_slot == NULL || brand_slot->accessor || !kiln_c99_strict_equal(brand_slot->value, brand)) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} }} kiln_property *slot = kiln_c99_own_private(receiver, {symbol}_constant_{name}, {len}); if (slot == NULL) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 1); {unwind} }} if (slot->accessor) {{ kiln_value setter = slot->setter; kiln_value produced; int status; if (setter.tag == KILN_VALUE_UNDEFINED) {{ status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 3); {unwind} }} status = kiln_c99_call(host, &produced, setter, receiver, &member, 1, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }} else if (!slot->writable) {{ int status = kiln_c99_private_error(thrown, {symbol}_constant_{name}, {len}, 4); {unwind} }} else {{ slot->value = member; }} stack[sp - 1] = member; }}",
+                len = text.len(),
+                brand_key = private_brand_key_of(text),
+                brand_len = private_brand_key_of(text).len()
             )
             .unwrap();
         }
@@ -3723,6 +3727,14 @@ fn emit_instruction(
             )
             .unwrap();
         }
+        Instruction::ToPropertyKey => {
+            let unwind = unwind_or_return(handlers, site);
+            writeln!(
+                output,
+                "    {{ int status = kiln_c99_op_to_property_key(host, stack, &sp, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+            )
+            .unwrap();
+        }
         Instruction::GetComputed => {
             let unwind = unwind_or_return(handlers, site);
             writeln!(
@@ -3838,6 +3850,15 @@ fn emit_instruction(
         }
         // A class's methods are not enumerated, which is the whole difference from the
         // `SetProperty` an object literal's methods lower to.
+        // The enumerated sibling of `DefineMethod`: an object literal's members are listed,
+        // a class's methods are not.
+        Instruction::DefineNamedProperty => {
+            writeln!(
+                output,
+                "    {{ kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_put(host, stack[sp - 1], name.ptr, name.len, method, depth, thrown) != KILN_C99_OK) {{ {direct_refusal} }} }}"
+            )
+            .unwrap();
+        }
         Instruction::DefineMethod => {
             writeln!(
                 output,
@@ -3855,7 +3876,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value container = stack[--sp]; int answer; int status = kiln_c99_has_computed(host, container, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
+                "    {{ kiln_value container = stack[--sp]; int answer; if (!kiln_c99_is_reference(container) && container.tag != KILN_VALUE_DATE) {{ int status = kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR, \"Cannot use 'in' to search for a property in a non-object\"); {unwind} }} int status = kiln_c99_has_computed(host, container, stack[sp - 1], &answer, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = kiln_c99_boolean(answer); }}"
             )
             .unwrap();
         }
@@ -5021,6 +5042,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, u8::from(*enumerable));
             }
             Instruction::DefineMethod => byte(&mut hash, 43),
+            Instruction::DefineNamedProperty => byte(&mut hash, 194),
             Instruction::DefinePrivate { name, kind } => {
                 byte(&mut hash, 70);
                 word(&mut hash, u64::from(*name));
@@ -5052,6 +5074,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 word(&mut hash, u64::from(*count));
             }
             Instruction::GetComputed => byte(&mut hash, 29),
+            Instruction::ToPropertyKey => byte(&mut hash, 193),
             Instruction::SetComputed => byte(&mut hash, 30),
             Instruction::SetComputedStrict { strict } => {
                 byte(&mut hash, 68);
@@ -5394,3 +5417,18 @@ fn hash_module_with_seed(module: &ModuleProgram, seed: u64) -> u64 {
 
 #[cfg(test)]
 mod tests;
+
+/// The reserved key an instance stores its class's brand under, derived from a private name.
+///
+/// `@@private:{scope}:{member}` becomes `@@private:{scope}:%brand`: one brand per class, shared
+/// by every private member it declares. Derived here rather than passed, so the instruction
+/// keeps the shape the interpreter gives it.
+fn private_brand_key_of(name: &str) -> String {
+    match name
+        .strip_prefix("@@private:")
+        .and_then(|rest| rest.split_once(':'))
+    {
+        Some((scope, _)) => format!("@@private:{scope}:%brand"),
+        None => name.to_owned(),
+    }
+}

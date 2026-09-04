@@ -1,4 +1,5 @@
 use super::*;
+use crate::PrimitiveHint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Native {
@@ -639,9 +640,13 @@ pub enum Native {
     DataViewGetBig {
         signed: bool,
     },
-    /// One variant for `setBigInt64` and `setBigUint64` together: both write the low 64 bits of
-    /// whatever they are given, and the signedness only ever shows on the way back out.
-    DataViewSetBig,
+    /// `setBigInt64` and `setBigUint64`. Both write the low 64 bits of whatever they are given
+    /// and the signedness only ever shows on the way back out, so it does not change what the
+    /// method *does* -- but a program can see which one it is holding: they are two function
+    /// objects with two names, and one variant for both gave them one name and one identity.
+    DataViewSetBig {
+        signed: bool,
+    },
     /// `Iterator`: abstract, like `%TypedArray%`, and reachable by name so that a program can
     /// hang methods on its prototype and ask whether something is one.
     IteratorConstructor,
@@ -706,8 +711,25 @@ pub enum Native {
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
+    /// `Function.prototype[Symbol.hasInstance]`, which is `OrdinaryHasInstance` published as a
+    /// method. It is the one built-in the specification makes neither writable nor configurable,
+    /// because it is what decides `instanceof` for every ordinary function in the realm.
+    FunctionHasInstance,
+    /// `Symbol.prototype[Symbol.toPrimitive]`: `thisSymbolValue`, and the reason a symbol refuses
+    /// to be coerced. It exists as its own variant rather than reusing `PrimitiveValueOf` because
+    /// a program can read it, and what it reads must be named `[Symbol.toPrimitive]`.
+    SymbolToPrimitive,
+    /// `String.prototype.toString`. Its behaviour is `valueOf`'s exactly -- both hand back the
+    /// string -- but they are two function objects with two names, and publishing one variant for
+    /// both made `String.prototype.toString.name` answer `"valueOf"` and the two compare equal.
+    StringToStringMethod,
     PromiseAll,
     PromiseAllSettled,
+    /// `Promise.allKeyed` and `Promise.allSettledKeyed`: the same two combinators, walking an
+    /// object's own enumerable keys instead of an iterable, and settling with an object keyed the
+    /// same way rather than an array indexed by position.
+    PromiseAllKeyed,
+    PromiseAllSettledKeyed,
     PromiseRace,
     PromiseAny,
     PromiseThen,
@@ -879,16 +901,17 @@ impl Native {
 
     /// Whether this built-in reduces its arguments to primitives first, and with which hint.
     ///
-    /// `Some(false)` is the number hint, `Some(true)` the string hint, and `None` means the
-    /// built-in takes its arguments as they arrive. The distinction has to be carried rather than
-    /// collapsed into a flag: for an object defining both methods, `Math.abs` reaches `valueOf`
-    /// and `parseInt` reaches `toString`, so the two disagree on the same value.
+    /// `None` means the built-in takes its arguments as they arrive. The hint has to be carried
+    /// rather than collapsed into a flag: for an object defining both methods, `Math.abs` reaches
+    /// `valueOf` and `parseInt` reaches `toString`, so the two disagree on the same value -- and
+    /// `new Date(x)` asks for neither, which is a third answer rather than a shade of one of
+    /// these two, and is why the count is a parameter here.
     ///
     /// Only the built-ins whose pure implementations cannot do this themselves are listed.
     /// `String`, the global `isNaN` and the global `isFinite` already agree with the
     /// specification by another route, and naming them here would reduce twice -- which a
     /// `valueOf` that counts its calls can see.
-    pub(crate) fn primitive_argument_hint(self) -> Option<bool> {
+    pub(crate) fn primitive_argument_hint(self, argument_count: usize) -> Option<PrimitiveHint> {
         match self {
             // `Math.random` takes no argument, so it is deliberately not in this list.
             Self::MathAbs
@@ -935,9 +958,19 @@ impl Native {
             // The field forms of both take seven numbers, and the *order* the conversions
             // happen in is observable through a `valueOf`: the specification converts year
             // through millisecond left to right, before it decides anything about the date.
-            | Self::DateConstructor
-            | Self::DateUtc => Some(false),
-            Self::ParseInt | Self::ParseFloat => Some(true),
+            | Self::DateUtc
+            // Both take code *units*, and both read them with the pure `as_number`, which
+            // answers NaN for an object: `String.fromCharCode({valueOf: () => 65})` was NUL
+            // rather than "A", and `fromCodePoint` refused the same argument outright.
+            | Self::StringFromCharCode
+            | Self::StringFromCodePoint => Some(PrimitiveHint::Number),
+            Self::ParseInt | Self::ParseFloat => Some(PrimitiveHint::String),
+            // `new Date(value)` is `ToPrimitive(value)` with no preferred type at all: it decides
+            // between parsing a date string and reading an instant only once the value has
+            // reduced, so it cannot have asked for a number. Every other arity is the field form,
+            // which takes seven numbers left to right.
+            Self::DateConstructor if argument_count == 1 => Some(PrimitiveHint::Default),
+            Self::DateConstructor => Some(PrimitiveHint::Number),
             _ => None,
         }
     }
@@ -1081,6 +1114,51 @@ impl Native {
                 // that: `String.prototype.bold.call(5)` is `"5".bold()`.
                 | Self::StringHtml(_)
         )
+    }
+
+    /// What a built-in prototype table publishes itself, before the step up to `Object.prototype`.
+    pub(crate) fn prototype_table_value(table: PrototypeTable, name: &str) -> Value {
+        match table {
+            PrototypeTable::Object => object_property(name),
+            PrototypeTable::Array => array_property(name),
+            PrototypeTable::String => string_property(name),
+            PrototypeTable::Number => number_property(name),
+            PrototypeTable::Function => tabulated_function_property(name),
+            PrototypeTable::RegExp => regexp_method(name),
+            PrototypeTable::Date => date_method(name),
+            PrototypeTable::ArrayBuffer => array_buffer_method(false, name),
+            PrototypeTable::SharedArrayBuffer => array_buffer_method(true, name),
+            PrototypeTable::TypedArray => typed_array_method(name),
+            // The per-view table carries only what differs between the views; everything
+            // else is inherited from `%TypedArray%.prototype` one link up the chain, which
+            // is why reading it here rather than there would be the wrong shape.
+            PrototypeTable::TypedArrayFor(kind) => match name {
+                "BYTES_PER_ELEMENT" => Value::Number(kind.width() as f64),
+                _ => typed_array_for_method(kind, name),
+            },
+            PrototypeTable::DataView => data_view_method(name),
+            PrototypeTable::Iterator => iterator_method(name),
+            PrototypeTable::Boolean => boolean_method(name),
+            PrototypeTable::Symbol => symbol_method(name),
+            PrototypeTable::BigInt => bigint_method(name),
+            PrototypeTable::Promise => promise_method(name),
+            PrototypeTable::Map => collection_property(true, false, name),
+            PrototypeTable::Set => collection_property(false, false, name),
+            PrototypeTable::WeakMap => collection_property(true, true, name),
+            PrototypeTable::WeakSet => collection_property(false, true, name),
+            PrototypeTable::WeakRef => weak_ref_method(name),
+            PrototypeTable::ShadowRealm => shadow_realm_method(name),
+            PrototypeTable::DisposableStack => disposable_stack_method(name),
+            PrototypeTable::AsyncDisposableStack => async_disposable_stack_method(name),
+            PrototypeTable::FinalizationRegistry => finalization_registry_method(name),
+            PrototypeTable::EventEmitter => Value::Undefined,
+            PrototypeTable::Readable => Self::PrototypeOf(PrototypeTable::EventEmitter)
+                .property(name)
+                .unwrap_or(Value::Undefined),
+            PrototypeTable::Writable => Self::PrototypeOf(PrototypeTable::EventEmitter)
+                .property(name)
+                .unwrap_or(Value::Undefined),
+        }
     }
 
     pub(crate) fn property(self, name: &str) -> Option<Value> {
@@ -1810,49 +1888,11 @@ impl Native {
                 },
                 RealmId::PRIMARY,
             )),
+            // A read falls through to `Object.prototype`; `own_property` does not, which is the
+            // difference between what this table *has* and what a read through it *finds*.
             (Self::PrototypeOf(table), _) => Some(inherit_from_object(
                 table,
-                match table {
-                    PrototypeTable::Object => object_property(name),
-                    PrototypeTable::Array => array_property(name),
-                    PrototypeTable::String => string_property(name),
-                    PrototypeTable::Number => number_property(name),
-                    PrototypeTable::Function => tabulated_function_property(name),
-                    PrototypeTable::RegExp => regexp_method(name),
-                    PrototypeTable::Date => date_method(name),
-                    PrototypeTable::ArrayBuffer => array_buffer_method(false, name),
-                    PrototypeTable::SharedArrayBuffer => array_buffer_method(true, name),
-                    PrototypeTable::TypedArray => typed_array_method(name),
-                    // The per-view table carries only what differs between the views; everything
-                    // else is inherited from `%TypedArray%.prototype` one link up the chain, which
-                    // is why reading it here rather than there would be the wrong shape.
-                    PrototypeTable::TypedArrayFor(kind) => match name {
-                        "BYTES_PER_ELEMENT" => Value::Number(kind.width() as f64),
-                        _ => typed_array_for_method(kind, name),
-                    },
-                    PrototypeTable::DataView => data_view_method(name),
-                    PrototypeTable::Iterator => iterator_method(name),
-                    PrototypeTable::Boolean => boolean_method(name),
-                    PrototypeTable::Symbol => symbol_method(name),
-                    PrototypeTable::BigInt => bigint_method(name),
-                    PrototypeTable::Promise => promise_method(name),
-                    PrototypeTable::Map => collection_property(true, false, name),
-                    PrototypeTable::Set => collection_property(false, false, name),
-                    PrototypeTable::WeakMap => collection_property(true, true, name),
-                    PrototypeTable::WeakSet => collection_property(false, true, name),
-                    PrototypeTable::WeakRef => weak_ref_method(name),
-                    PrototypeTable::ShadowRealm => shadow_realm_method(name),
-                    PrototypeTable::DisposableStack => disposable_stack_method(name),
-                    PrototypeTable::AsyncDisposableStack => async_disposable_stack_method(name),
-                    PrototypeTable::FinalizationRegistry => finalization_registry_method(name),
-                    PrototypeTable::EventEmitter => Value::Undefined,
-                    PrototypeTable::Readable => Self::PrototypeOf(PrototypeTable::EventEmitter)
-                        .property(name)
-                        .unwrap_or(Value::Undefined),
-                    PrototypeTable::Writable => Self::PrototypeOf(PrototypeTable::EventEmitter)
-                        .property(name)
-                        .unwrap_or(Value::Undefined),
-                },
+                Self::prototype_table_value(table, name),
                 name,
             )),
             (Self::ObjectConstructor, "preventExtensions") => Some(Value::Native(
@@ -1992,6 +2032,13 @@ impl Native {
             (Self::PromiseConstructor, "allSettled") => {
                 Some(Value::Native(Self::PromiseAllSettled, RealmId::PRIMARY))
             }
+            (Self::PromiseConstructor, "allKeyed") => {
+                Some(Value::Native(Self::PromiseAllKeyed, RealmId::PRIMARY))
+            }
+            (Self::PromiseConstructor, "allSettledKeyed") => Some(Value::Native(
+                Self::PromiseAllSettledKeyed,
+                RealmId::PRIMARY,
+            )),
             (Self::PromiseConstructor, "race") => {
                 Some(Value::Native(Self::PromiseRace, RealmId::PRIMARY))
             }
@@ -2037,6 +2084,7 @@ impl Native {
             // takes a different path rather than failing loudly.
             (Self::SymbolConstructor, _) => WellKnown::ALL
                 .into_iter()
+                .filter(|symbol| symbol.published_by_symbol())
                 .find(|symbol| symbol.js_name() == name)
                 .map(|symbol| Value::Symbol(Symbol::WellKnown(symbol))),
             _ => None,

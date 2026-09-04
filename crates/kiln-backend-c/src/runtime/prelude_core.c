@@ -4456,9 +4456,37 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
     }
 }
 
+/* `ToPropertyKey` of a computed key that arrived from the program.
+ *
+ * Only an object does any work. `kiln_c99_property_key` cannot do it: it answers
+ * "[object Object]" for every object, so `o[{toString(){return "hello"}}] = 42` wrote under
+ * that name and `o.hello` read back `undefined` -- a silent wrong answer of exactly the kind
+ * the native backend must not produce. A symbol is already a key and must not be stringified,
+ * and a number stays a number so the array fast path still recognises it.
+ *
+ * A nullish target passes through unreduced: the read or write that follows throws for it, and
+ * the specification performs that check before the key converts. */
+static int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key,
+                               kiln_value *out, int depth, kiln_value *thrown) {
+    *out = key;
+    if (target.tag == KILN_VALUE_UNDEFINED || target.tag == KILN_VALUE_NULL) {
+        return KILN_C99_OK;
+    }
+    if (!kiln_c99_is_reference(key)) {
+        return KILN_C99_OK;
+    }
+    return kiln_c99_to_primitive(host, key, 1, out, depth, thrown);
+}
+
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
                                  kiln_value *out, int depth, kiln_value *thrown) {
     double index;
+    {
+        int reduced = kiln_c99_reduce_key(host, target, key, &key, depth, thrown);
+        if (reduced != KILN_C99_OK) {
+            return reduced;
+        }
+    }
     /* Before the key is reduced to a name: a Symbol reaches the trap as itself. */
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_get(host, target, key, target, out, depth, thrown);
@@ -4587,6 +4615,12 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
                                       kiln_value value, int strict, int depth,
                                       kiln_value *thrown) {
     double index;
+    {
+        int reduced = kiln_c99_reduce_key(host, target, key, &key, depth, thrown);
+        if (reduced != KILN_C99_OK) {
+            return reduced;
+        }
+    }
     if (target.tag == KILN_VALUE_PROXY) {
         return kiln_c99_proxy_set(host, target, key, value, strict, depth, thrown);
     }
@@ -15739,6 +15773,40 @@ static int kiln_c99_has_property(kiln_host *host, kiln_value target, const char 
         }
         return KILN_C99_OK;
     }
+    if (target.tag == KILN_VALUE_REGEXP) {
+        /* A regexp answers for its accessors, its own store and its prototype's methods, and
+         * `in` has to agree with the read about all three. Without an arm here the walk fell
+         * through to the generic chain, which does not know a regexp's prototype, so
+         * `"exec" in /x/` and `"source" in /x/` were both false -- the interpreter says true, and
+         * `"exec" in rx` is how a program feature-detects one. */
+        static const char *const own[] = {"source",     "flags",       "lastIndex",  "constructor",
+                                          "hasIndices", "global",      "ignoreCase", "multiline",
+                                          "dotAll",     "unicode",     "unicodeSets", "sticky"};
+        size_t index;
+        for (index = 0; index < sizeof own / sizeof own[0]; ++index) {
+            if (kiln_c99_same_name(key, key_len, own[index])) {
+                *answer = 1;
+                return KILN_C99_OK;
+            }
+        }
+        /* The prototype's members are listed rather than read: a read *refuses* a name this
+         * backend has not implemented, which is right for `rx.nope` and wrong for
+         * `"nope" in rx` -- the question there is answerable and the answer is false. A regexp
+         * carries no property store of its own here, so there is no third place to look. */
+        {
+            static const char *const inherited[] = {"exec",      "test",       "toString",
+                                                    "compile",   "@@match",    "@@matchAll",
+                                                    "@@replace", "@@search",   "@@split"};
+            for (index = 0; index < sizeof inherited / sizeof inherited[0]; ++index) {
+                if (kiln_c99_same_name(key, key_len, inherited[index])) {
+                    *answer = 1;
+                    return KILN_C99_OK;
+                }
+            }
+        }
+        *answer = 0;
+        return KILN_C99_OK;
+    }
     if (target.tag == KILN_VALUE_ARRAY) {
         /* An index is present when it is in range, and `length` always is. */
         double index = kiln_c99_key_index(key, key_len);
@@ -23504,6 +23572,31 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
 }
 
 
+/* The three hints `ToPrimitive` can be asked for. The specification has three, not two, and the
+ * third is not decoration: a `Date` is the one built-in whose `@@toPrimitive` answers a string for
+ * "default" and a number for "number", which is the whole of why `date + date` concatenates while
+ * `date - date` subtracts. For every other value the three coincide, which is why two of them
+ * sufficed here for so long. NUMBER and STRING keep the 0 and 1 the two-valued flag used, so every
+ * call site that already said what it wanted still says it.
+ *
+ * Defined here as well as in `prelude_declarations.h` because a single-unit prelude does not
+ * include that header, and guarded so that the separately compiled build sees one definition. */
+/* Whether reducing this value to a primitive is a *call* rather than a no-op.
+ *
+ * Deliberately not `kiln_c99_is_reference`, which is a primitive denylist that excludes a date on
+ * purpose; using that one as "is an object" is a mistake this file has already paid for once. A
+ * date is not a reference and still has to be reduced by calling, so the two predicates are
+ * genuinely different questions and each has its own name. */
+static int kiln_c99_reduces_to_primitive(kiln_value value) {
+    return kiln_c99_is_reference(value) || value.tag == KILN_VALUE_DATE;
+}
+
+#ifndef KILN_C99_HINT_NUMBER
+#define KILN_C99_HINT_NUMBER 0
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_HINT_DEFAULT 2
+#endif
+
 /* Reduce a value to a primitive, which is a *call* rather than a formatting rule.
  *
  * Which method is tried first depends on what the operator wanted: arithmetic wants a number and
@@ -23516,18 +23609,29 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
  *
  * A value with no method to call falls back to `kiln_c99_text`, which is where an array's join
  * and a function's source text already live. */
-static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
+static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
                                  kiln_value *out, int depth, kiln_value *thrown) {
     static const char *const string_first[2] = {"toString", "valueOf"};
     static const char *const value_first[2] = {"valueOf", "toString"};
-    const char *const *order = string_hint ? string_first : value_first;
+    /* `Date.prototype[@@toPrimitive]` is a real method in the interpreter, but this backend
+     * models a date as a value kind rather than an object carrying that method, so the rule it
+     * would apply is applied here instead: a date asked for "default" tries `toString` first,
+     * every other value tries `valueOf`. That single line is the difference between
+     * `date + date` concatenating and adding. */
+    int prefers_string = hint == KILN_C99_HINT_STRING ||
+                         (hint == KILN_C99_HINT_DEFAULT && value.tag == KILN_VALUE_DATE);
+    const char *const *order = prefers_string ? string_first : value_first;
     int step;
     /* `${p}` and `p + 1` read `@@toPrimitive`, `valueOf` and `toString` off the proxy, which are
      * three trap calls whose results this backend has nowhere to put yet. */
     if (value.tag == KILN_VALUE_PROXY) {
         KILN_C99_REFUSE("converting a Proxy to a primitive");
     }
-    if (!kiln_c99_is_reference(value)) {
+    /* A date is not a reference here -- `kiln_c99_is_reference` is a primitive denylist and
+     * excludes it on purpose -- but it still reduces by *calling*, and it is the one value whose
+     * answer depends on which hint was asked for. Letting it through as its own primitive is what
+     * made `date + date` add two instants. */
+    if (!kiln_c99_is_reference(value) && value.tag != KILN_VALUE_DATE) {
         *out = value;
         return KILN_C99_OK;
     }
@@ -23539,10 +23643,13 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
             return status;
         }
         if (status == KILN_C99_OK && kiln_c99_is_callable(exotic)) {
-            kiln_value hint = kiln_c99_copy_text(string_hint ? "string" : "default",
-                                                 string_hint ? 6 : 7);
+            const char *spelling = hint == KILN_C99_HINT_STRING
+                                       ? "string"
+                                       : (hint == KILN_C99_HINT_DEFAULT ? "default" : "number");
+            kiln_value hint_text = kiln_c99_copy_text(spelling, strlen(spelling));
             kiln_value produced;
-            status = kiln_c99_call(host, &produced, exotic, value, &hint, 1, depth, thrown);
+            status = kiln_c99_call(host, &produced, exotic, value, &hint_text, 1, depth,
+                                   thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -23671,7 +23778,7 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
     int left_big;
     int right_big;
     int numeric;
-    if (kiln_c99_is_reference(left) || kiln_c99_is_reference(right)) {
+    if (kiln_c99_reduces_to_primitive(left) || kiln_c99_reduces_to_primitive(right)) {
         /* Strict equality is identity and never coerces, `in` and `instanceof` take their
          * operands as they are, and a nullish `==` is answered without any conversion at all --
          * `value != null` is the commonest guard in JavaScript, and running a wrapper's `valueOf`
@@ -23684,16 +23791,22 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
              * != null` is the commonest guard in JavaScript, and running a wrapper's `valueOf`
              * there is both wrong and, for a wrapper that assumes it is being used properly,
              * fatal. */
-            if ((kiln_c99_is_reference(left) && kiln_c99_is_reference(right)) ||
+            if ((kiln_c99_reduces_to_primitive(left) && kiln_c99_reduces_to_primitive(right)) ||
                 left.tag == KILN_VALUE_UNDEFINED || left.tag == KILN_VALUE_NULL ||
                 right.tag == KILN_VALUE_UNDEFINED || right.tag == KILN_VALUE_NULL) {
                 coerces = 0;
             }
         }
         if (coerces) {
-            /* Every operator here wants a number or has no preference, and both of those ask
-             * `valueOf` first. Only `${}` and `String(x)` use the other order. */
-            int status = kiln_c99_to_primitive(host, left, 0, &left, depth, thrown);
+            /* Every operator here asks `valueOf` first; only `${}` and `String(x)` use the
+             * other order. But `+` and loose equality state no *preference* -- each chooses
+             * between a string reading and a numeric one only once both sides have reduced --
+             * while the rest have already committed to a number. That distinction is invisible
+             * for every value but a date, and it is why `date + date` concatenates. */
+            int hint = (operation == 1 || operation == 15 || operation == 16)
+                           ? KILN_C99_HINT_DEFAULT
+                           : KILN_C99_HINT_NUMBER;
+            int status = kiln_c99_to_primitive(host, left, hint, &left, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -23708,7 +23821,7 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Cannot convert a Symbol value to a number");
             }
-            status = kiln_c99_to_primitive(host, right, 0, &right, depth, thrown);
+            status = kiln_c99_to_primitive(host, right, hint, &right, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -24048,6 +24161,26 @@ static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *
     if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(target);
     if (status != KILN_C99_OK) return status;
     stack[*sp - 1] = read;
+    return KILN_C99_OK;
+}
+
+/* `ToPropertyKey` of the top of the stack, in place.
+ *
+ * Only a reference does anything: a primitive is already a key, and leaving it alone keeps the
+ * numeric fast path in the property instructions. That also makes this idempotent, so the
+ * conversion `kiln_c99_get_computed` still performs is a no-op rather than a second call into
+ * the program's own `toString`.
+ *
+ * A nullish target also passes through: the order is fixed, and the read that follows throws
+ * for it before the key would have converted. */
+static int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp,
+                                       int depth, kiln_value *thrown) {
+    kiln_value reduced;
+    int status = kiln_c99_reduce_key(host, stack[*sp - 2], stack[*sp - 1], &reduced, depth, thrown);
+    if (status != KILN_C99_OK) {
+        return status;
+    }
+    stack[*sp - 1] = reduced;
     return KILN_C99_OK;
 }
 

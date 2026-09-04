@@ -1503,6 +1503,7 @@ static int kiln_c99_get_ikey(kiln_host *host, kiln_value target, const char *key
 static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, const char *key,
 static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
 static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key, size_t key_len,
+static int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_write_would_accept(kiln_value target, const char *key, size_t key_len) {
@@ -1793,7 +1794,13 @@ static kiln_value kiln_c99_typeof(kiln_value value) {
 static int kiln_c99_string_compare(kiln_value left, kiln_value right) {
 static kiln_value kiln_c99_unary(uint16_t operation, kiln_value value) {
 static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_value right) {
-static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
+static int kiln_c99_reduces_to_primitive(kiln_value value) {
+#ifndef KILN_C99_HINT_NUMBER
+#define KILN_C99_HINT_NUMBER 0
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_HINT_DEFAULT 2
+#endif
+static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
@@ -1806,6 +1813,7 @@ static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key
 static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
+static int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp,
 static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp,
 static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp,
 static int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc,

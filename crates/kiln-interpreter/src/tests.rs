@@ -2677,6 +2677,8 @@ fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionErr
         crate::JsonCall::ToJson(receiver, _) => Ok(receiver.clone()),
         crate::JsonCall::Replace(_, _, property) => Ok(property),
     };
+    // The root's holder is the wrapper `{"": value}` the specification serialises through; no
+    // fixture here has a replacer to read it, so the value itself stands in.
     json_stringify(
         value,
         indent,
@@ -2685,6 +2687,7 @@ fn serialize(value: &Value, indent: &str) -> Result<Option<String>, ExecutionErr
         &mut unreachable_getter,
         None,
         "",
+        value,
     )
 }
 
@@ -3997,4 +4000,208 @@ fn every_internal_slot_is_reserved() {
 /// `symbol::is_reserved` is crate-private; this is the one place a test needs it by name.
 fn kiln_interpreter_is_reserved(key: &str) -> bool {
     crate::symbol::is_reserved(key)
+}
+
+/// Every prototype table, for the sweeps below. Written out rather than derived because
+/// `PrototypeTable` has no iterator; a variant missing from here weakens the sweep but cannot
+/// make it wrong.
+fn every_prototype_table() -> Vec<PrototypeTable> {
+    use PrototypeTable as P;
+    vec![
+        P::Object,
+        P::Array,
+        P::String,
+        P::Number,
+        P::Function,
+        P::RegExp,
+        P::Date,
+        P::ArrayBuffer,
+        P::SharedArrayBuffer,
+        P::TypedArray,
+        P::DataView,
+        P::Iterator,
+        P::Boolean,
+        P::Symbol,
+        P::BigInt,
+        P::Promise,
+        P::Map,
+        P::Set,
+        P::WeakMap,
+        P::WeakSet,
+        P::WeakRef,
+        P::FinalizationRegistry,
+        P::ShadowRealm,
+        P::DisposableStack,
+        P::AsyncDisposableStack,
+        P::EventEmitter,
+        P::Readable,
+        P::Writable,
+    ]
+}
+
+/// A built-in never reports flags for a member it does not have.
+///
+/// The failure this guards against does not look like a missing property; it looks like an extra
+/// one. Attributes are asked before the value is, so a rule that answers from the *name* invents
+/// the property outright: generalising one such rule from `Date` to every prototype gave every
+/// prototype in the realm a phantom own `@@toPrimitive`, and the tests that noticed were in
+/// `Date`, `Object` and `language/expressions` rather than anywhere near the change.
+///
+/// Swept across every table and every well-known symbol, plus names no built-in publishes.
+#[test]
+fn attributes_are_never_reported_for_an_absent_member() {
+    let absent = [
+        "definitelyNotAMember",
+        "constructor2",
+        "__nope__",
+        "species",
+        "iterator",
+    ];
+    for table in every_prototype_table() {
+        let target = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
+        let symbols = crate::symbol::WellKnown::ALL
+            .into_iter()
+            .map(|symbol| symbol.property_key());
+        for key in symbols.chain(absent.iter().copied()) {
+            let published = !matches!(
+                Native::PrototypeOf(table).property(key),
+                None | Some(Value::Undefined)
+            ) || intrinsic_accessor(&target, key).is_some()
+                || machine_accessor(&target, key).is_some();
+            let described = intrinsic_own_attributes(&target, key).is_some();
+            assert_eq!(
+                described, published,
+                "{table:?} describes {key} as {described} but publishes it as {published}"
+            );
+        }
+    }
+}
+
+/// What a table lists, it also describes -- and the other way round.
+///
+/// The raw name lists are deliberately supersets: `Array.prototype` and `%TypedArray%.prototype`
+/// share one, so the array table names `set`, which only the view has.
+/// `intrinsic_prototype_entries` is what resolves that, by dropping any name the value tables do
+/// not answer -- so the *listing* is correct even though the list is not.
+///
+/// What must not drift is the agreement between that filtered listing and
+/// `intrinsic_own_attributes`. `hasOwnProperty`, `getOwnPropertyNames` and
+/// `getOwnPropertyDescriptor` are answered by different halves of this pair, and a name in one
+/// and not the other is a property that exists depending on which question you ask -- which has
+/// shipped more than once.
+#[test]
+fn listing_and_describing_agree() {
+    // Collected rather than asserted one at a time: the whole point is to see the shape of a
+    // drift, and failing on the first row hides how wide it is.
+    let mut disagreements = Vec::new();
+    for table in every_prototype_table() {
+        let target = Value::Native(Native::PrototypeOf(table), RealmId::PRIMARY);
+        let listed: Vec<String> = intrinsic_prototype_entries(table)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect();
+        // Swept over the union of this table's names *and* every other table's, so that the
+        // check runs in both directions. Only sweeping this table's own list missed the
+        // direction that actually bit: `Object.prototype`'s eleven members were described as own
+        // by every prototype in the realm and listed by none, because the ownership test was
+        // asking the *read* path, which carries a table its last step up to `Object.prototype`.
+        let mut sweep: Vec<&str> = every_prototype_table()
+            .into_iter()
+            .flat_map(|other| intrinsic_prototype_method_names(other).iter().copied())
+            .collect();
+        sweep.sort_unstable();
+        sweep.dedup();
+        for name in sweep {
+            let is_listed = listed.iter().any(|key| key == name);
+            let is_described = intrinsic_own_attributes(&target, name).is_some();
+            if is_listed != is_described {
+                disagreements.push(format!(
+                    "{table:?}.{name}: listed={is_listed} described={is_described}"
+                ));
+            }
+        }
+        // Everything the filtered listing holds must describe, including `constructor` and the
+        // accessors, which the name list does not carry.
+        for key in &listed {
+            if intrinsic_own_attributes(&target, key).is_none() {
+                disagreements.push(format!("{table:?}.{key}: listed=true described=false"));
+            }
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "listing and describing disagree on {} members:\n{}",
+        disagreements.len(),
+        disagreements.join("\n")
+    );
+}
+
+/// No enumeration list carries the internal spelling of a symbol.
+///
+/// `NamedMembers::new` refuses one while the compiler builds the table, so this cannot fail today.
+/// It is here because the cost of the leak was 838 rows and a wrong post-mortem, and a second
+/// check that runs on a different mechanism is cheap.
+#[test]
+fn no_listed_member_is_a_symbol_spelling() {
+    for table in every_prototype_table() {
+        for name in intrinsic_prototype_method_names(table) {
+            assert!(
+                !kiln_interpreter_is_reserved(name),
+                "{table:?} lists the reserved spelling {name}"
+            );
+        }
+    }
+}
+
+/// Every callable a built-in prototype publishes has a `name` and a `length`.
+///
+/// The third axis of the same drift. A member's value comes from the per-table value functions,
+/// but its `name` and `length` come from `intrinsic_identity`, which is keyed on the *`Native`
+/// variant* rather than on the table and key. Nothing joins the two: publishing a method whose
+/// variant has no arity tabulated gives a function with no own `length` and no own `name`, which
+/// every `Function.prototype.bind` wrapper and every argument-count check in the ecosystem reads.
+#[test]
+fn every_published_callable_is_named_and_measured() {
+    let mut missing = Vec::new();
+    for table in every_prototype_table() {
+        for (key, property) in intrinsic_prototype_entries(table) {
+            let Property::Value(value) = property else {
+                continue;
+            };
+            if value.type_of() != "function" {
+                continue;
+            }
+            if intrinsic_identity(&value).is_none() {
+                missing.push(format!("{table:?}.{key}"));
+            }
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "published callables with no name or length: {}",
+        missing.join(", ")
+    );
+}
+
+#[test]
+#[ignore = "diagnostic: prints where a published name differs from its key"]
+fn report_name_key_mismatches() {
+    let mut rows = Vec::new();
+    for table in every_prototype_table() {
+        for (key, property) in intrinsic_prototype_entries(table) {
+            let Property::Value(value) = property else {
+                continue;
+            };
+            if value.type_of() != "function" {
+                continue;
+            }
+            if let Some((name, _)) = intrinsic_identity(&value)
+                && name != key
+            {
+                rows.push(format!("{table:?}: key={key} name={name}"));
+            }
+        }
+    }
+    println!("{}", rows.join("\n"));
+    println!("total mismatches: {}", rows.len());
 }
