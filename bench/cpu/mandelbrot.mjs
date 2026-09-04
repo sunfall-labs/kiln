@@ -1,3 +1,5 @@
+import { bench } from "../harness.mjs";
+
 function mandelbrot() {
   const width = 500;
   const height = 500;
@@ -21,4 +23,5 @@ function mandelbrot() {
   }
   return total;
 }
-console.log(mandelbrot());
+
+bench("mandelbrot", mandelbrot);

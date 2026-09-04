@@ -1,16 +1,19 @@
-const map = new Map();
-const set = new Set();
+import { bench } from "../harness.mjs";
 
-for (let i = 0; i < 50000; i++) {
-  map.set(i, i * 2);
-  set.add(i);
-}
+bench("collections", () => {
+  const map = new Map();
+  const set = new Set();
 
-let sum = 0;
-for (let i = 0; i < 50000; i++) {
-  if (set.has(i)) {
-    sum += map.get(i);
+  for (let i = 0; i < 50000; i++) {
+    map.set(i, i * 2);
+    set.add(i);
   }
-}
 
-console.log(sum);
+  let sum = 0;
+  for (let i = 0; i < 50000; i++) {
+    if (set.has(i)) {
+      sum += map.get(i);
+    }
+  }
+  return sum;
+});

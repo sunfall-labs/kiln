@@ -1,3 +1,5 @@
+import { bench } from "../harness.mjs";
+
 class Point {
   constructor(x, y) {
     this.x = x;
@@ -18,15 +20,17 @@ class Point3D extends Point {
   }
 }
 
-let sum = 0;
 const pts = [];
 for (let i = 0; i < 1000; i++) {
   pts.push(i % 2 === 0 ? new Point(i, i + 1) : new Point3D(i, i + 1, i + 2));
 }
 
-for (let r = 0; r < 500; r++) {
-  for (let i = 0; i < pts.length; i++) {
-    sum += pts[i].dist();
+bench("class-poly", () => {
+  let sum = 0;
+  for (let r = 0; r < 500; r++) {
+    for (let i = 0; i < pts.length; i++) {
+      sum += pts[i].dist();
+    }
   }
-}
-console.log(Math.round(sum));
+  return Math.round(sum);
+});
