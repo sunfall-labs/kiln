@@ -15536,7 +15536,21 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // interpreted.
             Native::StringRaw => {
                 let strings = arguments.first().cloned().unwrap_or(Value::Undefined);
+                // `ToObject` of the template, and again of whatever its `raw` answered. Both
+                // refuse a nullish value, and skipping the check did not merely lose an error:
+                // `String.raw()` answered the empty string, which tells a caller its template
+                // had no segments rather than that it passed no template at all.
+                if strings.is_nullish() {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Cannot convert undefined or null to object".to_owned(),
+                    });
+                }
                 let raw = self.read_property(&strings, "raw", instruction)?;
+                if raw.is_nullish() {
+                    return Err(ExecutionError::TypeErrorMessage {
+                        message: "Cannot convert undefined or null to object".to_owned(),
+                    });
+                }
                 // An array's elements are not named properties, so an index read has to go
                 // through the array itself; anything else is treated as array-like.
                 let segments = match &raw {
