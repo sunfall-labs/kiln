@@ -104,12 +104,27 @@ pub(crate) fn decode_run_result(
 pub(crate) fn retry_while_executable_is_busy<T>(
     mut operation: impl FnMut() -> io::Result<T>,
 ) -> io::Result<T> {
-    const ATTEMPTS: u32 = 12;
+    // A budget rather than a count, because what has to be outlasted is the *other* thread's
+    // fork-to-execve window, and that window is only microseconds on an idle machine. Twelve
+    // attempts with a 100ms cap gave up after about six tenths of a second, which was ample
+    // there and not ample here: this repository is routinely built by more than one agent at
+    // once, and under an eight-way build the forking thread can be descheduled for far longer
+    // than it takes to `execve`. Four to five of `kiln-native`'s tests then failed together,
+    // reproducibly under load and never in isolation -- which reads as a flaky test suite rather
+    // than as the transient kernel condition it is.
+    //
+    // The condition always clears: it is held by a descriptor that closes at the other thread's
+    // `execve`. So the bound exists only to keep a file somebody genuinely is writing surfacing
+    // as an error rather than a hang, and ten seconds does that while being far outside any
+    // plausible scheduling delay.
+    const BUDGET: Duration = Duration::from_secs(10);
+    let deadline = Instant::now() + BUDGET;
     let mut backoff = Duration::from_millis(2);
-    for attempt in 1..=ATTEMPTS {
+    loop {
         match operation() {
             Err(source)
-                if source.kind() == io::ErrorKind::ExecutableFileBusy && attempt < ATTEMPTS =>
+                if source.kind() == io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
             {
                 std::thread::sleep(backoff);
                 backoff = backoff.saturating_mul(2).min(Duration::from_millis(100));
@@ -117,7 +132,6 @@ pub(crate) fn retry_while_executable_is_busy<T>(
             other => return other,
         }
     }
-    unreachable!("the final attempt returns rather than looping")
 }
 
 /// `Command`, for the case where the program was built moments ago by this same process.
@@ -151,4 +165,56 @@ pub(crate) fn run_executable(
             executable: executable.to_path_buf(),
             source,
         })
+}
+
+#[cfg(test)]
+mod busy_retry_tests {
+    use super::retry_while_executable_is_busy;
+    use std::cell::Cell;
+    use std::io;
+    use std::time::{Duration, Instant};
+
+    /// The retry outlasts a busy window far longer than a fork-to-`execve` gap on an idle machine.
+    ///
+    /// This is the regression this bound exists for. It used to be twelve attempts with a 100ms
+    /// cap -- about six tenths of a second -- which is ample against the microsecond window the
+    /// condition has when nothing else is running, and not ample when eight threads are each
+    /// forking a C compiler. Four to five of this crate's tests failed together under that load
+    /// and passed in isolation, which is indistinguishable from a flaky suite until you know the
+    /// mechanism.
+    ///
+    /// A count cannot express "outlast a scheduling delay"; a deadline can. Asserting on a
+    /// duration that the old bound could not have survived is what keeps it from being tuned back
+    /// down to one.
+    #[test]
+    fn a_busy_executable_is_waited_out_past_the_old_attempt_bound() {
+        let started = Instant::now();
+        let busy_until = started + Duration::from_millis(1_500);
+        let calls = Cell::new(0u32);
+        let outcome = retry_while_executable_is_busy(|| {
+            calls.set(calls.get() + 1);
+            if Instant::now() < busy_until {
+                return Err(io::Error::from(io::ErrorKind::ExecutableFileBusy));
+            }
+            Ok(7u32)
+        });
+        assert_eq!(outcome.expect("the window closes, so the operation succeeds"), 7);
+        assert!(
+            started.elapsed() >= Duration::from_millis(1_500),
+            "returned before the busy window closed"
+        );
+        assert!(calls.get() > 12, "gave up within the old twelve-attempt bound");
+    }
+
+    /// A file somebody genuinely is writing still surfaces as an error rather than hanging.
+    #[test]
+    fn a_permanently_busy_executable_still_reports_rather_than_hanging() {
+        let outcome = retry_while_executable_is_busy(|| {
+            Err::<(), _>(io::Error::from(io::ErrorKind::Interrupted))
+        });
+        assert_eq!(
+            outcome.expect_err("an unrelated error is returned at once").kind(),
+            io::ErrorKind::Interrupted
+        );
+    }
 }
