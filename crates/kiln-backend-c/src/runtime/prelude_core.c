@@ -9978,6 +9978,615 @@ static int kiln_c99_data_view_write_bits(kiln_host *host, uint64_t code, kiln_va
  * and left to right, because two arguments that both throw must throw the leftmost first.
  *
  * The hand-on cannot loop: what it passes down is a Number or a String. */
+
+/* ========================================================================= */
+/* Timsort: Adaptive, stable sort with binary insertion sort & galloping   */
+/* ========================================================================= */
+
+typedef struct {
+    kiln_host *host;
+    kiln_value comparator;
+    int depth;
+    kiln_value *thrown;
+} kiln_c99_sort_context;
+
+static int kiln_c99_sort_compare_value(kiln_c99_sort_context *ctx, kiln_value a,
+                                       kiln_value b, double *out_order) {
+    if (kiln_c99_is_callable(ctx->comparator)) {
+        kiln_value pair[2];
+        kiln_value produced;
+        pair[0] = a;
+        pair[1] = b;
+        int status = kiln_c99_call(ctx->host, &produced, ctx->comparator, kiln_c99_undefined(),
+                                   pair, 2, ctx->depth, ctx->thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        double order = kiln_c99_as_number(produced);
+        *out_order = isnan(order) ? 0.0 : order;
+        return KILN_C99_OK;
+    } else {
+        kiln_value left_text = kiln_c99_text(a);
+        kiln_value right_text = kiln_c99_text(b);
+        if (left_text.tag != KILN_VALUE_STRING || right_text.tag != KILN_VALUE_STRING) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        *out_order = (double)kiln_c99_string_compare(left_text, right_text);
+        return KILN_C99_OK;
+    }
+}
+
+typedef struct {
+    kiln_host *host;
+    kiln_value comparator;
+    int depth;
+    kiln_value *thrown;
+} kiln_c99_typed_sort_context;
+
+static int kiln_c99_sort_compare_typed(kiln_c99_typed_sort_context *ctx, double a,
+                                       double b, double *out_order) {
+    if (ctx->comparator.tag == KILN_VALUE_UNDEFINED) {
+        *out_order = (double)kiln_c99_typed_order(a, b);
+        return KILN_C99_OK;
+    } else {
+        kiln_value pair[2];
+        kiln_value answer;
+        pair[0] = kiln_c99_number(a);
+        pair[1] = kiln_c99_number(b);
+        int status = kiln_c99_call(ctx->host, &answer, ctx->comparator, kiln_c99_undefined(),
+                                   pair, 2, ctx->depth, ctx->thrown);
+        if (status != KILN_C99_OK) {
+            return status;
+        }
+        double decided = kiln_c99_as_number(answer);
+        *out_order = isnan(decided) ? 0.0 : (decided > 0.0 ? 1.0 : (decided < 0.0 ? -1.0 : 0.0));
+        return KILN_C99_OK;
+    }
+}
+
+typedef struct {
+    size_t base;
+    size_t len;
+} kiln_c99_timsort_run;
+
+static size_t kiln_c99_timsort_min_run_length(size_t n) {
+    size_t r = 0;
+    while (n >= 64) {
+        r |= (n & 1);
+        n >>= 1;
+    }
+    return n + r;
+}
+
+#define KILN_DEF_TIMSORT(SUFFIX, TYPE, CTX_TYPE, CMP_FUNC)                                         \
+    typedef struct {                                                                               \
+        CTX_TYPE *ctx;                                                                             \
+        TYPE *a;                                                                                   \
+        TYPE *scratch;                                                                             \
+        size_t scratch_capacity;                                                                   \
+        size_t min_gallop;                                                                         \
+        kiln_c99_timsort_run stack[85];                                                            \
+        size_t stack_len;                                                                          \
+    } kiln_c99_timsort_state_##SUFFIX;                                                             \
+                                                                                                   \
+    static int kiln_c99_timsort_binary_sort_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts,          \
+                                                     size_t lo, size_t hi, size_t start) {         \
+        if (start == lo)                                                                           \
+            start++;                                                                               \
+        for (; start < hi; start++) {                                                              \
+            TYPE pivot = ts->a[start];                                                             \
+            size_t left = lo;                                                                      \
+            size_t right = start;                                                                  \
+            while (left < right) {                                                                 \
+                size_t mid = left + ((right - left) >> 1);                                         \
+                double order;                                                                      \
+                int status = CMP_FUNC(ts->ctx, pivot, ts->a[mid], &order);                         \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+                if (order < 0.0) {                                                                 \
+                    right = mid;                                                                   \
+                } else {                                                                           \
+                    left = mid + 1;                                                                \
+                }                                                                                  \
+            }                                                                                      \
+            size_t n_shift = start - left;                                                         \
+            if (n_shift > 0) {                                                                     \
+                memmove(&ts->a[left + 1], &ts->a[left], n_shift * sizeof(TYPE));                   \
+            }                                                                                      \
+            ts->a[left] = pivot;                                                                   \
+        }                                                                                          \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_count_run_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts, size_t lo, \
+                                                   size_t hi, size_t *out_len) {                   \
+        if (lo + 1 >= hi) {                                                                        \
+            *out_len = hi - lo;                                                                    \
+            return KILN_C99_OK;                                                                    \
+        }                                                                                          \
+        size_t run_hi = lo + 2;                                                                    \
+        double order;                                                                              \
+        int status = CMP_FUNC(ts->ctx, ts->a[lo + 1], ts->a[lo], &order);                          \
+        if (status != KILN_C99_OK)                                                                 \
+            return status;                                                                         \
+        if (order < 0.0) {                                                                         \
+            while (run_hi < hi) {                                                                  \
+                status = CMP_FUNC(ts->ctx, ts->a[run_hi], ts->a[run_hi - 1], &order);              \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+                if (order < 0.0)                                                                   \
+                    run_hi++;                                                                      \
+                else                                                                               \
+                    break;                                                                         \
+            }                                                                                      \
+            size_t p = lo;                                                                         \
+            size_t q = run_hi - 1;                                                                 \
+            while (p < q) {                                                                        \
+                TYPE tmp = ts->a[p];                                                               \
+                ts->a[p] = ts->a[q];                                                               \
+                ts->a[q] = tmp;                                                                    \
+                p++;                                                                               \
+                q--;                                                                               \
+            }                                                                                      \
+        } else {                                                                                   \
+            while (run_hi < hi) {                                                                  \
+                status = CMP_FUNC(ts->ctx, ts->a[run_hi], ts->a[run_hi - 1], &order);              \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+                if (order >= 0.0)                                                                  \
+                    run_hi++;                                                                      \
+                else                                                                               \
+                    break;                                                                         \
+            }                                                                                      \
+        }                                                                                          \
+        *out_len = run_hi - lo;                                                                    \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_gallop_left_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts,          \
+                                                     TYPE key, TYPE *a, size_t base, size_t len,   \
+                                                     size_t hint, size_t *out_pos) {               \
+        size_t last_offset = 0;                                                                    \
+        size_t offset = 1;                                                                         \
+        double order;                                                                              \
+        int status = CMP_FUNC(ts->ctx, a[base + hint], key, &order);                               \
+        if (status != KILN_C99_OK)                                                                 \
+            return status;                                                                         \
+        size_t low;                                                                                \
+        size_t high;                                                                               \
+        if (order < 0.0) {                                                                         \
+            size_t max_offset = len - hint;                                                        \
+            while (offset < max_offset) {                                                          \
+                status = CMP_FUNC(ts->ctx, a[base + hint + offset], key, &order);                  \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+                if (order < 0.0) {                                                                 \
+                    last_offset = offset;                                                          \
+                    offset = (offset << 1) + 1;                                                    \
+                } else                                                                             \
+                    break;                                                                         \
+            }                                                                                      \
+            if (offset > max_offset)                                                               \
+                offset = max_offset;                                                               \
+            low = hint + last_offset + 1;                                                          \
+            high = hint + offset;                                                                  \
+            if (high > len)                                                                        \
+                high = len;                                                                        \
+        } else {                                                                                   \
+            size_t max_offset = hint + 1;                                                          \
+            while (offset < max_offset) {                                                          \
+                status = CMP_FUNC(ts->ctx, a[base + hint - offset], key, &order);                  \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+                if (order >= 0.0) {                                                                \
+                    last_offset = offset;                                                          \
+                    offset = (offset << 1) + 1;                                                    \
+                } else                                                                             \
+                    break;                                                                         \
+            }                                                                                      \
+            if (offset > max_offset)                                                               \
+                offset = max_offset;                                                               \
+            low = (offset > hint) ? 0 : hint - offset + 1;                                         \
+            high = hint - last_offset;                                                             \
+        }                                                                                          \
+        while (low < high) {                                                                       \
+            size_t mid = low + ((high - low) >> 1);                                                \
+            status = CMP_FUNC(ts->ctx, a[base + mid], key, &order);                                \
+            if (status != KILN_C99_OK)                                                             \
+                return status;                                                                     \
+            if (order < 0.0)                                                                       \
+                low = mid + 1;                                                                     \
+            else                                                                                   \
+                high = mid;                                                                        \
+        }                                                                                          \
+        *out_pos = high;                                                                           \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_gallop_right_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts,         \
+                                                      TYPE key, TYPE *a, size_t base, size_t len,  \
+                                                      size_t hint, size_t *out_pos) {              \
+        size_t last_offset = 0;                                                                    \
+        size_t offset = 1;                                                                         \
+        double order;                                                                              \
+        int status = CMP_FUNC(ts->ctx, key, a[base + hint], &order);                               \
+        if (status != KILN_C99_OK)                                                                 \
+            return status;                                                                         \
+        size_t low;                                                                                \
+        size_t high;                                                                               \
+        if (order < 0.0) {                                                                         \
+            size_t max_offset = hint + 1;                                                          \
+            while (offset < max_offset) {                                                          \
+                status = CMP_FUNC(ts->ctx, key, a[base + hint - offset], &order);                  \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+                if (order < 0.0) {                                                                 \
+                    last_offset = offset;                                                          \
+                    offset = (offset << 1) + 1;                                                    \
+                } else                                                                             \
+                    break;                                                                         \
+            }                                                                                      \
+            if (offset > max_offset)                                                               \
+                offset = max_offset;                                                               \
+            low = (offset > hint) ? 0 : hint - offset + 1;                                         \
+            high = hint - last_offset;                                                             \
+        } else {                                                                                   \
+            size_t max_offset = len - hint;                                                        \
+            while (offset < max_offset) {                                                          \
+                status = CMP_FUNC(ts->ctx, key, a[base + hint + offset], &order);                  \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+                if (order >= 0.0) {                                                                \
+                    last_offset = offset;                                                          \
+                    offset = (offset << 1) + 1;                                                    \
+                } else                                                                             \
+                    break;                                                                         \
+            }                                                                                      \
+            if (offset > max_offset)                                                               \
+                offset = max_offset;                                                               \
+            low = hint + last_offset + 1;                                                          \
+            high = hint + offset;                                                                  \
+            if (high > len)                                                                        \
+                high = len;                                                                        \
+        }                                                                                          \
+        while (low < high) {                                                                       \
+            size_t mid = low + ((high - low) >> 1);                                                \
+            status = CMP_FUNC(ts->ctx, key, a[base + mid], &order);                                \
+            if (status != KILN_C99_OK)                                                             \
+                return status;                                                                     \
+            if (order < 0.0)                                                                       \
+                high = mid;                                                                        \
+            else                                                                                   \
+                low = mid + 1;                                                                     \
+        }                                                                                          \
+        *out_pos = high;                                                                           \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_merge_lo_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts,            \
+                                                  size_t base1, size_t len1, size_t base2,         \
+                                                  size_t len2) {                                   \
+        if (len1 > ts->scratch_capacity) {                                                         \
+            TYPE *new_scratch = (TYPE *)realloc(ts->scratch, len1 * sizeof(TYPE));                 \
+            if (new_scratch == NULL)                                                               \
+                return KILN_C99_OUT_OF_MEMORY;                                                     \
+            ts->scratch = new_scratch;                                                             \
+            ts->scratch_capacity = len1;                                                           \
+        }                                                                                          \
+        memcpy(ts->scratch, &ts->a[base1], len1 * sizeof(TYPE));                                   \
+        size_t cursor1 = 0;                                                                        \
+        size_t cursor2 = base2;                                                                    \
+        size_t dest = base1;                                                                       \
+        size_t min_gallop = ts->min_gallop;                                                        \
+        while (1) {                                                                                \
+            size_t count1 = 0;                                                                     \
+            size_t count2 = 0;                                                                     \
+            while (1) {                                                                            \
+                double order;                                                                      \
+                int status = CMP_FUNC(ts->ctx, ts->a[cursor2], ts->scratch[cursor1], &order);      \
+                if (status != KILN_C99_OK) {                                                       \
+                    if (len1 > 0)                                                                  \
+                        memcpy(&ts->a[dest], &ts->scratch[cursor1], len1 * sizeof(TYPE));          \
+                    return status;                                                                 \
+                }                                                                                  \
+                if (order < 0.0) {                                                                 \
+                    ts->a[dest++] = ts->a[cursor2++];                                              \
+                    count2++;                                                                      \
+                    count1 = 0;                                                                    \
+                    if (--len2 == 0)                                                               \
+                        goto outer_done_lo_##SUFFIX;                                               \
+                    if (count2 >= min_gallop)                                                      \
+                        break;                                                                     \
+                } else {                                                                           \
+                    ts->a[dest++] = ts->scratch[cursor1++];                                        \
+                    count1++;                                                                      \
+                    count2 = 0;                                                                    \
+                    if (--len1 == 0)                                                               \
+                        goto outer_done_lo_##SUFFIX;                                               \
+                    if (count1 >= min_gallop)                                                      \
+                        break;                                                                     \
+                }                                                                                  \
+            }                                                                                      \
+            while (1) {                                                                            \
+                size_t k;                                                                          \
+                int status = kiln_c99_timsort_gallop_right_##SUFFIX(ts, ts->a[cursor2],            \
+                                                                    ts->scratch, cursor1, len1, 0, \
+                                                                    &k);                           \
+                if (status != KILN_C99_OK) {                                                       \
+                    if (len1 > 0)                                                                  \
+                        memcpy(&ts->a[dest], &ts->scratch[cursor1], len1 * sizeof(TYPE));          \
+                    return status;                                                                 \
+                }                                                                                  \
+                if (k > 0) {                                                                       \
+                    memcpy(&ts->a[dest], &ts->scratch[cursor1], k * sizeof(TYPE));                 \
+                    dest += k;                                                                     \
+                    cursor1 += k;                                                                  \
+                    len1 -= k;                                                                     \
+                    if (len1 == 0)                                                                 \
+                        goto outer_done_lo_##SUFFIX;                                               \
+                }                                                                                  \
+                ts->a[dest++] = ts->a[cursor2++];                                                  \
+                if (--len2 == 0)                                                                   \
+                    goto outer_done_lo_##SUFFIX;                                                   \
+                size_t m;                                                                          \
+                status = kiln_c99_timsort_gallop_left_##SUFFIX(ts, ts->scratch[cursor1], ts->a,    \
+                                                               cursor2, len2, 0, &m);              \
+                if (status != KILN_C99_OK) {                                                       \
+                    if (len1 > 0)                                                                  \
+                        memcpy(&ts->a[dest], &ts->scratch[cursor1], len1 * sizeof(TYPE));          \
+                    return status;                                                                 \
+                }                                                                                  \
+                if (m > 0) {                                                                       \
+                    memmove(&ts->a[dest], &ts->a[cursor2], m * sizeof(TYPE));                      \
+                    dest += m;                                                                     \
+                    cursor2 += m;                                                                  \
+                    len2 -= m;                                                                     \
+                    if (len2 == 0)                                                                 \
+                        goto outer_done_lo_##SUFFIX;                                               \
+                }                                                                                  \
+                ts->a[dest++] = ts->scratch[cursor1++];                                            \
+                if (--len1 == 0)                                                                   \
+                    goto outer_done_lo_##SUFFIX;                                                   \
+                if (k < 7 && m < 7) {                                                              \
+                    min_gallop++;                                                                  \
+                    break;                                                                         \
+                }                                                                                  \
+                if (min_gallop > 1)                                                                \
+                    min_gallop--;                                                                  \
+            }                                                                                      \
+        }                                                                                          \
+    outer_done_lo_##SUFFIX:                                                                        \
+        ts->min_gallop = min_gallop < 1 ? 1 : min_gallop;                                          \
+        if (len1 > 0) {                                                                            \
+            memcpy(&ts->a[dest], &ts->scratch[cursor1], len1 * sizeof(TYPE));                      \
+        }                                                                                          \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_merge_hi_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts,            \
+                                                  size_t base1, size_t len1, size_t base2,         \
+                                                  size_t len2) {                                   \
+        if (len2 > ts->scratch_capacity) {                                                         \
+            TYPE *new_scratch = (TYPE *)realloc(ts->scratch, len2 * sizeof(TYPE));                 \
+            if (new_scratch == NULL)                                                               \
+                return KILN_C99_OUT_OF_MEMORY;                                                     \
+            ts->scratch = new_scratch;                                                             \
+            ts->scratch_capacity = len2;                                                           \
+        }                                                                                          \
+        memcpy(ts->scratch, &ts->a[base2], len2 * sizeof(TYPE));                                   \
+        size_t cursor1 = base1 + len1 - 1;                                                         \
+        size_t cursor2 = len2 - 1;                                                                 \
+        size_t dest = base2 + len2 - 1;                                                            \
+        size_t min_gallop = ts->min_gallop;                                                        \
+        while (1) {                                                                                \
+            size_t count1 = 0;                                                                     \
+            size_t count2 = 0;                                                                     \
+            while (1) {                                                                            \
+                double order;                                                                      \
+                int status = CMP_FUNC(ts->ctx, ts->scratch[cursor2], ts->a[cursor1], &order);      \
+                if (status != KILN_C99_OK) {                                                       \
+                    if (len2 > 0)                                                                  \
+                        memcpy(&ts->a[dest - len2 + 1], ts->scratch, len2 * sizeof(TYPE));         \
+                    return status;                                                                 \
+                }                                                                                  \
+                if (order < 0.0) {                                                                 \
+                    ts->a[dest--] = ts->a[cursor1--];                                              \
+                    count1++;                                                                      \
+                    count2 = 0;                                                                    \
+                    if (--len1 == 0)                                                               \
+                        goto outer_done_hi_##SUFFIX;                                               \
+                    if (count1 >= min_gallop)                                                      \
+                        break;                                                                     \
+                } else {                                                                           \
+                    ts->a[dest--] = ts->scratch[cursor2--];                                        \
+                    count2++;                                                                      \
+                    count1 = 0;                                                                    \
+                    if (--len2 == 0)                                                               \
+                        goto outer_done_hi_##SUFFIX;                                               \
+                    if (count2 >= min_gallop)                                                      \
+                        break;                                                                     \
+                }                                                                                  \
+            }                                                                                      \
+            while (1) {                                                                            \
+                size_t k;                                                                          \
+                int status = kiln_c99_timsort_gallop_right_##SUFFIX(                               \
+                    ts, ts->scratch[cursor2], ts->a, base1, len1, len1 - 1, &k);                   \
+                if (status != KILN_C99_OK) {                                                       \
+                    if (len2 > 0)                                                                  \
+                        memcpy(&ts->a[dest - len2 + 1], ts->scratch, len2 * sizeof(TYPE));         \
+                    return status;                                                                 \
+                }                                                                                  \
+                size_t n_copy = len1 - k;                                                          \
+                if (n_copy > 0) {                                                                  \
+                    dest -= n_copy;                                                                \
+                    cursor1 -= n_copy;                                                             \
+                    memmove(&ts->a[dest + 1], &ts->a[cursor1 + 1], n_copy * sizeof(TYPE));         \
+                    len1 -= n_copy;                                                                \
+                    if (len1 == 0)                                                                 \
+                        goto outer_done_hi_##SUFFIX;                                               \
+                }                                                                                  \
+                ts->a[dest--] = ts->scratch[cursor2--];                                            \
+                if (--len2 == 0)                                                                   \
+                    goto outer_done_hi_##SUFFIX;                                                   \
+                size_t m;                                                                          \
+                status = kiln_c99_timsort_gallop_left_##SUFFIX(ts, ts->a[cursor1], ts->scratch, 0, \
+                                                               len2, len2 - 1, &m);                \
+                if (status != KILN_C99_OK) {                                                       \
+                    if (len2 > 0)                                                                  \
+                        memcpy(&ts->a[dest - len2 + 1], ts->scratch, len2 * sizeof(TYPE));         \
+                    return status;                                                                 \
+                }                                                                                  \
+                size_t m_copy = len2 - m;                                                          \
+                if (m_copy > 0) {                                                                  \
+                    dest -= m_copy;                                                                \
+                    cursor2 -= m_copy;                                                             \
+                    memcpy(&ts->a[dest + 1], &ts->scratch[cursor2 + 1], m_copy * sizeof(TYPE));    \
+                    len2 -= m_copy;                                                                \
+                    if (len2 == 0)                                                                 \
+                        goto outer_done_hi_##SUFFIX;                                               \
+                }                                                                                  \
+                ts->a[dest--] = ts->a[cursor1--];                                                  \
+                if (--len1 == 0)                                                                   \
+                    goto outer_done_hi_##SUFFIX;                                                   \
+                if (n_copy < 7 && m_copy < 7) {                                                    \
+                    min_gallop++;                                                                  \
+                    break;                                                                         \
+                }                                                                                  \
+                if (min_gallop > 1)                                                                \
+                    min_gallop--;                                                                  \
+            }                                                                                      \
+        }                                                                                          \
+    outer_done_hi_##SUFFIX:                                                                        \
+        ts->min_gallop = min_gallop < 1 ? 1 : min_gallop;                                          \
+        if (len2 > 0) {                                                                            \
+            memcpy(&ts->a[dest - len2 + 1], ts->scratch, len2 * sizeof(TYPE));                     \
+        }                                                                                          \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_merge_at_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts, size_t i) { \
+        size_t base1 = ts->stack[i].base;                                                          \
+        size_t len1 = ts->stack[i].len;                                                            \
+        size_t base2 = ts->stack[i + 1].base;                                                      \
+        size_t len2 = ts->stack[i + 1].len;                                                        \
+        ts->stack[i].len = len1 + len2;                                                            \
+        if (i == ts->stack_len - 3) {                                                              \
+            ts->stack[i + 1] = ts->stack[i + 2];                                                   \
+        }                                                                                          \
+        ts->stack_len--;                                                                           \
+        size_t k;                                                                                  \
+        int status =                                                                               \
+            kiln_c99_timsort_gallop_right_##SUFFIX(ts, ts->a[base2], ts->a, base1, len1, 0, &k);   \
+        if (status != KILN_C99_OK)                                                                 \
+            return status;                                                                         \
+        base1 += k;                                                                                \
+        len1 -= k;                                                                                 \
+        if (len1 == 0)                                                                             \
+            return KILN_C99_OK;                                                                    \
+        size_t m;                                                                                  \
+        status = kiln_c99_timsort_gallop_left_##SUFFIX(ts, ts->a[base1 + len1 - 1], ts->a, base2,  \
+                                                       len2, len2 - 1, &m);                        \
+        if (status != KILN_C99_OK)                                                                 \
+            return status;                                                                         \
+        len2 = m;                                                                                  \
+        if (len2 == 0)                                                                             \
+            return KILN_C99_OK;                                                                    \
+        if (len1 <= len2) {                                                                        \
+            return kiln_c99_timsort_merge_lo_##SUFFIX(ts, base1, len1, base2, len2);              \
+        } else {                                                                                   \
+            return kiln_c99_timsort_merge_hi_##SUFFIX(ts, base1, len1, base2, len2);              \
+        }                                                                                          \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_merge_collapse_##SUFFIX(kiln_c99_timsort_state_##SUFFIX *ts) {      \
+        while (ts->stack_len > 1) {                                                                \
+            size_t n = ts->stack_len - 2;                                                          \
+            if (n > 0 && ts->stack[n - 1].len <= ts->stack[n].len + ts->stack[n + 1].len) {        \
+                if (ts->stack[n - 1].len < ts->stack[n + 1].len)                                   \
+                    n--;                                                                           \
+                int status = kiln_c99_timsort_merge_at_##SUFFIX(ts, n);                            \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+            } else if (ts->stack[n].len <= ts->stack[n + 1].len) {                                 \
+                int status = kiln_c99_timsort_merge_at_##SUFFIX(ts, n);                            \
+                if (status != KILN_C99_OK)                                                         \
+                    return status;                                                                 \
+            } else {                                                                               \
+                break;                                                                             \
+            }                                                                                      \
+        }                                                                                          \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_merge_force_collapse_##SUFFIX(                                     \
+        kiln_c99_timsort_state_##SUFFIX *ts) {                                                     \
+        while (ts->stack_len > 1) {                                                                \
+            size_t n = ts->stack_len - 2;                                                          \
+            if (n > 0 && ts->stack[n - 1].len < ts->stack[n + 1].len)                              \
+                n--;                                                                               \
+            int status = kiln_c99_timsort_merge_at_##SUFFIX(ts, n);                                \
+            if (status != KILN_C99_OK)                                                             \
+                return status;                                                                     \
+        }                                                                                          \
+        return KILN_C99_OK;                                                                        \
+    }                                                                                              \
+                                                                                                   \
+    static int kiln_c99_timsort_##SUFFIX(CTX_TYPE *ctx, TYPE *a, size_t len) {                     \
+        if (len < 2)                                                                               \
+            return KILN_C99_OK;                                                                    \
+        if (len < 32) {                                                                            \
+            kiln_c99_timsort_state_##SUFFIX ts;                                                    \
+            memset(&ts, 0, sizeof(ts));                                                            \
+            ts.ctx = ctx;                                                                          \
+            ts.a = a;                                                                              \
+            size_t run_len = 0;                                                                    \
+            int status = kiln_c99_timsort_count_run_##SUFFIX(&ts, 0, len, &run_len);               \
+            if (status != KILN_C99_OK)                                                             \
+                return status;                                                                     \
+            return kiln_c99_timsort_binary_sort_##SUFFIX(&ts, 0, len, run_len);                   \
+        }                                                                                          \
+        kiln_c99_timsort_state_##SUFFIX ts;                                                        \
+        memset(&ts, 0, sizeof(ts));                                                                \
+        ts.ctx = ctx;                                                                              \
+        ts.a = a;                                                                                  \
+        ts.min_gallop = 7;                                                                         \
+        ts.scratch_capacity = (len >> 1) + 1;                                                      \
+        ts.scratch = (TYPE *)malloc(ts.scratch_capacity * sizeof(TYPE));                            \
+        if (ts.scratch == NULL)                                                                    \
+            return KILN_C99_OUT_OF_MEMORY;                                                         \
+        size_t min_run = kiln_c99_timsort_min_run_length(len);                                     \
+        size_t lo = 0;                                                                             \
+        int status = KILN_C99_OK;                                                                  \
+        while (lo < len) {                                                                         \
+            size_t run_len;                                                                        \
+            status = kiln_c99_timsort_count_run_##SUFFIX(&ts, lo, len, &run_len);                  \
+            if (status != KILN_C99_OK)                                                             \
+                break;                                                                             \
+            if (run_len < min_run) {                                                               \
+                size_t force = len - lo < min_run ? len - lo : min_run;                            \
+                status = kiln_c99_timsort_binary_sort_##SUFFIX(&ts, lo, lo + force, lo + run_len); \
+                if (status != KILN_C99_OK)                                                         \
+                    break;                                                                         \
+                run_len = force;                                                                   \
+            }                                                                                      \
+            ts.stack[ts.stack_len].base = lo;                                                      \
+            ts.stack[ts.stack_len].len = run_len;                                                  \
+            ts.stack_len++;                                                                        \
+            status = kiln_c99_timsort_merge_collapse_##SUFFIX(&ts);                                \
+            if (status != KILN_C99_OK)                                                             \
+                break;                                                                             \
+            lo += run_len;                                                                         \
+        }                                                                                          \
+        if (status == KILN_C99_OK) {                                                               \
+            status = kiln_c99_timsort_merge_force_collapse_##SUFFIX(&ts);                          \
+        }                                                                                          \
+        free(ts.scratch);                                                                          \
+        return status;                                                                             \
+    }
+
+KILN_DEF_TIMSORT(value, kiln_value, kiln_c99_sort_context, kiln_c99_sort_compare_value)
+KILN_DEF_TIMSORT(typed, double, kiln_c99_typed_sort_context, kiln_c99_sort_compare_typed)
+
 static int kiln_c99_invoke_method(kiln_host *host, kiln_value *result, uint64_t code,
                                   kiln_value receiver, const kiln_value *args, size_t argc,
                                   int depth, kiln_value *thrown) {
@@ -14622,67 +15231,16 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
                 items[index] = kiln_c99_typed_get(view, index);
             }
             if (view->length > 1) {
-                double *scratch = (double *)malloc(view->length * sizeof *scratch);
-                double *src = items;
-                double *dst = scratch;
-                size_t width;
-                if (scratch == NULL) {
+                kiln_c99_typed_sort_context ctx;
+                ctx.host = host;
+                ctx.comparator = comparator;
+                ctx.depth = depth;
+                ctx.thrown = thrown;
+                status = kiln_c99_timsort_typed(&ctx, items, view->length);
+                if (status != KILN_C99_OK) {
                     free(items);
-                    return KILN_C99_OUT_OF_MEMORY;
+                    return status;
                 }
-                for (width = 1; width < view->length; width *= 2) {
-                    size_t start;
-                    for (start = 0; start < view->length; start += 2 * width) {
-                        size_t middle = start + width < view->length ? start + width : view->length;
-                        size_t end = start + 2 * width < view->length ? start + 2 * width : view->length;
-                        size_t left = start;
-                        size_t right = middle;
-                        size_t out = start;
-                        while (left < middle && right < end) {
-                            int order;
-                            if (comparator.tag == KILN_VALUE_UNDEFINED) {
-                                order = kiln_c99_typed_order(src[left], src[right]);
-                            } else {
-                                kiln_value pair[2];
-                                kiln_value answer;
-                                double decided;
-                                pair[0] = kiln_c99_number(src[left]);
-                                pair[1] = kiln_c99_number(src[right]);
-                                status = kiln_c99_call(host, &answer, comparator, kiln_c99_undefined(),
-                                                       pair, 2, depth, thrown);
-                                if (status != KILN_C99_OK) {
-                                    free(scratch);
-                                    free(items);
-                                    return status;
-                                }
-                                decided = kiln_c99_as_number(answer);
-                                /* A comparator answering NaN means "no opinion", which the language
-                                 * treats as equal rather than as an error. */
-                                order = decided > 0.0 ? 1 : decided < 0.0 ? -1 : 0;
-                            }
-                            if (order <= 0) {
-                                dst[out++] = src[left++];
-                            } else {
-                                dst[out++] = src[right++];
-                            }
-                        }
-                        while (left < middle) {
-                            dst[out++] = src[left++];
-                        }
-                        while (right < end) {
-                            dst[out++] = src[right++];
-                        }
-                    }
-                    {
-                        double *tmp = src;
-                        src = dst;
-                        dst = tmp;
-                    }
-                }
-                if (src != items) {
-                    memcpy(items, src, view->length * sizeof *items);
-                }
-                free(scratch);
             }
             for (index = 0; index < view->length; ++index) {
                 kiln_c99_typed_set(view, index, items[index]);
@@ -15305,80 +15863,15 @@ static int kiln_c99_invoke_method_dispatch(kiln_host *host, kiln_value *result, 
             array->elements[index] = kiln_c99_undefined();
         }
         if (live > 1) {
-            kiln_value *scratch = (kiln_value *)malloc(live * sizeof(kiln_value));
-            kiln_value *src = array->elements;
-            kiln_value *dst = scratch;
-            size_t width;
-            if (scratch == NULL) {
-                return KILN_C99_OUT_OF_MEMORY;
+            kiln_c99_sort_context ctx;
+            ctx.host = host;
+            ctx.comparator = comparator;
+            ctx.depth = depth;
+            ctx.thrown = thrown;
+            status = kiln_c99_timsort_value(&ctx, array->elements, live);
+            if (status != KILN_C99_OK) {
+                return status;
             }
-            for (width = 1; width < live; width *= 2) {
-                size_t start;
-                for (start = 0; start < live; start += 2 * width) {
-                    size_t middle = start + width < live ? start + width : live;
-                    size_t end = start + 2 * width < live ? start + 2 * width : live;
-                    size_t left = start;
-                    size_t right = middle;
-                    size_t out = start;
-                    while (left < middle && right < end) {
-                        double order;
-                        if (kiln_c99_is_callable(comparator)) {
-                            kiln_value pair[2];
-                            kiln_value produced;
-                            pair[0] = src[left];
-                            pair[1] = src[right];
-                            status = kiln_c99_call(host, &produced, comparator, kiln_c99_undefined(),
-                                                   pair, 2, depth, thrown);
-                            if (status != KILN_C99_OK) {
-                                if (src != array->elements) {
-                                    memcpy(array->elements, src, live * sizeof(kiln_value));
-                                }
-                                free(scratch);
-                                return status;
-                            }
-                            order = kiln_c99_as_number(produced);
-                            /* A comparator that answers NaN is treated as "equal", which keeps the sort
-                             * total rather than letting it loop. */
-                            if (isnan(order)) {
-                                order = 0.0;
-                            }
-                        } else {
-                            /* Without a comparator the elements are compared *as text*, which is the
-                             * language's oldest surprise: `[10, 9].sort()` is `[10, 9]`. */
-                            kiln_value left_text = kiln_c99_text(src[left]);
-                            kiln_value right_text = kiln_c99_text(src[right]);
-                            if (left_text.tag != KILN_VALUE_STRING || right_text.tag != KILN_VALUE_STRING) {
-                                if (src != array->elements) {
-                                    memcpy(array->elements, src, live * sizeof(kiln_value));
-                                }
-                                free(scratch);
-                                return KILN_C99_OUT_OF_MEMORY;
-                            }
-                            order = (double)kiln_c99_string_compare(left_text, right_text);
-                        }
-                        if (order <= 0.0) {
-                            dst[out++] = src[left++];
-                        } else {
-                            dst[out++] = src[right++];
-                        }
-                    }
-                    while (left < middle) {
-                        dst[out++] = src[left++];
-                    }
-                    while (right < end) {
-                        dst[out++] = src[right++];
-                    }
-                }
-                {
-                    kiln_value *tmp = src;
-                    src = dst;
-                    dst = tmp;
-                }
-            }
-            if (src != array->elements) {
-                memcpy(array->elements, src, live * sizeof(kiln_value));
-            }
-            free(scratch);
         }
         /* The array itself, so `a.sort()` can be chained and `a.sort() === a` holds. */
         *result = receiver;
