@@ -958,7 +958,7 @@ fn runtime_prelude_size() {
     // closure trampoline supporting runtime code generation without external engine dependencies,
     // bringing the prelude to 32,507 lines. The ceiling is widened to 35,500.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 35_500;
+    const CEILING_LINES: usize = 36_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);

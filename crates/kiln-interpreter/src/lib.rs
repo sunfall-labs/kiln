@@ -20633,42 +20633,258 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             .into_iter()
             .partition(|item| !matches!(item, Value::Undefined));
 
-        let mut width = 1;
-        while width < present.len() {
-            let mut merged = Vec::with_capacity(present.len());
-            let mut start = 0;
-            while start < present.len() {
-                let middle = (start + width).min(present.len());
-                let end = (start + 2 * width).min(present.len());
-                let (mut left, mut right) = (start, middle);
-                while left < middle && right < end {
-                    // `<= 0` keeps the left run first on a tie, which is what makes it stable.
-                    if self.compare_for_sort(
-                        &comparator,
-                        &present[left],
-                        &present[right],
-                        instruction,
-                    )? <= 0.0
-                    {
-                        merged.push(present[left].clone());
-                        left += 1;
-                    } else {
-                        merged.push(present[right].clone());
-                        right += 1;
-                    }
-                }
-                merged.extend_from_slice(&present[left..middle]);
-                merged.extend_from_slice(&present[right..end]);
-                start = end;
-            }
-            present = merged;
-            width *= 2;
-        }
+        self.timsort(&comparator, &mut present, instruction)?;
 
         present.extend(absent);
         *items.borrow_mut() = present;
         // In place, and yields the same array rather than a copy.
         Ok(receiver.clone())
+    }
+
+    fn timsort_min_run_length(mut n: usize) -> usize {
+        let mut r = 0;
+        while n >= 64 {
+            r |= n & 1;
+            n >>= 1;
+        }
+        n + r
+    }
+
+    fn timsort(
+        &mut self,
+        comparator: &Value,
+        arr: &mut [Value],
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let len = arr.len();
+        if len < 2 {
+            return Ok(());
+        }
+        if len < 32 {
+            let run_len = self.timsort_count_run(comparator, arr, instruction)?;
+            return self.timsort_binary_sort(comparator, arr, run_len, instruction);
+        }
+        let min_run = Self::timsort_min_run_length(len);
+        let mut runs: Vec<(usize, usize)> = Vec::with_capacity(64);
+        let mut lo = 0;
+        while lo < len {
+            let mut run_len = self.timsort_count_run(comparator, &mut arr[lo..], instruction)?;
+            if run_len < min_run {
+                let force = (len - lo).min(min_run);
+                self.timsort_binary_sort(
+                    comparator,
+                    &mut arr[lo..lo + force],
+                    run_len,
+                    instruction,
+                )?;
+                run_len = force;
+            }
+            runs.push((lo, run_len));
+            self.timsort_merge_collapse(comparator, arr, &mut runs, instruction)?;
+            lo += run_len;
+        }
+        self.timsort_merge_force_collapse(comparator, arr, &mut runs, instruction)?;
+        Ok(())
+    }
+
+    fn timsort_binary_sort(
+        &mut self,
+        comparator: &Value,
+        slice: &mut [Value],
+        start: usize,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let len = slice.len();
+        let start = start.max(1);
+        for i in start..len {
+            let pivot = slice[i].clone();
+            let mut left = 0;
+            let mut right = i;
+            while left < right {
+                let mid = left + ((right - left) >> 1);
+                let order = self.compare_for_sort(comparator, &pivot, &slice[mid], instruction)?;
+                if order < 0.0 {
+                    right = mid;
+                } else {
+                    left = mid + 1;
+                }
+            }
+            slice[left..=i].rotate_right(1);
+        }
+        Ok(())
+    }
+
+    fn timsort_count_run(
+        &mut self,
+        comparator: &Value,
+        slice: &mut [Value],
+        instruction: usize,
+    ) -> Result<usize, ExecutionError> {
+        let len = slice.len();
+        if len <= 1 {
+            return Ok(len);
+        }
+        let order = self.compare_for_sort(comparator, &slice[1], &slice[0], instruction)?;
+        let mut run_hi = 2;
+        if order < 0.0 {
+            while run_hi < len {
+                let ord = self.compare_for_sort(
+                    comparator,
+                    &slice[run_hi],
+                    &slice[run_hi - 1],
+                    instruction,
+                )?;
+                if ord < 0.0 {
+                    run_hi += 1;
+                } else {
+                    break;
+                }
+            }
+            slice[..run_hi].reverse();
+        } else {
+            while run_hi < len {
+                let ord = self.compare_for_sort(
+                    comparator,
+                    &slice[run_hi],
+                    &slice[run_hi - 1],
+                    instruction,
+                )?;
+                if ord >= 0.0 {
+                    run_hi += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        Ok(run_hi)
+    }
+
+    fn timsort_merge_collapse(
+        &mut self,
+        comparator: &Value,
+        arr: &mut [Value],
+        runs: &mut Vec<(usize, usize)>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        while runs.len() > 1 {
+            let mut n = runs.len() - 2;
+            if n > 0 && runs[n - 1].1 <= runs[n].1 + runs[n + 1].1 {
+                if runs[n - 1].1 < runs[n + 1].1 {
+                    n -= 1;
+                }
+                self.timsort_merge_at(comparator, arr, runs, n, instruction)?;
+            } else if runs[n].1 <= runs[n + 1].1 {
+                self.timsort_merge_at(comparator, arr, runs, n, instruction)?;
+            } else {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn timsort_merge_force_collapse(
+        &mut self,
+        comparator: &Value,
+        arr: &mut [Value],
+        runs: &mut Vec<(usize, usize)>,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        while runs.len() > 1 {
+            let mut n = runs.len() - 2;
+            if n > 0 && runs[n - 1].1 < runs[n + 1].1 {
+                n -= 1;
+            }
+            self.timsort_merge_at(comparator, arr, runs, n, instruction)?;
+        }
+        Ok(())
+    }
+
+    fn timsort_merge_at(
+        &mut self,
+        comparator: &Value,
+        arr: &mut [Value],
+        runs: &mut Vec<(usize, usize)>,
+        i: usize,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        let (base1, len1) = runs[i];
+        let (base2, len2) = runs[i + 1];
+        runs[i] = (base1, len1 + len2);
+        runs.remove(i + 1);
+
+        let mut k = 0;
+        while k < len1 {
+            let ord =
+                self.compare_for_sort(comparator, &arr[base2], &arr[base1 + k], instruction)?;
+            if ord < 0.0 {
+                break;
+            }
+            k += 1;
+        }
+        let (base1, len1) = (base1 + k, len1 - k);
+        if len1 == 0 {
+            return Ok(());
+        }
+
+        let mut m = len2;
+        while m > 0 {
+            let ord = self.compare_for_sort(
+                comparator,
+                &arr[base1 + len1 - 1],
+                &arr[base2 + m - 1],
+                instruction,
+            )?;
+            if ord >= 0.0 {
+                break;
+            }
+            m -= 1;
+        }
+        let len2 = m;
+        if len2 == 0 {
+            return Ok(());
+        }
+
+        if len1 <= len2 {
+            let scratch = arr[base1..base1 + len1].to_vec();
+            let (mut c1, mut c2, mut dest) = (0, base2, base1);
+            while c1 < len1 && c2 < base2 + len2 {
+                let ord = self.compare_for_sort(comparator, &arr[c2], &scratch[c1], instruction)?;
+                if ord < 0.0 {
+                    arr[dest] = arr[c2].clone();
+                    c2 += 1;
+                } else {
+                    arr[dest] = scratch[c1].clone();
+                    c1 += 1;
+                }
+                dest += 1;
+            }
+            while c1 < len1 {
+                arr[dest] = scratch[c1].clone();
+                dest += 1;
+                c1 += 1;
+            }
+        } else {
+            let scratch = arr[base2..base2 + len2].to_vec();
+            let (mut c1, mut c2, mut dest) = (base1 + len1, len2, base2 + len2);
+            while c1 > base1 && c2 > 0 {
+                let ord =
+                    self.compare_for_sort(comparator, &scratch[c2 - 1], &arr[c1 - 1], instruction)?;
+                if ord < 0.0 {
+                    arr[dest - 1] = arr[c1 - 1].clone();
+                    c1 -= 1;
+                } else {
+                    arr[dest - 1] = scratch[c2 - 1].clone();
+                    c2 -= 1;
+                }
+                dest -= 1;
+            }
+            while c2 > 0 {
+                arr[dest - 1] = scratch[c2 - 1].clone();
+                dest -= 1;
+                c2 -= 1;
+            }
+        }
+        Ok(())
     }
 
     /// One comparison for `array_sort`: the comparator's number, or the default string order.
