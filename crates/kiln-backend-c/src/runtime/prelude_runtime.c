@@ -2705,10 +2705,19 @@ static int kiln_c99_new_object_with_capacity(kiln_value *out, size_t capacity) {
         return status;
     }
     object = kiln_c99_object_of(*out);
-    /* The object is already on the heap, so a failure here leaves it to the collector rather
-     * than to a partially built caller. */
-    return kiln_c99_reserve((void **)&object->properties, &object->capacity, capacity,
-                            sizeof *object->properties);
+    if (capacity > KILN_C99_INLINE_SLOTS) {
+        kiln_value *new_slots = (kiln_value *)malloc(capacity * sizeof(kiln_value));
+        size_t i;
+        if (new_slots == NULL) {
+            return KILN_C99_OUT_OF_MEMORY;
+        }
+        for (i = 0; i < capacity; ++i) {
+            new_slots[i] = kiln_c99_undefined();
+        }
+        object->slots = new_slots;
+        object->slot_capacity = capacity;
+    }
+    return KILN_C99_OK;
 }
 
 /* Cancellation is ordinary object state, not a new value kind. That keeps the hot value layout

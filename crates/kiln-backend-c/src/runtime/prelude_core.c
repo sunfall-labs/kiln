@@ -2703,7 +2703,7 @@ static int kiln_c99_get_own_kind(kiln_host *host, kiln_value target, const char 
          * the chain can hold it and the walk is not made at all -- unless the check mode is on,
          * which wants every level's scan run by bytes. */
         if (ikey == NULL) ikey = kiln_c99_interned(key, key_len);
-        walk = ikey != NULL || kiln_c99_keys_checked();
+        walk = ikey != NULL || kiln_c99_keys_checked() || kiln_c99_key_index(key, key_len) >= 0.0;
         /* Own properties first, then the chain. Iterative and bounded rather than recursive:
          * the walk is on the C stack, and a program can build a chain long enough to exhaust
          * it. */
@@ -4758,10 +4758,76 @@ static int kiln_c99_set_computed(kiln_host *host, kiln_value target, kiln_value 
  * the caller having built something this cannot be asked about. */
 static int kiln_c99_define_computed(kiln_value target, kiln_value key, kiln_value value) {
     kiln_value text = kiln_c99_property_key(key);
+    kiln_object *object;
     kiln_property *slot;
     int status;
     if (text.tag != KILN_VALUE_STRING || target.tag != KILN_VALUE_OBJECT) {
         KILN_C99_REFUSE("a computed definition needs a string key and an ordinary object");
+    }
+    object = kiln_c99_object_of(target);
+    if (object->shape != NULL) {
+        double index_num = kiln_c99_key_index(text.ptr, text.len);
+        if (index_num >= 0.0 && index_num < 100000.0) {
+            size_t elem_idx = (size_t)index_num;
+            if (elem_idx >= object->element_capacity) {
+                size_t new_cap = object->element_capacity == 0 ? 8 : object->element_capacity * 2;
+                kiln_value *new_elements;
+                size_t fill_i;
+                while (elem_idx >= new_cap) new_cap *= 2;
+                new_elements = (kiln_value *)realloc(object->elements, new_cap * sizeof(kiln_value));
+                if (new_elements == NULL) return KILN_C99_OUT_OF_MEMORY;
+                for (fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
+                    new_elements[fill_i] = kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0);
+                }
+                object->elements = new_elements;
+                object->element_capacity = new_cap;
+            }
+            object->elements[elem_idx] = value;
+            if (elem_idx >= object->element_count) {
+                object->element_count = elem_idx + 1;
+            }
+            return KILN_C99_OK;
+        } else {
+            const char *ikey = kiln_c99_intern(text.ptr, text.len);
+            uint32_t slot_idx;
+            kiln_shape *next_shape;
+            if (ikey == NULL) return KILN_C99_OUT_OF_MEMORY;
+            if (kiln_c99_shape_find_slot(object->shape, ikey, &slot_idx)) {
+                if (slot_idx < object->slot_capacity) {
+                    object->slots[slot_idx] = value;
+                    return KILN_C99_OK;
+                }
+            }
+            if (kiln_c99_shape_transition(object->shape, ikey, &next_shape)) {
+                uint32_t new_slot = next_shape->slot_index;
+                if (new_slot >= object->slot_capacity) {
+                    size_t new_cap = object->slot_capacity == 0 ? KILN_C99_INLINE_SLOTS : object->slot_capacity * 2;
+                    kiln_value *new_slots;
+                    size_t fill_i;
+                    while (new_slot >= new_cap) new_cap *= 2;
+                    if (object->slots == object->inline_slots) {
+                        new_slots = (kiln_value *)malloc(new_cap * sizeof(kiln_value));
+                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+                        memcpy(new_slots, object->inline_slots, KILN_C99_INLINE_SLOTS * sizeof(kiln_value));
+                    } else if (object->slots == NULL) {
+                        new_slots = (kiln_value *)malloc(new_cap * sizeof(kiln_value));
+                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    } else {
+                        new_slots = (kiln_value *)realloc(object->slots, new_cap * sizeof(kiln_value));
+                        if (new_slots == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    }
+                    for (fill_i = object->slot_capacity; fill_i < new_cap; ++fill_i) {
+                        new_slots[fill_i] = kiln_c99_undefined();
+                    }
+                    object->slots = new_slots;
+                    object->slot_capacity = new_cap;
+                }
+                object->slots[new_slot] = value;
+                object->shape = next_shape;
+                return KILN_C99_OK;
+            }
+        }
+        kiln_c99_ensure_dictionary(object);
     }
     status = kiln_c99_own_slot(target, text.ptr, text.len, &slot);
     if (status != KILN_C99_OK) {
@@ -16726,6 +16792,9 @@ static int kiln_c99_define_properties(kiln_host *host, kiln_value target, kiln_v
         KILN_C99_REFUSE("Object.defineProperties given descriptors that are not an object");
     }
     source = kiln_c99_object_of(descriptors);
+    if (source->shape != NULL) {
+        kiln_c99_ensure_dictionary(source);
+    }
     for (index = 0; index < source->count; ++index) {
         /* Only the enumerable own ones, which is what the language walks -- and the machine's
          * own `@@` keys are never among them. */

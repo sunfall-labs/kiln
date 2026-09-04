@@ -815,6 +815,22 @@ static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
     size_t index;
     size_t which;
     if (headers == NULL) return 0;
+    if (headers->shape != NULL) {
+        for (index = 0; index < headers->shape->property_count; ++index) {
+            const char *key = headers->shape->keys[index];
+            size_t len = strlen(key);
+            for (which = 0; which < 2; ++which) {
+                size_t flen = strlen(framing[which]);
+                size_t byte;
+                if (len != flen) continue;
+                for (byte = 0; byte < flen; ++byte) {
+                    if ((char)tolower((unsigned char)key[byte]) != framing[which][byte])
+                        break;
+                }
+                if (byte == flen) return 1;
+            }
+        }
+    }
     for (index = 0; index < headers->count; ++index) {
         const kiln_property *property = &headers->properties[index];
         for (which = 0; which < 2; ++which) {
