@@ -667,6 +667,7 @@ struct kiln_shape;
 typedef struct kiln_shape_transition {
 typedef struct kiln_shape {
 typedef struct kiln_property {
+#define KILN_C99_INLINE_SLOTS 4
 typedef struct kiln_object {
 #define KILN_C99_MAX_PROTOTYPE_DEPTH 10000
 typedef struct kiln_c99_site {
