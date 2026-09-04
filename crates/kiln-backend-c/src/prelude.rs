@@ -3835,6 +3835,8 @@ fn build_runtime_prelude_source(src: &str) -> String {
                 if let Some(tail) = rem.strip_prefix("inline int kiln_c99_invoke_closure(") {
                     out.push_str("int kiln_c99_invoke_closure(");
                     out.push_str(tail);
+                } else if rem.starts_with("inline ") {
+                    out.push_str(line);
                 } else {
                     out.push_str(rem);
                 }

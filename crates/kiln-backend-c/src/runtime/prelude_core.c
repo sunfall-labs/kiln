@@ -1096,14 +1096,17 @@ static kiln_value kiln_c99_static_text(const char *text, size_t len) {
     return kiln_c99_value(KILN_VALUE_STRING, 0, text, len);
 }
 
+static const char kiln_c99_empty_string[] = "";
+
 static kiln_value kiln_c99_copy_text(const char *text, size_t len) {
+    if (len == 0) {
+        return kiln_c99_value(KILN_VALUE_STRING, 0, kiln_c99_empty_string, 0);
+    }
     char *copy = kiln_c99_gc_alloc_text(len);
     if (copy == NULL) {
         return kiln_c99_undefined();
     }
-    if (len != 0) {
-        memcpy(copy, text, len);
-    }
+    memcpy(copy, text, len);
     return kiln_c99_value(KILN_VALUE_STRING, 0, copy, len);
 }
 
@@ -24631,23 +24634,12 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
  * Outlined instruction operation helpers (compact scalar emission)
  * ========================================================================= */
 
-static kiln_val kiln_val_from_boundary(kiln_value v) {
-    if (v.tag == KILN_VALUE_NUMBER) {
-        /* Canonicalize any quiet-NaN to prevent collision with tagged pointer prefixes */
-        if (KILN_UNLIKELY((v.bits & UINT64_C(0x7FF8000000000000)) == UINT64_C(0x7FF8000000000000))) {
-            return KILN_QNAN_BASE;
-        }
-        return (kiln_val)v.bits;
+static kiln_val kiln_c99_string_constant(void **cached, const char *bytes, size_t len) {
+    if (KILN_UNLIKELY(*cached == NULL)) {
+        kiln_value val = kiln_c99_copy_text(bytes, len);
+        *cached = (void *)val.ptr;
     }
-    switch (v.tag) {
-        case KILN_VALUE_UNDEFINED: return KILN_VAL_UNDEFINED;
-        case KILN_VALUE_NULL:      return KILN_VAL_NULL;
-        case KILN_VALUE_BOOLEAN:   return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
-        case KILN_VALUE_STRING:    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, (const void *)v.ptr);
-        case KILN_VALUE_OBJECT:    return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
-        case KILN_VALUE_FUNCTION:  return KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)v.bits);
-        default:                   return KILN_VAL_UNDEFINED;
-    }
+    return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, *cached);
 }
 
 static kiln_value kiln_val_to_boundary(kiln_val v) {
@@ -24658,25 +24650,175 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
         out.bits = (uint64_t)v;
         return out;
     }
-    switch (v) {
-        case KILN_VAL_UNDEFINED: return kiln_c99_undefined();
-        case KILN_VAL_NULL:      return kiln_c99_null();
-        case KILN_VAL_FALSE:     return kiln_c99_boolean(0);
-        case KILN_VAL_TRUE:      return kiln_c99_boolean(1);
-        default:
-            if ((v & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
-                const char *p = (const char *)KILN_VAL_PTR(v);
-                return kiln_c99_copy_text(p, p ? strlen(p) : 0);
-            }
-            if ((v & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX) {
-                kiln_value out;
-                out.tag = KILN_VALUE_OBJECT;
-                out.len = 0;
-                out.bits = (uint64_t)(uintptr_t)KILN_VAL_PTR(v);
-                return out;
-            }
-            return kiln_c99_undefined();
+    if (KILN_VAL_IS_BUILTIN(v)) {
+        return kiln_c99_builtin(KILN_VAL_BUILTIN_ID(v));
     }
+    if (KILN_VAL_IS_METHOD(v)) {
+        return kiln_c99_method(KILN_VAL_METHOD_ID(v));
+    }
+    switch (v) {
+        case KILN_VAL_UNDEFINED:     return kiln_c99_undefined();
+        case KILN_VAL_NULL:          return kiln_c99_null();
+        case KILN_VAL_FALSE:         return kiln_c99_boolean(0);
+        case KILN_VAL_TRUE:          return kiln_c99_boolean(1);
+        case KILN_VAL_HOLE:          return kiln_c99_hole();
+        case KILN_VAL_UNINITIALIZED: return kiln_c99_uninitialized();
+        default: {
+            uint64_t tag = v & KILN_TAG_MASK;
+            void *ptr = KILN_VAL_PTR(v);
+            if (tag == KILN_TAG_STRING_PREFIX) {
+                const char *p = (const char *)ptr;
+                size_t len = 0;
+                if (p) {
+                    kiln_gc_heap *heap = kiln_c99_gc_heap();
+                    kiln_gc_block *block = heap != NULL ? kiln_c99_gc_lookup(heap, p) : NULL;
+                    if (block != NULL && (block->kind & KILN_GC_KIND_MASK) == KILN_GC_STRING) {
+                        len = block->size;
+                    } else {
+                        len = strlen(p);
+                    }
+                }
+                return kiln_c99_value(KILN_VALUE_STRING, 0, p, len);
+            }
+            if (tag == KILN_TAG_CLOSURE_PREFIX) {
+                return kiln_c99_value(KILN_VALUE_FUNCTION, (uint64_t)(uintptr_t)ptr, NULL, 0);
+            }
+            if (tag == KILN_TAG_SYMBOL_PREFIX) {
+                return kiln_c99_value(KILN_VALUE_SYMBOL, (uint64_t)(uintptr_t)ptr, NULL, 0);
+            }
+            if (tag == KILN_TAG_CELL_PREFIX) {
+                return kiln_c99_value(KILN_VALUE_CELL, (uint64_t)(uintptr_t)ptr, NULL, 0);
+            }
+            if ((v & UINT64_C(0xFFFF800000000000)) == KILN_TAG_TEMPORAL_PREFIX) {
+                return kiln_c99_value(KILN_VALUE_TEMPORAL, (uint64_t)(uintptr_t)ptr, NULL, 0);
+            }
+            if ((v & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX) {
+                return kiln_c99_value(KILN_VALUE_BIGINT, (uint64_t)(uintptr_t)ptr, NULL, 0);
+            }
+            uint32_t val_tag = (tag == KILN_TAG_BUFFER_PREFIX) ? KILN_VALUE_ARRAY : KILN_VALUE_OBJECT;
+            uint32_t gc_kind = kiln_c99_gc_kind_of_ptr(ptr);
+            switch (gc_kind) {
+                case KILN_GC_OBJECT:            val_tag = KILN_VALUE_OBJECT; break;
+                case KILN_GC_ARRAY:             val_tag = KILN_VALUE_ARRAY; break;
+                case KILN_GC_TYPED_ARRAY:       val_tag = KILN_VALUE_TYPED_ARRAY; break;
+                case KILN_GC_TYPED_BUFFER:      val_tag = KILN_VALUE_ARRAY_BUFFER; break;
+                case KILN_GC_DATA_VIEW:         val_tag = KILN_VALUE_DATA_VIEW; break;
+                case KILN_GC_GENERATOR:         val_tag = KILN_VALUE_GENERATOR; break;
+                case KILN_GC_PROMISE:           val_tag = KILN_VALUE_PROMISE; break;
+                case KILN_GC_SETTLER:           val_tag = KILN_VALUE_SETTLER; break;
+                case KILN_GC_BOUND:             val_tag = KILN_VALUE_BOUND; break;
+                case KILN_GC_COLLECTION:        val_tag = KILN_VALUE_COLLECTION; break;
+                case KILN_GC_PROXY:             val_tag = KILN_VALUE_PROXY; break;
+                case KILN_GC_DATE:              val_tag = KILN_VALUE_DATE; break;
+                case KILN_GC_REGEXP:            val_tag = KILN_VALUE_REGEXP; break;
+                case KILN_GC_SYMBOL:            val_tag = KILN_VALUE_SYMBOL; break;
+                case KILN_GC_COMMONJS_REQUIRE:  val_tag = KILN_VALUE_COMMONJS_REQUIRE; break;
+                case KILN_GC_CLOSURE:           val_tag = KILN_VALUE_FUNCTION; break;
+                case KILN_GC_CELL:              val_tag = KILN_VALUE_CELL; break;
+                default: break;
+            }
+            return kiln_c99_value(val_tag, (uint64_t)(uintptr_t)ptr, NULL, 0);
+        }
+    }
+}
+
+static int kiln_c99_val_compare(uint16_t operation, kiln_val left, kiln_val right, int *result) {
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {
+        double a, b;
+        memcpy(&a, &left, sizeof(a));
+        memcpy(&b, &right, sizeof(b));
+        switch (operation) {
+            case 7:  *result = a == b; return 1;
+            case 8:  *result = a != b; return 1;
+            case 9:  *result = a < b;  return 1;
+            case 10: *result = a <= b; return 1;
+            case 11: *result = a > b;  return 1;
+            case 12: *result = a >= b; return 1;
+            case 15: *result = a == b; return 1;
+            case 16: *result = a != b; return 1;
+            default: return 0;
+        }
+    }
+    if (operation == 7) { /* StrictEqual */
+        if (left == right) { *result = 1; return 1; }
+        if (KILN_VAL_IS_NUMBER(left) || KILN_VAL_IS_NUMBER(right)) { *result = 0; return 1; }
+    }
+    if (operation == 8) { /* StrictNotEqual */
+        if (left == right) { *result = 0; return 1; }
+        if (KILN_VAL_IS_NUMBER(left) || KILN_VAL_IS_NUMBER(right)) { *result = 1; return 1; }
+    }
+    return 0;
+}
+
+static kiln_val kiln_c99_val_binary_fast(uint16_t operation, kiln_val left, kiln_val right) {
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {
+        double a, b;
+        memcpy(&a, &left, sizeof(a));
+        memcpy(&b, &right, sizeof(b));
+        switch (operation) {
+            case 1:  return kiln_c99_val_from_double(a + b);
+            case 2:  return kiln_c99_val_from_double(a - b);
+            case 3:  return kiln_c99_val_from_double(a * b);
+            case 4:  return kiln_c99_val_from_double(a / b);
+            case 5:  return kiln_c99_val_from_double(fmod(a, b));
+            case 6:  return kiln_c99_val_from_double(pow(a, b));
+            case 7:  return (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 8:  return (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 9:  return (a < b)  ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 10: return (a <= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 11: return (a > b)  ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 12: return (a >= b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 15: return (a == b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 16: return (a != b) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 17: return kiln_c99_val_from_double(kiln_c99_signed32(
+                kiln_c99_to_uint32(a) & kiln_c99_to_uint32(b)));
+            case 18: return kiln_c99_val_from_double(kiln_c99_signed32(
+                kiln_c99_to_uint32(a) | kiln_c99_to_uint32(b)));
+            case 19: return kiln_c99_val_from_double(kiln_c99_signed32(
+                kiln_c99_to_uint32(a) ^ kiln_c99_to_uint32(b)));
+            case 20: return kiln_c99_val_from_double(kiln_c99_signed32(
+                kiln_c99_to_uint32(a) << (kiln_c99_to_uint32(b) & UINT32_C(31))));
+            case 21: return kiln_c99_val_from_double(kiln_c99_signed32(kiln_c99_shift_right(
+                kiln_c99_to_uint32(a), kiln_c99_to_uint32(b))));
+            case 22: return kiln_c99_val_from_double((double)(
+                kiln_c99_to_uint32(a) >> (kiln_c99_to_uint32(b) & UINT32_C(31))));
+            default: break;
+        }
+    }
+    return kiln_val_from_boundary(kiln_c99_binary(operation, kiln_val_to_boundary(left), kiln_val_to_boundary(right)));
+}
+
+static kiln_val kiln_c99_val_binary(uint16_t operation, kiln_host *host, kiln_val left, kiln_val right, int *status, int depth, kiln_value *thrown) {
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(left) && KILN_VAL_IS_NUMBER(right))) {
+        *status = KILN_C99_OK;
+        return kiln_c99_val_binary_fast(operation, left, right);
+    }
+    kiln_value l = kiln_val_to_boundary(left);
+    kiln_value r = kiln_val_to_boundary(right);
+    kiln_value ans;
+    *status = kiln_c99_binary_checked(operation, host, l, r, &ans, depth, thrown);
+    if (*status == KILN_C99_OK) return kiln_val_from_boundary(ans);
+    return KILN_VAL_UNDEFINED;
+}
+
+static kiln_val kiln_c99_val_unary_fast(uint16_t operation, kiln_val value) {
+    if (KILN_LIKELY(KILN_VAL_IS_NUMBER(value))) {
+        double a;
+        memcpy(&a, &value, sizeof(a));
+        switch (operation) {
+            case 1: return kiln_c99_val_from_double(+a);
+            case 2: return kiln_c99_val_from_double(-a);
+            case 3: return (a == 0.0 || isnan(a)) ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+            case 4: return kiln_val_from_boundary(kiln_c99_typeof(kiln_val_to_boundary(value)));
+            case 5: return kiln_c99_val_from_double(kiln_c99_signed32(~kiln_c99_to_uint32(a)));
+            case 6: return KILN_VAL_UNDEFINED;
+            case 7: return value;
+            case 8: return kiln_c99_val_from_double(a + 1.0);
+            case 9: return kiln_c99_val_from_double(a - 1.0);
+            default: break;
+        }
+    }
+    return kiln_val_from_boundary(kiln_c99_unary(operation, kiln_val_to_boundary(value)));
 }
 
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,
@@ -24757,6 +24899,60 @@ static int kiln_c99_write_property(kiln_host *host, kiln_value target,
         }
     }
     return kiln_c99_put_site(host, target, key, key_len, value, strict, depth, thrown, site);
+}
+
+static int kiln_c99_val_read_property(kiln_host *host, kiln_val target,
+                                      const char *key, size_t key_len,
+                                      int depth, kiln_value *thrown,
+                                      kiln_c99_site *site, kiln_val *out) {
+    if (KILN_LIKELY(site != NULL && site->pic_count > 0 && KILN_VAL_IS_OBJECT(target))) {
+        const kiln_object *object = (const kiln_object *)KILN_VAL_PTR(target);
+        size_t p;
+        for (p = 0; p < site->pic_count; ++p) {
+            if (object->shape == site->entries[p].shape &&
+                site->entries[p].slot < object->slot_capacity) {
+                *out = kiln_val_from_boundary(object->slots[site->entries[p].slot]);
+                return KILN_C99_OK;
+            }
+        }
+    }
+    kiln_value t = kiln_val_to_boundary(target);
+    kiln_value o = kiln_c99_undefined();
+    int status = kiln_c99_read_property(host, t, key, key_len, depth, thrown, site, &o);
+    if (status == KILN_C99_OK) *out = kiln_val_from_boundary(o);
+    return status;
+}
+
+static int kiln_c99_val_write_property(kiln_host *host, kiln_val target,
+                                       const char *key, size_t key_len,
+                                       kiln_val value, int strict,
+                                       int depth, kiln_value *thrown,
+                                       kiln_c99_site *site) {
+    if (KILN_LIKELY(site != NULL && site->pic_count > 0 && KILN_VAL_IS_OBJECT(target))) {
+        kiln_object *object = (kiln_object *)KILN_VAL_PTR(target);
+        size_t p;
+        for (p = 0; p < site->pic_count; ++p) {
+            if (object->shape == site->entries[p].shape) {
+                if (site->entries[p].transition_to == NULL) {
+                    if (KILN_LIKELY(site->entries[p].slot < object->slot_capacity && !object->frozen)) {
+                        object->slots[site->entries[p].slot] = kiln_val_to_boundary(value);
+                        return KILN_C99_OK;
+                    }
+                } else if (!object->not_extensible &&
+                           site->entries[p].slot < object->slot_capacity &&
+                           (object->prototype.tag == KILN_VALUE_UNDEFINED ||
+                            !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
+                    object->slots[site->entries[p].slot] = kiln_val_to_boundary(value);
+                    object->shape = (kiln_shape *)site->entries[p].transition_to;
+                    return KILN_C99_OK;
+                }
+                break;
+            }
+        }
+    }
+    kiln_value t = kiln_val_to_boundary(target);
+    kiln_value v = kiln_val_to_boundary(value);
+    return kiln_c99_write_property(host, t, key, key_len, v, strict, depth, thrown, site);
 }
 
 static void kiln_c99_note_get_property_refusal(kiln_value target) {
@@ -25065,6 +25261,176 @@ static int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *
     int status = kiln_c99_write_element(host, target, key, member, strict, depth, thrown);
     if (status != KILN_C99_OK) return status;
     stack[*sp - 1] = member;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_get_property(kiln_host *host, kiln_val *stack, size_t *sp,
+                                        const char *key, size_t key_len,
+                                        int depth, kiln_value *thrown, kiln_c99_site *site) {
+    kiln_val read;
+    kiln_val target = stack[*sp - 1];
+    int status = kiln_c99_val_read_property(host, target, key, key_len, depth, thrown, site, &read);
+    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(kiln_val_to_boundary(target));
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = read;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_set_property(kiln_host *host, kiln_val *stack, size_t *sp,
+                                        const char *key, size_t key_len, int strict,
+                                        int depth, kiln_value *thrown, kiln_c99_site *site) {
+    kiln_val member = stack[--(*sp)];
+    kiln_val target = stack[*sp - 1];
+    int status = kiln_c99_val_write_property(host, target, key, key_len, member, strict, depth, thrown, site);
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = member;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_to_property_key(kiln_host *host, kiln_val *stack, size_t *sp,
+                                           int depth, kiln_value *thrown) {
+    kiln_value reduced;
+    kiln_value target = kiln_val_to_boundary(stack[*sp - 2]);
+    kiln_value key = kiln_val_to_boundary(stack[*sp - 1]);
+    int status = kiln_c99_reduce_key(host, target, key, &reduced, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = kiln_val_from_boundary(reduced);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_val_read_element(kiln_host *host, kiln_val target, kiln_val key,
+                                     int depth, kiln_value *thrown, kiln_val *out) {
+    if (KILN_LIKELY((KILN_VAL_IS_OBJECT(target) || ((target & KILN_TAG_MASK) == KILN_TAG_BUFFER_PREFIX)) && KILN_VAL_IS_NUMBER(key))) {
+        double idx;
+        memcpy(&idx, &key, sizeof(idx));
+        if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
+            size_t slot = (size_t)idx;
+            kiln_value t = kiln_val_to_boundary(target);
+            if (t.tag == KILN_VALUE_ARRAY) {
+                const kiln_array *array = kiln_c99_array_of(t);
+                if (KILN_LIKELY(slot < array->count && !kiln_c99_is_hole(array->elements[slot]))) {
+                    *out = kiln_val_from_boundary(array->elements[slot]);
+                    return KILN_C99_OK;
+                }
+            } else if (t.tag == KILN_VALUE_OBJECT) {
+                const kiln_object *object = kiln_c99_object_of(t);
+                if (object->elements != NULL && slot < object->element_count && !kiln_c99_is_hole(object->elements[slot])) {
+                    *out = kiln_val_from_boundary(object->elements[slot]);
+                    return KILN_C99_OK;
+                }
+            }
+        }
+    }
+    kiln_value t = kiln_val_to_boundary(target);
+    kiln_value k = kiln_val_to_boundary(key);
+    kiln_value o;
+    int status = kiln_c99_read_element(host, t, k, depth, thrown, &o);
+    if (status == KILN_C99_OK) *out = kiln_val_from_boundary(o);
+    return status;
+}
+
+static int kiln_c99_val_write_element(kiln_host *host, kiln_val target, kiln_val key,
+                                      kiln_val value, int strict, int depth, kiln_value *thrown) {
+    kiln_value t = kiln_val_to_boundary(target);
+    kiln_value k = kiln_val_to_boundary(key);
+    kiln_value v = kiln_val_to_boundary(value);
+    return kiln_c99_write_element(host, t, k, v, strict, depth, thrown);
+}
+
+static int kiln_c99_op_val_get_computed(kiln_host *host, kiln_val *stack, size_t *sp,
+                                        int depth, kiln_value *thrown) {
+    kiln_val key = stack[--(*sp)];
+    kiln_val target = stack[*sp - 1];
+    kiln_val read;
+    int status = kiln_c99_val_read_element(host, target, key, depth, thrown, &read);
+    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {
+        kiln_c99_note_get_computed_refusal(kiln_val_to_boundary(target), kiln_val_to_boundary(key));
+    }
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = read;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_set_computed(kiln_host *host, kiln_val *stack, size_t *sp,
+                                        int strict, int depth, kiln_value *thrown) {
+    kiln_val member = stack[--(*sp)];
+    kiln_val key = stack[--(*sp)];
+    kiln_val target = stack[*sp - 1];
+    int status = kiln_c99_val_write_element(host, target, key, member, strict, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    stack[*sp - 1] = member;
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_call_method(kiln_host *host, kiln_val *stack, size_t *sp,
+                                       const char *key, size_t key_len, size_t argc,
+                                       int depth, kiln_value *thrown, kiln_c99_site *site,
+                                       const char *inst_site, size_t inst_idx, const char *inst_op,
+                                       kiln_value *result) {
+    kiln_value bstack[argc + 1];
+    for (size_t i = 0; i < argc + 1; ++i) {
+        bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
+    }
+    size_t bsp = argc + 1;
+    int status = kiln_c99_op_call_method(host, bstack, &bsp, key, key_len, argc, depth, thrown, site, inst_site, inst_idx, inst_op, result);
+    if (status != KILN_C99_OK) return status;
+    *sp -= (argc + 1);
+    stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_call(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc,
+                                int depth, kiln_value *thrown,
+                                const char *inst_site, size_t inst_idx, const char *inst_op,
+                                kiln_value *result) {
+    kiln_value bstack[argc + 1];
+    for (size_t i = 0; i < argc + 1; ++i) {
+        bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
+    }
+    size_t bsp = argc + 1;
+    int status = kiln_c99_op_call(host, bstack, &bsp, argc, depth, thrown, inst_site, inst_idx, inst_op, result);
+    if (status != KILN_C99_OK) return status;
+    *sp -= (argc + 1);
+    stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_new(kiln_host *host, kiln_val *stack, size_t *sp, size_t argc,
+                               int depth, kiln_value *thrown) {
+    kiln_value bstack[argc + 1];
+    for (size_t i = 0; i < argc + 1; ++i) {
+        bstack[i] = kiln_val_to_boundary(stack[*sp - argc - 1 + i]);
+    }
+    size_t bsp = argc + 1;
+    int status = kiln_c99_op_new(host, bstack, &bsp, argc, depth, thrown);
+    if (status != KILN_C99_OK) return status;
+    *sp -= (argc + 1);
+    stack[(*sp)++] = kiln_val_from_boundary(bstack[bsp - 1]);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_op_val_load_cell(kiln_val cell, kiln_val *stack, size_t *sp, kiln_value *thrown) {
+    kiln_value c = kiln_val_to_boundary(cell);
+    kiln_value *target = kiln_c99_cell_of(c);
+    if (target->tag == KILN_VALUE_UNINITIALIZED) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
+    }
+    stack[(*sp)++] = kiln_val_from_boundary(*target);
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_val_check_tdz(kiln_val val, kiln_value *thrown) {
+    if (val == KILN_VAL_UNINITIALIZED) {
+        return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_REFERENCE_ERROR, "cannot access a binding before its declaration");
+    }
+    return KILN_C99_OK;
+}
+
+static int kiln_c99_val_make_cell(kiln_val *slot) {
+    kiln_value b = kiln_val_to_boundary(*slot);
+    int status = kiln_c99_make_cell(&b);
+    if (status != KILN_C99_OK) return status;
+    *slot = kiln_val_from_boundary(b);
     return KILN_C99_OK;
 }
 

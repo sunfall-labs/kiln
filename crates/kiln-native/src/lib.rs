@@ -4395,12 +4395,13 @@ static int {stem}_proxy_call(void *context, uint16_t operation, uint16_t argc,
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
     }}
-    copy = (char *)malloc(result->len == 0 ? 1 : result->len);
+    copy = (char *)malloc(result->len + 1);
     if (copy == NULL) {{
         proxy->failure_status = KILN_C99_HOST_ERROR;
         return KILN_C99_HOST_ERROR;
     }}
     if (result->len != 0) memcpy(copy, result->ptr, result->len);
+    copy[result->len] = '\0';
     status = {arena}_track(proxy->arena, copy);
     if (status != KILN_C99_OK) {{
         free(copy);
@@ -4440,12 +4441,13 @@ static int {run}(kiln_host *host, kiln_result_v2 **out) {{
     }}
     owned->value = value;
     if (value.tag == KILN_VALUE_STRING) {{
-        copy = (char *)malloc(value.len == 0 ? 1 : value.len);
+        copy = (char *)malloc(value.len + 1);
         if (copy == NULL) {{
             status = KILN_C99_HOST_ERROR;
             goto cleanup;
         }}
         if (value.len != 0) memcpy(copy, value.ptr, value.len);
+        copy[value.len] = '\0';
         owned->value.ptr = copy;
         copy = NULL;
     }} else {{
@@ -4723,12 +4725,13 @@ static int kiln_proxy_call(void *context, uint16_t operation, uint16_t argc,
         proxy->failure_status = KILN_C99_INVALID_ARGUMENT;
         return KILN_C99_INVALID_ARGUMENT;
     }
-    copy = (char *)malloc(result->len == 0 ? 1 : result->len);
+    copy = (char *)malloc(result->len + 1);
     if (copy == NULL) {
         proxy->failure_status = KILN_C99_HOST_ERROR;
         return KILN_C99_HOST_ERROR;
     }
     if (result->len != 0) memcpy(copy, result->ptr, result->len);
+    copy[result->len] = '\0';
     status = kiln_proxy_arena_track(arena, copy);
     if (status != KILN_C99_OK) {
         free(copy);
@@ -4943,12 +4946,13 @@ static int {impl_symbol}(kiln_host *host, kiln_value *result, int preserve_resul
             *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
             status = KILN_C99_INVALID_ARGUMENT;
         }} else {{
-            preserved = (char *)malloc(result->len == 0 ? 1 : result->len);
+            preserved = (char *)malloc(result->len + 1);
             if (preserved == NULL) {{
                 *result = (kiln_value){{ KILN_VALUE_UNDEFINED, 0, {{0}} }};
                 status = KILN_C99_HOST_ERROR;
             }} else {{
                 if (result->len != 0) memcpy(preserved, result->ptr, result->len);
+                preserved[result->len] = '\0';
             }}
         }}
     }}

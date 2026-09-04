@@ -14,22 +14,105 @@ typedef uint64_t kiln_val;
 
 #define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
 #define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
-#define KILN_PAYLOAD_MASK       UINT64_C(0x0000FFFFFFFFFFFF)
+#define KILN_PAYLOAD_MASK       UINT64_C(0x00007FFFFFFFFFFF)
 
 #define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
 #define KILN_VAL_NULL           UINT64_C(0xFFF8000000000002)
 #define KILN_VAL_FALSE          UINT64_C(0xFFF8000000000004)
 #define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
 #define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
+#define KILN_VAL_UNINITIALIZED  UINT64_C(0xFFF8000000000007)
 
-#define KILN_TAG_STRING_PREFIX  UINT64_C(0xFFF9000000000000)
-#define KILN_TAG_OBJECT_PREFIX  UINT64_C(0xFFFA000000000000)
-#define KILN_TAG_CLOSURE_PREFIX UINT64_C(0xFFFB000000000000)
-#define KILN_TAG_BUFFER_PREFIX  UINT64_C(0xFFFC000000000000)
+#define KILN_VAL_BUILTIN_PREFIX UINT64_C(0xFFF8000100000000)
+#define KILN_VAL_BUILTIN(id)    (KILN_VAL_BUILTIN_PREFIX | ((uint64_t)(id) & UINT64_C(0xFFFFFFFF)))
+#define KILN_VAL_IS_BUILTIN(v)  (((uint64_t)(v) & UINT64_C(0xFFFFFFFF00000000)) == KILN_VAL_BUILTIN_PREFIX)
+#define KILN_VAL_BUILTIN_ID(v)  ((uint32_t)((uint64_t)(v) & UINT64_C(0xFFFFFFFF)))
 
-#define KILN_VAL_IS_NUMBER(v)   ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
-#define KILN_VAL_PTR(v)         ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
+#define KILN_VAL_METHOD_PREFIX  UINT64_C(0xFFF8000200000000)
+#define KILN_VAL_METHOD(id)     (KILN_VAL_METHOD_PREFIX | ((uint64_t)(id) & UINT64_C(0xFFFFFFFF)))
+#define KILN_VAL_IS_METHOD(v)   (((uint64_t)(v) & UINT64_C(0xFFFFFFFF00000000)) == KILN_VAL_METHOD_PREFIX)
+#define KILN_VAL_METHOD_ID(v)   ((uint32_t)((uint64_t)(v) & UINT64_C(0xFFFFFFFF)))
+
+#define KILN_TAG_STRING_PREFIX   UINT64_C(0xFFF9000000000000)
+#define KILN_TAG_OBJECT_PREFIX   UINT64_C(0xFFFA000000000000)
+#define KILN_TAG_CLOSURE_PREFIX  UINT64_C(0xFFFB000000000000)
+#define KILN_TAG_BUFFER_PREFIX   UINT64_C(0xFFFC000000000000)
+#define KILN_TAG_SYMBOL_PREFIX   UINT64_C(0xFFFD000000000000)
+#define KILN_TAG_BIGINT_PREFIX   UINT64_C(0xFFFE000000000000)
+#define KILN_TAG_TEMPORAL_PREFIX UINT64_C(0xFFFE800000000000)
+#define KILN_TAG_CELL_PREFIX     UINT64_C(0xFFFF000000000000)
+
+#define KILN_VAL_IS_NUMBER(v)    ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
+#define KILN_VAL_IS_BOOLEAN(v)   (((uint64_t)(v) & UINT64_C(0xFFFFFFFFFFFFFFFE)) == KILN_VAL_FALSE)
+#define KILN_VAL_IS_NULL(v)      ((v) == KILN_VAL_NULL)
+#define KILN_VAL_IS_UNDEFINED(v) ((v) == KILN_VAL_UNDEFINED)
+#define KILN_VAL_IS_NULLISH(v)   ((v) == KILN_VAL_UNDEFINED || (v) == KILN_VAL_NULL)
+#define KILN_VAL_IS_STRING(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX)
+#define KILN_VAL_IS_OBJECT(v)    (((v) & KILN_TAG_MASK) == KILN_TAG_OBJECT_PREFIX)
+#define KILN_VAL_IS_CLOSURE(v)   (((v) & KILN_TAG_MASK) == KILN_TAG_CLOSURE_PREFIX)
+#define KILN_VAL_PTR(v)          ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
 #define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
+
+static inline kiln_val kiln_val_from_boundary(kiln_value v) {
+    if (v.tag == KILN_VALUE_NUMBER) {
+        /* Canonicalize any quiet-NaN to prevent collision with tagged pointer prefixes */
+        if (KILN_UNLIKELY((v.bits & UINT64_C(0x7FF8000000000000)) == UINT64_C(0x7FF8000000000000))) {
+            return KILN_QNAN_BASE;
+        }
+        return (kiln_val)v.bits;
+    }
+    switch (v.tag) {
+        case KILN_VALUE_UNDEFINED:     return KILN_VAL_UNDEFINED;
+        case KILN_VALUE_NULL:          return KILN_VAL_NULL;
+        case KILN_VALUE_BOOLEAN:       return v.bits ? KILN_VAL_TRUE : KILN_VAL_FALSE;
+        case KILN_VALUE_STRING:        return KILN_VAL_TAG_PTR(KILN_TAG_STRING_PREFIX, v.ptr ? (const void *)v.ptr : (const void *)"");
+        case KILN_VALUE_FUNCTION:      return KILN_VAL_TAG_PTR(KILN_TAG_CLOSURE_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_OBJECT:        return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_ARRAY:         return KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_TYPED_ARRAY:   return KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_ARRAY_BUFFER:  return KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_DATA_VIEW:     return KILN_VAL_TAG_PTR(KILN_TAG_BUFFER_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_SYMBOL:        return KILN_VAL_TAG_PTR(KILN_TAG_SYMBOL_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_BUILTIN:       return KILN_VAL_BUILTIN(v.bits);
+        case KILN_VALUE_METHOD:        return KILN_VAL_METHOD(v.bits);
+        case KILN_VALUE_BIGINT:        return KILN_VAL_TAG_PTR(KILN_TAG_BIGINT_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_TEMPORAL:      return KILN_VAL_TAG_PTR(KILN_TAG_TEMPORAL_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_CELL:          return KILN_VAL_TAG_PTR(KILN_TAG_CELL_PREFIX, (const void *)(uintptr_t)v.bits);
+        case KILN_VALUE_HOLE:          return KILN_VAL_HOLE;
+        case KILN_VALUE_UNINITIALIZED: return KILN_VAL_UNINITIALIZED;
+        default:                       return KILN_VAL_TAG_PTR(KILN_TAG_OBJECT_PREFIX, (const void *)(uintptr_t)v.bits);
+    }
+}
+
+static inline kiln_val kiln_c99_val_from_double(double d) {
+    if (KILN_UNLIKELY(isnan(d))) {
+        return KILN_QNAN_BASE;
+    }
+    union { double d; uint64_t u; } res = { .d = d };
+    return res.u;
+}
+
+int32_t kiln_bigint_is_zero(const void *handle);
+
+static inline int kiln_c99_val_truthy(kiln_val v) {
+    if (v == KILN_VAL_FALSE || v == KILN_VAL_UNDEFINED || v == KILN_VAL_NULL) return 0;
+    if (v == KILN_VAL_TRUE) return 1;
+    if (KILN_VAL_IS_NUMBER(v)) {
+        double d;
+        memcpy(&d, &v, sizeof(d));
+        return d != 0.0 && !isnan(d);
+    }
+    if ((v & UINT64_C(0xFFFF800000000000)) == KILN_TAG_BIGINT_PREFIX) {
+        return !kiln_bigint_is_zero(KILN_VAL_PTR(v));
+    }
+    if ((v & KILN_TAG_MASK) == KILN_TAG_STRING_PREFIX) {
+        const char *p = (const char *)KILN_VAL_PTR(v);
+        return p != NULL && p[0] != '\0';
+    }
+    return 1;
+}
+
+static kiln_value kiln_val_to_boundary(kiln_val v);
 
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
@@ -461,8 +544,8 @@ typedef struct kiln_generator {
      * and this is the promise its eventual return value settles. Undefined for a plain one. */
     kiln_value promise;
     int is_async;
-    kiln_value *locals;
-    kiln_value *stack;
+    kiln_val *locals;
+    kiln_val *stack;
     size_t sp;
     /* Which `Yield` to come back to. Zero before the first `next`, when the body starts at its
      * beginning rather than resuming. */
