@@ -34674,6 +34674,16 @@ fn call_native(
         // `Object.prototype.toString.call(x)`, the oldest type test there is.
         // The tag reports the *box*, not what is in it, which is why this is one of the few
         // built-ins `receiver_for` deliberately leaves a wrapper closed for.
+        // Not `[object X]`: this is the *tag*, which `Object.prototype.toString` then wraps.
+        // It answered the wrapped form, and answered it for every receiver -- so the getter that
+        // serializers use as a typed-array brand check said `"[object Object]"` about a plain
+        // object instead of `undefined`, which is true of nothing.
+        Native::TypedArrayToStringTag => match wrapped_primitive(receiver)
+            .unwrap_or_else(|| receiver.clone())
+        {
+            Value::TypedArray(view) => Value::String(view.kind.name().to_owned()),
+            _ => Value::Undefined,
+        },
         Native::ObjectToStringTag => Value::String(format!(
             "[object {}]",
             match &wrapped_primitive(receiver).unwrap_or_else(|| receiver.clone()) {
@@ -43289,6 +43299,7 @@ const fn native_length(native: Native) -> Option<f64> {
         // receiver.
         N::FunctionHasInstance => 1.0,
         N::SymbolToPrimitive => 1.0,
+        N::TypedArrayToStringTag => 0.0,
         N::PrototypeOf(_) => return None,
         N::Math | N::Json | N::Reflect | N::Performance => return None,
         N::HostCreateRealm => 0.0,
@@ -44338,7 +44349,7 @@ fn intrinsic_accessor(target: &Value, key: &str) -> Option<Property> {
             if key == WellKnown::ToStringTag.property_key() =>
         {
             Some(Property::Accessor {
-                get: Some(Value::Native(Native::ObjectToStringTag, realm)),
+                get: Some(Value::Native(Native::TypedArrayToStringTag, realm)),
                 set: None,
             })
         }
@@ -44704,7 +44715,13 @@ fn own_property_keys_including_symbols(intrinsics: &Intrinsics, target: &Value) 
         };
         for symbol in WellKnown::ALL {
             let key = symbol.property_key();
-            if !matches!(native.property(key), None | Some(Value::Undefined)) {
+            // An accessor as well as a value: `%TypedArray%.prototype[@@toStringTag]` is a
+            // getter, so asking the value tables alone left it readable, describable, and
+            // absent from `getOwnPropertySymbols`.
+            let published = !matches!(native.property(key), None | Some(Value::Undefined))
+                || intrinsic_accessor(target, key).is_some()
+                || machine_accessor(target, key).is_some();
+            if published {
                 keys.push(key.to_owned());
             }
         }
@@ -45114,6 +45131,8 @@ fn native_js_name(native: &Native) -> String {
         // can see.
         Native::FunctionHasInstance => "[Symbol.hasInstance]".to_owned(),
         Native::SymbolToPrimitive => "[Symbol.toPrimitive]".to_owned(),
+        // An accessor is named for what it reads, prefixed with the half it is.
+        Native::TypedArrayToStringTag => "get [Symbol.toStringTag]".to_owned(),
         Native::StringToStringMethod => "toString".to_owned(),
         // A `DataView` accessor is named for the member it is published under, not for the Rust
         // variant behind it. Sixteen of them share four variants, so derivation gave all eight

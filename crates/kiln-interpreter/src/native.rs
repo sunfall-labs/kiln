@@ -719,6 +719,11 @@ pub enum Native {
     /// to be coerced. It exists as its own variant rather than reusing `PrimitiveValueOf` because
     /// a program can read it, and what it reads must be named `[Symbol.toPrimitive]`.
     SymbolToPrimitive,
+    /// `%TypedArray%.prototype[Symbol.toStringTag]`'s getter. It answers the concrete view's name
+    /// -- `"Uint8Array"` -- and `undefined` for anything that is not a view, which is what makes
+    /// it usable as a brand check: real serializers capture this getter once and call it on every
+    /// value they meet.
+    TypedArrayToStringTag,
     /// `String.prototype.toString`. Its behaviour is `valueOf`'s exactly -- both hand back the
     /// string -- but they are two function objects with two names, and publishing one variant for
     /// both made `String.prototype.toString.name` answer `"valueOf"` and the two compare equal.

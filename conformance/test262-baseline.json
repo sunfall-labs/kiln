@@ -197,8 +197,8 @@
       "passed": 18
     },
     "built-ins/TypedArray": {
-      "failed": 305,
-      "passed": 2571
+      "failed": 289,
+      "passed": 2587
     },
     "built-ins/TypedArrayConstructors": {
       "failed": 122,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 694,
-      "passed": 1901
+      "failed": 692,
+      "passed": 1903
     },
     "staging/source-phase-imports": {
       "failed": 0,
