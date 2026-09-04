@@ -1,6 +1,23 @@
 # A module with module-scope globals cannot be compiled natively
 
-**Status:** open, pre-existing. Reproduced at `52e60b1f` in a clean worktree, so it predates
+**Status:** FIXED 2026-09-03. Kept for the diagnosis, and for one thing this note got wrong.
+
+The fix was three declarations. `prelude_declarations.h` -- which *is* included in a module unit
+-- now carries `KILN_GC_PHASE_MARK`, an opaque `struct kiln_gc_heap`, and an `extern` for
+`kiln_c99_gc_mark_values`, and the emitted cast names the bare struct so the header cannot
+collide with the typedef in `prelude_runtime.c`.
+
+**What this note got wrong:** it said a declaration "would compile and then fail to link" because
+`kiln_c99_gc_mark_values` is `static`. It is static *in the source*, but the prelude emitter
+strips `static ` from every function when it renders the prelude for separate compilation
+(`prelude.rs`), so every one of them has external linkage in the built artifact. That is also why
+`kiln_c99_gc_unit_roots` -- equally static in source -- was resolving from the same unit all
+along. The contradiction was visible in the original note and I did not chase it; the emitted C
+in the work directory settled it in one look.
+
+## Original diagnosis (accurate except as corrected above)
+
+**Status was:** open, pre-existing. Reproduced at `52e60b1f` in a clean worktree, so it predates
 the 2026-09-03 conversion work on this branch.
 
 ## Repro

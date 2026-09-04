@@ -5,7 +5,7 @@ expression: body(&unit)
 /* Program hash: f4d3dbd71fb25e3e; bytecode version: 2. */
 static kiln_value kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals[2];
 static void kiln_module_f4d3dbd71fb25e3e751b47bde606576f_gc_roots(void *heap, void *context, int phase) {
-    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((kiln_gc_heap *)heap, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals, 2);
+    if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((struct kiln_gc_heap *)heap, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals, 2);
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
 static int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);
