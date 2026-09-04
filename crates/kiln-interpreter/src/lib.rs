@@ -36196,6 +36196,24 @@ fn call_native(
         Native::MathExp => Value::Number(argument_number(arguments).exp()),
         // `Number(x)` converts; `Number()` with no argument is 0, not NaN.
         Native::PrimitiveValueOf => receiver.clone(),
+        // Every hint answers the same thing, which is the point: a symbol does not become a
+        // number or a string, so the reduction ends here and the caller refuses it.
+        Native::SymbolToPrimitive => match receiver {
+            Value::Symbol(_) => receiver.clone(),
+            // `thisSymbolValue` accepts the box as well as the primitive, which is what makes
+            // `Object(sym)[Symbol.toPrimitive]()` answer the symbol it wraps.
+            boxed if matches!(wrapped_primitive(boxed), Some(Value::Symbol(_))) => {
+                wrapped_primitive(boxed).unwrap_or(Value::Undefined)
+            }
+            other => {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "Symbol.prototype[Symbol.toPrimitive] called on {}",
+                        other.type_name()
+                    ),
+                });
+            }
+        },
         Native::BooleanToString => Value::String(branded_boolean(receiver)?.to_string()),
         Native::BooleanValueOf => Value::Boolean(branded_boolean(receiver)?),
         Native::NumberValueOf => Value::Number(branded_number(receiver)?),
@@ -41949,6 +41967,12 @@ fn symbol_method(name: &str) -> Value {
         "toString" | "toLocaleString" => Value::Native(Native::PrimitiveToString, RealmId::PRIMARY),
         "valueOf" => Value::Native(Native::PrimitiveValueOf, RealmId::PRIMARY),
         key if key == WellKnown::ToStringTag.property_key() => Value::String("Symbol".to_owned()),
+        // `thisSymbolValue`, which answers the symbol itself for every hint. It is what makes
+        // `` `${sym}` `` a TypeError rather than a description: the reduction reaches a symbol,
+        // and a symbol has no string.
+        key if key == WellKnown::ToPrimitive.property_key() => {
+            Value::Native(Native::SymbolToPrimitive, RealmId::PRIMARY)
+        }
         _ => Value::Undefined,
     }
 }
@@ -43233,6 +43257,7 @@ const fn native_length(native: Native) -> Option<f64> {
         // `OrdinaryHasInstance(C, O)` takes the one value being tested; the constructor is the
         // receiver.
         N::FunctionHasInstance => 1.0,
+        N::SymbolToPrimitive => 1.0,
         N::PrototypeOf(_) => return None,
         N::Math | N::Json | N::Reflect | N::Performance => return None,
         N::HostCreateRealm => 0.0,
@@ -44807,6 +44832,7 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
     // that could assign over it or delete it could change what every one of them answers.
     if matches!(native, Native::PrototypeOf(PrototypeTable::Function))
         && key == WellKnown::HasInstance.property_key()
+        && !matches!(native.property(key), None | Some(Value::Undefined))
     {
         return Some(Attributes {
             writable: false,
@@ -44814,11 +44840,17 @@ fn intrinsic_own_attributes(target: &Value, key: &str) -> Option<Attributes> {
             configurable: false,
         });
     }
-    // `Date.prototype[Symbol.toPrimitive]` is the one built-in *method* the specification makes
-    // read-only. It is what `ToPrimitive` finds before anything else, so a program that could
-    // assign over it could change what every date in the realm coerces to.
-    if matches!(native, Native::PrototypeOf(PrototypeTable::Date))
+    // An `@@toPrimitive` a prototype publishes is read-only wherever it appears -- `Date` and
+    // `Symbol` both have one. It is what `ToPrimitive` finds before anything else, so a program
+    // that could assign over it could change what every value of that type coerces to.
+    //
+    // Gated on the member actually being there. Generalising this from `Date` to every table
+    // *without* that check gave every prototype in the realm a phantom own `@@toPrimitive`:
+    // attributes are asked before the value is, so answering for a name the table does not
+    // publish invents the property outright.
+    if matches!(native, Native::PrototypeOf(_))
         && key == WellKnown::ToPrimitive.property_key()
+        && !matches!(native.property(key), None | Some(Value::Undefined))
     {
         return Some(Attributes {
             writable: false,
@@ -45001,6 +45033,7 @@ fn native_js_name(native: &Native) -> String {
         // `functionHasInstance`, the name of a Rust variant rather than of anything a program
         // can see.
         Native::FunctionHasInstance => "[Symbol.hasInstance]".to_owned(),
+        Native::SymbolToPrimitive => "[Symbol.toPrimitive]".to_owned(),
         // Derivation cannot reach these: the payload is the whole of the name.
         Native::Intl(op) => intl::js_name(*op),
         Native::Temporal(op) => temporal::js_name(*op),
