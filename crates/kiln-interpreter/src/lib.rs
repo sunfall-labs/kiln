@@ -15969,6 +15969,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // Describing and defining a property are trapped operations of their own. A library
             // that copies a proxy into a plain object -- which is what a copy-on-write layer
             // does when it finalises -- goes through exactly this pair.
+            // The detached `Object.prototype.__proto__` getter, called on a proxy: it is
+            // `[[GetPrototypeOf]]` like the property read is, and the trap can throw.
+            Native::ProtoGetter if matches!(receiver, Value::Proxy(_)) => {
+                let target = receiver.clone();
+                self.proxy_get_prototype_of(&target, instruction)
+            }
             Native::ObjectGetOwnPropertyDescriptor
                 if matches!(arguments.first(), Some(Value::Proxy(_))) =>
             {
@@ -17298,59 +17304,70 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 message: "Cannot convert undefined or null to object".to_owned(),
             });
         }
-        // `ToPropertyKey` first, and before the callable check below, because a key that throws
-        // on conversion must throw before anything else is decided.
-        let key = self.property_key_of(arguments.first(), instruction)?;
-        if defines {
+        // `IsCallable(getter)` is step 2 and `ToPropertyKey(P)` is step 4, in that order: a
+        // non-callable getter is refused *before* the key is converted, so a key whose
+        // `toString` counts its calls is never called at all. This ran the conversion first,
+        // which is one observable call the language says does not happen.
+        let function = if defines {
             let function = arguments.get(1).cloned().unwrap_or(Value::Undefined);
             if !is_callable(&function) {
                 return Err(ExecutionError::TypeErrorMessage {
                     message: "Object.prototype.__defineGetter__: Expecting function".to_owned(),
                 });
             }
-            let property = if setter {
-                Property::Accessor {
-                    get: None,
-                    set: Some(function),
-                }
-            } else {
-                Property::Accessor {
-                    get: Some(function),
-                    set: None,
-                }
-            };
-            // Enumerable and configurable, which is what makes these different from every
-            // definition `Object.defineProperty` makes with a bare descriptor.
-            install_property(
-                &self.intrinsics,
+            function
+        } else {
+            Value::Undefined
+        };
+        let key = self.property_key_of(arguments.first(), instruction)?;
+        if defines {
+            // `DefinePropertyOrThrow(O, key, desc)`, spelled by handing the descriptor to
+            // `Object.defineProperty` rather than by installing the property directly. Installing
+            // it was four separate wrong answers: it overwrote a *partial* descriptor, so
+            // defining a getter beside an existing setter silently dropped the setter; it did not
+            // refuse a non-configurable property; it did not refuse a non-extensible object; and
+            // it never reached a proxy's `defineProperty` trap. All four are the ordinary
+            // definition path's job, and this is that path.
+            //
+            // The descriptor names only the half being defined, which is what preserves the
+            // other one, and is enumerable and configurable -- the two flags that make these
+            // different from a bare `Object.defineProperty` definition.
+            let mut described = ObjectData::default();
+            described.set(if setter { "set" } else { "get" }, function);
+            described.set("enumerable", Value::Boolean(true));
+            described.set("configurable", Value::Boolean(true));
+            self.dispatch_native(
+                Native::ObjectDefineProperty,
                 receiver,
-                &key,
-                property,
-                Attributes {
-                    writable: false,
-                    enumerable: true,
-                    configurable: true,
-                },
+                &[
+                    receiver.clone(),
+                    Value::String(key),
+                    Value::Object(Rc::new(RefCell::new(described))),
+                ],
+                instruction,
             )?;
             return Ok(Value::Undefined);
         }
         // The chain, not just the own property: that is the whole reason this exists beside
-        // `Object.getOwnPropertyDescriptor`.
+        // `Object.getOwnPropertyDescriptor`. Both steps of the walk are trapped operations --
+        // `[[GetOwnProperty]]` and `[[GetPrototypeOf]]` -- so both go through the paths that run
+        // a proxy's handler. Reading the property store directly answered for the proxy's target
+        // instead, which is a different object than the one the program named.
+        let name = Value::String(key);
         let mut current = receiver.clone();
         for _ in 0..MAX_PROTOTYPE_DEPTH {
-            if let Some((Property::Accessor { get, set }, _)) =
-                own_property_state(&self.intrinsics, &current, &key)
-            {
-                let half = if setter { set } else { get };
-                return Ok(half.unwrap_or(Value::Undefined));
-            }
-            if own_property_state(&self.intrinsics, &current, &key).is_some() {
+            if let Some(descriptor) = self.own_descriptor_value(&current, &name, instruction)? {
                 // A data property of the same name ends the walk: it shadows whatever accessor
                 // sits behind it, and answering that accessor would report one the program
-                // cannot reach.
-                return Ok(Value::Undefined);
+                // cannot reach. Its descriptor simply has no half to read, so this answers
+                // `undefined` without a separate test for it.
+                return self.read_property(
+                    &descriptor,
+                    if setter { "set" } else { "get" },
+                    instruction,
+                );
             }
-            current = prototype_of(&current);
+            current = self.proxy_get_prototype_of(&current, instruction)?;
             if matches!(current, Value::Null) {
                 break;
             }
@@ -28734,7 +28751,9 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // as it would shadow any accessor further up the chain, which is why this runs only when
         // the walk above found nothing.
         if name == "__proto__" && accessor.is_none() && is_reflect_target(target) {
-            return Ok(prototype_of(target));
+            // `[[GetPrototypeOf]]`, which a proxy answers with a handler rather than a stored
+            // link -- so reading `p.__proto__` reports the proxy's prototype, not its target's.
+            return self.proxy_get_prototype_of(target, instruction);
         }
         // `Function.prototype.caller` and `.arguments` are the same shape of problem: an
         // accessor on a table that has no room for one. Every function inherits the pair from
