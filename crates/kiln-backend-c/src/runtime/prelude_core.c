@@ -4561,6 +4561,16 @@ static int kiln_c99_get_computed(kiln_host *host, kiln_value target, kiln_value 
         key.ptr[0] == '@' && key.ptr[1] == '@') {
         KILN_C99_ABSENT("a reserved slot a typed array does not carry", out);
     }
+    if (target.tag == KILN_VALUE_OBJECT && index >= 0.0 && index < 100000.0) {
+        const kiln_object *object = kiln_c99_object_of(target);
+        if (object->shape != NULL && object->elements != NULL) {
+            size_t elem_idx = (size_t)index;
+            if (elem_idx < object->element_count && !kiln_c99_is_hole(object->elements[elem_idx])) {
+                *out = object->elements[elem_idx];
+                return KILN_C99_OK;
+            }
+        }
+    }
     {
         /* An object key is a string, whatever it was written as -- and a symbol's is the
          * reserved slot it names rather than the way it prints. */
@@ -4611,6 +4621,36 @@ static int kiln_c99_set_computed_mode(kiln_host *host, kiln_value target, kiln_v
         kiln_typed_array *view = kiln_c99_typed_array_of(target);
         kiln_c99_typed_set(view, (size_t)index, kiln_c99_as_number(value));
         return KILN_C99_OK;
+    }
+    if (target.tag == KILN_VALUE_OBJECT && index >= 0.0 && index < 100000.0) {
+        kiln_object *object = kiln_c99_object_of(target);
+        if (object->shape != NULL && !object->frozen) {
+            size_t elem_idx = (size_t)index;
+            if (object->elements != NULL && elem_idx < object->element_count && object->elements[elem_idx].tag != KILN_VALUE_HOLE) {
+                object->elements[elem_idx] = value;
+                return KILN_C99_OK;
+            }
+            if (!object->not_extensible && (object->prototype.tag == KILN_VALUE_UNDEFINED || !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
+                if (elem_idx >= object->element_capacity) {
+                    size_t new_cap = object->element_capacity == 0 ? 8 : object->element_capacity * 2;
+                    kiln_value *new_elements;
+                    size_t fill_i;
+                    while (elem_idx >= new_cap) new_cap *= 2;
+                    new_elements = (kiln_value *)realloc(object->elements, new_cap * sizeof(kiln_value));
+                    if (new_elements == NULL) return KILN_C99_OUT_OF_MEMORY;
+                    for (fill_i = object->element_capacity; fill_i < new_cap; ++fill_i) {
+                        new_elements[fill_i] = kiln_c99_value(KILN_VALUE_HOLE, 0, NULL, 0);
+                    }
+                    object->elements = new_elements;
+                    object->element_capacity = new_cap;
+                }
+                object->elements[elem_idx] = value;
+                if (elem_idx >= object->element_count) {
+                    object->element_count = elem_idx + 1;
+                }
+                return KILN_C99_OK;
+            }
+        }
     }
     {
         /* Not an index, so it is an ordinary key -- `a["length"] = 0` and `a["tag"] = "x"` are
@@ -23792,6 +23832,93 @@ static void kiln_c99_note_get_property_refusal(kiln_value target) {
     if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "GetProperty lookup refused";
 }
 
+static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key) {
+    if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
+    if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {
+        const char *named = target.tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(target.bits) : NULL;
+        if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {
+            size_t pos = 0;
+            if (named != NULL) {
+                size_t nlen = strlen(named);
+                if (nlen < sizeof kiln_c99_diagnostic_compose - 1) {
+                    memcpy(kiln_c99_diagnostic_compose, named, nlen);
+                    pos = nlen;
+                    kiln_c99_diagnostic_compose[pos++] = '.';
+                }
+            }
+            size_t klen = key.len;
+            if (pos + klen >= sizeof kiln_c99_diagnostic_compose) {
+                klen = sizeof kiln_c99_diagnostic_compose - 1 - pos;
+            }
+            memcpy(kiln_c99_diagnostic_compose + pos, key.ptr, klen);
+            pos += klen;
+            kiln_c99_diagnostic_compose[pos] = '\0';
+            kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose;
+            kiln_c99_diagnostic_function_len = pos;
+        } else if (named != NULL) {
+            kiln_c99_diagnostic_function = named;
+            kiln_c99_diagnostic_function_len = strlen(named);
+        }
+    }
+    if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "GetComputed lookup refused";
+}
+
+static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key,
+                                 int depth, kiln_value *thrown, kiln_value *out) {
+    if (KILN_LIKELY(target.tag == KILN_VALUE_ARRAY && key.tag == KILN_VALUE_NUMBER)) {
+        double idx = kiln_c99_as_number(key);
+        if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
+            size_t slot = (size_t)idx;
+            const kiln_array *array = kiln_c99_array_of(target);
+            if (KILN_LIKELY(slot < array->count && !kiln_c99_is_hole(array->elements[slot]))) {
+                *out = array->elements[slot];
+                return KILN_C99_OK;
+            }
+        }
+    }
+    if (target.tag == KILN_VALUE_OBJECT && key.tag == KILN_VALUE_NUMBER) {
+        double idx = kiln_c99_as_number(key);
+        if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
+            size_t slot = (size_t)idx;
+            const kiln_object *object = kiln_c99_object_of(target);
+            if (object->elements != NULL && slot < object->element_count && !kiln_c99_is_hole(object->elements[slot])) {
+                *out = object->elements[slot];
+                return KILN_C99_OK;
+            }
+        }
+    }
+    return kiln_c99_get_computed(host, target, key, out, depth, thrown);
+}
+
+static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key,
+                                  kiln_value value, int strict, int depth,
+                                  kiln_value *thrown) {
+    if (KILN_LIKELY(target.tag == KILN_VALUE_ARRAY && key.tag == KILN_VALUE_NUMBER)) {
+        double idx = kiln_c99_as_number(key);
+        if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
+            size_t slot = (size_t)idx;
+            kiln_array *array = kiln_c99_array_of(target);
+            if (KILN_LIKELY(!array->frozen && slot < array->count)) {
+                array->elements[slot] = value;
+                return KILN_C99_OK;
+            }
+        }
+    }
+    if (target.tag == KILN_VALUE_OBJECT && key.tag == KILN_VALUE_NUMBER) {
+        double idx = kiln_c99_as_number(key);
+        if (KILN_LIKELY(idx >= 0.0 && idx <= 4294967294.0 && floor(idx) == idx)) {
+            size_t slot = (size_t)idx;
+            kiln_object *object = kiln_c99_object_of(target);
+            if (KILN_LIKELY(object->shape != NULL && !object->frozen && object->elements != NULL &&
+                            slot < object->element_count && object->elements[slot].tag != KILN_VALUE_HOLE)) {
+                object->elements[slot] = value;
+                return KILN_C99_OK;
+            }
+        }
+    }
+    return kiln_c99_set_computed_mode(host, target, key, value, strict, depth, thrown);
+}
+
 static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
                                     const char *key, size_t key_len,
                                     int depth, kiln_value *thrown, kiln_c99_site *site) {
@@ -23809,36 +23936,9 @@ static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *
     kiln_value key = stack[--(*sp)];
     kiln_value read;
     kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_get_computed(host, target, key, &read, depth, thrown);
-    if (status == KILN_C99_CONTROL_ERROR) {
-        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
-        if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {
-            const char *named = target.tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(target.bits) : NULL;
-            if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {
-                size_t pos = 0;
-                if (named != NULL) {
-                    size_t nlen = strlen(named);
-                    if (nlen < sizeof kiln_c99_diagnostic_compose - 1) {
-                        memcpy(kiln_c99_diagnostic_compose, named, nlen);
-                        pos = nlen;
-                        kiln_c99_diagnostic_compose[pos++] = '.';
-                    }
-                }
-                size_t klen = key.len;
-                if (pos + klen >= sizeof kiln_c99_diagnostic_compose) {
-                    klen = sizeof kiln_c99_diagnostic_compose - 1 - pos;
-                }
-                memcpy(kiln_c99_diagnostic_compose + pos, key.ptr, klen);
-                pos += klen;
-                kiln_c99_diagnostic_compose[pos] = '\0';
-                kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose;
-                kiln_c99_diagnostic_function_len = pos;
-            } else if (named != NULL) {
-                kiln_c99_diagnostic_function = named;
-                kiln_c99_diagnostic_function_len = strlen(named);
-            }
-        }
-        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "GetComputed lookup refused";
+    int status = kiln_c99_read_element(host, target, key, depth, thrown, &read);
+    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) {
+        kiln_c99_note_get_computed_refusal(target, key);
     }
     if (status != KILN_C99_OK) return status;
     stack[*sp - 1] = read;
@@ -23999,7 +24099,7 @@ static int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *
     kiln_value member = stack[--(*sp)];
     kiln_value key = stack[--(*sp)];
     kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_set_computed_mode(host, target, key, member, strict, depth, thrown);
+    int status = kiln_c99_write_element(host, target, key, member, strict, depth, thrown);
     if (status != KILN_C99_OK) return status;
     stack[*sp - 1] = member;
     return KILN_C99_OK;

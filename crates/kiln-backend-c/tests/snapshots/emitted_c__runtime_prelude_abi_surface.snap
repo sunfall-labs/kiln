@@ -1,5 +1,6 @@
 ---
 source: crates/kiln-backend-c/tests/emitted_c.rs
+assertion_line: 800
 expression: abi_surface(prelude)
 ---
 #if !defined(_WIN32) && !defined(__APPLE__) && !defined(_POSIX_C_SOURCE)
@@ -1801,6 +1802,9 @@ static kiln_value kiln_val_to_boundary(kiln_val v) {
 static int kiln_c99_read_property(kiln_host *host, kiln_value target,
 static int kiln_c99_write_property(kiln_host *host, kiln_value target,
 static void kiln_c99_note_get_property_refusal(kiln_value target) {
+static void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key) {
+static int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key,
+static int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key,
 static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
 static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp,
 static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp,
