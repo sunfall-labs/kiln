@@ -23752,7 +23752,14 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
         return status;
     }
 
-    status = kiln_c99_call(host, &call_result, method, self_value, call_args, argc, depth, thrown);
+    {
+        kiln_closure *plain = method.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(method) : NULL;
+        if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {
+            status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : self_value, call_args, argc, depth, thrown, NULL, 0);
+        } else {
+            status = kiln_c99_call(host, &call_result, method, self_value, call_args, argc, depth, thrown);
+        }
+    }
     if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {
         *result = call_result;
         return status;
