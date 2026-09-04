@@ -15420,6 +15420,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // reach the string and number method tables for nothing. A `Temporal`
                         // value carries a `toJSON` and it is the whole reason the step exists:
                         // without it `JSON.stringify(plainDate)` answered `{}`.
+                        // `SerializeJSONProperty` asks for `toJSON` when the value is an Object
+                        // *or a BigInt* -- the one primitive in the list, and the reason a
+                        // program can make its BigInts serialisable at all. Leaving it out meant
+                        // `JSON.stringify(1n)` refused before the hook it was told to call.
                         if !matches!(
                             receiver,
                             Value::Object(_)
@@ -15427,6 +15431,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                                 | Value::Date(_)
                                 | Value::Temporal(_)
                                 | Value::Proxy(_)
+                                | Value::BigInt(_)
                         ) {
                             return Ok(receiver.clone());
                         }
@@ -34114,11 +34119,11 @@ fn call_native(
             };
             match value {
                 Value::BigInt(_) => value.clone(),
-                Value::String(text) => match text.trim().parse::<num_bigint::BigInt>() {
-                    Ok(parsed) => Value::BigInt(Rc::new(parsed)),
+                Value::String(text) => match string_to_big_int(text) {
+                    Some(parsed) => Value::BigInt(Rc::new(parsed)),
                     // A string that is not an integer is a SyntaxError, unlike `Number("x")`
                     // which is NaN -- a BigInt has no NaN to be.
-                    Err(_) => return Err(ExecutionError::InvalidJson),
+                    None => return Err(ExecutionError::InvalidJson),
                 },
                 other => {
                     let number = other.as_number();
@@ -41669,6 +41674,34 @@ fn construct_typed_array(kind: TypedKind, arguments: &[Value]) -> Result<Value, 
         }
     })
 }
+/// `StringToBigInt`, which is `StringNumericLiteral` without the decimal forms.
+///
+/// The prefixed radices count -- `0x`, `0o`, `0b`, in either case -- and were the whole of what
+/// was missing: `BigInt("0x10")` is 16, and parsing the trimmed text as decimal refused it. A
+/// sign is allowed only on the decimal form, which is why `-0x10` is still a SyntaxError, and
+/// the empty string is zero rather than an error, exactly as `Number("")` is.
+fn string_to_big_int(text: &str) -> Option<num_bigint::BigInt> {
+    let trimmed = text.trim_matches(is_js_whitespace);
+    if trimmed.is_empty() {
+        return Some(num_bigint::BigInt::from(0));
+    }
+    let radix = match trimmed.get(..2) {
+        Some("0x" | "0X") => Some(16),
+        Some("0o" | "0O") => Some(8),
+        Some("0b" | "0B") => Some(2),
+        _ => None,
+    };
+    match radix {
+        // A prefixed literal takes no sign and no separators, so the digits are handed over
+        // exactly as written and an empty tail is refused rather than read as zero.
+        Some(radix) => {
+            let digits = trimmed.get(2..).filter(|digits| !digits.is_empty())?;
+            num_bigint::BigInt::parse_bytes(digits.as_bytes(), radix)
+        }
+        None => trimmed.parse::<num_bigint::BigInt>().ok(),
+    }
+}
+
 
 /// Whether `new value(...)` is something the language will run.
 ///
