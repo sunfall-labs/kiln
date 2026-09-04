@@ -24,6 +24,24 @@ impl WorkDirectory {
             path: path.clone(),
             source,
         })?;
+        // Canonicalized, because the compiler emits the canonical form and `-ffile-prefix-map`
+        // only rewrites a path it can match literally.
+        //
+        // `std::env::temp_dir()` reads `TMPDIR`, and on macOS that is `/var/folders/...`, which
+        // is a symlink into `/private/var/folders/...`. The toolchain builds its prefix map out
+        // of this path and the compiler writes the resolved one, so the map missed and every
+        // object embedded the directory it happened to be built in -- a directory whose name
+        // carries a pid and a nanosecond timestamp, so no two builds ever agreed.
+        //
+        // That made the artifact cache refuse its own entries: one key is a claim that exactly
+        // one payload exists, the payloads differed in those bytes alone, and the second writer
+        // reported `same cache key already contains a different payload`. Cold cache and parallel
+        // tests were what it took to see, so it read as a flake rather than as the compiler being
+        // told the wrong prefix. Twelve bytes, one string, no other difference in two megabytes.
+        //
+        // Failing soft: a path that cannot be resolved is still a usable work directory, and the
+        // determinism it costs is what we already had.
+        let path = fs::canonicalize(&path).unwrap_or(path);
         Ok(Self { path })
     }
 
