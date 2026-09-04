@@ -1779,6 +1779,9 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
 static int kiln_c99_to_number_checked(kiln_host *host, kiln_value value, double *out, int depth,
 static int kiln_c99_unary_checked(uint16_t operation, kiln_host *host, kiln_value value,
 static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_value left,
+static int kiln_c99_read_property(kiln_host *host, kiln_value target,
+static int kiln_c99_write_property(kiln_host *host, kiln_value target,
+static void kiln_c99_note_get_property_refusal(kiln_value target) {
 static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
 static int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp,
 static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp,

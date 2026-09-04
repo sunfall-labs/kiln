@@ -1619,3 +1619,80 @@ fn emitted_units_carry_no_ambient_state() {
         assert!(!unit.symbol.is_empty());
     }
 }
+
+#[test]
+fn fused_property_read_and_write_emission() {
+    let p = program(
+        vec![
+            Constant::String("x".to_string()),
+            Constant::String("y".to_string()),
+            Constant::String("z".to_string()),
+            number(42.0),
+        ],
+        vec![
+            // let b = a.x; (LoadLocal(0), GetProperty(0), StoreLocal(1))
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(0),
+            Instruction::StoreLocal(1),
+            // a.y = b; (LoadLocal(0), LoadLocal(1), SetProperty(1), Pop)
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::SetProperty(1),
+            Instruction::Pop,
+            // a.z = 42; (LoadLocal(0), Const(3), SetPropertyStrict(2), Pop)
+            Instruction::LoadLocal(0),
+            Instruction::Const(3),
+            Instruction::SetPropertyStrict {
+                name: 2,
+                strict: true,
+            },
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+        2,
+    );
+    let unit = emit(&p).expect("fused property program emits");
+    let b = body(&unit);
+    // Verified: No intermediate stack traffic for fused property read
+    assert!(b.contains("kiln_c99_read_property(host, locals[0]"));
+    assert!(b.contains("locals[1] = read;"));
+    // Verified: No stack pushes for fused local property write
+    assert!(b.contains("kiln_c99_write_property(host, locals[0],"));
+    assert!(b.contains("locals[1], 0,"));
+    // Verified: No stack pushes for fused const property write
+    assert!(b.contains("kiln_c99_number_bits(UINT64_C(4631107791820423168)), 1,"));
+}
+
+#[test]
+fn fused_call_method_statement_and_assignment() {
+    let p = program(
+        vec![
+            Constant::String("foo".to_string()),
+            Constant::String("bar".to_string()),
+            Constant::String("baz".to_string()),
+        ],
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::CallMethod { name: 0, argc: 0 },
+            Instruction::Pop,
+            Instruction::LoadLocal(0),
+            Instruction::CallMethod { name: 1, argc: 0 },
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(0),
+            Instruction::CallMethod { name: 2, argc: 0 },
+            Instruction::Dup,
+            Instruction::StoreLocal(2),
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+        3,
+    );
+    let unit = emit(&p).expect("fused call_method program emits");
+    let b = body(&unit);
+    // CallMethod + Pop emits inline drop --sp
+    assert!(b.contains("kiln_c99_op_call_method(host, stack, &sp,") && b.contains("--sp; }"));
+    // CallMethod + StoreLocal emits direct local write
+    assert!(b.contains("locals[1] = stack[--sp]; }"));
+    // CallMethod + Dup + StoreLocal + Pop fuses out Dup and Pop
+    assert!(b.contains("locals[2] = stack[--sp]; }"));
+}

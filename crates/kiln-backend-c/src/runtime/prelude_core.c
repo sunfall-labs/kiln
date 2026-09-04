@@ -23614,23 +23614,58 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
  * Outlined instruction operation helpers (compact scalar emission)
  * ========================================================================= */
 
+static int kiln_c99_read_property(kiln_host *host, kiln_value target,
+                                  const char *key, size_t key_len,
+                                  int depth, kiln_value *thrown,
+                                  kiln_c99_site *site, kiln_value *out) {
+    if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
+        const kiln_object *object = kiln_c99_object_of(target);
+        if (KILN_LIKELY(object->shape == site->entries[0].shape &&
+                        site->entries[0].slot < object->slot_capacity)) {
+            *out = object->slots[site->entries[0].slot];
+            return KILN_C99_OK;
+        }
+    }
+    return kiln_c99_get_site(host, target, key, key_len, out, depth, thrown, site);
+}
+
+static int kiln_c99_write_property(kiln_host *host, kiln_value target,
+                                   const char *key, size_t key_len,
+                                   kiln_value value, int strict,
+                                   int depth, kiln_value *thrown,
+                                   kiln_c99_site *site) {
+    if (KILN_LIKELY(site->pic_count > 0 && target.tag == KILN_VALUE_OBJECT)) {
+        kiln_object *object = kiln_c99_object_of(target);
+        if (KILN_LIKELY(object->shape == site->entries[0].shape &&
+                        site->entries[0].transition_to == NULL &&
+                        site->entries[0].slot < object->slot_capacity &&
+                        !object->frozen)) {
+            object->slots[site->entries[0].slot] = value;
+            return KILN_C99_OK;
+        }
+    }
+    return kiln_c99_put_site(host, target, key, key_len, value, strict, depth, thrown, site);
+}
+
+static void kiln_c99_note_get_property_refusal(kiln_value target) {
+    if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
+    if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
+        const char *named = kiln_c99_builtin_name(target.bits);
+        if (named != NULL) {
+            kiln_c99_diagnostic_function = named;
+            kiln_c99_diagnostic_function_len = strlen(named);
+        }
+    }
+    if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "GetProperty lookup refused";
+}
+
 static int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp,
                                     const char *key, size_t key_len,
                                     int depth, kiln_value *thrown, kiln_c99_site *site) {
     kiln_value read;
     kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_get_site(host, target, key, key_len, &read, depth, thrown, site);
-    if (status == KILN_C99_CONTROL_ERROR) {
-        if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag;
-        if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {
-            const char *named = kiln_c99_builtin_name(target.bits);
-            if (named != NULL) {
-                kiln_c99_diagnostic_function = named;
-                kiln_c99_diagnostic_function_len = strlen(named);
-            }
-        }
-        if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "GetProperty lookup refused";
-    }
+    int status = kiln_c99_read_property(host, target, key, key_len, depth, thrown, site, &read);
+    if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(target);
     if (status != KILN_C99_OK) return status;
     stack[*sp - 1] = read;
     return KILN_C99_OK;
@@ -23688,7 +23723,7 @@ static int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *s
     const kiln_value *call_args = argc > 0 ? &stack[*sp - argc] : NULL;
     int status;
 
-    status = kiln_c99_get_site(host, self_value, key, key_len, &method, depth, thrown, site);
+    status = kiln_c99_read_property(host, self_value, key, key_len, depth, thrown, site, &method);
     if (status == KILN_C99_CONTROL_ERROR) {
         if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag;
         if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = "CallMethod property lookup refused";
@@ -23827,7 +23862,7 @@ static int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *
                                     int depth, kiln_value *thrown, kiln_c99_site *site) {
     kiln_value member = stack[--(*sp)];
     kiln_value target = stack[*sp - 1];
-    int status = kiln_c99_put_site(host, target, key, key_len, member, strict, depth, thrown, site);
+    int status = kiln_c99_write_property(host, target, key, key_len, member, strict, depth, thrown, site);
     if (status != KILN_C99_OK) return status;
     stack[*sp - 1] = member;
     return KILN_C99_OK;
