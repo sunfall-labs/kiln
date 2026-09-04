@@ -4191,6 +4191,16 @@ static int kiln_c99_site_learn(kiln_c99_site *site, const kiln_object *object, c
         (key_len == 9 && memcmp(key, "__proto__", 9) == 0)) {
         return 0;
     }
+    if (object->shape != NULL) {
+        uint32_t slot;
+        if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
+            site->shape = object->shape;
+            site->transition_to = NULL;
+            site->own = slot;
+            site->proto = KILN_C99_SITE_NONE;
+            return 1;
+        }
+    }
     for (index = 0; index < object->count; ++index) {
         if (object->properties[index].key == key) {
             site->own = index < KILN_C99_SITE_NONE ? (uint32_t)index : KILN_C99_SITE_NONE;
@@ -4237,6 +4247,7 @@ static int kiln_c99_get_site(kiln_host *host, kiln_value target, const char *key
                     if (slot < object->slot_capacity) {
                         *out = object->slots[slot];
                         site->shape = object->shape;
+                        site->transition_to = NULL;
                         site->own = slot;
                         site->proto = KILN_C99_SITE_NONE;
                         return KILN_C99_OK;
@@ -4287,9 +4298,32 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
     {
         kiln_object *object = kiln_c99_object_of(target);
         if (object->shape != NULL && !object->frozen && !object->module_namespace) {
-            if (site->shape == object->shape && site->own < object->slot_capacity) {
+            /* Monomorphic existing-property hit */
+            if (site->shape == object->shape && site->transition_to == NULL &&
+                site->own < object->slot_capacity) {
                 object->slots[site->own] = value;
                 return KILN_C99_OK;
+            }
+            /* Monomorphic transitioning store hit */
+            if (site->shape == object->shape && site->transition_to != NULL &&
+                !object->not_extensible && site->own < object->slot_capacity &&
+                object->prototype.tag == KILN_VALUE_UNDEFINED) {
+                object->slots[site->own] = value;
+                object->shape = (kiln_shape *)site->transition_to;
+                return KILN_C99_OK;
+            }
+            {
+                uint32_t slot;
+                if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
+                    if (slot < object->slot_capacity) {
+                        object->slots[slot] = value;
+                        site->shape = object->shape;
+                        site->transition_to = NULL;
+                        site->own = slot;
+                        site->proto = KILN_C99_SITE_NONE;
+                        return KILN_C99_OK;
+                    }
+                }
             }
         }
         uint32_t own = site->own;
@@ -4301,13 +4335,34 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                 return KILN_C99_OK;
             }
         }
-        status = kiln_c99_put_mode_ikey(host, target, key, key_len, key, value, strict, depth,
-                                        thrown);
-        if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP &&
-            !kiln_c99_site_learn(site, object, key, key_len)) {
-            site->misses += 1;
+        {
+            const kiln_shape *orig_shape = object->shape;
+            status = kiln_c99_put_mode_ikey(host, target, key, key_len, key, value, strict, depth,
+                                            thrown);
+            if (status == KILN_C99_OK && site->misses < KILN_C99_SITE_GIVE_UP) {
+                if (object->shape != NULL) {
+                    if (orig_shape != NULL && object->shape != orig_shape) {
+                        site->shape = orig_shape;
+                        site->transition_to = object->shape;
+                        site->own = object->shape->slot_index;
+                        site->proto = KILN_C99_SITE_NONE;
+                    } else {
+                        uint32_t slot;
+                        if (kiln_c99_shape_find_slot(object->shape, key, &slot)) {
+                            site->shape = object->shape;
+                            site->transition_to = NULL;
+                            site->own = slot;
+                            site->proto = KILN_C99_SITE_NONE;
+                        } else if (!kiln_c99_site_learn(site, object, key, key_len)) {
+                            site->misses += 1;
+                        }
+                    }
+                } else if (!kiln_c99_site_learn(site, object, key, key_len)) {
+                    site->misses += 1;
+                }
+            }
+            return status;
         }
-        return status;
     }
 }
 
