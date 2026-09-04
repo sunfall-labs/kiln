@@ -87,7 +87,10 @@ kiln_cargo build --release --locked -p kiln-cli >/dev/null || {
 # suite never ran. Asserting on the summary line rather than the exit code is what catches it.
 step "crate tests" "$BASH" -c '
 	output="$(mbx test --workspace -- --test-threads=4 2>&1)"
-	printf "%s\n" "$output" | grep -E "^(test result|error)" | tail -12
+	# The failing *names* as well as the summary: a count says the suite is red and nothing
+	# about which part, and this step is the one that reports breakage in any other crate.
+	printf "%s\n" "$output" | grep -E "^(test result: FAILED|error|---- .* stdout)" | head -20
+	printf "%s\n" "$output" | grep -E "^test result: ok" | tail -3
 	! grep -qE "^error|FAILED" <<<"$output"
 '
 
