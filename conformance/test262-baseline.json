@@ -17,8 +17,8 @@
       "passed": 40
     },
     "built-ins/Array": {
-      "failed": 224,
-      "passed": 5893
+      "failed": 221,
+      "passed": 5896
     },
     "built-ins/ArrayBuffer": {
       "failed": 30,
@@ -57,8 +57,8 @@
       "passed": 762
     },
     "built-ins/BigInt": {
-      "failed": 46,
-      "passed": 108
+      "failed": 44,
+      "passed": 110
     },
     "built-ins/Boolean": {
       "failed": 2,
@@ -85,8 +85,8 @@
       "passed": 92
     },
     "built-ins/Function": {
-      "failed": 106,
-      "passed": 787
+      "failed": 104,
+      "passed": 789
     },
     "built-ins/GeneratorFunction": {
       "failed": 26,
@@ -101,12 +101,12 @@
       "passed": 10
     },
     "built-ins/Iterator": {
-      "failed": 84,
-      "passed": 1224
+      "failed": 82,
+      "passed": 1226
     },
     "built-ins/JSON": {
-      "failed": 56,
-      "passed": 274
+      "failed": 54,
+      "passed": 276
     },
     "built-ins/Map": {
       "failed": 16,
@@ -133,12 +133,12 @@
       "passed": 671
     },
     "built-ins/Object": {
-      "failed": 176,
-      "passed": 6626
+      "failed": 171,
+      "passed": 6631
     },
     "built-ins/Promise": {
-      "failed": 134,
-      "passed": 1324
+      "failed": 130,
+      "passed": 1328
     },
     "built-ins/Proxy": {
       "failed": 51,
@@ -153,8 +153,8 @@
       "passed": 3580
     },
     "built-ins/RegExpStringIteratorPrototype": {
-      "failed": 16,
-      "passed": 18
+      "failed": 14,
+      "passed": 20
     },
     "built-ins/Set": {
       "failed": 18,
@@ -173,8 +173,8 @@
       "passed": 198
     },
     "built-ins/String": {
-      "failed": 186,
-      "passed": 2257
+      "failed": 182,
+      "passed": 2261
     },
     "built-ins/StringIteratorPrototype": {
       "failed": 4,
@@ -185,8 +185,8 @@
       "passed": 34
     },
     "built-ins/Symbol": {
-      "failed": 22,
-      "passed": 170
+      "failed": 20,
+      "passed": 172
     },
     "built-ins/Temporal": {
       "failed": 526,
@@ -197,8 +197,8 @@
       "passed": 18
     },
     "built-ins/TypedArray": {
-      "failed": 289,
-      "passed": 2587
+      "failed": 273,
+      "passed": 2603
     },
     "built-ins/TypedArrayConstructors": {
       "failed": 122,
@@ -285,8 +285,8 @@
       "passed": 396
     },
     "intl402/DisplayNames": {
-      "failed": 12,
-      "passed": 102
+      "failed": 11,
+      "passed": 103
     },
     "intl402/DurationFormat": {
       "failed": 70,
@@ -301,8 +301,8 @@
       "passed": 100
     },
     "intl402/ListFormat": {
-      "failed": 14,
-      "passed": 148
+      "failed": 12,
+      "passed": 150
     },
     "intl402/Locale": {
       "failed": 236,
@@ -321,12 +321,12 @@
       "passed": 80
     },
     "intl402/RelativeTimeFormat": {
-      "failed": 8,
-      "passed": 152
+      "failed": 6,
+      "passed": 154
     },
     "intl402/Segmenter": {
-      "failed": 16,
-      "passed": 142
+      "failed": 14,
+      "passed": 144
     },
     "intl402/String": {
       "failed": 14,
@@ -381,8 +381,8 @@
       "passed": 20488
     },
     "language/function-code": {
-      "failed": 9,
-      "passed": 272
+      "failed": 4,
+      "passed": 277
     },
     "language/future-reserved-words": {
       "failed": 0,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 687,
-      "passed": 1908
+      "failed": 681,
+      "passed": 1914
     },
     "staging/source-phase-imports": {
       "failed": 0,

@@ -14909,7 +14909,14 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 });
             }
             let searched = arguments.first().cloned().unwrap_or(Value::Undefined);
-            if !searched.is_nullish() {
+            // Only an Object is asked. The specification looks the symbol up on `regexp` after
+            // establishing it is one, and the difference is observable through an accessor: a
+            // getter on `Number.prototype[@@match]` must not run for `"a1b".match(1)`.
+            //
+            // This read as correct for as long as a primitive answered nothing off its chain,
+            // which was itself a bug -- so fixing that one exposed this one. A `nullish` test
+            // was never the same question: it lets every other primitive through.
+            if is_object_type(&searched) {
                 // `replaceAll` and `matchAll` refuse a regexp that is not global, because both
                 // are defined to visit every match and a non-global regexp would visit the
                 // first one forever. The check is on the *flags property*, not on an internal
@@ -28843,11 +28850,57 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// read path and the write path have to ask before either falls back to one of those
     /// accessors, or they would disagree about which shadows which.
     fn stored_property(&self, target: &Value, name: &str) -> Option<Property> {
+        // Every arm below finds what the value *stores*, and then the same walk finds what a
+        // built-in prototype on its chain carries. Splitting that second half across the arms is
+        // what left it on objects alone: an accessor defined on `Object.prototype` was reachable
+        // through a plain object and through nothing else, though every value in the language
+        // inherits from it.
+        self.own_stored_property(target, name)
+            .or_else(|| self.inherited_accessor(target, name))
+    }
+
+    /// An accessor a built-in prototype above `target` carries.
+    ///
+    /// Split from the walk itself so that both guards are asked before any work is done. The
+    /// first is the common case by an enormous margin -- no program has defined an accessor on
+    /// any built-in -- and this sits on the path of `array.map`.
+    ///
+    /// The second is the one that cost forty-two rows of `built-ins/String` and thirty-six of
+    /// `built-ins/TypedArrayConstructors` when it was missing. An own property is not looked up
+    /// on a chain, and a value may answer a name without storing it anywhere: a string's
+    /// characters and its length, a view's elements, an array's dense elements. The stores were
+    /// searched above and hold none of those, so the question has to be put to the value itself
+    /// before the chain is walked -- and `own_property_state` is where the language already
+    /// answers it, for `getOwnPropertyDescriptor` and now for this. Asking it here rather than
+    /// listing the kinds again is the difference between one authority and two that drift.
+    ///
+    /// Without it, a getter on `Object.prototype` answered for a character of a string and an
+    /// element of a view. That is not an exotic shape: installing one is precisely how test262
+    /// detects a lookup that should never have reached the prototype at all.
+    fn inherited_accessor(&self, target: &Value, name: &str) -> Option<Property> {
+        if !self.intrinsics.any_accessor() {
+            return None;
+        }
+        if own_property_state(&self.intrinsics, target, name).is_some() {
+            return None;
+        }
+        // An exotic `[[Get]]` answers some names itself whether or not it *has* one: a view's
+        // `sample["1.1"]`, its `"-0"` and an index past its end are all `undefined` with the
+        // chain never consulted. That is the exotic method rather than an absence, so
+        // `own_property_state` above answers `None` for them and would let the walk run --
+        // which is exactly what `internals/Get/key-is-not-integer.js` installs a getter on
+        // `%TypedArray%.prototype` named `"1.1"` to catch.
+        if exotic_reserved_name(target, name) {
+            return None;
+        }
+        inherited_intrinsic_accessor(&self.intrinsics, target, name)
+    }
+
+    /// What `target` itself stores under `name` -- its own store and any chain of stores linked
+    /// from it, but not the built-in prototype that chain ends at.
+    fn own_stored_property(&self, target: &Value, name: &str) -> Option<Property> {
         match target {
-            Value::Object(object) => object
-                .borrow()
-                .lookup(name)
-                .or_else(|| inherited_object_accessor(&self.intrinsics, &object.borrow(), name)),
+            Value::Object(object) => object.borrow().lookup(name),
             Value::Function(closure) if name != "prototype" => {
                 closure.properties.borrow().lookup(name)
             }
@@ -28857,6 +28910,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Array(items) => match canonical_index(name) {
                 Some(index) => match array_exotic_element(items, index) {
                     Some(entry) => Some(entry.property),
+                    // A dense element answers, and it is in no store: `inherited_accessor` is
+                    // what stops the walk, by asking the array whether it owns the name.
                     None if items
                         .borrow()
                         .get(index)
@@ -28875,6 +28930,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             Value::Native(_, _) | Value::Callback(_, _) => {
                 match self.intrinsics.overridden(target, name) {
                     Overridden::Held(property, _) => Some(property),
+                    // Deleted, or never touched: either way the chain above may still answer.
                     Overridden::Removed | Overridden::Untouched => None,
                 }
             }
@@ -30362,27 +30418,12 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         {
             return self.builtin_accessor(builtin, receiver, instruction);
         }
-        let accessor = match target {
-            Value::Object(object) => object.borrow().lookup(&property_key).or_else(|| {
-                inherited_object_accessor(&self.intrinsics, &object.borrow(), &property_key)
-            }),
-            Value::Function(closure) if property_key != "prototype" => {
-                closure.properties.borrow().lookup(&property_key)
-            }
-            Value::Bound(bound) => bound.properties.borrow().lookup(&property_key),
-            Value::Array(_) => self.stored_property(target, &property_key),
-            Value::Native(_, _) | Value::Callback(_, _) => {
-                match self.intrinsics.overridden(target, &property_key) {
-                    Overridden::Held(property, _) => Some(property),
-                    Overridden::Removed | Overridden::Untouched => None,
-                }
-            }
-            // An exotic object's store can hold an accessor too, and only this spelling of the
-            // read reaches a computed key: `Object.defineProperty(sample, key, { get })` where
-            // `key` is a variable was answered by the prototype the getter was shadowing.
-            _ => self.stored_property(target, &property_key),
-        };
-        match accessor {
+        // The named read's own walk, on the computed spelling. This was a second copy of it,
+        // arm for arm, with two of the arms already delegating here -- and the copy is how the
+        // two spellings came to disagree: `Object.defineProperty(sample, key, { get })` with a
+        // variable `key` was answered by the prototype the getter was shadowing. One walk cannot
+        // drift from itself.
+        match self.stored_property(target, &property_key) {
             Some(Property::Accessor { get, .. }) => match get {
                 Some(getter) => self.call_value(&getter, receiver.clone(), Vec::new(), instruction),
                 None => Ok(Value::Undefined),
@@ -43152,32 +43193,90 @@ fn dense_array(value: &Value) -> Option<&Rc<ArrayData>> {
 /// Separate from the property store beside it because neither of those two is in the store --
 /// the elements are a dense `Vec` and `length` is derived from its size -- and a prototype chain
 /// that walks into an array has to see all three.
-/// An accessor the realm's `Object.prototype` carries, for an object whose chain still ends
-/// there.
+/// The first link a *read* of `target` walks to.
 ///
-/// `ObjectData::lookup` walks stored links and stops: the realm keeps what a program defined on
-/// `Object.prototype` in its own store, which no link points at. A *data* property there is
-/// already answered by the read that falls through to `inherited_object_property`; an accessor is
-/// a call, and reaching it needs the property itself rather than the value it would have read as.
-fn inherited_object_accessor(
+/// [`prototype_of`] is the reflective chain and answers `Null` for a primitive, which is what
+/// `Object.getPrototypeOf` needs before it coerces. A read does not coerce: `"s".at` finds
+/// `String.prototype.at` with no wrapper made anywhere, so the chain a read walks starts at the
+/// wrapper prototype rather than at nothing. Reading the two off one function is what left
+/// strings and numbers behind when every other kind could see an accessor a program had defined.
+fn read_chain_start(target: &Value) -> Value {
+    let realm = value_realm(target);
+    let table = match target {
+        Value::String(_) => PrototypeTable::String,
+        Value::Number(_) => PrototypeTable::Number,
+        Value::Boolean(_) => PrototypeTable::Boolean,
+        Value::BigInt(_) => PrototypeTable::BigInt,
+        Value::Symbol(_) => PrototypeTable::Symbol,
+        _ => return prototype_of(target),
+    };
+    Value::Native(Native::PrototypeOf(table), realm)
+}
+
+/// An accessor a *built-in prototype* carries, for a value whose chain reaches one.
+///
+/// Nothing links to a built-in prototype. The tables are match arms rather than stores, and
+/// `ObjectData::lookup` walks stored links and stops at the last one, so the realm's record of
+/// what a program defined on `Array.prototype` is reached by name and by nothing else. A *data*
+/// property defined there is still answered, because the read falls through to the table and the
+/// table consults the realm's store on the way past. An accessor cannot be: it is a call, and
+/// reaching it needs the `Property` itself rather than the value it would have read as.
+///
+/// Without this, `Object.defineProperty(Array.prototype, "x", { get })` is visible on the
+/// prototype and invisible through every array -- and that asymmetry is not a curiosity. It is
+/// how a redefined `constructor` read as the table's own: species construction asks an instance
+/// for `.constructor`, a program that installs one installs an accessor, and the instance
+/// answered `Array` while the prototype answered the override.
+///
+/// The walk stops at the first link that answers `name` at all -- an override holding a data
+/// property, or a table publishing the name itself -- because carrying on past it would let an
+/// accessor further up shadow the thing that actually answers, which is the direction a prototype
+/// chain does not run in.
+fn inherited_intrinsic_accessor(
     intrinsics: &Intrinsics,
-    object: &ObjectData,
+    target: &Value,
     name: &str,
 ) -> Option<Property> {
-    // An object whose prototype is explicitly `null` inherits nothing.
-    if matches!(object.prototype(), Some(Value::Null)) {
+    // The common case by an enormous margin: no program has defined an accessor on any built-in,
+    // so there is nothing up there to find and every read that misses its own store pays one
+    // load to learn it. This walk is otherwise on the path of `array.map`.
+    if !intrinsics.any_accessor() {
         return None;
     }
-    match intrinsics.overridden(
-        &Value::Native(
-            Native::PrototypeOf(PrototypeTable::Object),
-            RealmId::PRIMARY,
-        ),
-        name,
-    ) {
-        Overridden::Held(property @ Property::Accessor { .. }, _) => Some(property),
-        _ => None,
+    let mut link = read_chain_start(target);
+    // Bounded rather than trusted. `Object.setPrototypeOf` refuses to build a cycle, but this
+    // walks the chain a value *kind* gives as well as the stored one, and a bounded walk cannot
+    // hang whatever the two combine into. Real chains are a handful of links deep.
+    for _ in 0..64 {
+        let Value::Native(native, _) = link else {
+            if matches!(link, Value::Null | Value::Undefined) {
+                return None;
+            }
+            // An ordinary object on the chain has already been walked by `lookup`; carry on so
+            // that a moved chain -- `array.__proto__ = {}` -- still reaches the table that
+            // object's own prototype ends at.
+            link = prototype_of(&link);
+            continue;
+        };
+        match intrinsics.overridden(&link, name) {
+            Overridden::Held(property @ Property::Accessor { .. }, _) => return Some(property),
+            // A data property answers here, and the ordinary read is what finds it.
+            Overridden::Held(Property::Value(_), _) => return None,
+            // Deleted here, so the chain carries on past it -- which is the whole point of the
+            // tombstone.
+            Overridden::Removed => {}
+            Overridden::Untouched => {
+                if intrinsic_owns(native, name).is_some()
+                    || intrinsic_accessor(&link, name).is_some()
+                    || machine_accessor(&link, name).is_some()
+                {
+                    return None;
+                }
+            }
+        }
+        link = prototype_of(&link);
     }
+    None
 }
 
 fn array_own_property(items: &ArrayData, key: &str) -> Option<Property> {
@@ -43827,6 +43926,14 @@ struct Intrinsics {
     /// alone and holds a handful of entries for one that does not, which is well below the size
     /// where hashing every lookup pays for itself.
     entries: RefCell<Vec<(IntrinsicKey, IntrinsicSlots)>>,
+    /// Whether any program has defined an *accessor* on any built-in.
+    ///
+    /// A guard for [`inherited_intrinsic_accessor`], which is asked on every read that misses a
+    /// value's own store -- which is every method call on an array, a string or a map. False
+    /// until a program does it and never cleared afterwards: `delete` removing the last one is
+    /// rare enough that re-scanning to clear the flag would cost more than the walk it saves,
+    /// and a stale `true` is only ever slower, never wrong.
+    accessors: std::cell::Cell<bool>,
     /// Each realm's nine error prototypes, indexed by realm and then by kind.
     ///
     /// Here rather than on the machine because `Error.prototype` is an own property of `Error`
@@ -43847,6 +43954,7 @@ impl Default for Intrinsics {
     fn default() -> Self {
         Self {
             entries: RefCell::default(),
+            accessors: std::cell::Cell::new(false),
             error_prototypes: RefCell::new(vec![[const { None }; ErrorKind::ALL.len()]]),
         }
     }
@@ -43948,6 +44056,14 @@ impl Intrinsics {
         }
     }
 
+    /// Whether any program has defined an accessor on any built-in.
+    ///
+    /// See the field: the answer guards a prototype-chain walk that would otherwise run on every
+    /// read that misses a value's own store.
+    fn any_accessor(&self) -> bool {
+        self.accessors.get()
+    }
+
     /// Whether this built-in still accepts new properties.
     ///
     /// Untouched means extensible: the specification builds every one of them that way, and a
@@ -43986,6 +44102,9 @@ impl Intrinsics {
         let Some(identity) = intrinsic_key(target) else {
             return;
         };
+        if matches!(property, Property::Accessor { .. }) {
+            self.accessors.set(true);
+        }
         let mut entries = self.entries.borrow_mut();
         let slots = Self::slots(&mut entries, identity);
         // A definition after a deletion is a property that exists again, so the tombstone goes.
