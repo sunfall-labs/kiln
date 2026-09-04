@@ -36365,7 +36365,22 @@ fn call_native(
                 // No normalisation tables, so this is the identity. Honest for text that is
                 // already normalised, which is what a bundler emits, and wrong for text that is
                 // not -- which is why it is called out here rather than left to be discovered.
-                Native::StringNormalize => Value::String(text.clone()),
+                Native::StringNormalize => {
+                    // The form is checked even though the normalisation is not performed: a
+                    // form outside the four the specification names is a `RangeError`, and
+                    // answering the string for `normalize("XYZ")` told the caller its text was
+                    // normalised into a form that does not exist. The no-op above is a separate
+                    // and larger gap -- it needs Unicode data this crate does not carry -- and
+                    // is left as it was rather than papered over here.
+                    let form = match arguments.first() {
+                        None | Some(Value::Undefined) => "NFC".to_owned(),
+                        Some(value) => value.to_display_string(),
+                    };
+                    if !matches!(form.as_str(), "NFC" | "NFD" | "NFKC" | "NFKD") {
+                        return Err(ExecutionError::RadixOutOfRange);
+                    }
+                    Value::String(text.clone())
+                }
                 Native::StringTrimStart => {
                     Value::String(text.trim_start_matches(is_js_whitespace).to_owned())
                 }
@@ -42009,7 +42024,10 @@ const fn textual_arguments(native: Native) -> &'static [usize] {
         | N::StringLastIndexOf
         | N::StringIncludes
         | N::StringStartsWith
-        | N::StringEndsWith => &[0],
+        | N::StringEndsWith
+        // The form is `ToString`'d before it is checked, so an object naming a form is accepted
+        // and one whose `toString` throws does so here.
+        | N::StringNormalize => &[0],
         _ => &[],
     }
 }
