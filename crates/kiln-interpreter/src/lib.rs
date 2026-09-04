@@ -33628,7 +33628,20 @@ fn binary(
         BinaryOp::StrictEqual => Value::Boolean(strict_equal(&left, &right)),
         // `key in object` tests presence, which is not the same question as reading the key and
         // comparing to undefined: a property explicitly set to undefined is present.
-        BinaryOp::In => Value::Boolean(has_property(intrinsics, &right, &left)),
+        // `in` asks an *object* what it has, and refuses anything else. Answering `false` told a
+        // program the property was absent from something that could never have had it -- the
+        // same wrong answer for a typo'd receiver as for a deliberate check.
+        BinaryOp::In => {
+            if !is_an_object(&right) && !is_callable(&right) {
+                return Err(ExecutionError::TypeErrorMessage {
+                    message: format!(
+                        "Cannot use 'in' to search for a property in {}",
+                        right.to_display_string()
+                    ),
+                });
+            }
+            Value::Boolean(has_property(intrinsics, &right, &left))
+        }
         // Handled in the interpreter loop, which has the realm's Error.prototype; reaching here
         // would mean the loop stopped special-casing it.
         BinaryOp::InstanceOf => unreachable!("instanceof is evaluated with realm context"),
