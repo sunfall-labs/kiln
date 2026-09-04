@@ -1,16 +1,4 @@
 
-#ifndef KILN_LIKELY
-#if defined(__GNUC__) || defined(__clang__)
-#define KILN_LIKELY(x)   (__builtin_expect(!!(x), 1))
-#define KILN_UNLIKELY(x) (__builtin_expect(!!(x), 0))
-#define KILN_ALWAYS_INLINE __attribute__((always_inline))
-#else
-#define KILN_LIKELY(x)   (x)
-#define KILN_UNLIKELY(x) (x)
-#define KILN_ALWAYS_INLINE
-#endif
-#endif
-
 /* This layout is the complete boundary value.  bits stores booleans and IEEE-754 numbers;
  * ptr/len stores UTF-8 string bytes and is not required to be NUL terminated. */
 typedef struct kiln_value {
@@ -19,17 +7,29 @@ typedef struct kiln_value {
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
-static double kiln_c99_bits_to_double(uint64_t bits) {
-    union { uint64_t u; double d; } pun;
-    pun.u = bits;
-    return pun.d;
-}
+/* =========================================================================
+ * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
+ * ========================================================================= */
+typedef uint64_t kiln_val;
 
-static uint64_t kiln_c99_double_to_bits(double d) {
-    union { double d; uint64_t u; } pun;
-    pun.d = d;
-    return pun.u;
-}
+#define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
+#define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
+#define KILN_PAYLOAD_MASK       UINT64_C(0x0000FFFFFFFFFFFF)
+
+#define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
+#define KILN_VAL_NULL           UINT64_C(0xFFF8000000000002)
+#define KILN_VAL_FALSE          UINT64_C(0xFFF8000000000004)
+#define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
+#define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
+
+#define KILN_TAG_STRING_PREFIX  UINT64_C(0xFFF9000000000000)
+#define KILN_TAG_OBJECT_PREFIX  UINT64_C(0xFFFA000000000000)
+#define KILN_TAG_CLOSURE_PREFIX UINT64_C(0xFFFB000000000000)
+#define KILN_TAG_BUFFER_PREFIX  UINT64_C(0xFFFC000000000000)
+
+#define KILN_VAL_IS_NUMBER(v)   ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
+#define KILN_VAL_PTR(v)         ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
+#define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
 
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
@@ -118,9 +118,15 @@ extern int kiln_realm_gc_mark_roots(void *heap);
  * interpreter uses, so both engines print `[Function 3]` for the same function. */
 struct kiln_closure;
 struct kiln_generator;
-typedef int (*kiln_body_fn)(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                            kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                            kiln_value *thrown, struct kiln_generator *frame);
+typedef struct kiln_call_context {
+    kiln_host *host;
+    kiln_value *thrown;
+    struct kiln_generator *frame;
+    int depth;
+} kiln_call_context;
+
+typedef int (*kiln_body_fn)(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                            const kiln_value *receiver, const kiln_value *args, size_t argc);
 typedef struct kiln_closure {
     kiln_body_fn body;
     /* An arrow captures `new.target` where it was written, for the same reason it captures
@@ -217,6 +223,31 @@ typedef struct kiln_native_constructor {
 
 /* KILN_NATIVE_CONSTRUCTOR_TABLE */
 
+/* A shape describes the layout of an object's own properties (ADR 0050):
+ * an ordered list of interned keys and slot indices. Objects with the same
+ * sequence of added properties share the same shape. */
+#define KILN_SHAPE_MAX_FAST_PROPERTIES 32
+
+struct kiln_shape;
+
+typedef struct kiln_shape_transition {
+    const char *ikey;
+    struct kiln_shape *next;
+    struct kiln_shape_transition *next_transition;
+} kiln_shape_transition;
+
+typedef struct kiln_shape {
+    struct kiln_shape *parent;
+    const char *ikey;
+    uint32_t slot_index;
+    uint32_t property_count;
+    uint32_t num_transitions;
+    const char *keys[KILN_SHAPE_MAX_FAST_PROPERTIES];
+    const char *inline_trans_ikey[2];
+    struct kiln_shape *inline_trans_next[2];
+    kiln_shape_transition *transitions;
+} kiln_shape;
+
 /* A plain data object: own string-keyed properties, scanned linearly.
  *
  * There is deliberately no shape here.  A shape identity has to be globally stable and never
@@ -235,7 +266,22 @@ typedef struct kiln_property {
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
     int enumerable;
+    /* A symbol key the program hid with a descriptor. This is a second bit rather than a value of
+     * `enumerable` because a symbol key is stored with `enumerable = 0` unconditionally, so that
+     * every walk over own *string* keys skips it without having to know about the `@@` prefix.
+     * That forcing erases the program's own answer, and three separate reads wanted it back:
+     * a spread carries symbol keys across and so must skip a hidden one; a descriptor reports
+     * what the program asked for; and `Object.keys`/`JSON.stringify` must keep skipping it
+     * whatever it asked. Overloading one bit for two questions answered all three wrongly at
+     * once -- and two of them by printing the internal `@@symbol:N` spelling into program output.
+     * Zero means visible, so a slot that nobody hid is correct from `calloc` alone. */
     int symbol_hidden;
+    /* Whether an assignment may replace the value, and whether `delete` may remove the property
+     * or `defineProperty` redefine it. Both are true for everything an assignment or a literal
+     * creates, which is why they went unmodelled for so long: only `Object.defineProperty` and
+     * `Object.freeze` can produce a property where they are not, and only
+     * `getOwnPropertyDescriptor` reports them back. Absent, a defined non-writable property took
+     * writes and a non-configurable one deleted -- both silently. */
     int writable;
     int configurable;
     int accessor;
@@ -257,13 +303,12 @@ typedef struct kiln_property {
     kiln_value setter;
 } kiln_property;
 
-#define KILN_OBJECT_INLINE_PROPERTIES 8
+#define KILN_C99_INLINE_SLOTS 4
 
 typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
     size_t capacity;
-    kiln_property inline_properties[KILN_OBJECT_INLINE_PROPERTIES];
     /* The next object a property read falls through to, or undefined for none.  Undefined and
      * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
      * nothing was recorded and the other means nothing was wanted. */
@@ -301,6 +346,33 @@ typedef struct kiln_object {
      * exactly. A level that never held an accessor or a read-only data property has nothing
      * that could intercept a write from a descendant. */
     int read_only_seen;
+    /* An error, by the same rule as `arguments_brand`: the brand is not a property. It was
+     * `@@error` -- the reserved slot carrying the error's kind -- and a reserved key is hidden
+     * from `getOwnPropertyNames` but still reachable, so a program could read it (`e["@@error"]`
+     * answered the internal builtin code), `delete` it, and set it. All three were observable
+     * through `Object.prototype.toString`: a plain object with an `@@error` of its own reported
+     * `[object Error]`, and a real error that had been `delete`d reported `[object Object]`.
+     * `@@error` still carries the *kind*, which is a value and belongs in a property; what may
+     * not is the answer to "is this an error", which a type test asks and a program may attack.
+     *
+     * APPENDED, NOT PLACED BESIDE `arguments_brand` WHERE IT BELONGS. Inserting a field into the
+     * middle of this struct breaks the native backend: `#bump` and every other private member
+     * stops being found, because a private name is stored under a reserved key and looked up by
+     * interned-pointer identity. Appending is safe -- 32 bytes appended changes nothing -- so
+     * the fault is offsets shifting, not size. Reproduced with a bare `int` and no other change,
+     * with `.kiln/bin` and `.kiln/cache` cleared, in both debug and release. See the issue in
+     * `.scratch/native-object-layout/`. Move this up once that is fixed. */
+    int error_brand;
+    /* Shape-based layout (ADR 0050). When non-NULL, properties are stored in
+     * the slots array indexed by shape->keys. Appended to preserve member offsets. */
+    kiln_shape *shape;
+    kiln_value *slots;
+    size_t slot_capacity;
+    kiln_value inline_slots[KILN_C99_INLINE_SLOTS];
+    /* Dense elements vector for integer keys (ADR 0050 Milestone 5) */
+    kiln_value *elements;
+    size_t element_count;
+    size_t element_capacity;
 } kiln_object;
 
 /* A prototype chain is built by the program, so its length is the program's business -- but the
@@ -315,16 +387,25 @@ typedef struct kiln_object {
  * whatsoever -- and objects built by the same code put their keys at the same indices, which is
  * what makes one guess right for every instance of a class that does not exist. One of these is
  * a block-scope static at each GetProperty, SetProperty, SetPropertyStrict and CallMethod. */
+#define KILN_C99_PIC_SIZE 4
+
+typedef struct kiln_c99_pic_entry {
+    const kiln_shape *shape;
+    const kiln_shape *transition_to;
+    uint32_t slot;
+} kiln_c99_pic_entry;
+
 typedef struct kiln_c99_site {
     uint32_t own;
     uint32_t proto;
     /* Slow-path answers that taught the site nothing: a name answered from a builtin table or a
      * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
     uint32_t misses;
-    const void *proto_cache[2];
-    kiln_value method_cache[2];
-    kiln_body_fn body_cache[2];
-    kiln_value *upvalues_cache[2];
+    uint32_t pic_count;
+    kiln_c99_pic_entry entries[KILN_C99_PIC_SIZE];
+    uint8_t cached_tag;
+    uint8_t has_cached_method;
+    uint64_t cached_method;
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
@@ -347,13 +428,10 @@ typedef struct kiln_proxy {
 /* An array's elements are dense and its `length` is derived, not stored: writing past the end
  * grows it and the gap is filled with holes, which read as undefined and are not the same thing --
  * `1 in [1, , 3]` is false and `[1, , 3].map(f)` does not call `f` for the middle. */
-#define KILN_ARRAY_INLINE_ELEMENTS 16
-
 typedef struct kiln_array {
     kiln_value *elements;
     size_t count;
     size_t capacity;
-    kiln_value inline_elements[KILN_ARRAY_INLINE_ELEMENTS];
     /* Properties that are not elements: `a.total = 1`, and the `index`, `input` and `groups` a
      * match result carries. Undefined until the first one is written, so an ordinary array is one
      * pointer smaller than it looks and costs nothing. */
@@ -460,8 +538,6 @@ typedef struct kiln_entry {
 
 typedef struct kiln_collection {
     kiln_entry *entries;
-    int32_t *hash_table;
-    size_t hash_capacity;
     /* How many slots have ever been used, dead ones included -- what iteration walks. */
     size_t count;
     /* How many are still there, which is what `size` reports. */
@@ -523,11 +599,6 @@ typedef struct kiln_regexp {
     int global;
     int sticky;
     double last_index;
-    const char *cache_ptr;
-    size_t cache_len;
-    int cache_matched;
-    size_t cache_groups;
-    int64_t cache_ranges[64];
 } kiln_regexp;
 
 /* A symbol: a property key with an identity of its own.
@@ -747,6 +818,22 @@ static int kiln_c99_node_response_is_framed(const kiln_object *headers) {
     size_t index;
     size_t which;
     if (headers == NULL) return 0;
+    if (headers->shape != NULL) {
+        for (index = 0; index < headers->shape->property_count; ++index) {
+            const char *key = headers->shape->keys[index];
+            size_t len = strlen(key);
+            for (which = 0; which < 2; ++which) {
+                size_t flen = strlen(framing[which]);
+                size_t byte;
+                if (len != flen) continue;
+                for (byte = 0; byte < flen; ++byte) {
+                    if ((char)tolower((unsigned char)key[byte]) != framing[which][byte])
+                        break;
+                }
+                if (byte == flen) return 1;
+            }
+        }
+    }
     for (index = 0; index < headers->count; ++index) {
         const kiln_property *property = &headers->properties[index];
         for (which = 0; which < 2; ++which) {

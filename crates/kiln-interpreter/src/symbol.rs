@@ -27,6 +27,58 @@ pub enum WellKnown {
 }
 
 impl WellKnown {
+    /// Every well-known symbol, including the host one `Symbol` does not publish.
+    ///
+    /// Kept exhaustive by [`WellKnown::ordinal`] rather than by review: that function matches on
+    /// `self`, so adding a variant stops the crate compiling until the variant is given an
+    /// ordinal, and the `const` block at the end of this file refuses to build unless this list
+    /// holds every ordinal exactly once and in order. There used to be a list of fifteen beside
+    /// an enum of sixteen, and a `chain` at the one call site that noticed -- which is how a
+    /// symbol goes missing from `getOwnPropertySymbols` while every other path still works.
+    pub(crate) const ALL: [Self; 16] = [
+        Self::Iterator,
+        Self::AsyncIterator,
+        Self::HasInstance,
+        Self::ToStringTag,
+        Self::ToPrimitive,
+        Self::Match,
+        Self::MatchAll,
+        Self::Replace,
+        Self::Search,
+        Self::Split,
+        Self::Species,
+        Self::Unscopables,
+        Self::IsConcatSpreadable,
+        Self::Dispose,
+        Self::AsyncDispose,
+        Self::NodeInspectCustom,
+    ];
+
+    /// This symbol's position in [`WellKnown::ALL`].
+    ///
+    /// Exists only so that the compiler has something exhaustive to check. Adding a variant
+    /// without adding it to `ALL` fails here.
+    const fn ordinal(self) -> usize {
+        match self {
+            Self::Iterator => 0,
+            Self::AsyncIterator => 1,
+            Self::HasInstance => 2,
+            Self::ToStringTag => 3,
+            Self::ToPrimitive => 4,
+            Self::Match => 5,
+            Self::MatchAll => 6,
+            Self::Replace => 7,
+            Self::Search => 8,
+            Self::Split => 9,
+            Self::Species => 10,
+            Self::Unscopables => 11,
+            Self::IsConcatSpreadable => 12,
+            Self::Dispose => 13,
+            Self::AsyncDispose => 14,
+            Self::NodeInspectCustom => 15,
+        }
+    }
+
     pub fn property_key(self) -> &'static str {
         match self {
             Self::Iterator => "@@iterator",
@@ -66,34 +118,23 @@ impl WellKnown {
     /// symbol-keyed property apart from the machine's own bookkeeping, which is the whole
     /// difficulty of storing symbols as strings.
     ///
-    /// `@@nodeInspectCustom` is included even though `ALL` excludes it: `Symbol` does not
-    /// publish it, but an object that carries it carries a symbol-keyed property and
-    /// `Object.getOwnPropertySymbols` has to say so.
+    /// `@@nodeInspectCustom` included: `Symbol` does not publish it, but an object that carries
+    /// it carries a symbol-keyed property and `Object.getOwnPropertySymbols` has to say so.
     pub(crate) fn from_property_key(key: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
-            .chain(std::iter::once(Self::NodeInspectCustom))
             .find(|symbol| symbol.property_key() == key)
     }
 
-    /// Every well-known symbol, so `Symbol` can publish them all from one list.
-    pub(crate) const ALL: [Self; 15] = [
-        Self::Iterator,
-        Self::AsyncIterator,
-        Self::HasInstance,
-        Self::ToStringTag,
-        Self::ToPrimitive,
-        Self::Match,
-        Self::MatchAll,
-        Self::Replace,
-        Self::Search,
-        Self::Split,
-        Self::Species,
-        Self::Unscopables,
-        Self::IsConcatSpreadable,
-        Self::Dispose,
-        Self::AsyncDispose,
-    ];
+    /// Whether `Symbol` publishes this one as a static member.
+    ///
+    /// All but one: `@@nodeInspectCustom` is a host symbol, so `Symbol.nodeInspectCustom` must
+    /// not exist -- but an object carrying it still carries a symbol-keyed property, and
+    /// `Object.getOwnPropertySymbols` has to say so. That single difference used to be spelled
+    /// as two lists of different lengths.
+    pub(crate) const fn published_by_symbol(self) -> bool {
+        !matches!(self, Self::NodeInspectCustom)
+    }
 
     /// What `String(symbol)` shows, which spells the well-known ones out.
     pub(crate) fn description(self) -> &'static str {
@@ -179,6 +220,90 @@ impl PartialEq for Symbol {
     }
 }
 
-/// Any string key beginning with this is the VM's own: a symbol-keyed property or an internal
-/// slot. `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
+/// The prefix the VM writes its own keys under: a symbol-keyed property, or an internal slot.
+/// `Object.keys` and `JSON.stringify` enumerate own *string* keys, so both skip them.
 pub(crate) const RESERVED_KEY_PREFIX: &str = "@@";
+
+/// The internal slots that are not symbol keys and do not carry one of the prefixes below.
+///
+/// Spelled out because the alternative -- "anything starting with `@@`" -- is a guess about what
+/// a *program* would never write, and it is wrong. `symbol-observable`, which redux and rxjs both
+/// depend on, stores its hook under the literal string `"@@observable"`, and that property then
+/// vanished from `Object.keys` and `getOwnPropertyNames` while remaining readable by name. A
+/// program's own data disappearing from enumeration is the kind of wrong answer that surfaces far
+/// from its cause.
+///
+/// `every_internal_slot_is_reserved` in `tests.rs` scans this crate for `"@@..."` literals and
+/// fails if one is missing from here, so a new slot cannot quietly start enumerating.
+const INTERNAL_SLOTS: [&str; 39] = [
+    "@@abort-listeners",
+    "@@asyncDisposeDone",
+    "@@asyncDisposeEntries",
+    "@@call-site-name",
+    "@@concat-index",
+    "@@concat-sources",
+    "@@disposeDone",
+    "@@disposeEntries",
+    "@@entries",
+    "@@finreg-callback",
+    "@@finreg-cells",
+    "@@helper-arg",
+    "@@helper-buffer",
+    "@@helper-counter",
+    "@@helper-done",
+    "@@helper-inner",
+    "@@helper-inner-next",
+    "@@helper-next",
+    "@@helper-partial",
+    "@@helper-source",
+    "@@index",
+    "@@iterated",
+    "@@map",
+    "@@matchall-global",
+    "@@matchall-regexp",
+    "@@matchall-subject",
+    "@@matchall-unicode",
+    "@@part",
+    "@@raw-json",
+    "@@size",
+    "@@trace",
+    "@@weak",
+    "@@weakref-target",
+    "@@zip-iters",
+    "@@zip-keyed",
+    "@@zip-keys",
+    "@@zip-mode",
+    "@@zip-open",
+    "@@zip-padding",
+];
+
+/// The families of internal key whose members are generated rather than listed: a unique symbol's
+/// serial, a private name's scope, and the two host-slot namespaces.
+const INTERNAL_PREFIXES: [&str; 4] = ["@@symbol:", "@@private:", "@@kiln:", "@@node:"];
+
+/// Whether `key` is one the VM wrote, rather than one a program did.
+///
+/// Exact rather than a prefix test -- see [`INTERNAL_SLOTS`] for what a prefix test cost.
+pub(crate) fn is_reserved(key: &str) -> bool {
+    if !key.starts_with(RESERVED_KEY_PREFIX) {
+        return false;
+    }
+    WellKnown::from_property_key(key).is_some()
+        || INTERNAL_PREFIXES
+            .iter()
+            .any(|prefix| key.starts_with(prefix))
+        || INTERNAL_SLOTS.contains(&key)
+}
+
+/// `WellKnown::ALL` holds every variant, once, in ordinal order -- checked while the compiler
+/// builds it, because a list that is merely believed to be complete is not one.
+const _: () = {
+    let mut index = 0;
+    while index < WellKnown::ALL.len() {
+        assert!(
+            WellKnown::ALL[index].ordinal() == index,
+            "WellKnown::ALL must hold every well-known symbol exactly once, in ordinal order"
+        );
+        index += 1;
+    }
+};

@@ -188,23 +188,49 @@ impl Harness {
         None
     }
 
-    /// Load every `.js` file in one harness directory.
+    /// Load every `.js` file in one harness directory, subdirectories included.
+    ///
+    /// An `includes` entry is a *path* relative to `harness/`, not a bare file name, and Test262
+    /// has used that since the SpiderMonkey corpus arrived in `staging/sm`: those cases say
+    /// `includes: [sm/non262-TypedArray-shell.js]`, and `harness/sm/` is where the files are.  A
+    /// flat `read_dir` keyed by file name found none of them, so 319 cases failed on a harness
+    /// the checkout was holding all along -- and failed saying the file "is not in" a directory
+    /// that contains it, which reads as a broken checkout rather than a runner that never looked
+    /// one level down.
     pub fn load(root: &Path) -> Result<Self, std::io::Error> {
         let mut sources = BTreeMap::new();
-        for entry in fs::read_dir(root)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|extension| extension == "js")
-                && let Some(name) = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned())
-            {
-                sources.insert(name, fs::read_to_string(&path)?);
-            }
-        }
+        Self::load_into(root, "", &mut sources)?;
         Ok(Self {
             root: root.to_owned(),
             sources,
         })
+    }
+
+    /// One directory's `.js` files, keyed by their path below the harness root.
+    ///
+    /// The key is joined with `/` whatever the platform's separator is, because it is compared
+    /// against text a Test262 file wrote and that text is always POSIX.
+    fn load_into(
+        directory: &Path,
+        prefix: &str,
+        sources: &mut BTreeMap<String, String>,
+    ) -> Result<(), std::io::Error> {
+        for entry in fs::read_dir(directory)? {
+            let path = entry?.path();
+            let Some(name) = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+            else {
+                continue;
+            };
+            let key = format!("{prefix}{name}");
+            if path.is_dir() {
+                Self::load_into(&path, &format!("{key}/"), sources)?;
+            } else if path.extension().is_some_and(|extension| extension == "js") {
+                sources.insert(key, fs::read_to_string(&path)?);
+            }
+        }
+        Ok(())
     }
 
     /// The directory this harness was loaded from.
@@ -272,6 +298,25 @@ mod tests {
         let harness = Harness::discover(&root.join("test").join("nested")).expect("found");
         assert_eq!(harness.root(), root.join("harness"));
         assert_eq!(harness.get("assert.js"), Some("var assert = 1;\n"));
+    }
+
+    #[test]
+    fn an_include_naming_a_subdirectory_resolves_to_the_file_below_it() {
+        // `staging/sm` says `includes: [sm/non262-Math-shell.js]`, and the file is at
+        // `harness/sm/non262-Math-shell.js`. Keyed by file name alone the include found nothing,
+        // and the whole SpiderMonkey corpus failed on a harness the checkout already had.
+        let root = scratch("nested-include");
+        fs::create_dir_all(root.join("harness").join("sm")).expect("create sm");
+        fs::write(
+            root.join("harness").join("sm").join("shell.js"),
+            "var sm = 4;\n",
+        )
+        .expect("sm shell");
+        let harness = Harness::discover(&root.join("test")).expect("found");
+        assert_eq!(harness.get("sm/shell.js"), Some("var sm = 4;\n"));
+        // A bare name must not reach into a subdirectory: two harness files may share one file
+        // name, and the include says which.
+        assert_eq!(harness.get("shell.js"), None);
     }
 
     #[test]

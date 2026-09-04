@@ -2307,13 +2307,14 @@ fn a_named_import_is_a_live_view_of_the_exported_binding() {
     assert_eq!(host.output, ["0 10", "2 10"]);
 }
 
-/// A namespace object is a snapshot, and says so.
+/// A namespace object tracks the bindings it names.
 ///
-/// Node's namespace objects are live; this one reads the exported cells once, when the
-/// provider finishes. Recorded as a test so the difference is a decision rather than a
-/// surprise.
+/// It used to be a snapshot -- the exported cells were read once, when the provider finished --
+/// and this test recorded that as a deliberate difference from every other engine. It is no
+/// longer one: the namespace keeps the cells beside its properties and brings the slots back
+/// into step before a read, so `counter.count` answers what `bump()` left there.
 #[test]
-fn a_namespace_object_is_a_snapshot_of_the_exports() {
+fn a_namespace_object_tracks_the_exports() {
     let project = TempProject::new();
     project.write(
         "counter.js",
@@ -2334,7 +2335,7 @@ fn a_namespace_object_is_a_snapshot_of_the_exports() {
             ExecutionCapabilities::default(),
         )
         .expect("execute graph");
-    assert_eq!(host.output, ["0"]);
+    assert_eq!(host.output, ["1"]);
 }
 
 #[test]

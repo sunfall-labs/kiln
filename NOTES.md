@@ -3670,6 +3670,13 @@ and then `MUST NOT PRINT`, exiting 0.
   engines apart -- including `Number(x)` passing "default" where the spec says "number", which
   is a shared inaccuracy rather than a divergence. Worth fixing in both at once, later.
 
+  *(2026-09-03: fixed in both at once, and it was not only an inaccuracy. The spec has three
+  hints and both engines carried a two-valued flag, which is harmless for every value except a
+  date -- the one built-in whose answer differs between "default" and "number". So `date + date`
+  added two instants instead of concatenating two date strings, in both engines, silently. The
+  flag is now a three-valued `PrimitiveHint` / `KILN_C99_HINT_*`, and `new Date(x)` turns out to
+  be a third caller that wants "default" and had to become arity-aware to say so.)*
+
 **Two of your things I touched, and one I deliberately did not.**
 
 I set `assert!(PROVIDER_ABI_VERSION == 2)` in `kiln-native/src/lib.rs:59` to match the constant

@@ -297,20 +297,18 @@ fn executable_runtime_event_emitter_preserves_order_once_and_removal() {
     let wrapper = format!(
         r#"
 static int calls = 0;
-static int listener(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                    kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                    kiln_value *thrown, kiln_generator *frame) {{
-    (void)host; (void)upvalues; (void)receiver; (void)depth; (void)thrown; (void)frame;
+static int listener(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                    const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)receiver_ptr;
     if (argc != 1 || args[0].tag != KILN_VALUE_NUMBER) return 91;
     calls = calls * 10 + (int)kiln_c99_as_number(args[0]);
     *result = kiln_c99_undefined();
     return KILN_C99_OK;
 }}
-static int child_constructor(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                             kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                             kiln_value *thrown, kiln_generator *frame) {{
-    (void)host; (void)upvalues; (void)args; (void)argc; (void)depth; (void)thrown; (void)frame;
-    *result = receiver;
+static int child_constructor(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                             const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {{
+    (void)ctx; (void)upvalues; (void)args; (void)argc;
+    *result = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
     return KILN_C99_OK;
 }}
 int main(void) {{
@@ -391,11 +389,10 @@ fn executable_runtime_readable_has_a_checked_native_prototype_graph() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("empty program emits runtime prelude");
     let wrapper = r#"
-static int readable_child(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                          kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                          kiln_value *thrown, kiln_generator *frame) {
-    (void)host; (void)upvalues; (void)args; (void)argc; (void)depth; (void)thrown; (void)frame;
-    *result = receiver;
+static int readable_child(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                          const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)args; (void)argc;
+    *result = receiver_ptr ? *receiver_ptr : kiln_c99_undefined();
     return KILN_C99_OK;
 }
 int main(void) {
@@ -1088,13 +1085,15 @@ fn structural_instruction_refusals_always_name_their_owner() {
         .next()
         .expect("instruction emitter end");
     let templates = instruction_emitter
+        .split("match instruction {")
+        .nth(1)
+        .expect("instruction match")
         .split("let refusal_target =")
         .next()
         .expect("instruction templates");
     assert!(
         !templates
             .lines()
-            .skip(35)
             .any(|line| line.contains("return KILN_C99_CONTROL_ERROR;")),
         "instruction templates must route structural refusals through direct_refusal"
     );
@@ -1171,12 +1170,10 @@ fn unowned_function_refusal_names_its_generated_source_and_function() {
     let generated = emit(&program(vec![], vec![Instruction::Return], 0))
         .expect("diagnostic source probe emits");
     let wrapper = r#"
-static int refuses_before_instruction(kiln_host *host, kiln_value *result,
-                                      kiln_value *upvalues, kiln_value receiver,
-                                      const kiln_value *args, size_t argc, int depth,
-                                      kiln_value *thrown, kiln_generator *frame) {
-    (void)host; (void)result; (void)upvalues; (void)receiver; (void)args;
-    (void)argc; (void)depth; (void)thrown; (void)frame;
+static int refuses_before_instruction(kiln_call_context *ctx, kiln_value *result,
+                                      kiln_value *upvalues, const kiln_value *receiver_ptr,
+                                      const kiln_value *args, size_t argc) {
+    (void)ctx; (void)result; (void)upvalues; (void)receiver_ptr; (void)args; (void)argc;
     return KILN_C99_CONTROL_ERROR;
 }
 int main(void) {
@@ -4340,10 +4337,9 @@ fn executable_node_support_facades_are_deterministic_and_callback_driven() {
     ))
     .expect("support facade probe emits");
     let wrapper = r#"
-static int callback(kiln_host *host, kiln_value *result, kiln_value *upvalues,
-                    kiln_value receiver, const kiln_value *args, size_t argc, int depth,
-                    kiln_value *thrown, kiln_generator *frame) {
-    (void)host; (void)upvalues; (void)receiver; (void)depth; (void)thrown; (void)frame;
+static int callback(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues,
+                    const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+    (void)ctx; (void)upvalues; (void)receiver_ptr;
     if (argc == 2 && args[0].tag == KILN_VALUE_NULL && args[1].tag == KILN_VALUE_ARRAY &&
         kiln_c99_array_of(args[1])->count == 2) {
         *result = kiln_c99_boolean(1);
@@ -4486,4 +4482,83 @@ fn absent_answers_are_where_they_say() {
              says what proves those names absent"
         );
     }
+}
+
+#[test]
+fn executable_dynamic_function_construction_and_evaluation() {
+    let generated =
+        emit(&program(vec![], vec![Instruction::Return], 0)).expect("empty program emits");
+    let wrapper = format!(
+        r#"
+int main(void) {{
+    uint64_t realm = 0;
+    if (kiln_realm_create(&realm) != KILN_C99_OK) return 99;
+    kiln_test_realm_active = 1;
+
+    kiln_value dummy;
+    int mod_status = {}(NULL, &dummy);
+    if (mod_status != KILN_C99_OK) return 100;
+
+    kiln_value thrown = kiln_c99_undefined();
+    kiln_value result = kiln_c99_undefined();
+
+    // 1. Dynamic function with no arguments returning constant:
+    kiln_value args1[1] = {{ kiln_c99_copy_text("return 42;", 10) }};
+    int status = kiln_c99_dynamic_new_function(NULL, &result, args1, 1, 0, &thrown);
+    if (status != KILN_C99_OK || result.tag != KILN_VALUE_FUNCTION) return 1;
+
+    kiln_value call_res = kiln_c99_undefined();
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), NULL, 0, 0, &thrown);
+    if (status != KILN_C99_OK) return 2;
+    if (call_res.tag != KILN_VALUE_NUMBER || kiln_c99_as_number(call_res) != 42.0) return 3;
+
+    // 2. Dynamic function with two parameters:
+    kiln_value args2[3] = {{
+        kiln_c99_copy_text("a", 1),
+        kiln_c99_copy_text("b", 1),
+        kiln_c99_copy_text("return a + b;", 13)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, args2, 3, 0, &thrown);
+    if (status != KILN_C99_OK) return 4;
+
+    kiln_value call_args2[2] = {{ kiln_c99_number(100.0), kiln_c99_number(23.0) }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), call_args2, 2, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(call_res) != 123.0) return 5;
+
+    // 3. Dynamic function mutating an object on the native heap:
+    kiln_value my_obj;
+    status = kiln_c99_new_object(&my_obj);
+    if (status != KILN_C99_OK) return 6;
+    status = kiln_c99_put(NULL, my_obj, "count", 5, kiln_c99_number(10.0), 0, &thrown);
+    if (status != KILN_C99_OK) return 7;
+
+    kiln_value args3[2] = {{
+        kiln_c99_copy_text("obj", 3),
+        kiln_c99_copy_text("obj.count = obj.count + 5; return obj.count;", 44)
+    }};
+    status = kiln_c99_dynamic_new_function(NULL, &result, args3, 2, 0, &thrown);
+    if (status != KILN_C99_OK) return 8;
+
+    kiln_value call_args3[1] = {{ my_obj }};
+    status = kiln_c99_call(NULL, &call_res, result, kiln_c99_undefined(), call_args3, 1, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(call_res) != 15.0) return 9;
+
+    kiln_value read_back;
+    status = kiln_c99_get(NULL, my_obj, "count", 5, &read_back, 0, &thrown);
+    if (status != KILN_C99_OK || kiln_c99_as_number(read_back) != 15.0) return 10;
+
+    kiln_test_realm_active = 0;
+    return kiln_realm_destroy(realm) == KILN_C99_OK ? 0 : 101;
+}}
+"#,
+        generated.symbol
+    );
+    let run = run_with_main(&generated, &wrapper, "dynamic-function");
+    assert!(
+        run.status.success(),
+        "dynamic function execution failed with exit code {:?}:\nstdout:\n{}\nstderr:\n{}",
+        run.status.code(),
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
 }

@@ -261,38 +261,6 @@ pub(crate) fn validate_code(
     Ok(max_height.max(1))
 }
 
-pub(crate) fn compute_stack_heights(code: &[Instruction]) -> Vec<usize> {
-    let mut heights: Vec<Option<usize>> = vec![None; code.len()];
-    let mut work = vec![(0usize, 0usize)];
-    while let Some((index, height)) = work.pop() {
-        if index >= code.len() || heights[index].is_some() {
-            continue;
-        }
-        heights[index] = Some(height);
-        let (next_height, terminal) = match stack_effect(&code[index], height, index) {
-            Ok(res) => res,
-            Err(_) => continue,
-        };
-        if terminal {
-            continue;
-        }
-        match &code[index] {
-            Instruction::Jump(target) => work.push((*target as usize, next_height)),
-            Instruction::JumpIfFalse(target)
-            | Instruction::JumpIfTruthy(target)
-            | Instruction::JumpIfNotNullish(target) => {
-                work.push((*target as usize, next_height));
-                if index + 1 < code.len() {
-                    work.push((index + 1, next_height));
-                }
-            }
-            _ if index + 1 < code.len() => work.push((index + 1, next_height)),
-            _ => {}
-        }
-    }
-    heights.into_iter().map(|h| h.unwrap_or(0)).collect()
-}
-
 /// Whether the backend can emit this instruction.
 ///
 /// There is no catch-all arm any more: **every instruction in the set is emitted**, and the match
@@ -371,6 +339,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
             | kiln_ir::Builtin::AbortController
             | kiln_ir::Builtin::AbortSignal
             | kiln_ir::Builtin::TextEncoder
+            | kiln_ir::Builtin::TextDecoder
             | kiln_ir::Builtin::Performance,
         ) => Ok(()),
         Instruction::LoadBuiltin(builtin) => Err(EmitError::Unsupported {
@@ -416,6 +385,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::SetProperty(_)
         | Instruction::SetPropertyStrict { .. }
         | Instruction::NewArray { .. }
+        | Instruction::ToPropertyKey
         | Instruction::GetComputed
         | Instruction::SetComputed
         | Instruction::SetComputedStrict { .. }
@@ -445,6 +415,7 @@ fn validate_supported_instruction(instruction: &Instruction) -> Result<(), EmitE
         | Instruction::StoreGlobal(_)
         | Instruction::DefineAccessor { .. }
         | Instruction::DefineMethod
+        | Instruction::DefineNamedProperty
         | Instruction::DefinePrivate { .. }
         | Instruction::SpreadObject
         | Instruction::SpreadInto
@@ -572,6 +543,15 @@ fn stack_effect(
                 Ok((height, false))
             }
         }
+        // Height-neutral: the key is replaced by its converted self. It needs the object beneath
+        // it as well, which it reads without consuming.
+        Instruction::ToPropertyKey => {
+            if height < 2 {
+                Err(underflow(2))
+            } else {
+                Ok((height, false))
+            }
+        }
         Instruction::GetComputed => {
             if height < 2 {
                 Err(underflow(2))
@@ -627,7 +607,9 @@ fn stack_effect(
         }
         // The half and the key are consumed; the target stays, so a class body can define
         // several accessors on one object without reloading it.
-        Instruction::DefineAccessor { .. } | Instruction::DefineMethod => {
+        Instruction::DefineAccessor { .. }
+        | Instruction::DefineMethod
+        | Instruction::DefineNamedProperty => {
             if height < 3 {
                 Err(underflow(3))
             } else {
@@ -836,20 +818,22 @@ fn stack_effect(
             }
         }
         // The object is replaced by what was read, exactly as `GetProperty` is.
+        // The brand rides on top of the receiver and is consumed with it: the value replaces
+        // both, so the height falls by one.
         Instruction::GetPrivate(_) => {
-            if height < 1 {
-                Err(underflow(1))
+            if height < 2 {
+                Err(underflow(2))
             } else {
-                Ok((height, false))
+                Ok((height - 1, false))
             }
         }
         // ...and the value replaces both, exactly as `SetProperty` does: an assignment is an
         // expression and its value is what was assigned.
         Instruction::SetPrivate(_) => {
-            if height < 2 {
-                Err(underflow(2))
+            if height < 3 {
+                Err(underflow(3))
             } else {
-                Ok((height - 1, false))
+                Ok((height - 2, false))
             }
         }
         // A throw consumes the value and does not fall through: control leaves for a handler.

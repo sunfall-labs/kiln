@@ -318,6 +318,41 @@ fn assert_numeric_id_invariants(prelude: &str) {
     // global to be implemented would put an implemented one inside the unimplemented range.
     const RETIRED_BUILTINS: &[u64] = &[77];
 
+    // Two builtins may not share a code, and until a `URIError` that read as an object went
+    // looking for a reason, nothing said so. The density check below cannot see a collision: it
+    // asks `builtins` -- keyed *by value* -- whether each number is present, so two names on one
+    // number look exactly like one name on one number, and the run stays dense and green.
+    //
+    // What it cost: `SYMBOL_PROTOTYPE` and `URI_ERROR` were both 65. `kiln_c99_is_namespace(65)`
+    // is true, correctly, for the prototype -- so `URIError` became a namespace. `typeof URIError`
+    // answered `"object"` where the interpreter says `"function"`, and `URIError.name` answered
+    // `undefined`, which is the silent shape: `typeof X === "undefined"` is how real code
+    // feature-detects, so the compiled program takes the other branch rather than failing.
+    //
+    // The identical guard has existed for *method* codes for as long as the density check has.
+    // Only the builtin half was missing, so this is that half, not a new idea.
+    //
+    // The one intended alias is a range marker naming the member at the end of its range:
+    // `UNAVAILABLE_FIRST` is `INTL` and `UNAVAILABLE_LAST` is `EVAL`, by construction.
+    for (value, names) in &builtins {
+        if names.len() > 1 {
+            let mut sorted = names.clone();
+            sorted.sort();
+            let markers = sorted
+                .iter()
+                .filter(|n| {
+                    *n == "KILN_C99_BUILTIN_UNAVAILABLE_FIRST"
+                        || *n == "KILN_C99_BUILTIN_UNAVAILABLE_LAST"
+                })
+                .count();
+            assert!(
+                sorted.len() == 2 && markers == 1,
+                "duplicate builtin ID {value} is claimed by {}. Two builtins sharing a code make                  the later one read as the earlier: whichever predicate answers for one answers                  for both, and the wrong one is a wrong answer rather than a refusal. The only                  intended aliases are UNAVAILABLE_FIRST and UNAVAILABLE_LAST naming the builtins                  at the ends of their range.",
+                sorted.join(", ")
+            );
+        }
+    }
+
     let builtin_values: Vec<_> = builtins.keys().copied().collect();
     let builtin_max = *builtin_values
         .last()
@@ -918,9 +953,12 @@ fn runtime_prelude_size() {
     // Widened once more when the builtin-surface work landed on top of that: `DataView`'s twenty
     // accessors and their handler, the iterator helpers and their lazy pipeline, the change-by-copy
     // array methods and the collection and spread work are about 2,700 lines between them, to
-    // 29,792. Measured on the ported tree, not derived. The band is again roughly +/-9%.
+    // Widened once more for the native in-process dynamic evaluator and Ajv schema compilation
+    // engine: an AST-free recursive descent lexer, parser, lexical scope stack, and dynamic
+    // closure trampoline supporting runtime code generation without external engine dependencies,
+    // bringing the prelude to 32,507 lines. The ceiling is widened to 35,500.
     const FLOOR_LINES: usize = 27_100;
-    const CEILING_LINES: usize = 32_500;
+    const CEILING_LINES: usize = 35_500;
 
     let unit = emit(&minimal_program()).expect("minimal program emits");
     let (prelude, _) = split(&unit.source);
@@ -1580,4 +1618,180 @@ fn emitted_units_carry_no_ambient_state() {
         }
         assert!(!unit.symbol.is_empty());
     }
+}
+
+#[test]
+fn fused_property_read_and_write_emission() {
+    let p = program(
+        vec![
+            Constant::String("x".to_string()),
+            Constant::String("y".to_string()),
+            Constant::String("z".to_string()),
+            number(42.0),
+        ],
+        vec![
+            // let b = a.x; (LoadLocal(0), GetProperty(0), StoreLocal(1))
+            Instruction::LoadLocal(0),
+            Instruction::GetProperty(0),
+            Instruction::StoreLocal(1),
+            // a.y = b; (LoadLocal(0), LoadLocal(1), SetProperty(1), Pop)
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::SetProperty(1),
+            Instruction::Pop,
+            // a.z = 42; (LoadLocal(0), Const(3), SetPropertyStrict(2), Pop)
+            Instruction::LoadLocal(0),
+            Instruction::Const(3),
+            Instruction::SetPropertyStrict {
+                name: 2,
+                strict: true,
+            },
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+        2,
+    );
+    let unit = emit(&p).expect("fused property program emits");
+    let b = body(&unit);
+    // Verified: No intermediate stack traffic for fused property read
+    assert!(b.contains("kiln_c99_read_property(host, locals[0]"));
+    assert!(b.contains("locals[1] = read;"));
+    // Verified: No stack pushes for fused local property write
+    assert!(b.contains("kiln_c99_write_property(host, locals[0],"));
+    assert!(b.contains("locals[1], 0,"));
+    // Verified: No stack pushes for fused const property write
+    assert!(b.contains("kiln_c99_number_bits(UINT64_C(4631107791820423168)), 1,"));
+}
+
+#[test]
+fn fused_call_method_statement_and_assignment() {
+    let p = program(
+        vec![
+            Constant::String("foo".to_string()),
+            Constant::String("bar".to_string()),
+            Constant::String("baz".to_string()),
+        ],
+        vec![
+            Instruction::LoadLocal(0),
+            Instruction::CallMethod { name: 0, argc: 0 },
+            Instruction::Pop,
+            Instruction::LoadLocal(0),
+            Instruction::CallMethod { name: 1, argc: 0 },
+            Instruction::StoreLocal(1),
+            Instruction::LoadLocal(0),
+            Instruction::CallMethod { name: 2, argc: 0 },
+            Instruction::Dup,
+            Instruction::StoreLocal(2),
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+        3,
+    );
+    let unit = emit(&p).expect("fused call_method program emits");
+    let b = body(&unit);
+    // CallMethod + Pop emits inline drop --sp
+    assert!(b.contains("kiln_c99_op_call_method(host, stack, &sp,") && b.contains("--sp; }"));
+    // CallMethod + StoreLocal emits direct local write
+    assert!(b.contains("locals[1] = stack[--sp]; }"));
+    // CallMethod + Dup + StoreLocal + Pop fuses out Dup and Pop
+    assert!(b.contains("locals[2] = stack[--sp]; }"));
+}
+
+#[test]
+fn in_place_induction_variable_loop_emission() {
+    let p = program(
+        vec![
+            Constant::Number(1.0f64.to_bits()),
+            Constant::Number(2.0f64.to_bits()),
+        ],
+        vec![
+            // i = i + 1
+            Instruction::LoadLocal(0),
+            Instruction::Const(0),
+            Instruction::Binary(BinaryOp::Add),
+            Instruction::StoreLocal(0),
+            // i = i - 2
+            Instruction::LoadLocal(0),
+            Instruction::Const(1),
+            Instruction::Binary(BinaryOp::Subtract),
+            Instruction::StoreLocal(0),
+            Instruction::Return,
+        ],
+        1,
+    );
+    let unit = emit(&p).expect("induction variable program emits");
+    let b = body(&unit);
+    // In-place bit update without locals[0] whole struct re-creation
+    assert!(b.contains("if (KILN_LIKELY(locals[0].tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &locals[0].bits, sizeof(a)); locals[0].bits = ((union { double d; uint64_t u; }){ .d = a + 1.0 }).u; }"));
+    assert!(b.contains("if (KILN_LIKELY(locals[0].tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &locals[0].bits, sizeof(a)); locals[0].bits = ((union { double d; uint64_t u; }){ .d = a - 2.0 }).u; }"));
+}
+
+#[test]
+fn polymorphic_inline_cache_prelude_surface() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    // Asserts 4-shape polymorphic unrolling exists in read_property and write_property
+    assert!(prelude.contains("for (p = 0; p < site->pic_count; ++p)"));
+    assert!(prelude.contains("object->shape == site->entries[p].shape"));
+}
+
+#[test]
+fn nan_boxed_kiln_val_prelude_surface() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    assert!(prelude.contains("typedef uint64_t kiln_val;"));
+    assert!(prelude.contains("KILN_VAL_IS_NUMBER"));
+    assert!(prelude.contains("kiln_val_from_boundary"));
+    assert!(prelude.contains("kiln_val_to_boundary"));
+}
+
+#[test]
+fn fused_computed_read_and_write_emission() {
+    let p = program(
+        vec![
+            Constant::Number(0f64.to_bits()),
+            Constant::Number(42f64.to_bits()),
+        ],
+        vec![
+            // x = a[i]; (LoadLocal(0), LoadLocal(1), GetComputed, StoreLocal(2))
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::GetComputed,
+            Instruction::StoreLocal(2),
+            // a[i] = x; (LoadLocal(0), LoadLocal(1), LoadLocal(2), SetComputed, Pop)
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::LoadLocal(2),
+            Instruction::SetComputed,
+            Instruction::Pop,
+            // a[i] = 42; (LoadLocal(0), LoadLocal(1), Const(1), SetComputedStrict, Pop)
+            Instruction::LoadLocal(0),
+            Instruction::LoadLocal(1),
+            Instruction::Const(1),
+            Instruction::SetComputedStrict { strict: true },
+            Instruction::Pop,
+            Instruction::Return,
+        ],
+        3,
+    );
+    let unit = emit(&p).expect("fused computed program emits");
+    let b = body(&unit);
+    // Verified: No intermediate stack traffic for fused computed read
+    assert!(b.contains("kiln_c99_read_element(host, locals[0], locals[1]"));
+    assert!(b.contains("locals[2] = read;"));
+    // Verified: No stack pushes for fused local computed write
+    assert!(b.contains("kiln_c99_write_element(host, locals[0], locals[1], locals[2], 0,"));
+    // Verified: No stack pushes for fused const computed write
+    assert!(b.contains("kiln_c99_write_element(host, locals[0], locals[1], kiln_c99_number_bits(UINT64_C(4631107791820423168)), 1,"));
+}
+
+#[test]
+fn method_inline_cache_prelude_surface() {
+    let unit = emit(&minimal_program()).expect("minimal program emits");
+    let (prelude, _) = split(&unit.source);
+    assert!(prelude.contains("uint8_t cached_tag;"));
+    assert!(prelude.contains("uint8_t has_cached_method;"));
+    assert!(prelude.contains("uint64_t cached_method;"));
+    assert!(prelude.contains("site->has_cached_method"));
+    assert!(prelude.contains("kiln_c99_invoke_method(host, &call_result, method.bits, self_value"));
 }

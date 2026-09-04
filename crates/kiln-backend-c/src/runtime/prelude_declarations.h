@@ -3,7 +3,14 @@
 #define KILN_PRELUDE_DECLARATIONS_H
 
 typedef struct kiln_data_view kiln_data_view;
+#define KILN_GC_PHASE_MARK 0
 #define KILN_GC_PHASE_RESET 2
+/* Opaque: a unit marks its module globals through the prelude and never looks inside the heap.
+ * Declared as the bare struct rather than the typedef so this header cannot collide with the
+ * definition in `prelude_runtime.c`. */
+struct kiln_gc_heap;
+extern void kiln_c99_gc_mark_values(struct kiln_gc_heap *heap, const kiln_value *values,
+                                    size_t count);
 #define KILN_GC_ROOT_SURVIVES_TEARDOWN 1
 typedef int (*kiln_native_entry)(void *heap, void *context, kiln_value *result, size_t depth, kiln_value *thrown);
 extern void kiln_c99_gc_release(void *ptr);
@@ -23,6 +30,14 @@ extern int kiln_c99_internal_status(const char *converted_by);
 #define KILN_C99_REFUSE_NAMED(lacked, subject, subject_len) \
     return kiln_c99_refuse_named((lacked), (subject), (subject_len))
 #define KILN_C99_REFUSE_INTERNAL(converted_by) return kiln_c99_internal_status(converted_by)
+
+#if defined(__GNUC__) || defined(__clang__)
+#define KILN_LIKELY(x) __builtin_expect(!!(x), 1)
+#define KILN_UNLIKELY(x) __builtin_expect(!!(x), 0)
+#else
+#define KILN_LIKELY(x) (x)
+#define KILN_UNLIKELY(x) (x)
+#endif
 
 /* Emitted variable declarations */
 extern int kiln_c99_keys_check_mode;
@@ -64,13 +79,10 @@ extern double kiln_c99_typed_get(kiln_typed_array *view, size_t index);
 extern void kiln_c99_typed_set(kiln_typed_array *view, size_t index, double value);
 extern int kiln_c99_new_typed_array(kiln_value *out, kiln_typed_kind kind, kiln_value source, size_t byte_offset, size_t length, int has_length, kiln_value *thrown);
 extern int kiln_c99_reserve(void **items, size_t *capacity, size_t needed, size_t item_size);
-extern int kiln_c99_object_reserve(kiln_object *object, size_t needed);
-extern int kiln_c99_array_reserve(kiln_array *array, size_t needed);
 extern int kiln_c99_same_name(const char *key, size_t key_len, const char *name);
 extern int kiln_c99_put_mode(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int strict, int depth, kiln_value *thrown);
 extern int kiln_c99_put(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int depth, kiln_value *thrown);
 extern int kiln_c99_own_slot(kiln_value target, const char *key, size_t key_len, kiln_property **out);
-extern int kiln_c99_own_slot_ikey(kiln_value target, const char *key, size_t key_len, const char *ikey, kiln_property **out);
 extern kiln_value kiln_c99_method(uint64_t code);
 extern int kiln_c99_commonjs_require_value(kiln_value *out, kiln_commonjs_require_fn call, void *context);
 extern const char *kiln_c99_method_name(uint64_t code);
@@ -92,6 +104,20 @@ extern uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
 extern kiln_value kiln_c99_builtin(uint64_t code);
 extern int kiln_c99_is_callable(kiln_value value);
 extern int kiln_c99_is_reference(kiln_value value);
+/* The three hints `ToPrimitive` can be asked for. The specification has three, not two, and the
+ * third is not decoration: a `Date` is the one built-in whose `@@toPrimitive` answers a string for
+ * "default" and a number for "number", which is the whole of why `date + date` concatenates while
+ * `date - date` subtracts. For every other value the three coincide, which is why two of them
+ * sufficed here for so long. NUMBER and STRING keep the 0 and 1 the two-valued flag used, so every
+ * call site that already said what it wanted still says it. */
+#ifndef KILN_C99_HINT_NUMBER
+#define KILN_C99_HINT_NUMBER 0
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_HINT_DEFAULT 2
+#endif
+
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
+extern int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_has_intrinsic_text(kiln_value value);
 extern int kiln_c99_crosses_boundary(kiln_value value);
 extern kiln_value kiln_c99_hole(void);
@@ -166,5 +192,23 @@ extern int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
 extern void kiln_c99_gc_unit_roots(void *opaque, void *context, int phase);
 extern uint64_t kiln_c99_array_method(const char *key, size_t key_len);
 extern uint64_t kiln_c99_string_method(const char *key, size_t key_len);
+extern int kiln_c99_op_get_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern int kiln_c99_op_to_property_key(kiln_host *host, kiln_value *stack, size_t *sp, int depth, kiln_value *thrown);
+extern int kiln_c99_op_get_computed(kiln_host *host, kiln_value *stack, size_t *sp, int depth, kiln_value *thrown);
+extern int kiln_c99_op_call_method(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, size_t argc, int depth, kiln_value *thrown, kiln_c99_site *site, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);
+extern int kiln_c99_op_call(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown, const char *inst_site, size_t inst_idx, const char *inst_op, kiln_value *result);
+extern int kiln_c99_op_new(kiln_host *host, kiln_value *stack, size_t *sp, size_t argc, int depth, kiln_value *thrown);
+extern int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp, kiln_value *thrown);
+extern int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown);
+extern int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp, int strict, int depth, kiln_value *thrown);
+extern int kiln_c99_read_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, kiln_value *out);
+extern int kiln_c99_write_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern void kiln_c99_note_get_property_refusal(kiln_value target);
+extern void kiln_c99_note_get_computed_refusal(kiln_value target, kiln_value key);
+extern int kiln_c99_read_element(kiln_host *host, kiln_value target, kiln_value key, int depth, kiln_value *thrown, kiln_value *out);
+extern int kiln_c99_write_element(kiln_host *host, kiln_value target, kiln_value key, kiln_value value, int strict, int depth, kiln_value *thrown);
+extern kiln_val kiln_val_from_boundary(kiln_value v);
+extern kiln_value kiln_val_to_boundary(kiln_val v);
 
 #endif /* KILN_PRELUDE_DECLARATIONS_H */
