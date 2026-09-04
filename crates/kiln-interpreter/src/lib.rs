@@ -4382,7 +4382,7 @@ impl Value {
             Self::Generator(_) => "[object Generator]".to_owned(),
             Self::Promise(_) => "[object Promise]".to_owned(),
             // `String(/a/g)` is the literal as written, which is what `toString` returns.
-            Self::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
+            Self::RegExp(regexp) => format!("/{}/{}", regexp.source, canonical_regexp_flags(&regexp.flags)),
             Self::Date(date) => date_to_string(date.time.get()),
             Self::Temporal(built) => built
                 .value()
@@ -29153,7 +29153,11 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // not disagree about what `re.source` is, and the raw pattern would not survive
                 // being written back between slashes.
                 "source" => Value::String(escaped_source(&regexp.source)),
-                "flags" => Value::String(regexp.flags.clone()),
+                // The specification's order -- `dgimsuvy` -- not the order the program wrote
+                // them: `new RegExp("a", "yigm").flags` is "gimy". Answering the stored spelling
+                // made the getter disagree with the generic one on `RegExp.prototype`, which
+                // builds the string from the eight flag accessors in exactly this order.
+                "flags" => Value::String(canonical_regexp_flags(&regexp.flags)),
                 "global" => Value::Boolean(regexp.global),
                 "sticky" => Value::Boolean(regexp.sticky),
                 "ignoreCase" => Value::Boolean(regexp.flags.contains('i')),
@@ -39636,7 +39640,7 @@ fn inspect_nested(value: &Value, depth: usize, seen: &mut Vec<usize>) -> String 
             view.byte_length().unwrap_or(0),
             view.offset
         ),
-        Value::RegExp(regexp) => format!("/{}/{}", regexp.source, regexp.flags),
+        Value::RegExp(regexp) => format!("/{}/{}", regexp.source, canonical_regexp_flags(&regexp.flags)),
         Value::Date(date) => {
             iso_string(date.time.get()).unwrap_or_else(|| "Invalid Date".to_owned())
         }
@@ -41701,6 +41705,17 @@ fn string_to_big_int(text: &str) -> Option<num_bigint::BigInt> {
         None => trimmed.parse::<num_bigint::BigInt>().ok(),
     }
 }
+/// A regexp's flags in the order `RegExp.prototype.flags` publishes them.
+///
+/// `dgimsuvy`, which is the order the generic getter walks its eight accessors in. The stored
+/// spelling is whatever the program wrote, and the two must not disagree.
+fn canonical_regexp_flags(written: &str) -> String {
+    "dgimsuvy"
+        .chars()
+        .filter(|flag| written.contains(*flag))
+        .collect()
+}
+
 
 
 /// Whether `new value(...)` is something the language will run.
