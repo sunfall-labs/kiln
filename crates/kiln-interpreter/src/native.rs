@@ -936,7 +936,12 @@ impl Native {
             // happen in is observable through a `valueOf`: the specification converts year
             // through millisecond left to right, before it decides anything about the date.
             | Self::DateConstructor
-            | Self::DateUtc => Some(false),
+            | Self::DateUtc
+            // Both take code *units*, and both read them with the pure `as_number`, which
+            // answers NaN for an object: `String.fromCharCode({valueOf: () => 65})` was NUL
+            // rather than "A", and `fromCodePoint` refused the same argument outright.
+            | Self::StringFromCharCode
+            | Self::StringFromCodePoint => Some(false),
             Self::ParseInt | Self::ParseFloat => Some(true),
             _ => None,
         }
