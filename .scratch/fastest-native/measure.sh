@@ -21,12 +21,16 @@ for b in loop fib class-poly; do
 	src="$(src_of "$b")"
 	"$KILN" --one-shot build "$src" --profile native-release --output "$WORK/$b.today" >/dev/null
 	clang -O2 -std=c99 -o "$WORK/$b.ideal" ".scratch/fastest-native/$b.c" -lm
-	want="$(node "$src")"
-	for v in today ideal; do
-		got="$("$WORK/$b.$v")"
-		[[ $got == "$want" ]] || { echo "$b.$v answered $got, node answered $want" >&2; exit 1; }
-	done
-	echo "== $b (node whole process, today's native, hand-emitted C)"
-	hyperfine -N -w 2 -r 7 "node $src" "$WORK/$b.today" "$WORK/$b.ideal" 2>/dev/null | grep -E 'Time \(mean'
-	echo "   hand-emitted C, workload only (same basis as bench/harness.mjs): $("$WORK/$b.ideal" 2>&1 >/dev/null)"
+	# bench/harness.mjs prints one JSON record per run: the checksum decides agreement and
+	# warm_median is the in-process number, the same basis for node and for today's native.
+	field() { python3 -c 'import sys,json; r=[l for l in sys.stdin.read().splitlines() if l.startswith("{")][-1]; print(json.loads(r)[sys.argv[1]])' "$1"; }
+	want="$(node "$src" | field checksum)"
+	today="$("$WORK/$b.today")"
+	[[ $(field checksum <<<"$today") == "$want" ]] || { echo "$b.today checksum differs from node's $want" >&2; exit 1; }
+	ideal_out="$("$WORK/$b.ideal" 2>"$WORK/$b.ideal.err")"
+	[[ $ideal_out == "$want" ]] || { echo "$b.ideal answered $ideal_out, node answered $want" >&2; exit 1; }
+	node_warm="$(node "$src" | field warm_median)"
+	today_warm="$(field warm_median <<<"$today")"
+	ideal_warm="$(sed -n 's/workload median \(.*\) ms/\1/p' "$WORK/$b.ideal.err")"
+	printf '%-12s node warm %8.3f ms   native today warm %8.3f ms   hand-emitted C warm %8.3f ms\n' "$b" "$node_warm" "$today_warm" "$ideal_warm"
 done
