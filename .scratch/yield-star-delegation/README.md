@@ -36,7 +36,34 @@ Three distinct defects, all from the same absence: a non-object result from the 
 is not refused, the inner result is discarded rather than propagated, and a missing inner `throw`
 neither closes the inner iterator nor raises the TypeError the specification requires.
 
-## Why this can be emitted IR
+## Correction (2026-09-03, later the same day)
+
+The section below is **wrong on the point that decides the design**, and is kept only so the
+mistake is not made twice. It claimed the protocol could be emitted instructions because "the VM
+already raises both resumption kinds as throwable values". That is true of the *interpreter* and
+not of the C backend, so an emitted sequence cannot be written against it.
+
+- The interpreter raises a return completion as a throwable value,
+  `Value::Native(Native::ReturnSignal)`, caught at the suspension point.
+- The C backend has no such value. Its generator carries the state on the frame instead --
+  `frame->raising = 1` with `frame->sent`, in `KILN_C99_METHOD_GENERATOR_RETURN`
+  (`prelude_core.c`). Nothing in the emitted C is a *value* an instruction could compare against.
+
+So an `IsReturnSignal` instruction, which was the obvious primitive, is implementable in one
+engine and not the other -- exactly what ADR 0043 exists to prevent. Both engines already handle
+`gen.return()` correctly, including running `finally`; they simply do it by different means.
+
+A fix therefore has to choose one of:
+
+- give the C backend a value-shaped return signal so the two representations agree, and *then*
+  emit the protocol -- the larger change, but the one that keeps a single lowering; or
+- implement the delegation inside each engine's generator machinery, accepting two
+  implementations of one rule and the drift that invites.
+
+Neither is small, and the choice is a real design decision rather than an implementation detail.
+That is the state of this issue: the row count still stands, the design does not.
+
+## Why this can be emitted IR (SUPERSEDED -- see the correction above)
 
 Worth writing down, because it decides the shape of the fix. The VM already raises *both*
 resumption kinds as throwable values at the suspension point
