@@ -2820,6 +2820,15 @@ fn emit_instruction(
         }
         // A class's methods are not enumerated, which is the whole difference from the
         // `SetProperty` an object literal's methods lower to.
+        // The enumerated sibling of `DefineMethod`: an object literal's members are listed,
+        // a class's methods are not.
+        Instruction::DefineNamedProperty => {
+            writeln!(
+                output,
+                "    {{ kiln_value method = stack[--sp]; kiln_value key = stack[--sp]; kiln_value name = kiln_c99_property_key(key); if (name.tag != KILN_VALUE_STRING) {{ {direct_refusal} }} if (kiln_c99_set_function_name(method, key, NULL) != KILN_C99_OK) {{ {direct_refusal} }} if (kiln_c99_put(host, stack[sp - 1], name.ptr, name.len, method, depth, thrown) != KILN_C99_OK) {{ {direct_refusal} }} }}"
+            )
+            .unwrap();
+        }
         Instruction::DefineMethod => {
             writeln!(
                 output,
@@ -3763,6 +3772,7 @@ fn hash_program_with_seed(program: &Program, seed: u64) -> u64 {
                 byte(&mut hash, u8::from(*enumerable));
             }
             Instruction::DefineMethod => byte(&mut hash, 43),
+            Instruction::DefineNamedProperty => byte(&mut hash, 194),
             Instruction::DefinePrivate { name, kind } => {
                 byte(&mut hash, 70);
                 word(&mut hash, u64::from(*name));
