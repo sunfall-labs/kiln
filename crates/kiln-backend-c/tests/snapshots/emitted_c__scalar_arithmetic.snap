@@ -43,7 +43,7 @@ kiln_label_12:;
 kiln_label_13:;
     locals[1] = stack[--sp];
 kiln_label_14:;
-    { kiln_value left = locals[0]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); uint64_t b_bits = UINT64_C(4611686018427387904); memcpy(&b, &b_bits, sizeof(b)); if (a != 0.0 && b != 0.0 && a >= -9007199254740992.0 && a <= 9007199254740992.0 &&              b >= -9007199254740992.0 && b <= 9007199254740992.0 && a == (double)(int64_t)a &&              b == (double)(int64_t)b) { answer = kiln_c99_number((double)((int64_t)a % (int64_t)b)); }              else { answer = kiln_c99_number(fmod(a, b)); } } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4611686018427387904)); answer = kiln_c99_binary(5, left, right); } stack[sp++] = answer; }
+    { kiln_value left = locals[0]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union { uint64_t u; double d; }){ .u = UINT64_C(4611686018427387904) }).d; if (KILN_LIKELY(a > 0.0 && a <= 9007199254740992.0 && a == (double)(int64_t)a)) { answer = kiln_c99_number((double)((int64_t)a & 1)); } else { answer = kiln_c99_number(fmod(a, b)); } } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4611686018427387904)); answer = kiln_c99_binary(5, left, right); } stack[sp++] = answer; }
 kiln_label_15:;
 kiln_label_16:;
 kiln_label_17:;

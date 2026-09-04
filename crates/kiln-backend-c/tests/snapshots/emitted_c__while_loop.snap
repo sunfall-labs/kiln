@@ -18,12 +18,12 @@ kiln_label_0:;
     locals[0] = kiln_c99_number_bits(UINT64_C(0));
 kiln_label_1:;
 kiln_label_2:;
-    { kiln_value left = locals[0]; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); uint64_t b_bits = UINT64_C(4613937818241073152); memcpy(&b, &b_bits, sizeof(b)); if (!(a < b)) goto kiln_label_11; } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4613937818241073152)); kiln_value answer = kiln_c99_binary(9, left, right); if (!kiln_c99_truthy(answer)) goto kiln_label_11; } }
+    { kiln_value left = locals[0]; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &left.bits, sizeof(a)); double b = ((union { uint64_t u; double d; }){ .u = UINT64_C(4613937818241073152) }).d; if (!(a < b)) goto kiln_label_11; } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4613937818241073152)); kiln_value answer = kiln_c99_binary(9, left, right); if (!kiln_c99_truthy(answer)) goto kiln_label_11; } }
 kiln_label_3:;
 kiln_label_4:;
 kiln_label_5:;
 kiln_label_6:;
-    { kiln_value left = locals[0]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; double b; memcpy(&a, &left.bits, sizeof(a)); uint64_t b_bits = UINT64_C(4607182418800017408); memcpy(&b, &b_bits, sizeof(b)); answer = kiln_c99_number(a + b); } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4607182418800017408)); answer = kiln_c99_binary(1, left, right); } locals[0] = answer; }
+    { kiln_value left = locals[0]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) { double a; memcpy(&a, &left.bits, sizeof(a)); answer = kiln_c99_number(a + 1.0); } else { kiln_value right = kiln_c99_number_bits(UINT64_C(4607182418800017408)); answer = kiln_c99_binary(1, left, right); } locals[0] = answer; }
 kiln_label_7:;
 kiln_label_8:;
 kiln_label_9:;
