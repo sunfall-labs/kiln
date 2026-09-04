@@ -15846,7 +15846,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         // what it is checked against afterwards.
                         let described = self.read_descriptor(&descriptor, instruction)?;
                         let handler = proxy.handler.clone();
-                        let list = vec![inner.clone(), Self::trap_key(&key), descriptor];
+                        let list = vec![inner.clone(), self.trap_key(&key), descriptor];
                         let answered = self.call_value(&trap, handler, list, instruction)?;
                         if !answered.is_truthy() {
                             if matches!(native, Native::ReflectDefineProperty) {
@@ -22485,7 +22485,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let handler = proxy.handler.clone();
                     let arguments = vec![
                         inner.clone(),
-                        Self::trap_key(key),
+                        self.trap_key(key),
                         value.clone(),
                         target.clone(),
                     ];
@@ -27309,7 +27309,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.proxy_descriptor(&inner, key, instruction);
         };
         let handler = proxy.handler.clone();
-        let list = vec![inner.clone(), Self::trap_key(key)];
+        let list = vec![inner.clone(), self.trap_key(key)];
         let answered = self.call_value(&trap, handler, list, instruction)?;
         if !is_an_object(&answered) && !matches!(answered, Value::Undefined) {
             return Err(Self::proxy_invariant(
@@ -27682,10 +27682,22 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     /// is the standard way a library hides its own state behind a proxy, and stringifying the
     /// key breaks exactly that. Everything else is a string, as the specification says, so a
     /// numeric index arrives as `"0"`.
-    fn trap_key(key: &Value) -> Value {
+    fn trap_key(&self, key: &Value) -> Value {
         match key {
             Value::Symbol(_) => key.clone(),
-            other => Value::String(other.property_key()),
+            other => {
+                // A symbol that reached here as its reserved spelling is turned back into the
+                // symbol. The interpreter stores a symbol key as a string, and handing that
+                // string to a trap showed the handler `"@@symbol:1"` where the language shows
+                // it the symbol -- so `Object.freeze(proxy)` asked about a name no program can
+                // hold. `symbol_of_key` draws the line this depends on: a symbol the program
+                // made comes back, the engine's own bookkeeping does not.
+                let spelling = other.property_key();
+                match self.symbol_of_key(&spelling) {
+                    Some(symbol) => Value::Symbol(symbol),
+                    None => Value::String(spelling),
+                }
+            }
         }
     }
 
@@ -29604,7 +29616,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.delete(&inner, key, instruction);
         };
         let handler = proxy.handler.clone();
-        let arguments = vec![inner.clone(), Self::trap_key(key)];
+        let arguments = vec![inner.clone(), self.trap_key(key)];
         let answered = self
             .call_value(&trap, handler, arguments, instruction)?
             .is_truthy();
@@ -29747,7 +29759,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.has(&inner, key, instruction);
         };
         let handler = proxy.handler.clone();
-        let arguments = vec![inner.clone(), Self::trap_key(key)];
+        let arguments = vec![inner.clone(), self.trap_key(key)];
         let answered = self
             .call_value(&trap, handler, arguments, instruction)?
             .is_truthy();
@@ -29870,7 +29882,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             return self.read_computed_with_receiver(&inner, key, receiver, instruction);
         };
         let handler = proxy.handler.clone();
-        let arguments = vec![inner.clone(), Self::trap_key(key), receiver.clone()];
+        let arguments = vec![inner.clone(), self.trap_key(key), receiver.clone()];
         let answered = self.call_value(&trap, handler, arguments, instruction)?;
         // A property the target has promised never to change is the one thing a `get` trap may
         // not invent an answer for: a caller that read it once may hold the value forever.
@@ -29993,7 +30005,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let handler = proxy.handler.clone();
                     let arguments = vec![
                         inner.clone(),
-                        Self::trap_key(key),
+                        self.trap_key(key),
                         value.clone(),
                         target.clone(),
                     ];
@@ -30997,7 +31009,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     let handler = proxy.handler.clone();
                     let arguments = vec![
                         inner.clone(),
-                        Self::trap_key(key),
+                        self.trap_key(key),
                         value.clone(),
                         receiver.clone(),
                     ];
@@ -31145,7 +31157,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         // a handler that reads `"writable" in descriptor` can see the difference.
         let object = Self::descriptor_object(descriptor);
         let handler = proxy.handler.clone();
-        let list = vec![inner.clone(), Self::trap_key(&key), object];
+        let list = vec![inner.clone(), self.trap_key(&key), object];
         let answered = self.call_value(&trap, handler, list, instruction)?;
         if !answered.is_truthy() {
             return Ok(false);
