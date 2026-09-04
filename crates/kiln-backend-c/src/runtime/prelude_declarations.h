@@ -180,5 +180,8 @@ extern int kiln_c99_op_load_cell(kiln_value cell, kiln_value *stack, size_t *sp,
 extern int kiln_c99_check_tdz(kiln_value val, kiln_value *thrown);
 extern int kiln_c99_op_set_property(kiln_host *host, kiln_value *stack, size_t *sp, const char *key, size_t key_len, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
 extern int kiln_c99_op_set_computed(kiln_host *host, kiln_value *stack, size_t *sp, int strict, int depth, kiln_value *thrown);
+extern int kiln_c99_read_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, int depth, kiln_value *thrown, kiln_c99_site *site, kiln_value *out);
+extern int kiln_c99_write_property(kiln_host *host, kiln_value target, const char *key, size_t key_len, kiln_value value, int strict, int depth, kiln_value *thrown, kiln_c99_site *site);
+extern void kiln_c99_note_get_property_refusal(kiln_value target);
 
 #endif /* KILN_PRELUDE_DECLARATIONS_H */

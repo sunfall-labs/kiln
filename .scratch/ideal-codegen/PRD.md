@@ -94,6 +94,8 @@ In `prelude_declarations.h`:
 - [x] **Milestone 11**: Power-of-2 and constant float arithmetic specialization: replaced expensive `fmod(a, 2.0)` with single-cycle bitwise `(int64_t)a & 1`, replaced division by power-of-2 constants with multiplication by their exact reciprocal (`a * 0.5`), and replaced `memcpy` float construction with compound union literals for direct Clang constant folding.
 - [x] **Milestone 12**: Symmetric constant-expression fusion: added `Const` + `LoadLocal` + `Binary` / `StoreLocal` / `CompareJump` multi-instruction patterns, compiling all constant-variable expressions (`3 * n`, `100 - x`, `0 < n`) directly to native C scalar arithmetic.
 - [x] **Milestone 13**: Architectural design and specification for 64-bit NaN-boxed internal value representation (ADR 0053: single GPR mapping, 2x cache density, unboxed doubles, and zero-overhead float checks).
+- [x] **Milestone 14**: Method call statement and assignment fusion: generalized call fusion machinery to match `CallMethod` + `Pop` (statement execution discarding return value without stack churn) and `CallMethod` + `Dup` + `StoreLocal` + `Pop` / `StoreLocal` (direct assignment to local destination variable).
+- [x] **Milestone 15**: Property access and assignment fusion with monomorphic inline cache fast-paths: fused `LoadLocal` + `GetProperty` + `StoreLocal` / `Pop`, `LoadLocal` + `LoadLocal`/`Const` + `SetProperty` + `Pop` sequences into direct register-to-register property reads and writes, bypassing stack memory traffic and routing through monomorphic shape caching (`kiln_c99_read_property` / `kiln_c99_write_property`).
 
 ## Benchmark Results (Empirical Release Measurements, 5 runs median)
 

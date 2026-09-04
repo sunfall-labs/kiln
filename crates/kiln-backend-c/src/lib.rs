@@ -22,7 +22,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 25;
+pub const C_GENERATOR_VERSION: u32 = 26;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -946,7 +946,10 @@ fn can_fuse_call_store(
     index: usize,
     jump_targets: &HashSet<u32>,
 ) -> Option<u32> {
-    if !matches!(code.get(index)?, Instruction::Call { .. }) {
+    if !matches!(
+        code.get(index)?,
+        Instruction::Call { .. } | Instruction::CallMethod { .. }
+    ) {
         return None;
     }
     let next_index = index + 1;
@@ -960,7 +963,10 @@ fn can_fuse_call_store(
 }
 
 fn can_fuse_call_pop(code: &[Instruction], index: usize, jump_targets: &HashSet<u32>) -> bool {
-    if !matches!(code.get(index), Some(Instruction::Call { .. })) {
+    if !matches!(
+        code.get(index),
+        Some(Instruction::Call { .. } | Instruction::CallMethod { .. })
+    ) {
         return false;
     }
     let next_index = index + 1;
@@ -975,7 +981,10 @@ fn can_fuse_call_dup_store_pop(
     index: usize,
     jump_targets: &HashSet<u32>,
 ) -> Option<u32> {
-    if !matches!(code.get(index), Some(Instruction::Call { .. })) {
+    if !matches!(
+        code.get(index),
+        Some(Instruction::Call { .. } | Instruction::CallMethod { .. })
+    ) {
         return None;
     }
     if jump_targets.contains(&((index + 1) as u32))
@@ -994,6 +1003,165 @@ fn can_fuse_call_dup_store_pop(
         return None;
     }
     Some(*dst)
+}
+
+fn can_fuse_load_get_property_store(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32)> {
+    let Instruction::LoadLocal(src) = code.get(index)? else {
+        return None;
+    };
+    if jump_targets.contains(&((index + 1) as u32)) || jump_targets.contains(&((index + 2) as u32))
+    {
+        return None;
+    }
+    let Instruction::GetProperty(name) = code.get(index + 1)? else {
+        return None;
+    };
+    let Instruction::StoreLocal(dst) = code.get(index + 2)? else {
+        return None;
+    };
+    Some((*src, *name, *dst))
+}
+
+fn can_fuse_load_get_property_dup_store_pop(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32)> {
+    let Instruction::LoadLocal(src) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=4 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::GetProperty(name) = code.get(index + 1)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 2)?, Instruction::Dup) {
+        return None;
+    }
+    let Instruction::StoreLocal(dst) = code.get(index + 3)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 4)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*src, *name, *dst))
+}
+
+fn can_fuse_load_get_property_pop(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32)> {
+    let Instruction::LoadLocal(src) = code.get(index)? else {
+        return None;
+    };
+    if jump_targets.contains(&((index + 1) as u32)) || jump_targets.contains(&((index + 2) as u32))
+    {
+        return None;
+    }
+    let Instruction::GetProperty(name) = code.get(index + 1)? else {
+        return None;
+    };
+    if !matches!(code.get(index + 2)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*src, *name))
+}
+
+fn can_fuse_load_get_property(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32)> {
+    let Instruction::LoadLocal(src) = code.get(index)? else {
+        return None;
+    };
+    if jump_targets.contains(&((index + 1) as u32)) {
+        return None;
+    }
+    let Instruction::GetProperty(name) = code.get(index + 1)? else {
+        return None;
+    };
+    Some((*src, *name))
+}
+
+fn can_fuse_load_load_set_property_pop(
+    code: &[Instruction],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32, bool)> {
+    let Instruction::LoadLocal(obj) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=3 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::LoadLocal(val) = code.get(index + 1)? else {
+        return None;
+    };
+    let (name, strict) = match code.get(index + 2)? {
+        Instruction::SetPropertyStrict { name, strict } => (*name, *strict),
+        Instruction::SetProperty(name) => (*name, false),
+        _ => return None,
+    };
+    if !matches!(code.get(index + 3)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*obj, *val, name, strict))
+}
+
+fn can_fuse_load_const_set_property_pop(
+    code: &[Instruction],
+    constants: &[Constant],
+    index: usize,
+    jump_targets: &HashSet<u32>,
+) -> Option<(u32, u32, u32, bool)> {
+    let Instruction::LoadLocal(obj) = code.get(index)? else {
+        return None;
+    };
+    for offset in 1..=3 {
+        if jump_targets.contains(&((index + offset) as u32)) {
+            return None;
+        }
+    }
+    let Instruction::Const(c_idx) = code.get(index + 1)? else {
+        return None;
+    };
+    if matches!(constants.get(*c_idx as usize), Some(Constant::BigInt(_))) {
+        return None;
+    }
+    let (name, strict) = match code.get(index + 2)? {
+        Instruction::SetPropertyStrict { name, strict } => (*name, *strict),
+        Instruction::SetProperty(name) => (*name, false),
+        _ => return None,
+    };
+    if !matches!(code.get(index + 3)?, Instruction::Pop) {
+        return None;
+    }
+    Some((*obj, *c_idx, name, strict))
+}
+
+fn render_constant_value(symbol: &str, constant_idx: u32, constant: &Constant) -> Option<String> {
+    match constant {
+        Constant::Undefined => Some("kiln_c99_undefined()".to_string()),
+        Constant::Null => Some("kiln_c99_null()".to_string()),
+        Constant::Boolean(val) => Some(format!("kiln_c99_boolean({})", i32::from(*val))),
+        Constant::Number(bits) => Some(format!("kiln_c99_number_bits(UINT64_C({bits}))")),
+        Constant::String(val) => Some(format!(
+            "kiln_c99_value(KILN_VALUE_STRING, 0, {symbol}_constant_{constant_idx}, {})",
+            val.len()
+        )),
+        Constant::BigInt(_) => None,
+    }
 }
 
 fn can_fuse_load_const_binary(
@@ -1172,6 +1340,7 @@ fn is_fused_with_previous(
         || can_fuse_load_store(code, prev, jump_targets).is_some()
         || can_fuse_call_store(code, prev, jump_targets).is_some()
         || can_fuse_call_pop(code, prev, jump_targets)
+        || can_fuse_load_get_property(code, prev, jump_targets).is_some()
     {
         return true;
     }
@@ -1181,6 +1350,8 @@ fn is_fused_with_previous(
             if can_fuse_load_const_binary(code, constants, start, jump_targets).is_some()
                 || can_fuse_load_load_binary(code, start, jump_targets).is_some()
                 || can_fuse_const_load_binary(code, constants, start, jump_targets).is_some()
+                || can_fuse_load_get_property_store(code, start, jump_targets).is_some()
+                || can_fuse_load_get_property_pop(code, start, jump_targets).is_some()
             {
                 return true;
             }
@@ -1196,7 +1367,18 @@ fn is_fused_with_previous(
                 || can_fuse_const_load_compare_jump(code, constants, start, jump_targets).is_some()
                 || can_fuse_const_load_binary_store(code, constants, start, jump_targets).is_some()
                 || can_fuse_call_dup_store_pop(code, start, jump_targets).is_some()
+                || can_fuse_load_load_set_property_pop(code, start, jump_targets).is_some()
+                || can_fuse_load_const_set_property_pop(code, constants, start, jump_targets)
+                    .is_some()
             {
+                return true;
+            }
+        }
+    }
+    for offset in 1..=4 {
+        if index >= offset {
+            let start = index - offset;
+            if can_fuse_load_get_property_dup_store_pop(code, start, jump_targets).is_some() {
                 return true;
             }
         }
@@ -3054,6 +3236,95 @@ fn emit_instruction(
                 if *local != dst {
                     writeln!(output, "    locals[{dst}] = locals[{local}];").unwrap();
                 }
+            } else if let Some((obj, val, name, strict)) =
+                can_fuse_load_load_set_property_pop(emitter.code, index, &emitter.jump_targets)
+            {
+                let Constant::String(text) = &constants[name as usize] else {
+                    unreachable!("verification rejects a non-string property name before emission")
+                };
+                let unwind = unwind_or_return(handlers, site);
+                if guarded.contains(&val) {
+                    writeln!(
+                        output,
+                        "    {{ int status = kiln_c99_check_tdz(locals[{val}], thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    )
+                    .unwrap();
+                }
+                writeln!(
+                    output,
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, locals[{val}], {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    text.len(),
+                    i32::from(strict)
+                )
+                .unwrap();
+            } else if let Some((obj, c_idx, name, strict)) =
+                can_fuse_load_const_set_property_pop(emitter.code, emitter.constants, index, &emitter.jump_targets)
+            {
+                let Constant::String(text) = &constants[name as usize] else {
+                    unreachable!("verification rejects a non-string property name before emission")
+                };
+                let const_val = render_constant_value(symbol, c_idx, &constants[c_idx as usize])
+                    .expect("BigInt excluded by can_fuse_load_const_set_property_pop");
+                let unwind = unwind_or_return(handlers, site);
+                writeln!(
+                    output,
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_write_property(host, locals[{obj}], {symbol}_key_{name}, {}, {const_val}, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    text.len(),
+                    i32::from(strict)
+                )
+                .unwrap();
+            } else if let Some((src, name, dst)) =
+                can_fuse_load_get_property_dup_store_pop(emitter.code, index, &emitter.jump_targets)
+            {
+                let Constant::String(text) = &constants[name as usize] else {
+                    unreachable!("verification rejects a non-string property name before emission")
+                };
+                let unwind = unwind_or_return(handlers, site);
+                writeln!(
+                    output,
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
+                    text.len()
+                )
+                .unwrap();
+            } else if let Some((src, name, dst)) =
+                can_fuse_load_get_property_store(emitter.code, index, &emitter.jump_targets)
+            {
+                let Constant::String(text) = &constants[name as usize] else {
+                    unreachable!("verification rejects a non-string property name before emission")
+                };
+                let unwind = unwind_or_return(handlers, site);
+                writeln!(
+                    output,
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; locals[{dst}] = read; }}",
+                    text.len()
+                )
+                .unwrap();
+            } else if let Some((src, name)) =
+                can_fuse_load_get_property_pop(emitter.code, index, &emitter.jump_targets)
+            {
+                let Constant::String(text) = &constants[name as usize] else {
+                    unreachable!("verification rejects a non-string property name before emission")
+                };
+                let unwind = unwind_or_return(handlers, site);
+                writeln!(
+                    output,
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                    text.len()
+                )
+                .unwrap();
+            } else if let Some((src, name)) =
+                can_fuse_load_get_property(emitter.code, index, &emitter.jump_targets)
+            {
+                let Constant::String(text) = &constants[name as usize] else {
+                    unreachable!("verification rejects a non-string property name before emission")
+                };
+                let unwind = unwind_or_return(handlers, site);
+                writeln!(
+                    output,
+                    "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; int status = kiln_c99_read_property(host, locals[{src}], {symbol}_key_{name}, {}, depth, thrown, &site, &read); if (KILN_UNLIKELY(status == KILN_C99_CONTROL_ERROR)) kiln_c99_note_get_property_refusal(locals[{src}]); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = read; }}",
+                    text.len()
+                )
+                .unwrap();
             } else {
                 writeln!(output, "    stack[sp++] = locals[{local}];").unwrap();
             }
@@ -3488,9 +3759,18 @@ fn emit_instruction(
             };
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
+            let action = if let Some(dst) = can_fuse_call_dup_store_pop(emitter.code, index, &emitter.jump_targets) {
+                format!(" locals[{dst}] = stack[--sp];")
+            } else if let Some(dst) = can_fuse_call_store(emitter.code, index, &emitter.jump_targets) {
+                format!(" locals[{dst}] = stack[--sp];")
+            } else if can_fuse_call_pop(emitter.code, index, &emitter.jump_targets) {
+                " --sp;".to_string()
+            } else {
+                String::new()
+            };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; int status = kiln_c99_op_call_method(host, stack, &sp, {symbol}_key_{name}, {}, (size_t){argc}, depth, thrown, &site, {instruction_site}, (size_t){index}, {instruction_operation}, result); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status;{action} }}",
                 text.len()
             )
             .unwrap();
