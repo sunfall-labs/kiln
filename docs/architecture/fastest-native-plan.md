@@ -47,6 +47,65 @@ reopens this file first.
 - **Nothing is proven dead statically.** Memory reclamation is checked at runtime (the turn
   nursery, 4.2); static escape analysis is used only for scalar replacement, which is local.
 
+
+## The three bets
+
+Everything in this file is incremental except three steps. If these three land, the rest follows;
+if any one slips, nothing else compensates for it.
+
+1. **The value graph (1.1 to 1.3).** Without it every compiler step is another fuser. It is the
+   only step that is a design effort rather than engineering: its ADR, the verifier and the
+   invariants above are argued before code, not after.
+2. **The zero-allocation request path with handler specialization (B.1 to B.3).** The lead bun
+   cannot follow, and it lands only if the closed-world facts from 1.6 are real.
+3. **One source for builtins (5.2).** The two engines have disagreed with node in different
+   places on the same functions. Every month with two implementations widens that.
+
+## What loses
+
+- An optimization landing before the verifier (1.2), the exit mode (2.1) and the fuzzer (2.2).
+  A fast wrong answer costs more than the speed it bought.
+- A number from the shared checkout, without its checksum, or without its client count. Every
+  wrong conclusion recorded in `NOTES.md` came from one of those.
+- The compatibility gap. Speed on programs nobody can run is not a runtime. Track C is table
+  stakes, not a nice-to-have.
+- Attention on anything under "later, only if needed" before the three bets have landed.
+
+## Track C: compatibility, continuous
+
+The thirdparty corpus (`conformance/thirdparty`, `scripts/thirdparty.sh`) is the measure of
+whether real code runs. It grows every week, by the next bundle a user would reach for, and a
+bundle that once passed never regresses. The refusal distribution the runner prints is the
+backlog, sorted by how many bundles each refusal unblocks; that order, not benchmark order,
+decides what the runtime builds next. `check-silent-undefined.sh` runs before a bundle is called
+passing, because an `undefined` where node has a value is the failure that costs weeks.
+
+## Start: this week
+
+Phase 0 and B.0 are independent, days each, and they are the scoreboard: nothing after them can
+be judged without them. One worktree and one owner per step, landed as each finishes:
+
+| owner | step | worktree |
+| --- | --- | --- |
+| 1 | 0.1, 0.2 toolchain flags and the FMA probe | `../kiln-flags` |
+| 2 | 0.3 NaN-boxing seam | `../kiln-seam` |
+| 3 | 0.4, 0.5 TDZ elimination and diagnostics | `../kiln-tdz` |
+| 4 | 0.6 bundles in the gate, then Track C | `../kiln-bundles` |
+| 5 | B.0 server scenarios and the leak check, then B.2, B.4, B.7 | `../kiln-io` |
+| 6 | the ADR for 1.1, 1.2 and the invariants; argued in `docs/adr/` while the above land | `../kiln-graph` |
+
+Owner 6 starts 1.1 the day the ADR is accepted and 0.3 has landed.
+
+## Cadence
+
+- The harness table, with commit hashes and client counts, goes into `NOTES.md` weekly under a
+  dated heading, alongside `.scratch/fastest-native/measure.sh`'s three rows and the thirdparty
+  pass count.
+- A step is done when its "done when" column is true, the gate is green, and its row has moved.
+  A step whose row did not move is reverted, not kept.
+- The plan is reopened, in this file, when an invariant has to break or a bet changes shape.
+  Nowhere else.
+
 ## Phase 0: corrections, days each, all parallel
 
 | # | step | where | done when |
