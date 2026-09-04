@@ -6963,7 +6963,7 @@ struct CombinatorWalk {
 /// A real function object rather than a Rust closure because a program is handed it and may do
 /// anything with it: a thenable's `then` receives it, keeps it, calls it twice. `alreadyCalled`
 /// is per element and the rest is shared -- see [`CombinatorWalk`].
-struct ElementFunction {
+pub struct ElementFunction {
     walk: Rc<CombinatorWalk>,
     index: usize,
     /// Whether this is the *reject* half, which only `allSettled` and `any` have.
@@ -15570,15 +15570,6 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     _ => None,
                 };
                 let function = is_callable(&replacer).then_some(replacer);
-                let mut replace = |holder: &Value, key: &str, property: Value| match &function {
-                    Some(replacer) => self.call_value(
-                        replacer,
-                        holder.clone(),
-                        Vec::from([Value::String(key.to_owned()), property]),
-                        instruction,
-                    ),
-                    None => Ok(property),
-                };
                 let mut resolve = |call: JsonCall<'_>| match call {
                     JsonCall::Getter(getter, receiver) => {
                         self.call_value(getter, receiver.clone(), Vec::new(), instruction)
@@ -16627,7 +16618,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         argument.clone()
                     });
                 }
-                return self.dispatch_native(native, receiver, &converted, instruction);
+                self.dispatch_native(native, receiver, &converted, instruction)
             }
             Native::StringSplit if matches!(arguments.first(), Some(Value::RegExp(_))) => {
                 let Value::String(text) = receiver else {
@@ -16706,17 +16697,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                         )
                     };
                 }
-                return self.dispatch_native(native, receiver, &converted, instruction);
+                self.dispatch_native(native, receiver, &converted, instruction)
             }
-            // `SetTypedArrayFromArrayLike`: a source that is neither an array nor a view is
-            // still read as one, through `length` and its indices. The machine-free
-            // implementation recognised only those two kinds and answered an empty list for
-            // everything else, so `view.set({ length: 2, 0: 7, 1: 8 })` and `view.set("12")`
-            // both copied nothing at all and reported success by returning `undefined`.
-            //
-            // It needs a machine because those reads are the program's: `length` may be an
-            // accessor, and so may any index. Collected here and handed on as a dense array, the
-            // existing copy then does the bounds check and the per-element conversion unchanged.
             Native::TypedArraySet
                 if arguments.first().is_some_and(|source| {
                     !matches!(source, Value::Array(_) | Value::TypedArray(_))
@@ -16731,7 +16713,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 let mut converted = arguments.to_vec();
                 converted[0] = Value::Array(ArrayData::new(collected));
-                return self.dispatch_native(native, receiver, &converted, instruction);
+                self.dispatch_native(native, receiver, &converted, instruction)
             }
             // `subarray` builds a second view over the same bytes, and it is specified over
             // `TypedArraySpeciesCreate` like `slice` and `map` -- so a subclass gets its own type
@@ -16823,7 +16805,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 if !tracking {
                     built.push(Value::Number(end.saturating_sub(start) as f64));
                 }
-                return self.typed_array_species_over(receiver, view.kind, &built, instruction);
+                self.typed_array_species_over(receiver, view.kind, &built, instruction)
             }
             Native::StringSearch => {
                 let Value::String(text) = receiver else {
@@ -34330,7 +34312,7 @@ fn json_stringify(
                 // A replacer given as an array is a list of the keys to keep, in its order of
                 // interest rather than the object's -- the filter is here, and the value is
                 // replaced below once it has been read.
-                if allowed.is_some_and(|keys| !keys.iter().any(|name| *name == key)) {
+                if allowed.is_some_and(|keys| !keys.contains(&key)) {
                     continue;
                 }
                 if symbol::is_reserved(&key) {
@@ -34375,11 +34357,7 @@ fn json_stringify(
             None => "null".to_owned(),
         }),
         // A function has no JSON spelling, and a settler is one.
-        Value::Settler(..)
-        | Value::Capability(..)
-        | Value::Element(_)
-        | Value::Bound(_)
-        | Value::Wrapped(_) => None,
+        Value::Settler(..) | Value::Capability(..) | Value::Bound(_) | Value::Wrapped(_) => None,
         // Serialising a proxy means reading its properties, which means running its traps, which
         // this pure walk cannot do. Refused rather than silently serialising the target.
         Value::Proxy(_) => return Err(ExecutionError::ProxyNotSerialisable),
