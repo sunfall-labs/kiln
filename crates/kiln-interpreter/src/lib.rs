@@ -15306,17 +15306,37 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // is a list of the keys to keep.
                 let replacer = arguments.get(1).cloned().unwrap_or(Value::Undefined);
                 let allowed: Option<Vec<String>> = match &replacer {
-                    Value::Array(items) => Some(
-                        items
-                            .borrow()
-                            .iter()
-                            .filter_map(|entry| match entry {
+                    Value::Array(items) => {
+                        let mut keys: Vec<String> = Vec::new();
+                        for entry in items.borrow().iter() {
+                            // A `String` or `Number` *wrapper* counts as its primitive, which the
+                            // specification says explicitly and which matching the primitive
+                            // forms alone missed: `[new String("a")]` selected nothing.
+                            let name = match entry {
                                 Value::String(text) => Some(text.clone()),
                                 Value::Number(number) => Some(number_string(*number)),
+                                Value::Object(object) => {
+                                    let inner = object.borrow().primitive().cloned();
+                                    match inner {
+                                        Some(Value::String(text)) => Some(text),
+                                        Some(Value::Number(number)) => {
+                                            Some(number_string(number))
+                                        }
+                                        _ => None,
+                                    }
+                                }
                                 _ => None,
-                            })
-                            .collect(),
-                    ),
+                            };
+                            // The list is a set in list order: a key repeated in the replacer
+                            // appears once, where it first appeared.
+                            if let Some(name) = name
+                                && !keys.contains(&name)
+                            {
+                                keys.push(name);
+                            }
+                        }
+                        Some(keys)
+                    }
                     _ => None,
                 };
                 let function = is_callable(&replacer).then_some(replacer);
@@ -33635,6 +33655,22 @@ fn json_stringify(
             // Read out before iterating, so the object is not borrowed while a getter runs --
             // a getter is ordinary code and may touch the object it belongs to.
             let entries = own_properties(&Intrinsics::default(), value);
+            // A replacer given as an array decides the order as well as the membership: the
+            // specification walks the *list* and looks each name up, so `["a", "b"]` answers
+            // `a` first however the object was built. Filtering the object's own order instead
+            // kept the object's, which is a different document for the same inputs.
+            let entries = match allowed {
+                Some(keys) => keys
+                    .iter()
+                    .filter_map(|name| {
+                        entries
+                            .iter()
+                            .find(|(key, _)| key == name)
+                            .map(|(key, property)| (key.clone(), property.clone()))
+                    })
+                    .collect(),
+                None => entries,
+            };
             let mut parts = Vec::new();
             for (key, property) in entries {
                 // Internal bookkeeping -- an iterator's cursor, a well-known symbol -- is not an
