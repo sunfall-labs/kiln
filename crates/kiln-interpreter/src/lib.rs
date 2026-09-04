@@ -12036,7 +12036,19 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::GetPrivate(name) => {
                     let name = self.string_constant(*name, current)?;
+                    let brand = self.pop(current)?;
                     let target = self.pop(current)?;
+                    if !private_brand_matches(&target, &name, &brand) {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot read private member #{} from an object whose class did not declare it",
+                                private_display_name(&name)
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
                     // Own-only, and a miss is a TypeError. That own-only rule *is* the brand
                     // check: an object of another class does not carry the name, however much
                     // of the rest of the shape it shares.
@@ -12086,8 +12098,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 }
                 Instruction::SetPrivate(name) => {
                     let name = self.string_constant(*name, current)?;
+                    let brand = self.pop(current)?;
                     let value = self.pop(current)?;
                     let target = self.pop(current)?;
+                    if !private_brand_matches(&target, &name, &brand) {
+                        self.throw_error(
+                            ErrorKind::Type,
+                            format!(
+                                "Cannot write private member #{} to an object whose class did not declare it",
+                                private_display_name(&name)
+                            ),
+                            current,
+                        )?;
+                        continue;
+                    }
                     let Some((property, attributes)) = own_private_element(&target, &name) else {
                         self.throw_error(
                             ErrorKind::Type,
@@ -41759,6 +41783,32 @@ fn canonical_regexp_flags(written: &str) -> String {
         .chars()
         .filter(|flag| written.contains(*flag))
         .collect()
+}
+
+/// Whether `target` carries the brand of the class evaluation that is asking.
+///
+/// A private name is stored under a key fixed at compile time, so two *evaluations* of one class
+/// share it and the own-only rule alone cannot tell them apart: `A.probe(new B())` read B's slot
+/// where the language refuses it. Each evaluation mints a brand, every instance and the
+/// constructor carry it, and this compares the two.
+///
+/// An absent expected brand means the access was compiled outside any class -- a syntax error
+/// reported elsewhere -- and is let through so the error that matters is the one already raised.
+fn private_brand_matches(target: &Value, name: &str, expected: &Value) -> bool {
+    if matches!(expected, Value::Undefined) {
+        return true;
+    }
+    let Some((scope, _)) = name
+        .strip_prefix(PRIVATE_KEY_PREFIX)
+        .and_then(|rest| rest.split_once(':'))
+    else {
+        return true;
+    };
+    let key = format!("{PRIVATE_KEY_PREFIX}{scope}:%brand");
+    match own_private_element(target, &key) {
+        Some((Property::Value(held), _)) => strict_equal(&held, expected),
+        _ => false,
+    }
 }
 
 

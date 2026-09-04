@@ -818,20 +818,22 @@ fn stack_effect(
             }
         }
         // The object is replaced by what was read, exactly as `GetProperty` is.
+        // The brand rides on top of the receiver and is consumed with it: the value replaces
+        // both, so the height falls by one.
         Instruction::GetPrivate(_) => {
-            if height < 1 {
-                Err(underflow(1))
+            if height < 2 {
+                Err(underflow(2))
             } else {
-                Ok((height, false))
+                Ok((height - 1, false))
             }
         }
         // ...and the value replaces both, exactly as `SetProperty` does: an assignment is an
         // expression and its value is what was assigned.
         Instruction::SetPrivate(_) => {
-            if height < 2 {
-                Err(underflow(2))
+            if height < 3 {
+                Err(underflow(3))
             } else {
-                Ok((height - 1, false))
+                Ok((height - 2, false))
             }
         }
         // A throw consumes the value and does not fall through: control leaves for a handler.
