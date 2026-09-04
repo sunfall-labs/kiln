@@ -27535,6 +27535,10 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 )?,
                 None => item,
             };
+            // `Set(target, k, value, true)` converts to the view's element type, and for an
+            // object that conversion runs its `valueOf`. The pure store answered zero, so
+            // `Uint8Array.of({valueOf: () => 3})` was a view holding nought.
+            let item = self.as_element(target.kind, &item, instruction)?;
             target.set(index, &item)?;
         }
         Ok(out)
