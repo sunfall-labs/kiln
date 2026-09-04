@@ -217,6 +217,7 @@ typedef struct kiln_shape {
     const char *ikey;
     uint32_t slot_index;
     uint32_t property_count;
+    uint32_t num_transitions;
     const char *keys[KILN_SHAPE_MAX_FAST_PROPERTIES];
     kiln_shape_transition *transitions;
 } kiln_shape;

@@ -4368,7 +4368,8 @@ static int kiln_c99_put_site(kiln_host *host, kiln_value target, const char *key
                     /* Polymorphic transitioning store hit */
                     else if (!object->not_extensible &&
                              site->entries[p].slot < object->slot_capacity &&
-                             object->prototype.tag == KILN_VALUE_UNDEFINED) {
+                             (object->prototype.tag == KILN_VALUE_UNDEFINED ||
+                              !kiln_c99_has_inherited_setter_or_readonly(object->prototype))) {
                         object->slots[site->entries[p].slot] = value;
                         object->shape = (kiln_shape *)site->entries[p].transition_to;
                         return KILN_C99_OK;
