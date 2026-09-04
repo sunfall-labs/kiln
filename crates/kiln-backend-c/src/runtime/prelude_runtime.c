@@ -3013,10 +3013,28 @@ static int kiln_c99_buffer_method(kiln_value *out, uint64_t code, kiln_value rec
         if (status != KILN_C99_OK) return status;
         for (at = 0; at < items->count; ++at) {
             kiln_typed_array *view = kiln_c99_typed_array_of(items->elements[at]);
+            kiln_typed_array *target = kiln_c99_typed_array_of(*out);
             size_t index;
+            /* A Buffer is a `Uint8Array`, and so is what `Buffer.concat` allocates, so the
+             * overwhelmingly common case is bytes into bytes -- which is a `memcpy` and was
+             * written as a loop over `typed_get`/`typed_set`. Those two are generic: each element
+             * dispatched on the view's kind, bounds-checked, widened to a double and narrowed
+             * back. Copying 76 MiB that way took 207ms where node took 2.9ms; it is about 370
+             * MiB/s against memcpy's tens of gigabytes.
+             *
+             * The element loop stays for the case the fast path cannot serve -- an entry that is
+             * some other typed array -- because `Buffer.concat` is only documented to take
+             * Buffers and refusing a `Uint16Array` outright would be a new error where there was
+             * an answer. */
+            if (view->kind == KILN_TYPED_UINT8 && target->kind == KILN_TYPED_UINT8) {
+                if (view->length != 0)
+                    memcpy(target->buffer->bytes + target->byte_offset + written,
+                           view->buffer->bytes + view->byte_offset, view->length);
+                written += view->length;
+                continue;
+            }
             for (index = 0; index < view->length; ++index)
-                kiln_c99_typed_set(kiln_c99_typed_array_of(*out), written++,
-                                   kiln_c99_typed_get(view, index));
+                kiln_c99_typed_set(target, written++, kiln_c99_typed_get(view, index));
         }
         kiln_c99_typed_array_of(*out)->is_buffer = 1;
         return KILN_C99_OK;
