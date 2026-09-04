@@ -602,7 +602,7 @@ enum Resolution {
 /// allocated.
 #[derive(Debug, Clone)]
 struct InstanceElements {
-    private: Vec<(String, PrivateKind, Function)>,
+    private: Vec<(String, PrivateKind, String)>,
     fields: Vec<ClassField>,
 }
 
@@ -617,7 +617,7 @@ struct ClassBody<'a> {
     /// A derived class with no constructor of its own, whose synthesized body is
     /// `super(...arguments)` and nothing else.
     forwards_to_super: bool,
-    private_elements: &'a [(String, PrivateKind, Function)],
+    private_elements: &'a [(String, PrivateKind, String)],
     fields: &'a [&'a ClassField],
 }
 
@@ -3506,6 +3506,27 @@ impl Compiler {
         self.patch_jump(usable);
     }
 
+    /// Read a hidden binding that an inner function captured, the way the home object is read.
+    ///
+    /// `load_hidden` resolves a local and nothing else, which is right where the binding and the
+    /// reader are the same function. A private method is made where the class is defined and
+    /// installed from inside the constructor, so the read crosses a function boundary and has to
+    /// go through `resolve_or_capture`.
+    fn load_captured_binding(&mut self, binding: &str) {
+        match self.resolve_or_capture(binding) {
+            Resolution::Local(local) if local.celled => {
+                self.code.push(Instruction::LoadCell(local.slot));
+            }
+            Resolution::Local(local) => self.code.push(Instruction::LoadLocal(local.slot)),
+            Resolution::Upvalue(index) => self.code.push(Instruction::LoadUpvalue(index)),
+            Resolution::Global(slot) => self.code.push(Instruction::LoadGlobal(slot)),
+            Resolution::GlobalObject | Resolution::Unresolved => {
+                self.error(None, format!("`{binding}` went out of scope"));
+                self.push_constant(Constant::Undefined);
+            }
+        }
+    }
+
     /// `throw new TypeError("...")`, spelled in the instructions that already exist.
     fn emit_iterator_result_type_error(&mut self) {
         self.code.push(Instruction::LoadBuiltin(Builtin::TypeError));
@@ -4983,6 +5004,24 @@ impl Compiler {
             .filter(|field| !field.is_static)
             .collect();
         self.home_bindings.push(instance_home.clone());
+        // Each private method and accessor is created *once*, here, where the class is defined,
+        // and kept in a binding the constructor captures. Creating it inside the constructor
+        // made a fresh function per instance, so `a.#m === b.#m` was false and a brand check
+        // written as an identity comparison failed. It also closed over the constructor's
+        // locals rather than the class, which is not the environment the specification gives it.
+        let mut private_bindings: Vec<(String, PrivateKind, String)> =
+            Vec::with_capacity(private_elements.len());
+        for (name, kind, function) in &private_elements {
+            self.next_is_method = true;
+            let Some(body) = self.compile_function(function, class.span) else {
+                self.home_bindings.pop();
+                return;
+            };
+            let binding = self.declare_home_binding(class.span);
+            self.code.push(Instruction::MakeFunction(body));
+            self.store_home_binding(&binding);
+            private_bindings.push((name.clone(), *kind, binding));
+        }
         self.next_is_method = true;
         let compiled = self.compile_constructor(
             &constructor,
@@ -4993,7 +5032,7 @@ impl Compiler {
                 // to the parent. Without that, `class F extends Error {}` would construct an
                 // error with no message.
                 forwards_to_super: synthesized_derived,
-                private_elements: &private_elements,
+                private_elements: &private_bindings,
                 fields: &instance_fields,
             }),
         );
@@ -5439,18 +5478,17 @@ impl Compiler {
     /// initialiser.
     fn emit_instance_elements(
         &mut self,
-        private_elements: &[(String, PrivateKind, Function)],
+        private_elements: &[(String, PrivateKind, String)],
         fields: &[&ClassField],
         span: Span,
     ) -> Option<()> {
-        for (name, kind, function) in private_elements {
+        for (name, kind, binding) in private_elements {
             let key = self.private_key(name);
             let name = self.constant_index(Constant::String(key));
-            // A private method is a method: its home object is the one already on the stack.
-            self.next_is_method = true;
-            let body = self.compile_function(function, span)?;
+            // The class made this function once; every instance is given *that* one, which is
+            // what makes `a.#m === b.#m` true.
             self.code.push(Instruction::LoadThis);
-            self.code.push(Instruction::MakeFunction(body));
+            self.load_captured_binding(binding);
             self.code
                 .push(Instruction::DefinePrivate { name, kind: *kind });
             self.code.push(Instruction::Pop);
