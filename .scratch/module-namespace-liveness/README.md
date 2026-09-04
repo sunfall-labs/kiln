@@ -50,3 +50,28 @@ What has to be got right, and is why this is not a small change: a binding still
 dead zone must read as a ReferenceError rather than `undefined` (`refresh_self_imports` says so
 explicitly), circular imports must not observe a half-built namespace, and an async module's
 bindings settle after its body suspends.
+
+
+## Tested 2026-09-03: the cells lead does not close it on its own
+
+The namespace builder derefs at construction -- `data.define_value(&name, read_through_cell(&value), ..)`
+-- and `read_through_cell` is called from that one place. So "store the cell instead" is a
+one-character change, and it is not enough.
+
+`ObjectData`'s readers hand back *references* (`get_own_property` -> `Option<&Property>`), and
+there are 51 `get_own` call sites. Nothing on that path derefs a cell, so a namespace holding one
+would answer `Value::Cell` to `Object.keys`, `getOwnPropertyDescriptor`, spread, `for...in` and
+`JSON.stringify` -- a silent wrong answer of exactly the kind this backend refuses elsewhere, in
+exchange for fixing the plain read.
+
+The two shapes that would actually work:
+
+- **Deref at a chokepoint.** Give `ObjectData` a value-returning read that derefs when
+  `module_namespace` is set, and route the paths that can see a namespace through it. The work is
+  in finding those paths, not in the deref.
+- **Refresh on write**, the way `refresh_self_imports` does for a self-import -- but that walks
+  slots at a known moment, and a cross-module namespace has no such moment: it would need a hook
+  on writes to an exported binding, which cells do not have.
+
+So the row count stands and the difficulty does too. This is the third claim on this branch to be
+tested rather than asserted, and the second to survive.
