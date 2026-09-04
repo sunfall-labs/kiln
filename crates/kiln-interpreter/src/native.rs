@@ -1143,6 +1143,8 @@ impl Native {
             },
             PrototypeTable::DataView => data_view_method(name),
             PrototypeTable::Iterator => iterator_method(name),
+            PrototypeTable::Generator => generator_prototype_method(false, name),
+            PrototypeTable::AsyncGenerator => generator_prototype_method(true, name),
             PrototypeTable::Boolean => boolean_method(name),
             PrototypeTable::Symbol => symbol_method(name),
             PrototypeTable::BigInt => bigint_method(name),
@@ -1859,8 +1861,20 @@ impl Native {
             )),
             // A method table's `constructor` is the built-in it belongs to, which is what
             // `Object.prototype.constructor` has to answer for a plain-object check to work.
+            // `%GeneratorPrototype%.constructor` is `%GeneratorFunction.prototype%` in the
+            // specification -- an intrinsic this engine has no object for. Publishing the
+            // `Function` constructor instead would answer a plausible lie to
+            // `Object.getPrototypeOf(g()).constructor`, so it publishes nothing.
+            (
+                Self::PrototypeOf(PrototypeTable::Generator | PrototypeTable::AsyncGenerator),
+                "constructor",
+            ) => None,
             (Self::PrototypeOf(table), "constructor") => Some(Value::Native(
                 match table {
+                    // Caught by the arm above, which publishes no `constructor` for them.
+                    PrototypeTable::Generator | PrototypeTable::AsyncGenerator => {
+                        unreachable!("the generator tables answer `constructor` above")
+                    }
                     PrototypeTable::Object => Self::ObjectConstructor,
                     PrototypeTable::Array => Self::ArrayConstructor,
                     PrototypeTable::String => Self::StringConstructor,

@@ -45,8 +45,8 @@
       "passed": 18
     },
     "built-ins/AsyncGeneratorPrototype": {
-      "failed": 54,
-      "passed": 42
+      "failed": 52,
+      "passed": 44
     },
     "built-ins/AsyncIteratorPrototype": {
       "failed": 26,
@@ -93,8 +93,8 @@
       "passed": 20
     },
     "built-ins/GeneratorPrototype": {
-      "failed": 32,
-      "passed": 90
+      "failed": 24,
+      "passed": 98
     },
     "built-ins/Infinity": {
       "failed": 0,
@@ -377,8 +377,8 @@
       "passed": 3
     },
     "language/expressions": {
-      "failed": 478,
-      "passed": 20484
+      "failed": 474,
+      "passed": 20488
     },
     "language/function-code": {
       "failed": 9,
@@ -441,8 +441,8 @@
       "passed": 160
     },
     "language/statements": {
-      "failed": 420,
-      "passed": 17582
+      "failed": 416,
+      "passed": 17586
     },
     "language/types": {
       "failed": 6,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 692,
-      "passed": 1903
+      "failed": 688,
+      "passed": 1907
     },
     "staging/source-phase-imports": {
       "failed": 0,
