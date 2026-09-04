@@ -6938,6 +6938,10 @@ enum FromAsyncStage {
 struct CombinatorWalk {
     native: Native,
     values: RefCell<Vec<Value>>,
+    /// The keys the keyed combinators collected, parallel to `values` and empty for the four
+    /// that walk an iterable. Kept as `Value` rather than as the reserved string so that a
+    /// symbol-keyed input can put the symbol back on the result object.
+    keys: RefCell<Vec<Value>>,
     remaining: std::cell::Cell<usize>,
     resolve: Value,
     reject: Value,
@@ -6953,7 +6957,11 @@ struct ElementFunction {
     index: usize,
     /// Whether this is the *reject* half, which only `allSettled` and `any` have.
     rejects: bool,
-    already_called: std::cell::Cell<bool>,
+    /// Shared with this input's *other* element function, because the specification gives the
+    /// pair one `alreadyCalled` record between them rather than one each. A thenable that calls
+    /// both must have only the first take effect, and two separate flags let both through and
+    /// settled the same slot twice.
+    already_called: Rc<std::cell::Cell<bool>>,
 }
 
 impl std::fmt::Debug for ElementFunction {
@@ -14732,6 +14740,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 | Native::PromiseReject
                 | Native::PromiseAll
                 | Native::PromiseAllSettled
+                | Native::PromiseAllKeyed
+                | Native::PromiseAllSettledKeyed
                 | Native::PromiseRace
                 | Native::PromiseAny
         ) && !is_constructor(receiver)
@@ -15354,6 +15364,8 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // they collect, so they share one walk over the inputs.
             Native::PromiseAll
             | Native::PromiseAllSettled
+            | Native::PromiseAllKeyed
+            | Native::PromiseAllSettledKeyed
             | Native::PromiseRace
             | Native::PromiseAny => {
                 let source = arguments.first().cloned().unwrap_or(Value::Undefined);
@@ -15381,14 +15393,28 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     stack_height: self.stack.len(),
                     native_depth: self.native_depth,
                 });
-                let walked = self.perform_promise_combinator(
+                let walked = if matches!(
                     native,
-                    receiver,
-                    &source,
-                    &resolve,
-                    &reject,
-                    instruction,
-                );
+                    Native::PromiseAllKeyed | Native::PromiseAllSettledKeyed
+                ) {
+                    self.perform_promise_combinator_keyed(
+                        native,
+                        receiver,
+                        &source,
+                        &resolve,
+                        &reject,
+                        instruction,
+                    )
+                } else {
+                    self.perform_promise_combinator(
+                        native,
+                        receiver,
+                        &source,
+                        &resolve,
+                        &reject,
+                        instruction,
+                    )
+                };
                 self.handlers.truncate(installed);
                 let reason = match walked {
                     Ok(()) => return Ok(promise),
@@ -21910,6 +21936,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         let walk = Rc::new(CombinatorWalk {
             native,
             values: RefCell::new(Vec::new()),
+            keys: RefCell::new(Vec::new()),
             remaining: std::cell::Cell::new(1),
             resolve: resolve.clone(),
             reject: reject.clone(),
@@ -21956,6 +21983,106 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         Ok(())
     }
 
+    /// `PerformPromiseAllKeyed` and `PerformPromiseAllSettledKeyed`: the same walk, over an
+    /// object's own enumerable keys rather than over an iterable.
+    ///
+    /// The differences from the iterable form are all in what is being walked. The order is the
+    /// object's own-key order and is fixed before anything settles, so a result is keyed the way
+    /// the input was written no matter which input finishes first. A key is included only if it
+    /// has an own descriptor that is enumerable -- and the value is *not* read for one that is
+    /// not, which a getter can see. Every step here is a place a proxy trap or a getter can run
+    /// arbitrary code, so each one propagates, and the caller turns that into a rejection.
+    fn perform_promise_combinator_keyed(
+        &mut self,
+        native: Native,
+        constructor: &Value,
+        source: &Value,
+        resolve: &Value,
+        reject: &Value,
+        instruction: usize,
+    ) -> Result<(), ExecutionError> {
+        // `GetPromiseResolve(C)` before anything else and exactly once, as in the iterable form.
+        let promise_resolve = self.read_property(constructor, "resolve", instruction)?;
+        if !is_callable(&promise_resolve) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: "Promise resolve is not a function".to_owned(),
+            });
+        }
+        // An iterable combinator asks for `@@iterator`; this one requires an object outright,
+        // because there is nothing to enumerate on a primitive.
+        if !is_an_object(source) {
+            return Err(ExecutionError::TypeErrorMessage {
+                message: format!("{} is not an object", source.to_display_string()),
+            });
+        }
+
+        let walk = Rc::new(CombinatorWalk {
+            native,
+            values: RefCell::new(Vec::new()),
+            keys: RefCell::new(Vec::new()),
+            remaining: std::cell::Cell::new(1),
+            resolve: resolve.clone(),
+            reject: reject.clone(),
+        });
+
+        // `[[OwnPropertyKeys]]` once, up front: the result's key order is this order, and a
+        // trap that answers differently on a second call cannot change it half way through.
+        let mut index = 0usize;
+        for key in self.own_keys_reflected(source, instruction)? {
+            let name = Value::property_key(&key);
+            let Some(descriptor) = self.own_descriptor_value(source, &key, instruction)? else {
+                continue;
+            };
+            let enumerable = self.read_property(&descriptor, "enumerable", instruction)?;
+            if !enumerable.is_truthy() {
+                continue;
+            }
+            // Only now is the value read: a non-enumerable key's getter must not run.
+            let item = self.read_property(source, &name, instruction)?;
+            walk.keys.borrow_mut().push(key);
+            self.subscribe_combinator_input(
+                &walk,
+                constructor,
+                &promise_resolve,
+                item,
+                index,
+                instruction,
+            )?;
+            index += 1;
+            if index > self.limits.max_steps as usize {
+                return Err(ExecutionError::StepLimitExceeded {
+                    steps: index as u64,
+                    limit: self.limits.max_steps,
+                });
+            }
+        }
+
+        // The walk's own count, released here so that an input settling early cannot resolve the
+        // combinator before every key has been read -- and so that an object with no enumerable
+        // keys settles immediately, with an empty result.
+        walk.remaining.set(walk.remaining.get().saturating_sub(1));
+        if walk.remaining.get() == 0 {
+            self.finish_combinator(&walk, instruction)?;
+        }
+        Ok(())
+    }
+
+    /// `[[GetOwnProperty]]` as a descriptor object, through the proxy trap when there is one.
+    fn own_descriptor_value(
+        &mut self,
+        target: &Value,
+        key: &Value,
+        instruction: usize,
+    ) -> Result<Option<Value>, ExecutionError> {
+        let descriptor = if matches!(target, Value::Proxy(_)) {
+            self.proxy_descriptor(target, key, instruction)?
+        } else {
+            own_descriptor(&self.intrinsics, target, &Value::property_key(key))
+                .unwrap_or(Value::Undefined)
+        };
+        Ok((!matches!(descriptor, Value::Undefined)).then_some(descriptor))
+    }
+
     /// One input: `C.resolve(value).then(onFulfilled, onRejected)`.
     fn subscribe_combinator_input(
         &mut self,
@@ -21974,17 +22101,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
         )?;
         // `race` keeps no list and no count: its reactions are the capability's own functions,
         // and the first to be called wins.
+        let already_called = Rc::new(std::cell::Cell::new(false));
         let element = |rejects: bool| {
             Value::Element(Rc::new(ElementFunction {
                 walk: Rc::clone(walk),
                 index,
                 rejects,
-                already_called: std::cell::Cell::new(false),
+                already_called: Rc::clone(&already_called),
             }))
         };
         let (on_fulfilled, on_rejected) = match walk.native {
-            Native::PromiseAll => (element(false), walk.reject.clone()),
-            Native::PromiseAllSettled => (element(false), element(true)),
+            Native::PromiseAll | Native::PromiseAllKeyed => (element(false), walk.reject.clone()),
+            Native::PromiseAllSettled | Native::PromiseAllSettledKeyed => {
+                (element(false), element(true))
+            }
             Native::PromiseAny => (walk.resolve.clone(), element(true)),
             _ => (walk.resolve.clone(), walk.reject.clone()),
         };
@@ -22024,6 +22154,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             // An empty `race` never settles at all -- there is no input to settle it, and the
             // specification says so rather than leaving it undefined.
             Native::PromiseRace => {}
+            // `CreateKeyedPromiseCombinatorResultObject`: an ordinary object with *no*
+            // prototype, carrying one data property per key in the order the keys were read
+            // rather than the order they settled in. The null prototype is what lets a result
+            // be indexed by an arbitrary key without `toString` or `constructor` answering for
+            // a key the input never had.
+            Native::PromiseAllKeyed | Native::PromiseAllSettledKeyed => {
+                let mut data = ObjectData::default();
+                data.set_prototype(Value::Null);
+                for (key, value) in walk.keys.borrow().iter().zip(collected) {
+                    data.set(&Value::property_key(key), value);
+                }
+                let result = Value::Object(Rc::new(RefCell::new(data)));
+                self.call_value(&walk.resolve, Value::Undefined, vec![result], instruction)?;
+            }
             _ => {
                 let values = Value::Array(ArrayData::new(collected));
                 self.call_value(&walk.resolve, Value::Undefined, vec![values], instruction)?;
@@ -22041,13 +22185,13 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
     ) -> Result<Value, ExecutionError> {
         let walk = Rc::clone(&element.walk);
         let collected = match (walk.native, element.rejects) {
-            (Native::PromiseAllSettled, false) => {
+            (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, false) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("fulfilled".to_owned()));
                 data.set("value", argument);
                 Value::Object(Rc::new(RefCell::new(data)))
             }
-            (Native::PromiseAllSettled, true) => {
+            (Native::PromiseAllSettled | Native::PromiseAllSettledKeyed, true) => {
                 let mut data = ObjectData::default();
                 data.set("status", Value::String("rejected".to_owned()));
                 data.set("reason", argument);
@@ -34389,6 +34533,14 @@ fn call_native(
             | Value::Callback(_, _)
             | Value::Bound(_)
             | Value::Wrapped(_)
+            // The anonymous built-ins the specification hands a program: a combinator's element
+            // functions, a capability's `resolve`/`reject` pair, and the executor that captures
+            // them. Each owns a `name` and a `length` and nothing else. They were absent here
+            // and present in `own_attributes`, so `getOwnPropertyDescriptor` reported an own
+            // `length` that `hasOwnProperty` denied -- and test262 asks both.
+            | Value::Element(_)
+            | Value::Settler(..)
+            | Value::Capability(..)
             // An array's elements, its `length` and its property store are all own properties,
             // and `has_property` is the wrong question for any of them: it follows the chain,
             // and `Array.prototype[1] = 2` would make every array claim an own `1`.
@@ -35580,6 +35732,8 @@ fn call_native(
         | Native::PromiseReject
         | Native::PromiseAll
         | Native::PromiseAllSettled
+        | Native::PromiseAllKeyed
+        | Native::PromiseAllSettledKeyed
         | Native::PromiseRace
         | Native::PromiseAny
         | Native::PromiseThen
