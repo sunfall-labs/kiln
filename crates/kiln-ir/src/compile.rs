@@ -4174,9 +4174,32 @@ impl Compiler {
             // `#x in o` compiles to the ordinary `in`: a private field is stored under a key no
             // program can write, so asking whether the key is there *is* the brand check.
             ExpressionKind::PrivateIn { name, object } => {
-                self.push_constant(Constant::String(self.private_key(name)));
+                // The key alone is not the answer: two evaluations of one class share it, so an
+                // instance of a *sibling* evaluation carries the name and must still answer
+                // `false`. Unlike an access, this reports rather than throws -- `#x in o` exists
+                // to ask the question without raising.
+                let brand = self.private_brand(name);
+                let brand_key =
+                    self.constant_index(Constant::String(self.private_brand_key(name)));
+                let key = self.private_key(name);
+                let held = format!("%pin{}", self.hidden_bindings);
+                self.hidden_bindings += 1;
+                self.scopes.push(HashMap::new());
                 self.expression(object);
+                self.declare_hidden(&held, expression.span);
+                self.push_constant(Constant::String(key));
+                self.load_hidden(&held);
                 self.code.push(Instruction::Binary(BinaryOp::In));
+                let absent = self.emit_jump(Instruction::JumpIfFalse(0));
+                self.load_hidden(&held);
+                self.code.push(Instruction::GetProperty(brand_key));
+                self.push_private_brand(&brand);
+                self.code.push(Instruction::Binary(BinaryOp::StrictEqual));
+                let done = self.emit_jump(Instruction::Jump(0));
+                self.patch_jump(absent);
+                self.push_constant(Constant::Boolean(false));
+                self.patch_jump(done);
+                self.scopes.pop().expect("private-in scope was just pushed");
             }
             ExpressionKind::SuperMember { property } => {
                 // `super.m` resolves on the prototype of the object this method was defined on,
