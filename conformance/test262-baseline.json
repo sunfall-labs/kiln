@@ -17,8 +17,8 @@
       "passed": 40
     },
     "built-ins/Array": {
-      "failed": 228,
-      "passed": 5889
+      "failed": 224,
+      "passed": 5893
     },
     "built-ins/ArrayBuffer": {
       "failed": 30,
@@ -101,8 +101,8 @@
       "passed": 10
     },
     "built-ins/Iterator": {
-      "failed": 110,
-      "passed": 1198
+      "failed": 104,
+      "passed": 1204
     },
     "built-ins/JSON": {
       "failed": 56,
@@ -133,8 +133,8 @@
       "passed": 671
     },
     "built-ins/Object": {
-      "failed": 186,
-      "passed": 6616
+      "failed": 176,
+      "passed": 6626
     },
     "built-ins/Promise": {
       "failed": 134,
@@ -297,8 +297,8 @@
       "passed": 0
     },
     "intl402/Intl": {
-      "failed": 34,
-      "passed": 98
+      "failed": 32,
+      "passed": 100
     },
     "intl402/ListFormat": {
       "failed": 14,

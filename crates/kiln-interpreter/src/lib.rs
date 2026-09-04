@@ -1473,8 +1473,19 @@ fn array_set_length(
     if !items.length_writable.get() && wanted != current {
         return Ok(false);
     }
+    // A length past what the dense vector can hold is not an error: `length` is a count, not a
+    // claim about storage, and `a.length = 4294967295` is a legal assignment that stores nothing.
+    // Refusing it made every `verifyProperty(array, "length", ...)` in the test262 harness fail --
+    // ninety-five rows across `Array`, `Object` and `Iterator` -- for an array of two elements.
+    //
+    // The elements are left alone and only the length moves: growing has never created elements
+    // here, and an index past the end already reads as a hole.
     if wanted > MAX_DENSE_ARRAY {
-        return Err(ExecutionError::ArrayTooLarge { length: wanted });
+        if !items.length_writable.get() {
+            return Ok(false);
+        }
+        items.length.set(wanted);
+        return Ok(true);
     }
     // The elements above the new length are deleted one at a time from the top, and the walk
     // stops at the first one that will not go: `length` ends up one past it, describing an array
@@ -3519,6 +3530,9 @@ impl PartialEq for Closure {
 /// Keeping one store would mean deciding which a numeric-looking key is on every access.
 #[derive(Debug, Default)]
 pub struct ArrayData {
+    /// The `length` the language reports, which the dense storage below does not have to reach.
+    /// See [`ArrayData::length`].
+    length: std::cell::Cell<usize>,
     items: RefCell<Vec<Value>>,
     /// Empty for almost every array, and allocated with it rather than on demand because an
     /// array that never gains a named property still has to answer that it has none.
@@ -3568,6 +3582,7 @@ impl ArrayData {
                     .iter()
                     .any(|item| matches!(item, Value::Native(Native::Hole, _))),
             ),
+            length: std::cell::Cell::new(items.len()),
             items: RefCell::new(items),
             properties: RefCell::new(ObjectData::default()),
             length_writable: std::cell::Cell::new(true),
@@ -3579,8 +3594,54 @@ impl ArrayData {
         self.items.borrow()
     }
 
-    fn borrow_mut(&self) -> std::cell::RefMut<'_, Vec<Value>> {
-        self.items.borrow_mut()
+    fn borrow_mut(&self) -> ArrayItems<'_> {
+        ArrayItems {
+            items: self.items.borrow_mut(),
+            length: &self.length,
+        }
+    }
+
+    /// The array's `length`, which is not always the number of elements stored.
+    ///
+    /// `Object.defineProperty(a, "length", { value: 4294967295 })` is a legal thing to do and
+    /// says nothing about what the array *contains*: the language's `length` is a count that may
+    /// run far past the elements, and the dense vector holds only what is there. Deriving one
+    /// from the other made that assignment an error -- and it is one the test262 harness performs
+    /// on every array it verifies a property of, so it cost far more than the arrays it was
+    /// about.
+    fn length(&self) -> usize {
+        self.length.get()
+    }
+}
+
+/// A mutable borrow of an array's dense elements that keeps `length` in step.
+///
+/// The length is authoritative and the elements are storage, so every change to the storage has
+/// to say what it did to the length. Rather than ask eighteen call sites to remember, the borrow
+/// itself reports on release: for every one of them the array's length *is* the number of
+/// elements, which is what makes a single rule right for all of them.
+struct ArrayItems<'a> {
+    items: std::cell::RefMut<'a, Vec<Value>>,
+    length: &'a std::cell::Cell<usize>,
+}
+
+impl std::ops::Deref for ArrayItems<'_> {
+    type Target = Vec<Value>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.items
+    }
+}
+
+impl std::ops::DerefMut for ArrayItems<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.items
+    }
+}
+
+impl Drop for ArrayItems<'_> {
+    fn drop(&mut self) {
+        self.length.set(self.items.len());
     }
 }
 
@@ -29310,7 +29371,7 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
             }
             // `length` is not an ordinary property of an array: it is derived, and writing it
             // truncates. Reading it is all the corpus needs so far.
-            Value::Array(items) if name == "length" => Value::Number(items.borrow().len() as f64),
+            Value::Array(items) if name == "length" => Value::Number(items.length() as f64),
             // Unbound, so that reading the same method twice yields the same value. The
             // receiver is supplied by `CallMethod`, not captured here.
             // Strings expose `length` and the iterator. `length` is UTF-16 code units, which is
@@ -43019,7 +43080,7 @@ fn inherited_object_accessor(
 fn array_own_property(items: &ArrayData, key: &str) -> Option<Property> {
     if key == "length" {
         #[expect(clippy::cast_precision_loss)]
-        let length = items.borrow().len() as f64;
+        let length = items.length() as f64;
         return Some(Property::Value(Value::Number(length)));
     }
     let index = canonical_index(key)?;
