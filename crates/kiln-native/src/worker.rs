@@ -198,12 +198,18 @@ mod busy_retry_tests {
             }
             Ok(7u32)
         });
-        assert_eq!(outcome.expect("the window closes, so the operation succeeds"), 7);
+        assert_eq!(
+            outcome.expect("the window closes, so the operation succeeds"),
+            7
+        );
         assert!(
             started.elapsed() >= Duration::from_millis(1_500),
             "returned before the busy window closed"
         );
-        assert!(calls.get() > 12, "gave up within the old twelve-attempt bound");
+        assert!(
+            calls.get() > 12,
+            "gave up within the old twelve-attempt bound"
+        );
     }
 
     /// A file somebody genuinely is writing still surfaces as an error rather than hanging.
@@ -213,7 +219,9 @@ mod busy_retry_tests {
             Err::<(), _>(io::Error::from(io::ErrorKind::Interrupted))
         });
         assert_eq!(
-            outcome.expect_err("an unrelated error is returned at once").kind(),
+            outcome
+                .expect_err("an unrelated error is returned at once")
+                .kind(),
             io::ErrorKind::Interrupted
         );
     }
