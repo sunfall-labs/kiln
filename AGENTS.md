@@ -120,6 +120,40 @@ claim about the compiler -- so seven chunks answering `0/0` look like a catastro
 whatever you were measuring rather than like a missing corpus. Any gate script of your own must
 refuse to run when the corpus is missing or short, instead of reporting zeros.
 
+## Benchmarking: time the work, not the launcher
+
+`mise run bench` runs every microbenchmark under `bench/` against kiln, node and bun.
+`bench/server/compare.sh` is the separate one for HTTP throughput.
+
+The numbers it replaced were wrong in a way that flattered this repository, and both causes are
+structural rather than bad luck on the day:
+
+* **Process startup sat inside every row.** node takes about 45 ms to boot where a kiln native
+  binary takes 2.6 ms, so a benchmark whose work lasts 1 ms was mostly a comparison of launchers.
+* **Nothing was warm.** A JIT has barely started after one call, so timing a single run compares
+  warm ahead-of-time code against cold interpreted code and reports the difference as a property
+  of the compiler. `array-functional` is 4.8x faster on node and 6.9x faster on bun between its
+  first call and its steady state -- measured once, the native backend looked 1.3x slower than
+  node on it; measured warm, it is 11x.
+
+So a benchmark exports its workload to `bench/harness.mjs`, which runs it many times in one
+process, calibrates a batch size against the clock's resolution, and reports the first call apart
+from the steady state. Setup belongs at module scope, outside the timed function -- with the
+exception of state the workload destroys, like the array `array-sort` sorts in place, which has
+to be rebuilt inside it or the second iteration measures an already-sorted best case.
+
+**The interpreter cannot time itself.** Its realm clock is virtual and advances only for
+scheduled work (ADR 0044), so `Date.now`, `performance.now` and `process.hrtime` all return the
+same number from the first line of a synchronous run to the last. That is deliberate -- it is
+what makes a run reproducible -- so the harness detects it, reports iterations instead of
+milliseconds, and `compare.sh` times those from outside against a measured floor. Do not write a
+`while (Date.now() - start < n)` spin anywhere near the interpreter: against a clock that never
+moves it never ends.
+
+**A checksum that differs from node's is a divergence, not a time.** Every runtime's answer is
+compared, and one that did different work is excluded from the table and named. A fast wrong
+answer reads exactly like a win.
+
 ## Changing Node HTTP close behavior
 
 Run `bash scripts/check-http-close-contract.sh`. HTTP close authority spans the runtime transport,
@@ -146,6 +180,32 @@ the other engine. `bash scripts/check-silent-undefined.sh` asks it by running bo
 non-zero on this class alone. It costs several hundred native compiles, so it is not per-commit;
 `scripts/native.sh` is, and `conformance/native/*-refuses.ts` is where a decision to keep refusing
 gets written down so that the next person does not "fix" it into an `undefined`.
+
+## Editing the C prelude poisons the native caches
+
+Change anything under `crates/kiln-backend-c/src/runtime/` and the next native build fails with
+
+    kiln: native cache failed: corrupt cache artifact <path>: same cache key already contains a
+    different payload
+
+in every probe at once, which reads exactly like the change having broken the backend. It has
+not: the cache key does not include the prelude source, so the entry recorded before the edit is
+still there and the payload no longer matches it. Refusing is the right behaviour -- serving the
+stale object would be a silently wrong binary -- but the message names the artifact rather than
+the fix.
+
+Clear **both**, because they are separate stores and clearing one leaves the other to fail next:
+
+    rm -rf .kiln/cache target/kiln-test-cache
+
+`.kiln/cache` is what `kiln build` and `scripts/native.sh` use; `target/kiln-test-cache` is what
+`kiln-native`'s crate tests use, and a gate that clears only the first fails in a different step
+the second time round. Only ever clear the ones in a worktree you own.
+
+Run `scripts/native.sh` and `scripts/thirdparty.sh` by **executing** them, never as `bash
+scripts/native.sh`: macOS's `/bin/bash` is 3.2, the cleanup trap loses `BASHPID` under it and
+deletes the shared results directory instead of its own, and every probe then reports a missing
+result file. `mise run gate` gets this right; a hand-run does not unless you copy it.
 
 ## The native number provider is a staticlib, and `cargo build` does not build it
 

@@ -1,3 +1,5 @@
+import { bench } from "../harness.mjs";
+
 const payload = {
   id: 1042,
   name: "kiln-benchmark",
@@ -10,11 +12,13 @@ const payload = {
   }
 };
 
-let totalLen = 0;
-for (let i = 0; i < 50000; i++) {
-  const str = JSON.stringify(payload);
-  totalLen += str.length;
-  const parsed = JSON.parse(str);
-  totalLen += parsed.id;
-}
-console.log(totalLen);
+bench("json", () => {
+  let totalLen = 0;
+  for (let i = 0; i < 50000; i++) {
+    const str = JSON.stringify(payload);
+    totalLen += str.length;
+    const parsed = JSON.parse(str);
+    totalLen += parsed.id;
+  }
+  return totalLen;
+});

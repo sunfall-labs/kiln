@@ -27,6 +27,10 @@ run = "./scripts/test262-baseline.sh --update"
 description = "Fetch the pinned Test262 checkout into ~/.cache/kiln (needed once per machine)"
 run = "./scripts/test262-fetch.sh"
 
+[tasks.bench]
+description = "Every microbenchmark under bench/, under kiln, node and bun"
+run = "./bench/compare.sh"
+
 [tasks.native]
 description = "Native backend against node, probe by probe"
 run = "./scripts/native.sh"

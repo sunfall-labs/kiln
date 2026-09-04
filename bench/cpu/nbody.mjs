@@ -1,3 +1,5 @@
+import { bench } from "../harness.mjs";
+
 function nbody(n) {
   let x = 0.0;
   let y = 0.0;
@@ -18,4 +20,5 @@ function nbody(n) {
   }
   return x + y + z;
 }
-console.log(Math.round(nbody(50000000) * 1000));
+
+bench("nbody", () => Math.round(nbody(50000000) * 1000));
