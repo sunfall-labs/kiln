@@ -77,6 +77,20 @@ and points at `scripts/thirdparty.sh`.
 in a single `kiln test`, and that one process has repeatedly grown until it filled the disk. Run it
 under an explicit cap and watch it; do not point `kiln test` at the corpus by hand.
 
+**Keep the corpus outside `/tmp`.** A scratchpad checkout under `/private/tmp` is on borrowed time:
+macOS's periodic cleaner empties it on a day boundary, and on 2026-09-04 it took the whole
+checkout, `.git` included, in the middle of a session. Keep one at
+`~/.cache/kiln/test262-<short-commit>` and point work at it -- `scripts/test262.sh` already accepts
+`KILN_TEST262_CHECKOUT` and still verifies the pinned commit, so a durable checkout costs no
+guarantee. A submodule was considered and rejected: 53,874 files multiplied by every worktree is
+exactly the cost the worktree habit above exists to avoid, and the pin is already enforced.
+
+**A vanished corpus reads as a clean run.** `kiln test` on an emptied tree reports
+`discovered 0 / pass 0 / fail 0` and exits 0 -- deliberately, because an empty corpus is not a
+claim about the compiler -- so seven chunks answering `0/0` look like a catastrophic regression in
+whatever you were measuring rather than like a missing corpus. Any gate script of your own must
+refuse to run when the corpus is missing or short, instead of reporting zeros.
+
 ## Changing Node HTTP close behavior
 
 Run `bash scripts/check-http-close-contract.sh`. HTTP close authority spans the runtime transport,
