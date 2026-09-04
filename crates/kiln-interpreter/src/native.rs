@@ -707,6 +707,10 @@ pub enum Native {
     PromiseConstructor,
     PromiseResolve,
     PromiseReject,
+    /// `Function.prototype[Symbol.hasInstance]`, which is `OrdinaryHasInstance` published as a
+    /// method. It is the one built-in the specification makes neither writable nor configurable,
+    /// because it is what decides `instanceof` for every ordinary function in the realm.
+    FunctionHasInstance,
     PromiseAll,
     PromiseAllSettled,
     /// `Promise.allKeyed` and `Promise.allSettledKeyed`: the same two combinators, walking an

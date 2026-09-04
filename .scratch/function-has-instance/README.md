@@ -1,7 +1,7 @@
 # `Function.prototype[@@hasInstance]` is missing, and the obvious fix regresses badly
 
-**Status:** open. Attempted 2026-09-03, reverted. ~6-12 test262 rows available, but the naive
-route costs far more than it wins.
+**Status:** fixed 2026-09-03. **This filing's diagnosis was wrong**, and the correction is the
+useful part of it -- see the last section. +14 rows in `built-ins/Function`.
 
 ## The gap
 
@@ -53,3 +53,46 @@ reserved keys out. It also needs two things the string path cannot express:
 Worth doing only alongside a look at how symbol-keyed built-in members are meant to be published
 generally, because `@@toPrimitive`, `@@toStringTag` and `@@iterator` on the intrinsics raise the
 same question.
+
+
+## 2026-09-03, second attempt: the diagnosis above is wrong
+
+The name list is not what cost 838 rows. Publishing the property at all did, and it did so through
+a mechanism this filing never suspected.
+
+Isolated by building both halves separately and measuring each: with the member published and the
+name list untouched, `built-ins/Object` was **still** 5777 (-838) and `language/expressions` still
+20087 (-397) -- the same numbers, to the row, that were blamed on the enumeration leak. So the leak
+was never the cause. `Object.getOwnPropertyNames(Function.prototype)` was checked directly and does
+not contain the reserved key.
+
+The actual cause is one argument. `instance_of_value` carried an `error_prototype: Option<&Value>`
+supplied by the *operator*, and `Value::Native(Native::Error(_), _)` answered `false` when it was
+`None`. `Function.prototype[@@hasInstance]` is reached with no operator context, so it passed
+`None`, so `e instanceof TypeError` became false for every error in the realm. test262's own
+`assert.throws` is written with `instanceof`, so every test that asserts a throw -- hundreds of
+them, across chunks with nothing to do with `instanceof` -- failed at the harness.
+
+The fix is to stop threading it: the kind is in the constructor and the realm can always answer
+`error_prototype(kind)` itself. A caller that cannot supply a piece of context is a sign the
+context did not belong in the signature.
+
+## What it took, once the cause was known
+
+Exactly what the section above predicted, minus the part that was wrong:
+
+- the member is published through `tabulated_function_property`, which is the existence-and-value
+  path -- the same one `Date.prototype[@@toPrimitive]` uses. The enumeration list is untouched.
+- `w0e0c0` in `intrinsic_own_attributes`: the one built-in the specification locks on both axes.
+- `native_js_name` gives `[Symbol.hasInstance]`; `native_length` gives 1.
+- `ordinary_has_instance` split out of `instance_of_value`, so the method performs the walk rather
+  than the operator -- otherwise it reads itself back off the receiver and recurs for ever.
+- the callable refusal stays in the *operator*: `OrdinaryHasInstance` answers `false` for a
+  non-callable, and only `InstanceofOperator` throws. Putting it in the shared half made
+  `Function.prototype[@@hasInstance].call({}, 1)` throw where node answers false.
+
+## Still open, and now visible
+
+`getOwnPropertySymbols` on an intrinsic answers `[]` where node lists 1-2. The symbol members are
+readable and have correct descriptors; they are simply absent from the key listing, which is
+another instance of the same shape -- existence and enumeration are answered by different tables.
