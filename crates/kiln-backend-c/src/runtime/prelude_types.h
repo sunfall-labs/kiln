@@ -360,6 +360,7 @@ typedef struct kiln_c99_site {
      * deeper prototype. After `KILN_C99_SITE_GIVE_UP` of them the site stops scanning to learn. */
     uint32_t misses;
     const kiln_shape *shape;
+    const kiln_shape *transition_to;
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
