@@ -17,8 +17,8 @@
       "passed": 40
     },
     "built-ins/Array": {
-      "failed": 234,
-      "passed": 5883
+      "failed": 228,
+      "passed": 5889
     },
     "built-ins/ArrayBuffer": {
       "failed": 30,
@@ -441,8 +441,8 @@
       "passed": 160
     },
     "language/statements": {
-      "failed": 416,
-      "passed": 17586
+      "failed": 389,
+      "passed": 17613
     },
     "language/types": {
       "failed": 6,
@@ -477,8 +477,8 @@
       "passed": 6
     },
     "staging/sm": {
-      "failed": 688,
-      "passed": 1907
+      "failed": 687,
+      "passed": 1908
     },
     "staging/source-phase-imports": {
       "failed": 0,
