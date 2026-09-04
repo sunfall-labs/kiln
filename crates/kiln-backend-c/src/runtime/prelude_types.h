@@ -7,6 +7,30 @@ typedef struct kiln_value {
     union { uint64_t bits; const char *ptr; };
 } kiln_value;
 
+/* =========================================================================
+ * ADR 0053: 64-Bit Quiet-NaN Boxed Internal Value Representation
+ * ========================================================================= */
+typedef uint64_t kiln_val;
+
+#define KILN_QNAN_BASE          UINT64_C(0x7FF8000000000000)
+#define KILN_TAG_MASK           UINT64_C(0xFFFF000000000000)
+#define KILN_PAYLOAD_MASK       UINT64_C(0x0000FFFFFFFFFFFF)
+
+#define KILN_VAL_UNDEFINED      UINT64_C(0xFFF8000000000001)
+#define KILN_VAL_NULL           UINT64_C(0xFFF8000000000002)
+#define KILN_VAL_FALSE          UINT64_C(0xFFF8000000000004)
+#define KILN_VAL_TRUE           UINT64_C(0xFFF8000000000005)
+#define KILN_VAL_HOLE           UINT64_C(0xFFF8000000000006)
+
+#define KILN_TAG_STRING_PREFIX  UINT64_C(0xFFF9000000000000)
+#define KILN_TAG_OBJECT_PREFIX  UINT64_C(0xFFFA000000000000)
+#define KILN_TAG_CLOSURE_PREFIX UINT64_C(0xFFFB000000000000)
+#define KILN_TAG_BUFFER_PREFIX  UINT64_C(0xFFFC000000000000)
+
+#define KILN_VAL_IS_NUMBER(v)   ((uint64_t)(v) < UINT64_C(0xFFF8000000000000))
+#define KILN_VAL_PTR(v)         ((void *)((uint64_t)(v) & KILN_PAYLOAD_MASK))
+#define KILN_VAL_TAG_PTR(pfx, p) ((kiln_val)((pfx) | ((uint64_t)(uintptr_t)(p) & KILN_PAYLOAD_MASK)))
+
 typedef enum kiln_typed_kind {
     KILN_TYPED_INT8,
     KILN_TYPED_UINT8,
