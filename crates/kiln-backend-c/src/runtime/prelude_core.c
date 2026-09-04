@@ -22794,6 +22794,31 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
 }
 
 
+/* The three hints `ToPrimitive` can be asked for. The specification has three, not two, and the
+ * third is not decoration: a `Date` is the one built-in whose `@@toPrimitive` answers a string for
+ * "default" and a number for "number", which is the whole of why `date + date` concatenates while
+ * `date - date` subtracts. For every other value the three coincide, which is why two of them
+ * sufficed here for so long. NUMBER and STRING keep the 0 and 1 the two-valued flag used, so every
+ * call site that already said what it wanted still says it.
+ *
+ * Defined here as well as in `prelude_declarations.h` because a single-unit prelude does not
+ * include that header, and guarded so that the separately compiled build sees one definition. */
+/* Whether reducing this value to a primitive is a *call* rather than a no-op.
+ *
+ * Deliberately not `kiln_c99_is_reference`, which is a primitive denylist that excludes a date on
+ * purpose; using that one as "is an object" is a mistake this file has already paid for once. A
+ * date is not a reference and still has to be reduced by calling, so the two predicates are
+ * genuinely different questions and each has its own name. */
+static int kiln_c99_reduces_to_primitive(kiln_value value) {
+    return kiln_c99_is_reference(value) || value.tag == KILN_VALUE_DATE;
+}
+
+#ifndef KILN_C99_HINT_NUMBER
+#define KILN_C99_HINT_NUMBER 0
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_HINT_DEFAULT 2
+#endif
+
 /* Reduce a value to a primitive, which is a *call* rather than a formatting rule.
  *
  * Which method is tried first depends on what the operator wanted: arithmetic wants a number and
@@ -22806,18 +22831,29 @@ static kiln_value kiln_c99_binary(uint16_t operation, kiln_value left, kiln_valu
  *
  * A value with no method to call falls back to `kiln_c99_text`, which is where an array's join
  * and a function's source text already live. */
-static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint,
+static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint,
                                  kiln_value *out, int depth, kiln_value *thrown) {
     static const char *const string_first[2] = {"toString", "valueOf"};
     static const char *const value_first[2] = {"valueOf", "toString"};
-    const char *const *order = string_hint ? string_first : value_first;
+    /* `Date.prototype[@@toPrimitive]` is a real method in the interpreter, but this backend
+     * models a date as a value kind rather than an object carrying that method, so the rule it
+     * would apply is applied here instead: a date asked for "default" tries `toString` first,
+     * every other value tries `valueOf`. That single line is the difference between
+     * `date + date` concatenating and adding. */
+    int prefers_string = hint == KILN_C99_HINT_STRING ||
+                         (hint == KILN_C99_HINT_DEFAULT && value.tag == KILN_VALUE_DATE);
+    const char *const *order = prefers_string ? string_first : value_first;
     int step;
     /* `${p}` and `p + 1` read `@@toPrimitive`, `valueOf` and `toString` off the proxy, which are
      * three trap calls whose results this backend has nowhere to put yet. */
     if (value.tag == KILN_VALUE_PROXY) {
         KILN_C99_REFUSE("converting a Proxy to a primitive");
     }
-    if (!kiln_c99_is_reference(value)) {
+    /* A date is not a reference here -- `kiln_c99_is_reference` is a primitive denylist and
+     * excludes it on purpose -- but it still reduces by *calling*, and it is the one value whose
+     * answer depends on which hint was asked for. Letting it through as its own primitive is what
+     * made `date + date` add two instants. */
+    if (!kiln_c99_is_reference(value) && value.tag != KILN_VALUE_DATE) {
         *out = value;
         return KILN_C99_OK;
     }
@@ -22829,10 +22865,13 @@ static int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_h
             return status;
         }
         if (status == KILN_C99_OK && kiln_c99_is_callable(exotic)) {
-            kiln_value hint = kiln_c99_copy_text(string_hint ? "string" : "default",
-                                                 string_hint ? 6 : 7);
+            const char *spelling = hint == KILN_C99_HINT_STRING
+                                       ? "string"
+                                       : (hint == KILN_C99_HINT_DEFAULT ? "default" : "number");
+            kiln_value hint_text = kiln_c99_copy_text(spelling, strlen(spelling));
             kiln_value produced;
-            status = kiln_c99_call(host, &produced, exotic, value, &hint, 1, depth, thrown);
+            status = kiln_c99_call(host, &produced, exotic, value, &hint_text, 1, depth,
+                                   thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -22961,7 +23000,7 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
     int left_big;
     int right_big;
     int numeric;
-    if (kiln_c99_is_reference(left) || kiln_c99_is_reference(right)) {
+    if (kiln_c99_reduces_to_primitive(left) || kiln_c99_reduces_to_primitive(right)) {
         /* Strict equality is identity and never coerces, `in` and `instanceof` take their
          * operands as they are, and a nullish `==` is answered without any conversion at all --
          * `value != null` is the commonest guard in JavaScript, and running a wrapper's `valueOf`
@@ -22974,16 +23013,22 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
              * != null` is the commonest guard in JavaScript, and running a wrapper's `valueOf`
              * there is both wrong and, for a wrapper that assumes it is being used properly,
              * fatal. */
-            if ((kiln_c99_is_reference(left) && kiln_c99_is_reference(right)) ||
+            if ((kiln_c99_reduces_to_primitive(left) && kiln_c99_reduces_to_primitive(right)) ||
                 left.tag == KILN_VALUE_UNDEFINED || left.tag == KILN_VALUE_NULL ||
                 right.tag == KILN_VALUE_UNDEFINED || right.tag == KILN_VALUE_NULL) {
                 coerces = 0;
             }
         }
         if (coerces) {
-            /* Every operator here wants a number or has no preference, and both of those ask
-             * `valueOf` first. Only `${}` and `String(x)` use the other order. */
-            int status = kiln_c99_to_primitive(host, left, 0, &left, depth, thrown);
+            /* Every operator here asks `valueOf` first; only `${}` and `String(x)` use the
+             * other order. But `+` and loose equality state no *preference* -- each chooses
+             * between a string reading and a numeric one only once both sides have reduced --
+             * while the rest have already committed to a number. That distinction is invisible
+             * for every value but a date, and it is why `date + date` concatenates. */
+            int hint = (operation == 1 || operation == 15 || operation == 16)
+                           ? KILN_C99_HINT_DEFAULT
+                           : KILN_C99_HINT_NUMBER;
+            int status = kiln_c99_to_primitive(host, left, hint, &left, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }
@@ -22998,7 +23043,7 @@ static int kiln_c99_binary_checked(uint16_t operation, kiln_host *host, kiln_val
                 return kiln_c99_throw_error(thrown, KILN_C99_BUILTIN_TYPE_ERROR,
                                             "Cannot convert a Symbol value to a number");
             }
-            status = kiln_c99_to_primitive(host, right, 0, &right, depth, thrown);
+            status = kiln_c99_to_primitive(host, right, hint, &right, depth, thrown);
             if (status != KILN_C99_OK) {
                 return status;
             }

@@ -104,7 +104,19 @@ extern uint64_t kiln_c99_namespace_method(uint64_t builtin, const char *key, siz
 extern kiln_value kiln_c99_builtin(uint64_t code);
 extern int kiln_c99_is_callable(kiln_value value);
 extern int kiln_c99_is_reference(kiln_value value);
-extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int string_hint, kiln_value *out, int depth, kiln_value *thrown);
+/* The three hints `ToPrimitive` can be asked for. The specification has three, not two, and the
+ * third is not decoration: a `Date` is the one built-in whose `@@toPrimitive` answers a string for
+ * "default" and a number for "number", which is the whole of why `date + date` concatenates while
+ * `date - date` subtracts. For every other value the three coincide, which is why two of them
+ * sufficed here for so long. NUMBER and STRING keep the 0 and 1 the two-valued flag used, so every
+ * call site that already said what it wanted still says it. */
+#ifndef KILN_C99_HINT_NUMBER
+#define KILN_C99_HINT_NUMBER 0
+#define KILN_C99_HINT_STRING 1
+#define KILN_C99_HINT_DEFAULT 2
+#endif
+
+extern int kiln_c99_to_primitive(kiln_host *host, kiln_value value, int hint, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_reduce_key(kiln_host *host, kiln_value target, kiln_value key, kiln_value *out, int depth, kiln_value *thrown);
 extern int kiln_c99_has_intrinsic_text(kiln_value value);
 extern int kiln_c99_crosses_boundary(kiln_value value);
