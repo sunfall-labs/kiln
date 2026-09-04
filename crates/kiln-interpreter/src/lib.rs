@@ -30009,8 +30009,15 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                 // same reason a frozen object's write is: the machine does not know whether the
                 // code that wrote it was strict.
                 None if key.property_key() == "length" => {
+                    // `ToUint32` of whatever the program supplied, and for an object that
+                    // conversion *calls* its `valueOf` or `toString`. The pure `as_number`
+                    // inside `array_set_length` answered NaN for one, which the range check
+                    // then reported as `Invalid array length` -- a refusal where the language
+                    // takes the value.
+                    let items = Rc::clone(items);
+                    let value = Value::Number(self.as_number_argument(Some(&value), instruction)?);
                     array_set_length(
-                        items,
+                        &items,
                         &Descriptor {
                             value: Some(value),
                             get: None,
@@ -31246,6 +31253,20 @@ impl<H: HostOps + ?Sized> Vm<'_, H> {
                     Ok(true)
                 }
             };
+        }
+        // Same conversion for the definition form, and for the same reason: the descriptor's
+        // value arrives as the program wrote it, and an object reduces by calling its own code.
+        if matches!(target, Value::Array(_))
+            && key == "length"
+            && let Some(value) = descriptor.value.clone()
+            && !matches!(value, Value::Number(_))
+        {
+            let number = self.as_number_argument(Some(&value), instruction)?;
+            let descriptor = Descriptor {
+                value: Some(Value::Number(number)),
+                ..descriptor.clone()
+            };
+            return define_own_property(&self.intrinsics, target, key, &descriptor);
         }
         define_own_property(&self.intrinsics, target, key, descriptor)
     }

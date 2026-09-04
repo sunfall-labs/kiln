@@ -1,8 +1,15 @@
 # An array's `length` cannot exceed what the dense storage materialises
 
-**Status:** open, and deliberately not attempted. **133 test262 rows** -- the largest single
-root cause left in the corpus, and, I think, still the wrong thing to fix. The measurement and
-the reasoning are here so that judgement can be overruled with numbers rather than re-derived.
+**Status:** open, and deliberately not attempted.
+
+**Corrected 2026-09-03, shortly after filing.** This was first written up as "133 rows, one
+root cause". That was wrong: two different faults shared the `Invalid array length` message.
+About 26 of those rows were a *coercion* bug -- `array_set_length` read its value with the pure
+`as_number`, so `a.length = {toString(){return "2"}}` answered NaN and was refused as an invalid
+length. That one is fixed and the rows are recovered; it had nothing to do with the dense
+representation. What is left below is the genuine limit, and it is smaller than first claimed.
+Do not trust a row count that was derived from a shared error message without checking that the
+tests behind it fail for the same reason -- that is exactly how this one went wrong.
 
 ## What happens
 
