@@ -58,6 +58,34 @@ static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
     }
     return kiln_c99_truthy(val);
 }
+
+static inline KILN_ALWAYS_INLINE int kiln_fast_is_ascii(const char *ptr, size_t len) {
+    if (len == 0 || ptr == NULL) return 1;
+    const unsigned char *p = (const unsigned char *)ptr;
+    size_t i = 0;
+    while (i + 8 <= len) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        if (w & UINT64_C(0x8080808080808080)) return 0;
+        i += 8;
+    }
+    while (i < len) {
+        if (p[i] >= 0x80) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static inline KILN_ALWAYS_INLINE double kiln_fast_round(double v) {
+    if (fabs(v) >= 4503599627370496.0 || isnan(v)) {
+        return v;
+    }
+    double rounded = floor(v + 0.5);
+    if (rounded == 0.0 && signbit(v)) {
+        rounded = -0.0;
+    }
+    return rounded;
+}
 static void kiln_module_6f821f3641b87c4fcf58a3af90bd2540_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }

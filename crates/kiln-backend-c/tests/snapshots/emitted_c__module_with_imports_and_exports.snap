@@ -58,6 +58,34 @@ static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
     }
     return kiln_c99_truthy(val);
 }
+
+static inline KILN_ALWAYS_INLINE int kiln_fast_is_ascii(const char *ptr, size_t len) {
+    if (len == 0 || ptr == NULL) return 1;
+    const unsigned char *p = (const unsigned char *)ptr;
+    size_t i = 0;
+    while (i + 8 <= len) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        if (w & UINT64_C(0x8080808080808080)) return 0;
+        i += 8;
+    }
+    while (i < len) {
+        if (p[i] >= 0x80) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static inline KILN_ALWAYS_INLINE double kiln_fast_round(double v) {
+    if (fabs(v) >= 4503599627370496.0 || isnan(v)) {
+        return v;
+    }
+    double rounded = floor(v + 0.5);
+    if (rounded == 0.0 && signbit(v)) {
+        rounded = -0.0;
+    }
+    return rounded;
+}
 static void kiln_module_659cb65dc1a991aa4093bd7539036ba1_gc_roots(void *heap, void *context, int phase) {
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
@@ -84,7 +112,7 @@ kiln_label_1:;
 kiln_label_2:;
     stack[sp++] = kiln_fast_number_bits(UINT64_C(4607182418800017408));
 kiln_label_3:;
-    { kiln_value call_result = kiln_fast_undefined(); kiln_value callee = stack[sp - 2 - 1]; int status; kiln_value call_argbuf[(2) + 1]; for (size_t i = 0; i < (size_t)2; i++) { call_argbuf[i] = stack[sp - 2 + i]; } const kiln_value *call_args = 2 == 0 ? NULL : call_argbuf; { kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) { status = plain->body(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t)2, depth + 1, thrown, NULL); } else if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) { status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t)2, depth, thrown, NULL, 0); } else { status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t)2, depth, thrown); } } if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) { *result = call_result; return status; } if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) { kiln_c99_diagnostic_receiver_tag = callee.tag; } if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) { kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model"; } if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal("kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) goto kiln_uncaught; if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; sp -= (size_t)3; stack[sp++] = call_result; }
+    { kiln_value call_result = kiln_fast_undefined(); kiln_value callee = stack[sp - 2 - 1]; int status; const kiln_value *call_args = 2 == 0 ? NULL : &stack[sp - 2]; { kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) { status = plain->body(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t)2, depth + 1, thrown, NULL); } else if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) { status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t)2, depth, thrown, NULL, 0); } else { status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t)2, depth, thrown); } } if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) { *result = call_result; return status; } if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) { kiln_c99_diagnostic_receiver_tag = callee.tag; } if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) { kiln_c99_diagnostic_detail = "Call callee is unsupported by the native callable model"; } if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal("kiln_module_659cb65dc1a991aa4093bd7539036ba1", (size_t)3, "Call", (size_t)kiln_c99_diagnostic_active_depth); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) goto kiln_uncaught; if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; sp -= (size_t)3; stack[sp++] = call_result; }
 kiln_label_4:;
     locals[2] = stack[--sp];
 kiln_label_5:;
@@ -176,8 +204,7 @@ int kiln_module_659cb65dc1a991aa4093bd7539036ba1_namespace_wrapper(kiln_value *r
             }
             value = *kiln_c99_cell_of(value);
         }
-        status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
-                                  sizeof *data->properties);
+        status = kiln_c99_object_reserve(data, data->count + 1);
         if (status != KILN_C99_OK) {
             goto namespace_failure;
         }

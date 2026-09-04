@@ -235,12 +235,7 @@ typedef struct kiln_property {
     /* Whether `Object.keys`, `for...in`, spread and JSON see it. Every own property of an error
      * is readable by name and not enumerated, which is why `JSON.stringify(err)` is `{}`. */
     int enumerable;
-    /* Whether an assignment may replace the value, and whether `delete` may remove the property
-     * or `defineProperty` redefine it. Both are true for everything an assignment or a literal
-     * creates, which is why they went unmodelled for so long: only `Object.defineProperty` and
-     * `Object.freeze` can produce a property where they are not, and only
-     * `getOwnPropertyDescriptor` reports them back. Absent, a defined non-writable property took
-     * writes and a non-configurable one deleted -- both silently. */
+    int symbol_hidden;
     int writable;
     int configurable;
     int accessor;
@@ -262,10 +257,13 @@ typedef struct kiln_property {
     kiln_value setter;
 } kiln_property;
 
+#define KILN_OBJECT_INLINE_PROPERTIES 8
+
 typedef struct kiln_object {
     kiln_property *properties;
     size_t count;
     size_t capacity;
+    kiln_property inline_properties[KILN_OBJECT_INLINE_PROPERTIES];
     /* The next object a property read falls through to, or undefined for none.  Undefined and
      * null are different answers here, exactly as they are to `Object.getPrototypeOf`: one means
      * nothing was recorded and the other means nothing was wanted. */
@@ -325,6 +323,8 @@ typedef struct kiln_c99_site {
     uint32_t misses;
     const void *proto_cache[2];
     kiln_value method_cache[2];
+    kiln_body_fn body_cache[2];
+    kiln_value *upvalues_cache[2];
 } kiln_c99_site;
 #define KILN_C99_SITE_NONE 0xFFFFFFFFu
 #define KILN_C99_SITE_GIVE_UP 8u
@@ -347,10 +347,13 @@ typedef struct kiln_proxy {
 /* An array's elements are dense and its `length` is derived, not stored: writing past the end
  * grows it and the gap is filled with holes, which read as undefined and are not the same thing --
  * `1 in [1, , 3]` is false and `[1, , 3].map(f)` does not call `f` for the middle. */
+#define KILN_ARRAY_INLINE_ELEMENTS 16
+
 typedef struct kiln_array {
     kiln_value *elements;
     size_t count;
     size_t capacity;
+    kiln_value inline_elements[KILN_ARRAY_INLINE_ELEMENTS];
     /* Properties that are not elements: `a.total = 1`, and the `index`, `input` and `groups` a
      * match result carries. Undefined until the first one is written, so an ordinary array is one
      * pointer smaller than it looks and costs nothing. */

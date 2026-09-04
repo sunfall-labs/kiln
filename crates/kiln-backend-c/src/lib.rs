@@ -5,7 +5,11 @@
 //! using the numeric [`kiln_host_abi::HostOp`] value.  In particular, it never writes stdout (or
 //! otherwise bakes CLI policy into an object file).
 
-use std::{collections::HashSet, fmt::Write as _, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Write as _,
+    sync::Arc,
+};
 
 use kiln_host_abi::{HOST_ABI_VERSION, HostOp};
 use kiln_ir::{
@@ -22,7 +26,7 @@ pub const C_ABI_VERSION: u32 = 1;
 /// This is deliberately independent from [`C_ABI_VERSION`]: diagnostics and private helper code
 /// can change emitted object bytes without changing the public embedding layout. Native artifact
 /// keys include this revision so those objects are never reused across generator changes.
-pub const C_GENERATOR_VERSION: u32 = 18;
+pub const C_GENERATOR_VERSION: u32 = 33;
 
 /// Realm policy that changes observable native execution.
 ///
@@ -695,366 +699,6 @@ fn compute_guarded_loads(code: &[Instruction]) -> HashSet<usize> {
     guarded_loads
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValType {
-    Bottom,
-    Number,
-    Function(u32),
-    Any,
-}
-
-impl ValType {
-    fn join(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Bottom, x) | (x, Self::Bottom) => x,
-            (Self::Number, Self::Number) => Self::Number,
-            (Self::Function(a), Self::Function(b)) if a == b => Self::Function(a),
-            _ => Self::Any,
-        }
-    }
-}
-
-fn abstract_interpret(
-    code: &[Instruction],
-    constants: &[Constant],
-    local_count: u32,
-    initial_params: &[ValType],
-    function_signatures: &[(Vec<ValType>, ValType)],
-    current_func: Option<usize>,
-    observed_call_args: &mut [Vec<ValType>],
-) -> (HashSet<usize>, ValType) {
-    let n = code.len();
-    if n == 0 {
-        return (HashSet::new(), ValType::Bottom);
-    }
-
-    let mut in_locals: Vec<Option<Vec<ValType>>> = vec![None; n];
-    let mut in_stack: Vec<Option<Vec<ValType>>> = vec![None; n];
-    let mut known_numbers: HashSet<usize> = HashSet::new();
-    let mut observed_return = ValType::Bottom;
-
-    let mut init_loc = vec![ValType::Any; local_count as usize];
-    for (i, &p) in initial_params.iter().enumerate() {
-        if i < init_loc.len() && p != ValType::Bottom {
-            init_loc[i] = p;
-        }
-    }
-    in_locals[0] = Some(init_loc);
-    in_stack[0] = Some(Vec::new());
-
-    let mut worklist = vec![0usize];
-    let mut in_worklist = vec![false; n];
-    in_worklist[0] = true;
-
-    while let Some(pc) = worklist.pop() {
-        in_worklist[pc] = false;
-        let Some(cur_locals) = in_locals[pc].clone() else {
-            continue;
-        };
-        let Some(cur_stack) = in_stack[pc].clone() else {
-            continue;
-        };
-
-        let mut out_locals = cur_locals;
-        let mut out_stack = cur_stack;
-
-        match &code[pc] {
-            Instruction::Const(idx) => {
-                let ty = if matches!(constants.get(*idx as usize), Some(Constant::Number(_))) {
-                    ValType::Number
-                } else {
-                    ValType::Any
-                };
-                out_stack.push(ty);
-            }
-            Instruction::MakeFunction(proto_idx) => {
-                out_stack.push(ValType::Function(*proto_idx));
-            }
-            Instruction::LoadLocal(slot) => {
-                let ty = out_locals
-                    .get(*slot as usize)
-                    .copied()
-                    .unwrap_or(ValType::Any);
-                out_stack.push(ty);
-            }
-            Instruction::StoreLocal(slot) => {
-                let ty = out_stack.pop().unwrap_or(ValType::Any);
-                if (*slot as usize) < out_locals.len() {
-                    out_locals[*slot as usize] = ty;
-                }
-            }
-            Instruction::Pop => {
-                out_stack.pop();
-            }
-            Instruction::Dup => {
-                if let Some(&top) = out_stack.last() {
-                    out_stack.push(top);
-                }
-            }
-            Instruction::Dup2 => {
-                let len = out_stack.len();
-                if len >= 2 {
-                    let a = out_stack[len - 2];
-                    let b = out_stack[len - 1];
-                    out_stack.push(a);
-                    out_stack.push(b);
-                }
-            }
-            Instruction::Unary(op) => {
-                let val = out_stack.pop().unwrap_or(ValType::Any);
-                if val == ValType::Number
-                    && matches!(
-                        op,
-                        UnaryOp::Negate
-                            | UnaryOp::Plus
-                            | UnaryOp::ToNumeric
-                            | UnaryOp::Increment
-                            | UnaryOp::Decrement
-                    )
-                {
-                    known_numbers.insert(pc);
-                    out_stack.push(ValType::Number);
-                } else {
-                    known_numbers.remove(&pc);
-                    out_stack.push(ValType::Any);
-                }
-            }
-            Instruction::Binary(op) => {
-                let right = out_stack.pop().unwrap_or(ValType::Any);
-                let left = out_stack.pop().unwrap_or(ValType::Any);
-                if left == ValType::Number && right == ValType::Number {
-                    if matches!(
-                        op,
-                        BinaryOp::Add
-                            | BinaryOp::Subtract
-                            | BinaryOp::Multiply
-                            | BinaryOp::Divide
-                            | BinaryOp::Remainder
-                    ) {
-                        known_numbers.insert(pc);
-                        out_stack.push(ValType::Number);
-                    } else {
-                        known_numbers.remove(&pc);
-                        out_stack.push(ValType::Any);
-                    }
-                } else {
-                    known_numbers.remove(&pc);
-                    out_stack.push(ValType::Any);
-                }
-            }
-            Instruction::Call { argc } => {
-                let argc = *argc as usize;
-                let callee = if out_stack.len() > argc {
-                    out_stack[out_stack.len() - argc - 1]
-                } else {
-                    ValType::Any
-                };
-                let target_func = match callee {
-                    ValType::Function(idx) => Some(idx as usize),
-                    _ => current_func,
-                };
-                let mut args = Vec::with_capacity(argc);
-                for _ in 0..argc {
-                    args.push(out_stack.pop().unwrap_or(ValType::Any));
-                }
-                args.reverse();
-                out_stack.pop();
-
-                if let Some(target) = target_func {
-                    if target < observed_call_args.len() {
-                        for (arg_i, &arg_ty) in args.iter().enumerate() {
-                            if arg_i < observed_call_args[target].len() {
-                                observed_call_args[target][arg_i] =
-                                    observed_call_args[target][arg_i].join(arg_ty);
-                            }
-                        }
-                    }
-                    let ret_ty = function_signatures
-                        .get(target)
-                        .map(|(_, ret)| *ret)
-                        .unwrap_or(ValType::Any);
-                    out_stack.push(if ret_ty == ValType::Bottom {
-                        ValType::Any
-                    } else {
-                        ret_ty
-                    });
-                } else {
-                    out_stack.push(ValType::Any);
-                }
-            }
-            Instruction::Return => {
-                let ret = out_stack.pop().unwrap_or(ValType::Any);
-                observed_return = observed_return.join(ret);
-            }
-            _ => {}
-        }
-
-        let mut succs = Vec::with_capacity(2);
-        match &code[pc] {
-            Instruction::Jump(target) => {
-                succs.push(*target as usize);
-            }
-            Instruction::JumpIfFalse(target)
-            | Instruction::JumpIfTruthy(target)
-            | Instruction::JumpIfNotNullish(target) => {
-                out_stack.pop();
-                if pc + 1 < n {
-                    succs.push(pc + 1);
-                }
-                succs.push(*target as usize);
-            }
-            Instruction::Return | Instruction::Throw => {}
-            _ => {
-                if pc + 1 < n {
-                    succs.push(pc + 1);
-                }
-            }
-        }
-
-        for succ in succs {
-            if succ >= n {
-                continue;
-            }
-            let mut changed = false;
-            match (&mut in_locals[succ], &mut in_stack[succ]) {
-                (Some(succ_locals), Some(succ_stack)) => {
-                    for (i, val) in succ_locals.iter_mut().enumerate() {
-                        if let Some(&new_val) = out_locals.get(i) {
-                            let merged = val.join(new_val);
-                            if *val != merged {
-                                *val = merged;
-                                changed = true;
-                            }
-                        }
-                    }
-                    if succ_stack.len() == out_stack.len() {
-                        for (j, val) in succ_stack.iter_mut().enumerate() {
-                            let merged = val.join(out_stack[j]);
-                            if *val != merged {
-                                *val = merged;
-                                changed = true;
-                            }
-                        }
-                    }
-                }
-                (loc, stk) => {
-                    *loc = Some(out_locals.clone());
-                    *stk = Some(out_stack.clone());
-                    changed = true;
-                }
-            }
-            if changed && !in_worklist[succ] {
-                worklist.push(succ);
-                in_worklist[succ] = true;
-            }
-        }
-    }
-
-    (known_numbers, observed_return)
-}
-
-#[allow(clippy::type_complexity)]
-fn infer_program_types(
-    program: &Program,
-) -> (
-    Vec<HashSet<usize>>,
-    HashSet<usize>,
-    Vec<(Vec<ValType>, ValType)>,
-) {
-    let mut signatures: Vec<(Vec<ValType>, ValType)> = program
-        .functions
-        .iter()
-        .map(|f| {
-            (
-                vec![ValType::Bottom; f.parameter_count as usize],
-                ValType::Bottom,
-            )
-        })
-        .collect();
-
-    for _ in 0..4 {
-        let mut observed_call_args: Vec<Vec<ValType>> = program
-            .functions
-            .iter()
-            .map(|f| vec![ValType::Bottom; f.parameter_count as usize])
-            .collect();
-        let mut observed_returns: Vec<ValType> = vec![ValType::Bottom; program.functions.len()];
-
-        abstract_interpret(
-            &program.code,
-            &program.constants,
-            program.local_count,
-            &[],
-            &signatures,
-            None,
-            &mut observed_call_args,
-        );
-
-        for (f_idx, proto) in program.functions.iter().enumerate() {
-            let (_, ret) = abstract_interpret(
-                &proto.code,
-                &program.constants,
-                proto.local_count,
-                &signatures[f_idx].0,
-                &signatures,
-                Some(f_idx),
-                &mut observed_call_args,
-            );
-            observed_returns[f_idx] = ret;
-        }
-
-        let mut changed = false;
-        for (f_idx, (params, ret)) in signatures.iter_mut().enumerate() {
-            for (p_idx, p_val) in params.iter_mut().enumerate() {
-                let obs = observed_call_args[f_idx][p_idx];
-                if *p_val != obs {
-                    *p_val = obs;
-                    changed = true;
-                }
-            }
-            if *ret != observed_returns[f_idx] {
-                *ret = observed_returns[f_idx];
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    let mut dummy_call_args: Vec<Vec<ValType>> = program
-        .functions
-        .iter()
-        .map(|f| vec![ValType::Bottom; f.parameter_count as usize])
-        .collect();
-
-    let (module_known, _) = abstract_interpret(
-        &program.code,
-        &program.constants,
-        program.local_count,
-        &[],
-        &signatures,
-        None,
-        &mut dummy_call_args,
-    );
-
-    let mut func_known = Vec::with_capacity(program.functions.len());
-    for (f_idx, proto) in program.functions.iter().enumerate() {
-        let (k, _) = abstract_interpret(
-            &proto.code,
-            &program.constants,
-            proto.local_count,
-            &signatures[f_idx].0,
-            &signatures,
-            Some(f_idx),
-            &mut dummy_call_args,
-        );
-        func_known.push(k);
-    }
-
-    (func_known, module_known, signatures)
-}
-
 fn compute_guarded_loads_and_slots(code: &[Instruction]) -> (HashSet<usize>, HashSet<u32>) {
     let guarded = compute_guarded_loads(code);
     let guarded_slots = guarded
@@ -1124,6 +768,34 @@ static inline KILN_ALWAYS_INLINE int kiln_fast_truthy(kiln_value val) {
     }
     return kiln_c99_truthy(val);
 }
+
+static inline KILN_ALWAYS_INLINE int kiln_fast_is_ascii(const char *ptr, size_t len) {
+    if (len == 0 || ptr == NULL) return 1;
+    const unsigned char *p = (const unsigned char *)ptr;
+    size_t i = 0;
+    while (i + 8 <= len) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        if (w & UINT64_C(0x8080808080808080)) return 0;
+        i += 8;
+    }
+    while (i < len) {
+        if (p[i] >= 0x80) return 0;
+        i++;
+    }
+    return 1;
+}
+
+static inline KILN_ALWAYS_INLINE double kiln_fast_round(double v) {
+    if (fabs(v) >= 4503599627370496.0 || isnan(v)) {
+        return v;
+    }
+    double rounded = floor(v + 0.5);
+    if (rounded == 0.0 && signbit(v)) {
+        rounded = -0.0;
+    }
+    return rounded;
+}
 "#,
     );
 }
@@ -1135,20 +807,14 @@ fn can_emit_fast_numeric(proto: &FunctionProto, _func_idx: usize, program: &Prog
     if proto.generator || binds_at_call(proto) {
         return false;
     }
-    if proto.parameter_count == 0
-        && proto
-            .code
-            .iter()
-            .any(|i| matches!(i, Instruction::Call { .. }))
-    {
+    if !proto.upvalues.is_empty() {
         return false;
     }
-    let has_compute = proto.code.iter().enumerate().any(|(pos, i)| match i {
+    let has_loop = proto.code.iter().enumerate().any(|(pos, i)| match i {
         Instruction::Jump(t) => (*t as usize) <= pos,
-        Instruction::Call { .. } => true,
         _ => false,
     });
-    if !has_compute {
+    if !has_loop {
         return false;
     }
     for inst in &proto.code {
@@ -1195,75 +861,7 @@ fn can_emit_fast_numeric(proto: &FunctionProto, _func_idx: usize, program: &Prog
                 | UnaryOp::Increment
                 | UnaryOp::Decrement,
             ) => {}
-            Instruction::Call { argc } => {
-                if *argc as usize != proto.parameter_count as usize {
-                    return false;
-                }
-            }
-            Instruction::LoadUpvalue(_) => {}
             _ => return false,
-        }
-    }
-
-    if !proto.upvalues.is_empty() {
-        // Verify that every LoadUpvalue is strictly consumed as a callee in Call
-        let mut sim_stack: Vec<bool> = Vec::new(); // true = Callee, false = Number
-        for inst in &proto.code {
-            match inst {
-                Instruction::LoadLocal(_)
-                | Instruction::Pop
-                | Instruction::Dup
-                | Instruction::Const(_) => {
-                    sim_stack.push(false);
-                }
-                Instruction::StoreLocal(_) => {
-                    sim_stack.pop();
-                }
-                Instruction::Binary(_) => {
-                    let right = sim_stack.pop().unwrap_or(false);
-                    let left = sim_stack.pop().unwrap_or(false);
-                    if left || right {
-                        return false;
-                    }
-                    sim_stack.push(false);
-                }
-                Instruction::Unary(_) => {
-                    let op = sim_stack.pop().unwrap_or(false);
-                    if op {
-                        return false;
-                    }
-                    sim_stack.push(false);
-                }
-                Instruction::Call { argc } => {
-                    let count = *argc as usize;
-                    for _ in 0..count {
-                        if sim_stack.pop().unwrap_or(false) {
-                            return false;
-                        }
-                    }
-                    let callee = sim_stack.pop().unwrap_or(false);
-                    if !callee {
-                        return false;
-                    }
-                    sim_stack.push(false);
-                }
-                Instruction::LoadUpvalue(_) => {
-                    sim_stack.push(true);
-                }
-                Instruction::Return => {
-                    let ret = sim_stack.pop().unwrap_or(false);
-                    if ret {
-                        return false;
-                    }
-                }
-                Instruction::JumpIfFalse(_) | Instruction::JumpIfTruthy(_) => {
-                    let cond = sim_stack.pop().unwrap_or(false);
-                    if cond {
-                        return false;
-                    }
-                }
-                _ => {}
-            }
         }
     }
 
@@ -1509,7 +1107,6 @@ fn render_functions(
     diagnostic_site: &str,
     strict_functions: &[bool],
 ) {
-    let (func_known_numbers, _, _signatures) = infer_program_types(program);
     let mut has_fast = vec![false; program.functions.len()];
     for (index, proto) in program.functions.iter().enumerate() {
         if can_emit_fast_numeric(proto, index, program) {
@@ -1569,7 +1166,6 @@ fn render_functions(
             symbol,
             diagnostic_site,
             strict_functions,
-            func_known_numbers.get(index).cloned().unwrap_or_default(),
             has_fast[index],
         );
     }
@@ -1650,7 +1246,6 @@ fn render_function(
     symbol: &str,
     diagnostic_site: &str,
     strict_functions: &[bool],
-    known_number_binaries: HashSet<usize>,
     has_fast: bool,
 ) {
     let max_stack = frame_stacks[index];
@@ -1681,6 +1276,31 @@ fn render_function(
     )
     .unwrap();
     let handlers = handler_targets(&proto.code);
+    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&proto.code);
+    let FusedOperations {
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        fused_updates,
+        fused_update_skips,
+        fused_relational_jumps,
+        fused_relational_skips,
+        fused_accumulators,
+        fused_accumulator_skips,
+        fused_const_binaries,
+        fused_const_binary_skips,
+        fused_dead_push_pop,
+        fused_stack_objects,
+        fused_stack_slots,
+        fused_square_properties,
+        fused_square_adds,
+        fused_square_skips,
+    } = compute_fused_operations(
+        &proto.code,
+        &program.constants,
+        &guarded_loads,
+        &guarded_slots,
+    );
     // A generator and an async function both suspend, and every part of their state has to
     // outlive the call that stopped in the middle of them.
     let suspends = proto.generator || proto.asynchronous;
@@ -1776,12 +1396,15 @@ fn render_function(
         }
         if proto.parameter_count == 0 {
             output.push_str("    (void)args; (void)argc;\n");
-            if locals > 0 {
+            if proto.local_count > 0 {
                 writeln!(
                     output,
-                    "    for (slot = 0; slot < (size_t){locals}; ++slot) locals[slot] = kiln_fast_undefined();"
+                    "    for (slot = 0; slot < (size_t){}; ++slot) locals[slot] = kiln_fast_undefined();",
+                    proto.local_count
                 )
                 .unwrap();
+            } else {
+                output.push_str("    (void)slot; (void)locals;\n");
             }
         } else {
             writeln!(
@@ -1792,12 +1415,39 @@ fn render_function(
             .unwrap();
             writeln!(
                 output,
-                "    for (; slot < (size_t){locals}; ++slot) locals[slot] = kiln_fast_undefined();"
+                "    for (; slot < (size_t){}; ++slot) locals[slot] = kiln_fast_undefined();",
+                proto.local_count
             )
             .unwrap();
         }
+        let mut sorted_stack_slots: Vec<u32> = fused_stack_slots.iter().copied().collect();
+        sorted_stack_slots.sort_unstable();
+        for slot in sorted_stack_slots {
+            writeln!(output, "    kiln_object local_obj_{slot};").unwrap();
+            writeln!(
+                output,
+                "    local_obj_{slot}.properties = local_obj_{slot}.inline_properties;"
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    local_obj_{slot}.capacity = KILN_OBJECT_INLINE_PROPERTIES;"
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "    local_obj_{slot}.prototype = kiln_c99_undefined();"
+            )
+            .unwrap();
+            writeln!(output, "    local_obj_{slot}.frozen = 0;").unwrap();
+            writeln!(output, "    local_obj_{slot}.not_extensible = 0;").unwrap();
+            writeln!(output, "    local_obj_{slot}.module_namespace = 0;").unwrap();
+            writeln!(output, "    local_obj_{slot}.arguments_brand = 0;").unwrap();
+            writeln!(output, "    local_obj_{slot}.accessor_count = 0;").unwrap();
+            writeln!(output, "    local_obj_{slot}.read_only_seen = 0;").unwrap();
+            writeln!(output, "    local_obj_{slot}.count = 0;").unwrap();
+        }
     }
-    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&proto.code);
     let emitter = Emitter {
         constants: &program.constants,
         frame_stacks,
@@ -1811,8 +1461,24 @@ fn render_function(
         site: ReturnSite::Body,
         guarded: guarded_loads,
         guarded_slots,
-        known_number_binaries,
         current_func: Some(index),
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        fused_updates,
+        fused_update_skips,
+        fused_relational_jumps,
+        fused_relational_skips,
+        fused_accumulators,
+        fused_accumulator_skips,
+        fused_const_binaries,
+        fused_const_binary_skips,
+        fused_dead_push_pop,
+        fused_stack_objects,
+        fused_stack_slots,
+        fused_square_properties,
+        fused_square_adds,
+        fused_square_skips,
     };
     for position in 0..proto.code.len() {
         writeln!(output, "kiln_label_{position}:;").unwrap();
@@ -2175,8 +1841,7 @@ int {symbol}_namespace_wrapper(kiln_value *result, const char *const *names,
             }}
             value = *kiln_c99_cell_of(value);
         }}
-        status = kiln_c99_reserve((void **)&data->properties, &data->capacity, data->count + 1,
-                                  sizeof *data->properties);
+        status = kiln_c99_object_reserve(data, data->count + 1);
         if (status != KILN_C99_OK) {{
             goto namespace_failure;
         }}
@@ -2367,11 +2032,62 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         program.code.len(),
         false,
     );
+    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&program.code);
+    let FusedOperations {
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        fused_updates,
+        fused_update_skips,
+        fused_relational_jumps,
+        fused_relational_skips,
+        fused_accumulators,
+        fused_accumulator_skips,
+        fused_const_binaries,
+        fused_const_binary_skips,
+        fused_dead_push_pop,
+        fused_stack_objects,
+        fused_stack_slots,
+        fused_square_properties,
+        fused_square_adds,
+        fused_square_skips,
+    } = compute_fused_operations(
+        &program.code,
+        &program.constants,
+        &guarded_loads,
+        &guarded_slots,
+    );
     output.push_str("    if (result == NULL) return KILN_C99_INVALID_ARGUMENT;\n");
     for local in 0..program.local_count {
         writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
     }
-    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&program.code);
+    let mut sorted_stack_slots: Vec<u32> = fused_stack_slots.iter().copied().collect();
+    sorted_stack_slots.sort_unstable();
+    for slot in sorted_stack_slots {
+        writeln!(output, "    kiln_object local_obj_{slot};").unwrap();
+        writeln!(
+            output,
+            "    local_obj_{slot}.properties = local_obj_{slot}.inline_properties;"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "    local_obj_{slot}.capacity = KILN_OBJECT_INLINE_PROPERTIES;"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "    local_obj_{slot}.prototype = kiln_c99_undefined();"
+        )
+        .unwrap();
+        writeln!(output, "    local_obj_{slot}.frozen = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.not_extensible = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.module_namespace = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.arguments_brand = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.accessor_count = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.read_only_seen = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.count = 0;").unwrap();
+    }
     let emitter = Emitter {
         constants: &program.constants,
         frame_stacks: &plan.functions,
@@ -2388,8 +2104,24 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
         },
         guarded: guarded_loads,
         guarded_slots,
-        known_number_binaries: HashSet::new(),
         current_func: None,
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        fused_updates,
+        fused_update_skips,
+        fused_relational_jumps,
+        fused_relational_skips,
+        fused_accumulators,
+        fused_accumulator_skips,
+        fused_const_binaries,
+        fused_const_binary_skips,
+        fused_dead_push_pop,
+        fused_stack_objects,
+        fused_stack_slots,
+        fused_square_properties,
+        fused_square_adds,
+        fused_square_skips,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -2402,6 +2134,9 @@ fn render(program: &Program, program_hash: u64, symbol: &str, policy: &EmissionP
     output.push_str("}\n");
     if callables {
         render_scalar_realm_wrapper(&mut output, symbol);
+    }
+    if let Ok(dump_path) = std::env::var("KILN_DUMP_C") {
+        let _ = std::fs::write(&dump_path, &output);
     }
     output
 }
@@ -2542,8 +2277,60 @@ fn render_module(
         if commonjs { 1 } else { module.exports.len() }
     )
     .unwrap();
+    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&program.code);
+    let FusedOperations {
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        fused_updates,
+        fused_update_skips,
+        fused_relational_jumps,
+        fused_relational_skips,
+        fused_accumulators,
+        fused_accumulator_skips,
+        fused_const_binaries,
+        fused_const_binary_skips,
+        fused_dead_push_pop,
+        fused_stack_objects,
+        fused_stack_slots,
+        fused_square_properties,
+        fused_square_adds,
+        fused_square_skips,
+    } = compute_fused_operations(
+        &program.code,
+        &program.constants,
+        &guarded_loads,
+        &guarded_slots,
+    );
     for local in 0..program.local_count {
         writeln!(output, "    locals[{local}] = kiln_c99_undefined();").unwrap();
+    }
+    let mut sorted_stack_slots: Vec<u32> = fused_stack_slots.iter().copied().collect();
+    sorted_stack_slots.sort_unstable();
+    for slot in sorted_stack_slots {
+        writeln!(output, "    kiln_object local_obj_{slot};").unwrap();
+        writeln!(
+            output,
+            "    local_obj_{slot}.properties = local_obj_{slot}.inline_properties;"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "    local_obj_{slot}.capacity = KILN_OBJECT_INLINE_PROPERTIES;"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "    local_obj_{slot}.prototype = kiln_c99_undefined();"
+        )
+        .unwrap();
+        writeln!(output, "    local_obj_{slot}.frozen = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.not_extensible = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.module_namespace = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.arguments_brand = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.accessor_count = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.read_only_seen = 0;").unwrap();
+        writeln!(output, "    local_obj_{slot}.count = 0;").unwrap();
     }
     let boxed_imports = slots_read_as_cells(&program.code, &program.functions);
     for (index, binding) in module.imports.iter().enumerate() {
@@ -2561,7 +2348,6 @@ fn render_module(
             .unwrap();
         }
     }
-    let (guarded_loads, guarded_slots) = compute_guarded_loads_and_slots(&program.code);
     let emitter = Emitter {
         constants: &program.constants,
         frame_stacks: &plan.functions,
@@ -2578,8 +2364,24 @@ fn render_module(
         },
         guarded: guarded_loads,
         guarded_slots,
-        known_number_binaries: infer_program_types(program).1,
         current_func: None,
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        fused_updates,
+        fused_update_skips,
+        fused_relational_jumps,
+        fused_relational_skips,
+        fused_accumulators,
+        fused_accumulator_skips,
+        fused_const_binaries,
+        fused_const_binary_skips,
+        fused_dead_push_pop,
+        fused_stack_objects,
+        fused_stack_slots,
+        fused_square_properties,
+        fused_square_adds,
+        fused_square_skips,
     };
     for index in 0..program.code.len() {
         writeln!(output, "kiln_label_{index}:;").unwrap();
@@ -2604,6 +2406,9 @@ fn render_module(
     render_namespace_wrapper(&mut output, symbol);
     if callables {
         render_module_realm_wrapper(&mut output, symbol);
+    }
+    if let Ok(dump_path) = std::env::var("KILN_DUMP_C") {
+        let _ = std::fs::write(&dump_path, &output);
     }
     output
 }
@@ -2657,6 +2462,663 @@ fn render_runtime_module(
     output
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FusedUpdate {
+    slot: u32,
+    increment: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FusedRelationalJump {
+    slot: u32,
+    constant_bits: u64,
+    cmp_op: BinaryOp,
+    jump_if_truthy: bool,
+    target: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FusedAccumulator {
+    dest_slot: u32,
+    src_slot: u32,
+    constant_bits: u64,
+    inner_op: Option<BinaryOp>,
+    outer_op: BinaryOp,
+    src_is_int: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FusedConstBinary {
+    constant_bits: u64,
+    op: BinaryOp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FusedPropertyTarget {
+    This,
+    Local(u32),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FusedSquareProperty {
+    target: FusedPropertyTarget,
+    name: u32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FusedSquareAdd {
+    target: FusedPropertyTarget,
+    name: u32,
+}
+
+struct FusedOperations {
+    fused_new_objects: HashSet<usize>,
+    fused_spreads: HashSet<usize>,
+    fused_dup_store_pop: HashSet<usize>,
+    fused_updates: HashMap<usize, FusedUpdate>,
+    fused_update_skips: HashSet<usize>,
+    fused_relational_jumps: HashMap<usize, FusedRelationalJump>,
+    fused_relational_skips: HashSet<usize>,
+    fused_accumulators: HashMap<usize, FusedAccumulator>,
+    fused_accumulator_skips: HashSet<usize>,
+    fused_const_binaries: HashMap<usize, FusedConstBinary>,
+    fused_const_binary_skips: HashSet<usize>,
+    fused_dead_push_pop: HashSet<usize>,
+    fused_stack_objects: HashMap<usize, u32>,
+    fused_stack_slots: HashSet<u32>,
+    fused_square_properties: HashMap<usize, FusedSquareProperty>,
+    fused_square_adds: HashMap<usize, FusedSquareAdd>,
+    fused_square_skips: HashSet<usize>,
+}
+
+fn compute_fused_operations(
+    code: &[Instruction],
+    constants: &[Constant],
+    guarded_loads: &HashSet<usize>,
+    guarded_slots: &HashSet<u32>,
+) -> FusedOperations {
+    let mut jump_targets = HashSet::new();
+    for instruction in code {
+        match instruction {
+            Instruction::Jump(t)
+            | Instruction::JumpIfFalse(t)
+            | Instruction::JumpIfTruthy(t)
+            | Instruction::JumpIfNotNullish(t)
+            | Instruction::PushHandler(t) => {
+                jump_targets.insert(*t as usize);
+            }
+            _ => {}
+        }
+    }
+    let mut fused_new_objects = HashSet::new();
+    let mut fused_spreads = HashSet::new();
+    for i in 0..code.len() {
+        if let Instruction::NewObject { count } = code[i]
+            && count > 0
+            && code.get(i + 1) == Some(&Instruction::SpreadObject)
+            && !jump_targets.contains(&(i + 1))
+        {
+            fused_new_objects.insert(i);
+            fused_spreads.insert(i + 1);
+        }
+    }
+
+    let mut fused_updates = HashMap::new();
+    let mut fused_update_skips = HashSet::new();
+    for i in 0..code.len().saturating_sub(5) {
+        if guarded_loads.contains(&i) {
+            continue;
+        }
+        if let Instruction::LoadLocal(slot) = code[i]
+            && code.get(i + 1) == Some(&Instruction::Unary(UnaryOp::ToNumeric))
+        {
+            let op_opt = match (code.get(i + 2), code.get(i + 3)) {
+                (Some(Instruction::Dup), Some(Instruction::Unary(op))) => Some(*op),
+                (Some(Instruction::Unary(op)), Some(Instruction::Dup)) => Some(*op),
+                _ => None,
+            };
+            if let Some(op) = op_opt
+                && (op == UnaryOp::Increment || op == UnaryOp::Decrement)
+                && code.get(i + 4) == Some(&Instruction::StoreLocal(slot))
+                && code.get(i + 5) == Some(&Instruction::Pop)
+                && !(1..=5).any(|offset| jump_targets.contains(&(i + offset)))
+            {
+                fused_updates.insert(
+                    i,
+                    FusedUpdate {
+                        slot,
+                        increment: op == UnaryOp::Increment,
+                    },
+                );
+                for offset in 1..=5 {
+                    fused_update_skips.insert(i + offset);
+                }
+            }
+        }
+    }
+
+    let mut fused_relational_jumps = HashMap::new();
+    let mut fused_relational_skips = HashSet::new();
+    for i in 0..code.len().saturating_sub(3) {
+        if guarded_loads.contains(&i)
+            || fused_update_skips.contains(&i)
+            || fused_updates.contains_key(&i)
+            || (1..=3).any(|offset| jump_targets.contains(&(i + offset)))
+        {
+            continue;
+        }
+        if let Instruction::LoadLocal(slot) = code[i]
+            && let Some(Instruction::Const(c)) = code.get(i + 1)
+            && let Some(Constant::Number(bits)) = constants.get(*c as usize)
+            && let Some(Instruction::Binary(op)) = code.get(i + 2)
+        {
+            let is_cmp = matches!(
+                op,
+                BinaryOp::LessThan
+                    | BinaryOp::LessThanOrEqual
+                    | BinaryOp::GreaterThan
+                    | BinaryOp::GreaterThanOrEqual
+                    | BinaryOp::StrictEqual
+                    | BinaryOp::StrictNotEqual
+                    | BinaryOp::LooseEqual
+                    | BinaryOp::LooseNotEqual
+            );
+            if is_cmp {
+                let jump_opt = match code.get(i + 3) {
+                    Some(Instruction::JumpIfFalse(target)) => Some((false, *target)),
+                    Some(Instruction::JumpIfTruthy(target)) => Some((true, *target)),
+                    _ => None,
+                };
+                if let Some((jump_if_truthy, target)) = jump_opt {
+                    fused_relational_jumps.insert(
+                        i,
+                        FusedRelationalJump {
+                            slot,
+                            constant_bits: *bits,
+                            cmp_op: *op,
+                            jump_if_truthy,
+                            target,
+                        },
+                    );
+                    for offset in 1..=3 {
+                        fused_relational_skips.insert(i + offset);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut induction_ranges = Vec::new();
+    for (pc, instr) in code.iter().enumerate() {
+        if let Instruction::Jump(start) = instr {
+            let start = *start as usize;
+            if start < pc
+                && let Some(jump) = fused_relational_jumps.get(&start)
+                && jump.cmp_op == BinaryOp::LessThan
+            {
+                let val_f64 = f64::from_bits(jump.constant_bits);
+                if val_f64.fract() == 0.0 && val_f64 > 0.0 && val_f64 < 9007199254740992.0 {
+                    let slot = jump.slot;
+                    let init_ok = if start >= 2 {
+                        if let (Instruction::Const(c), Instruction::StoreLocal(s)) =
+                            (&code[start - 2], &code[start - 1])
+                        {
+                            if *s == slot {
+                                if let Some(Constant::Number(bits)) = constants.get(*c as usize) {
+                                    let init_val = f64::from_bits(*bits);
+                                    init_val.fract() == 0.0 && init_val >= 0.0
+                                } else {
+                                    false
+                                }
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    let mut updates_ok = init_ok;
+                    if updates_ok {
+                        #[allow(clippy::needless_range_loop)]
+                        for inner_pc in start..pc {
+                            if let Some(upd) = fused_updates.get(&inner_pc) {
+                                if upd.slot == slot && !upd.increment {
+                                    updates_ok = false;
+                                    break;
+                                }
+                            } else if let Instruction::StoreLocal(s) = code[inner_pc]
+                                && s == slot
+                                && !fused_update_skips.contains(&inner_pc)
+                            {
+                                updates_ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if updates_ok {
+                        induction_ranges.push((slot, start, pc));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut fused_accumulators = HashMap::new();
+    let mut fused_accumulator_skips = HashSet::new();
+    for i in 0..code.len().saturating_sub(4) {
+        if guarded_loads.contains(&i)
+            || guarded_loads.contains(&(i + 1))
+            || fused_update_skips.contains(&i)
+            || fused_updates.contains_key(&i)
+            || fused_relational_skips.contains(&i)
+            || fused_relational_jumps.contains_key(&i)
+            || fused_accumulator_skips.contains(&i)
+        {
+            continue;
+        }
+        if let (Instruction::LoadLocal(dest), Some(Instruction::LoadLocal(src))) =
+            (&code[i], code.get(i + 1))
+        {
+            let dest = *dest;
+            let src = *src;
+            let src_is_int = induction_ranges
+                .iter()
+                .any(|(s, start, end)| *s == src && i >= *start && i <= *end);
+            // Pattern 1: LoadLocal(dest) + LoadLocal(src) + Const(c) + Binary(inner_op) + Binary(outer_op) + [StoreLocal(dest) | Dup, StoreLocal(dest), Pop]
+            if let Some(Instruction::Const(c)) = code.get(i + 2)
+                && let Some(Constant::Number(bits)) = constants.get(*c as usize)
+                && let (Some(Instruction::Binary(inner_op)), Some(Instruction::Binary(outer_op))) =
+                    (code.get(i + 3), code.get(i + 4))
+            {
+                let is_outer_add_sub =
+                    *outer_op == BinaryOp::Add || *outer_op == BinaryOp::Subtract;
+                let inner_supported = numeric_fast_body(*inner_op).is_some();
+                if is_outer_add_sub && inner_supported {
+                    let end_opt = if code.get(i + 5) == Some(&Instruction::StoreLocal(dest)) {
+                        Some(i + 5)
+                    } else if code.get(i + 5) == Some(&Instruction::Dup)
+                        && code.get(i + 6) == Some(&Instruction::StoreLocal(dest))
+                        && code.get(i + 7) == Some(&Instruction::Pop)
+                    {
+                        Some(i + 7)
+                    } else {
+                        None
+                    };
+                    if let Some(end) = end_opt
+                        && !(1..=end - i).any(|offset| jump_targets.contains(&(i + offset)))
+                    {
+                        fused_accumulators.insert(
+                            i,
+                            FusedAccumulator {
+                                dest_slot: dest,
+                                src_slot: src,
+                                constant_bits: *bits,
+                                inner_op: Some(*inner_op),
+                                outer_op: *outer_op,
+                                src_is_int,
+                            },
+                        );
+                        for offset in 1..=end - i {
+                            fused_accumulator_skips.insert(i + offset);
+                        }
+                        continue;
+                    }
+                }
+            }
+            // Pattern 2: LoadLocal(dest) + LoadLocal(src) + Binary(outer_op) + [StoreLocal(dest) | Dup, StoreLocal(dest), Pop]
+            if let Some(Instruction::Binary(outer_op)) = code.get(i + 2) {
+                let is_outer_add_sub =
+                    *outer_op == BinaryOp::Add || *outer_op == BinaryOp::Subtract;
+                if is_outer_add_sub {
+                    let end_opt = if code.get(i + 3) == Some(&Instruction::StoreLocal(dest)) {
+                        Some(i + 3)
+                    } else if code.get(i + 3) == Some(&Instruction::Dup)
+                        && code.get(i + 4) == Some(&Instruction::StoreLocal(dest))
+                        && code.get(i + 5) == Some(&Instruction::Pop)
+                    {
+                        Some(i + 5)
+                    } else {
+                        None
+                    };
+                    if let Some(end) = end_opt
+                        && !(1..=end - i).any(|offset| jump_targets.contains(&(i + offset)))
+                    {
+                        fused_accumulators.insert(
+                            i,
+                            FusedAccumulator {
+                                dest_slot: dest,
+                                src_slot: src,
+                                constant_bits: 0,
+                                inner_op: None,
+                                outer_op: *outer_op,
+                                src_is_int,
+                            },
+                        );
+
+                        for offset in 1..=end - i {
+                            fused_accumulator_skips.insert(i + offset);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut fused_const_binaries = HashMap::new();
+    let mut fused_const_binary_skips = HashSet::new();
+    for i in 0..code.len().saturating_sub(1) {
+        if fused_update_skips.contains(&i)
+            || fused_updates.contains_key(&i)
+            || fused_relational_skips.contains(&i)
+            || fused_relational_jumps.contains_key(&i)
+            || fused_accumulator_skips.contains(&i)
+            || fused_accumulators.contains_key(&i)
+            || jump_targets.contains(&(i + 1))
+        {
+            continue;
+        }
+        if let Instruction::Const(c) = code[i]
+            && let Some(Constant::Number(bits)) = constants.get(c as usize)
+            && let Some(Instruction::Binary(op)) = code.get(i + 1)
+            && numeric_fast_body(*op).is_some()
+        {
+            fused_const_binary_skips.insert(i);
+            fused_const_binaries.insert(
+                i + 1,
+                FusedConstBinary {
+                    constant_bits: *bits,
+                    op: *op,
+                },
+            );
+        }
+    }
+
+    let mut fused_dup_store_pop = HashSet::new();
+    for i in 0..code.len().saturating_sub(2) {
+        if code[i] == Instruction::Dup
+            && !fused_update_skips.contains(&i)
+            && !fused_updates.contains_key(&i)
+            && !fused_relational_skips.contains(&i)
+            && !fused_relational_jumps.contains_key(&i)
+            && !fused_accumulator_skips.contains(&i)
+            && !fused_accumulators.contains_key(&i)
+            && !jump_targets.contains(&i)
+            && !jump_targets.contains(&(i + 1))
+            && !jump_targets.contains(&(i + 2))
+        {
+            let is_store = matches!(
+                code.get(i + 1),
+                Some(
+                    Instruction::StoreLocal(_)
+                        | Instruction::StoreCell(_)
+                        | Instruction::StoreUpvalue(_)
+                )
+            );
+            if is_store
+                && code.get(i + 2) == Some(&Instruction::Pop)
+                && !fused_update_skips.contains(&(i + 1))
+                && !fused_update_skips.contains(&(i + 2))
+                && !fused_accumulator_skips.contains(&(i + 1))
+                && !fused_accumulator_skips.contains(&(i + 2))
+            {
+                fused_dup_store_pop.insert(i);
+                fused_dup_store_pop.insert(i + 2);
+            }
+        }
+    }
+
+    let mut fused_dead_push_pop = HashSet::new();
+    for i in 0..code.len().saturating_sub(1) {
+        if !fused_update_skips.contains(&i)
+            && !fused_updates.contains_key(&i)
+            && !fused_relational_skips.contains(&i)
+            && !fused_relational_jumps.contains_key(&i)
+            && !fused_accumulator_skips.contains(&i)
+            && !fused_accumulators.contains_key(&i)
+            && !fused_const_binary_skips.contains(&i)
+            && !fused_const_binaries.contains_key(&i)
+            && !fused_dup_store_pop.contains(&i)
+            && !fused_dead_push_pop.contains(&i)
+            && !jump_targets.contains(&(i + 1))
+            && code.get(i + 1) == Some(&Instruction::Pop)
+            && !fused_dup_store_pop.contains(&(i + 1))
+            && !fused_update_skips.contains(&(i + 1))
+            && !fused_accumulator_skips.contains(&(i + 1))
+            && !fused_const_binary_skips.contains(&(i + 1))
+        {
+            let is_pure_push = match code[i] {
+                Instruction::LoadLocal(_) => !guarded_loads.contains(&i),
+                Instruction::Const(_) | Instruction::PushHole => true,
+                _ => false,
+            };
+            if is_pure_push {
+                fused_dead_push_pop.insert(i);
+                fused_dead_push_pop.insert(i + 1);
+            }
+        }
+    }
+
+    let mut candidate_allocs: HashMap<usize, u32> = HashMap::new();
+    let mut candidate_stores: HashMap<u32, usize> = HashMap::new();
+
+    let has_suspensions = code
+        .iter()
+        .any(|i| matches!(i, Instruction::Yield | Instruction::Await));
+    if !has_suspensions {
+        for i in 0..code.len() {
+            if let Instruction::NewObject { .. } = code[i] {
+                if fused_new_objects.contains(&i) {
+                    continue;
+                }
+                let mut rel_depth = 1isize;
+                let mut store_slot = None;
+                #[allow(clippy::needless_range_loop)]
+                for k in (i + 1)..code.len() {
+                    if jump_targets.contains(&k) {
+                        break;
+                    }
+                    if rel_depth == 1
+                        && let Instruction::StoreLocal(slot) = code[k]
+                    {
+                        store_slot = Some((slot, k));
+                        break;
+                    }
+                    let (popped, pushed) = match &code[k] {
+                        Instruction::Const(_)
+                        | Instruction::LoadLocal(_)
+                        | Instruction::LoadUpvalue(_)
+                        | Instruction::LoadCell(_)
+                        | Instruction::LoadGlobal(_) => (0, 1),
+
+                        Instruction::StoreLocal(_)
+                        | Instruction::StoreUpvalue(_)
+                        | Instruction::StoreCell(_)
+                        | Instruction::StoreGlobal(_)
+                        | Instruction::StoreGlobalBinding(_)
+                        | Instruction::StoreGlobalBindingStrict(_) => (1, 0),
+
+                        Instruction::Pop => (1, 0),
+                        Instruction::Dup => (0, 1),
+                        Instruction::Unary(_) => (1, 1),
+                        Instruction::Binary(_) => (2, 1),
+                        Instruction::GetProperty(_) => (1, 1),
+                        Instruction::SetProperty(_) => (2, 1),
+                        Instruction::DeleteProperty(_) => (1, 1),
+
+                        Instruction::NewObject { count } => {
+                            let pairs = (*count as usize) * 2;
+                            if fused_new_objects.contains(&k) {
+                                (pairs, 0)
+                            } else {
+                                (pairs, 1)
+                            }
+                        }
+                        Instruction::NewArray { count } => (*count as usize, 1),
+                        Instruction::SpreadObject => {
+                            if fused_spreads.contains(&k) {
+                                (0, 0)
+                            } else {
+                                (1, 0)
+                            }
+                        }
+                        Instruction::SpreadInto => (1, 0),
+                        _ => break,
+                    };
+
+                    rel_depth -= popped as isize;
+                    if rel_depth < 1 {
+                        break;
+                    }
+                    rel_depth += pushed as isize;
+                }
+
+                if let Some((slot, store_k)) = store_slot
+                    && !guarded_slots.contains(&slot)
+                {
+                    candidate_allocs.insert(i, slot);
+                    candidate_stores.insert(slot, store_k);
+                }
+            }
+        }
+    }
+
+    let mut fused_stack_objects = HashMap::new();
+    let mut fused_stack_slots = HashSet::new();
+
+    for (&alloc_idx, &slot) in &candidate_allocs {
+        let store_idx = candidate_stores[&slot];
+        let mut escapes = false;
+
+        for j in 0..code.len() {
+            match code[j] {
+                Instruction::StoreLocal(s) if s == slot => {
+                    if j != store_idx {
+                        escapes = true;
+                        break;
+                    }
+                }
+                Instruction::LoadLocal(s) if s == slot => {
+                    let next = j + 1;
+                    if next >= code.len() || jump_targets.contains(&next) {
+                        escapes = true;
+                        break;
+                    }
+                    match code[next] {
+                        Instruction::GetProperty(_) => {}
+                        _ => {
+                            escapes = true;
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if !escapes {
+            fused_stack_objects.insert(alloc_idx, slot);
+            fused_stack_slots.insert(slot);
+        }
+    }
+
+    let mut fused_square_properties = HashMap::new();
+    let mut fused_square_adds = HashMap::new();
+    let mut fused_square_skips = HashSet::new();
+
+    let mut prev_square_end: Option<usize> = None;
+    for i in 0..code.len() {
+        if fused_update_skips.contains(&i)
+            || fused_updates.contains_key(&i)
+            || fused_relational_skips.contains(&i)
+            || fused_relational_jumps.contains_key(&i)
+            || fused_accumulator_skips.contains(&i)
+            || fused_accumulators.contains_key(&i)
+            || fused_const_binary_skips.contains(&i)
+            || fused_const_binaries.contains_key(&i)
+            || fused_dup_store_pop.contains(&i)
+            || fused_dead_push_pop.contains(&i)
+            || fused_square_skips.contains(&i)
+            || fused_square_properties.contains_key(&i)
+            || fused_square_adds.contains_key(&i)
+        {
+            continue;
+        }
+
+        let target_at = |idx: usize| -> Option<FusedPropertyTarget> {
+            match code.get(idx) {
+                Some(Instruction::LoadThis) => Some(FusedPropertyTarget::This),
+                Some(Instruction::LoadLocal(s)) if !guarded_slots.contains(s) => {
+                    Some(FusedPropertyTarget::Local(*s))
+                }
+                _ => None,
+            }
+        };
+
+        if let Some(t1) = target_at(i)
+            && let Some(Instruction::GetProperty(name1)) = code.get(i + 1)
+            && let Some(t2) = target_at(i + 2)
+            && let Some(Instruction::GetProperty(name2)) = code.get(i + 3)
+            && t1 == t2
+            && name1 == name2
+            && code.get(i + 4) == Some(&Instruction::Binary(BinaryOp::Multiply))
+        {
+            if prev_square_end == Some(i)
+                && code.get(i + 5) == Some(&Instruction::Binary(BinaryOp::Add))
+                && !(1..=5).any(|off| jump_targets.contains(&(i + off)))
+            {
+                fused_square_adds.insert(
+                    i,
+                    FusedSquareAdd {
+                        target: t1,
+                        name: *name1,
+                    },
+                );
+                for off in 1..=5 {
+                    fused_square_skips.insert(i + off);
+                }
+                prev_square_end = Some(i + 6);
+                continue;
+            } else if !(1..=4).any(|off| jump_targets.contains(&(i + off))) {
+                fused_square_properties.insert(
+                    i,
+                    FusedSquareProperty {
+                        target: t1,
+                        name: *name1,
+                    },
+                );
+                for off in 1..=4 {
+                    fused_square_skips.insert(i + off);
+                }
+                prev_square_end = Some(i + 5);
+                continue;
+            }
+        }
+        prev_square_end = None;
+    }
+
+    FusedOperations {
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        fused_updates,
+        fused_update_skips,
+        fused_relational_jumps,
+        fused_relational_skips,
+        fused_accumulators,
+        fused_accumulator_skips,
+        fused_const_binaries,
+        fused_const_binary_skips,
+        fused_dead_push_pop,
+        fused_stack_objects,
+        fused_stack_slots,
+        fused_square_properties,
+        fused_square_adds,
+        fused_square_skips,
+    }
+}
+
 /// Where a `Return` lands.
 ///
 /// The entry point's value crosses the embedding boundary and a function body's does not, which
@@ -2694,9 +3156,25 @@ struct Emitter<'a> {
     /// The slots that have at least one guarded load.
     guarded_slots: HashSet<u32>,
     /// The binary instruction indices whose operands are provably numbers.
-    known_number_binaries: HashSet<usize>,
     /// The index of the function currently being rendered, if inside a function body.
     current_func: Option<usize>,
+    fused_new_objects: HashSet<usize>,
+    fused_spreads: HashSet<usize>,
+    fused_dup_store_pop: HashSet<usize>,
+    fused_updates: HashMap<usize, FusedUpdate>,
+    fused_update_skips: HashSet<usize>,
+    fused_relational_jumps: HashMap<usize, FusedRelationalJump>,
+    fused_relational_skips: HashSet<usize>,
+    fused_accumulators: HashMap<usize, FusedAccumulator>,
+    fused_accumulator_skips: HashSet<usize>,
+    fused_const_binaries: HashMap<usize, FusedConstBinary>,
+    fused_const_binary_skips: HashSet<usize>,
+    fused_dead_push_pop: HashSet<usize>,
+    fused_stack_objects: HashMap<usize, u32>,
+    fused_stack_slots: HashSet<u32>,
+    fused_square_properties: HashMap<usize, FusedSquareProperty>,
+    fused_square_adds: HashMap<usize, FusedSquareAdd>,
+    fused_square_skips: HashSet<usize>,
 }
 
 enum ReturnSite<'a> {
@@ -2707,12 +3185,219 @@ enum ReturnSite<'a> {
     Body,
 }
 
+fn emit_fused_fast_path(output: &mut String, index: usize, emitter: &Emitter<'_>) -> bool {
+    if emitter.fused_dead_push_pop.contains(&index) {
+        output.push_str("    /* fused dead push-pop */\n");
+        return true;
+    }
+    if emitter.fused_square_skips.contains(&index) {
+        output.push_str("    /* fused square skip */\n");
+        return true;
+    }
+    if let Some(sq) = emitter.fused_square_properties.get(&index) {
+        if !emitter.callables {
+            return false;
+        }
+        let unwind = unwind_or_return(&emitter.handlers, &emitter.site);
+        let Constant::String(text) = &emitter.constants[sq.name as usize] else {
+            unreachable!("verification rejects a non-string property name")
+        };
+        let target_expr = match sq.target {
+            FusedPropertyTarget::This => "receiver".to_string(),
+            FusedPropertyTarget::Local(slot) => format!("locals[{slot}]"),
+        };
+        let symbol = emitter.symbol;
+        let name = sq.name;
+        let len = text.len();
+        writeln!(
+            output,
+            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value target_val = {target_expr}; kiln_value val; if (KILN_LIKELY(target_val.tag == KILN_VALUE_OBJECT)) {{ const kiln_object *obj = kiln_c99_object_of(target_val); if (KILN_LIKELY(site.own < obj->count && obj->properties[site.own].key == {symbol}_key_{name} && !obj->properties[site.own].accessor)) {{ val = obj->properties[site.own].value; goto kiln_sqprop_done_{index}; }} }} int status = kiln_c99_get_site(host, target_val, {symbol}_key_{name}, {len}, &val, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; kiln_sqprop_done_{index}:; if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {{ double d = kiln_fast_to_double(val.bits); stack[sp++] = kiln_fast_number(d * d); }} else {{ kiln_value ans; int status = kiln_c99_binary_checked(3, host, val, val, &ans, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp++] = ans; }} }}"
+        ).unwrap();
+        return true;
+    }
+    if let Some(sq) = emitter.fused_square_adds.get(&index) {
+        if !emitter.callables {
+            return false;
+        }
+        let unwind = unwind_or_return(&emitter.handlers, &emitter.site);
+        let Constant::String(text) = &emitter.constants[sq.name as usize] else {
+            unreachable!("verification rejects a non-string property name")
+        };
+        let target_expr = match sq.target {
+            FusedPropertyTarget::This => "receiver".to_string(),
+            FusedPropertyTarget::Local(slot) => format!("locals[{slot}]"),
+        };
+        let symbol = emitter.symbol;
+        let name = sq.name;
+        let len = text.len();
+        writeln!(
+            output,
+            "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value target_val = {target_expr}; kiln_value val; if (KILN_LIKELY(target_val.tag == KILN_VALUE_OBJECT)) {{ const kiln_object *obj = kiln_c99_object_of(target_val); if (KILN_LIKELY(site.own < obj->count && obj->properties[site.own].key == {symbol}_key_{name} && !obj->properties[site.own].accessor)) {{ val = obj->properties[site.own].value; goto kiln_sqadd_done_{index}; }} }} int status = kiln_c99_get_site(host, target_val, {symbol}_key_{name}, {len}, &val, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; kiln_sqadd_done_{index}:; if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER && stack[sp - 1].tag == KILN_VALUE_NUMBER)) {{ double d = kiln_fast_to_double(val.bits); double prev = kiln_fast_to_double(stack[sp - 1].bits); stack[sp - 1] = kiln_fast_number(prev + d * d); }} else {{ kiln_value sq_val; int status = kiln_c99_binary_checked(3, host, val, val, &sq_val, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; kiln_value ans; status = kiln_c99_binary_checked(1, host, stack[sp - 1], sq_val, &ans, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = ans; }} }}"
+        ).unwrap();
+        return true;
+    }
+    if emitter.fused_update_skips.contains(&index) {
+        output.push_str("    /* fused in-place update */\n");
+        return true;
+    }
+    if emitter.fused_relational_skips.contains(&index) {
+        output.push_str("    /* fused relational jump */\n");
+        return true;
+    }
+    if emitter.fused_accumulator_skips.contains(&index) {
+        output.push_str("    /* fused accumulator */\n");
+        return true;
+    }
+    if emitter.fused_const_binary_skips.contains(&index) {
+        output.push_str("    /* fused constant with binary */\n");
+        return true;
+    }
+    if let Some(update) = emitter.fused_updates.get(&index) {
+        let slot = update.slot;
+        let op = if update.increment { '+' } else { '-' };
+        let code = if update.increment { 8 } else { 9 };
+        if !emitter.callables {
+            writeln!(
+                output,
+                "    locals[{slot}] = kiln_c99_unary({code}, locals[{slot}]);"
+            )
+            .unwrap();
+        } else {
+            let unwind = unwind_or_return(&emitter.handlers, &emitter.site);
+            writeln!(
+                output,
+                "    {{ kiln_value operand = locals[{slot}]; if (KILN_LIKELY(operand.tag == KILN_VALUE_NUMBER)) {{ locals[{slot}] = kiln_fast_number(kiln_fast_to_double(operand.bits) {op} 1.0); }} else {{ kiln_value answer; int status = kiln_c99_unary_checked({code}, host, operand, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; locals[{slot}] = answer; }} }}"
+            )
+            .unwrap();
+        }
+        return true;
+    }
+    if let Some(jump) = emitter.fused_relational_jumps.get(&index) {
+        let slot = jump.slot;
+        let target = jump.target;
+        let bits = jump.constant_bits;
+        let cmp_c_op = match jump.cmp_op {
+            BinaryOp::LessThan => "<",
+            BinaryOp::LessThanOrEqual => "<=",
+            BinaryOp::GreaterThan => ">",
+            BinaryOp::GreaterThanOrEqual => ">=",
+            BinaryOp::StrictEqual | BinaryOp::LooseEqual => "==",
+            BinaryOp::StrictNotEqual | BinaryOp::LooseNotEqual => "!=",
+            _ => "<",
+        };
+        let cmp_code = binary_code(jump.cmp_op);
+        let (cond_fast, cond_fallback) = if jump.jump_if_truthy {
+            (
+                format!("a {cmp_c_op} b"),
+                "kiln_fast_truthy(answer)".to_string(),
+            )
+        } else {
+            (
+                format!("!(a {cmp_c_op} b)"),
+                "!kiln_fast_truthy(answer)".to_string(),
+            )
+        };
+        writeln!(
+            output,
+            "    {{ kiln_value val = locals[{slot}]; if (KILN_LIKELY(val.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(val.bits); const double b = kiln_fast_to_double(UINT64_C({bits})); if ({cond_fast}) goto kiln_label_{target}; }} else {{ kiln_value right = kiln_fast_number_bits(UINT64_C({bits})); kiln_value answer = kiln_c99_binary({cmp_code}, val, right); if ({cond_fallback}) goto kiln_label_{target}; }} }}"
+        )
+        .unwrap();
+        return true;
+    }
+    if let Some(acc) = emitter.fused_accumulators.get(&index) {
+        let dest = acc.dest_slot;
+        let src = acc.src_slot;
+        let bits = acc.constant_bits;
+        let outer_op_char = if acc.outer_op == BinaryOp::Subtract {
+            '-'
+        } else {
+            '+'
+        };
+        let op2_code = binary_code(acc.outer_op);
+        match acc.inner_op {
+            Some(inner_op) => {
+                let op1_code = binary_code(inner_op);
+                let val_f64 = f64::from_bits(bits);
+                let is_positive_int =
+                    val_f64.fract() == 0.0 && val_f64 > 0.0 && val_f64 < 9007199254740992.0;
+                let const_int = val_f64 as i64;
+                if inner_op == BinaryOp::Remainder && is_positive_int {
+                    if acc.src_is_int {
+                        writeln!(
+                            output,
+                            "    {{ kiln_value v_dest = locals[{dest}]; kiln_value v_src = locals[{src}]; if (KILN_LIKELY(v_dest.tag == KILN_VALUE_NUMBER && v_src.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(v_src.bits); int64_t ia = (int64_t)a; double res = (double)(ia % {const_int}LL); locals[{dest}] = kiln_fast_number(kiln_fast_to_double(v_dest.bits) {outer_op_char} res); }} else {{ kiln_value v_const = kiln_fast_number_bits(UINT64_C({bits})); kiln_value res = kiln_c99_binary({op1_code}, v_src, v_const); locals[{dest}] = kiln_c99_binary({op2_code}, v_dest, res); }} }}"
+                        )
+                        .unwrap();
+                    } else {
+                        writeln!(
+                            output,
+                            "    {{ kiln_value v_dest = locals[{dest}]; kiln_value v_src = locals[{src}]; if (KILN_LIKELY(v_dest.tag == KILN_VALUE_NUMBER && v_src.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(v_src.bits); int64_t ia = (int64_t)a; if (KILN_LIKELY(a == (double)ia && (ia != 0 || !signbit(a)) && ia > -9007199254740992LL && ia < 9007199254740992LL)) {{ double res = (double)(ia % {const_int}LL); locals[{dest}] = kiln_fast_number(kiln_fast_to_double(v_dest.bits) {outer_op_char} res); }} else {{ double res = fmod(a, kiln_fast_to_double(UINT64_C({bits}))); locals[{dest}] = kiln_fast_number(kiln_fast_to_double(v_dest.bits) {outer_op_char} res); }} }} else {{ kiln_value v_const = kiln_fast_number_bits(UINT64_C({bits})); kiln_value res = kiln_c99_binary({op1_code}, v_src, v_const); locals[{dest}] = kiln_c99_binary({op2_code}, v_dest, res); }} }}"
+                        )
+                        .unwrap();
+                    }
+                } else {
+                    let inner_expr = match inner_op {
+                        BinaryOp::Add => "a + b",
+                        BinaryOp::Subtract => "a - b",
+                        BinaryOp::Multiply => "a * b",
+                        BinaryOp::Divide => "a / b",
+                        BinaryOp::Remainder => "fmod(a, b)",
+                        _ => "a + b",
+                    };
+                    writeln!(
+                        output,
+                        "    {{ kiln_value v_dest = locals[{dest}]; kiln_value v_src = locals[{src}]; if (KILN_LIKELY(v_dest.tag == KILN_VALUE_NUMBER && v_src.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(v_src.bits); const double b = kiln_fast_to_double(UINT64_C({bits})); double res = {inner_expr}; locals[{dest}] = kiln_fast_number(kiln_fast_to_double(v_dest.bits) {outer_op_char} res); }} else {{ kiln_value v_const = kiln_fast_number_bits(UINT64_C({bits})); kiln_value res = kiln_c99_binary({op1_code}, v_src, v_const); locals[{dest}] = kiln_c99_binary({op2_code}, v_dest, res); }} }}"
+                    )
+                    .unwrap();
+                }
+            }
+            None => {
+                writeln!(
+                    output,
+                    "    {{ kiln_value v_dest = locals[{dest}]; kiln_value v_src = locals[{src}]; if (KILN_LIKELY(v_dest.tag == KILN_VALUE_NUMBER && v_src.tag == KILN_VALUE_NUMBER)) {{ locals[{dest}] = kiln_fast_number(kiln_fast_to_double(v_dest.bits) {outer_op_char} kiln_fast_to_double(v_src.bits)); }} else {{ locals[{dest}] = kiln_c99_binary({op2_code}, v_dest, v_src); }} }}"
+                )
+                .unwrap();
+            }
+        }
+        return true;
+    }
+    if let Some(cb) = emitter.fused_const_binaries.get(&index) {
+        let bits = cb.constant_bits;
+        let code = binary_code(cb.op);
+        let fast = numeric_fast_body(cb.op).unwrap_or("answer = kiln_fast_number(a + b);");
+        if !emitter.callables {
+            writeln!(
+                output,
+                "    {{ kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(left.bits); const double b = kiln_fast_to_double(UINT64_C({bits})); {fast} }} else {{ kiln_value right = kiln_fast_number_bits(UINT64_C({bits})); answer = kiln_c99_binary({code}, left, right); }} stack[sp++] = answer; }}"
+            )
+            .unwrap();
+        } else {
+            let unwind = unwind_or_return(&emitter.handlers, &emitter.site);
+            writeln!(
+                output,
+                "    {{ kiln_value left = stack[--sp]; kiln_value answer; if (KILN_LIKELY(left.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(left.bits); const double b = kiln_fast_to_double(UINT64_C({bits})); {fast} }} else {{ kiln_value right = kiln_fast_number_bits(UINT64_C({bits})); int status = kiln_c99_binary_checked({code}, host, left, right, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp++] = answer; }}"
+            )
+            .unwrap();
+        }
+        return true;
+    }
+    false
+}
+
 fn emit_instruction(
     output: &mut String,
     instruction: &Instruction,
     index: usize,
     emitter: &Emitter<'_>,
 ) {
+    let instruction_site = c_string(emitter.diagnostic_site);
+    let instruction_operation = c_string(&instruction_diagnostic(instruction, emitter.constants));
+    let direct_refusal = format!(
+        "kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); return KILN_C99_CONTROL_ERROR;"
+    );
+    if emit_fused_fast_path(output, index, emitter) {
+        return;
+    }
     let Emitter {
         constants,
         frame_stacks,
@@ -2726,8 +3411,11 @@ fn emit_instruction(
         site,
         guarded,
         guarded_slots,
-        known_number_binaries,
         current_func,
+        fused_new_objects,
+        fused_spreads,
+        fused_dup_store_pop,
+        ..
     } = emitter;
     // A public scalar instruction starts a fresh diagnostic attempt. Function bodies do not
     // clear this state: when one calls another, the deepest failing body owns the refusal
@@ -2738,11 +3426,6 @@ fn emit_instruction(
         );
     }
     let before = output.len();
-    let instruction_site = c_string(diagnostic_site);
-    let instruction_operation = c_string(&instruction_diagnostic(instruction, constants));
-    let direct_refusal = format!(
-        "kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); return KILN_C99_CONTROL_ERROR;"
-    );
     let control_refusal = format!(
         "if (status == KILN_C99_CONTROL_ERROR || status == KILN_C99_THROWN) {{ kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth);"
     );
@@ -2793,7 +3476,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = stack[sp - {argc} - 1]; kiln_value self_value = stack[sp - {argc} - 2]; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value method; kiln_value call_result; int status; kiln_value key = stack[sp - {argc} - 1]; kiln_value self_value = stack[sp - {argc} - 2]; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_get_computed(host, self_value, key, &method, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 2
             )
             .unwrap();
@@ -3138,7 +3821,7 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_fast_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; {direct_call}if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = plain->body(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_fast_undefined(); kiln_value callee = stack[sp - {argc} - 1]; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; {{ kiln_closure *plain = callee.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(callee) : NULL; {direct_call}if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = plain->body(host, &call_result, plain->upvalues, plain->arrow ? plain->captured_this : kiln_fast_undefined(), call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else if (plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH) {{ status = kiln_c99_invoke_closure(host, &call_result, plain, plain->arrow ? plain->captured_this : kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown, NULL, 0); }} else {{ status = kiln_c99_call(host, &call_result, callee, kiln_c99_undefined(), call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_receiver_tag == 0) {{ kiln_c99_diagnostic_receiver_tag = callee.tag; }} if (status == KILN_C99_CONTROL_ERROR && kiln_c99_diagnostic_site == NULL && kiln_c99_diagnostic_operation == NULL && kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_detail = \"Call callee is unsupported by the native callable model\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 argc + 1
             )
             .unwrap();
@@ -3161,35 +3844,54 @@ fn emit_instruction(
         Instruction::NewObject { count } => {
             let unwind = unwind_or_return(handlers, site);
             let count = usize::try_from(*count).unwrap();
-            output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
-            if count > 0 {
-                // `count` is pairs, not final properties -- a literal with a duplicate key
-                // (`{ a: 1, a: 2 }`) asks for one more slot than it ends up filling, which
-                // `kiln_c99_new_object_with_capacity` already documents as a hint rather than a
-                // promise. Sizing once here is what a template-filling caller (this loop is
-                // exactly that: a fixed member count known before the first store) should do
-                // instead of paying `kiln_c99_reserve`'s 4 -> 8 -> ... walk one `define_computed`
-                // at a time.
+            if fused_new_objects.contains(&index) {
                 writeln!(
                     output,
-                    "        status = kiln_c99_new_object_with_capacity(&built, (size_t){count});"
+                    "    {{\n        static const char *site_ikeys[{count}] = {{0}};\n        static const char *site_raw[{count}] = {{0}};\n        kiln_value target = stack[sp - (size_t){count} * 2 - 1]; size_t pair; int status;\n        if (KILN_LIKELY(target.tag == KILN_VALUE_OBJECT)) {{ (void)kiln_c99_object_reserve(kiln_c99_object_of(target), kiln_c99_object_of(target)->count + (size_t){count}); }}\n        for (pair = 0; pair < (size_t){count}; ++pair) {{\n            kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2];\n            kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1];\n            const char *ikey = (site_raw[pair] == key.ptr && site_ikeys[pair] != NULL) ? site_ikeys[pair] : NULL;\n            if (KILN_UNLIKELY(ikey == NULL && key.tag == KILN_VALUE_STRING)) {{\n                ikey = kiln_c99_intern(key.ptr, key.len);\n                site_raw[pair] = key.ptr;\n                site_ikeys[pair] = ikey;\n            }}\n            if (KILN_LIKELY(ikey != NULL && target.tag == KILN_VALUE_OBJECT)) {{\n                kiln_object *obj = kiln_c99_object_of(target);\n                if (KILN_LIKELY(obj->accessor_count == 0 && !obj->frozen && !obj->not_extensible && (unsigned char)(key.ptr[0] - '0') > 9u)) {{\n                    size_t fi = 0;\n                    for (; fi < obj->count; ++fi) {{\n                        if (obj->properties[fi].key == ikey) {{\n                            obj->properties[fi].value = member;\n                            break;\n                        }}\n                    }}\n                    if (fi == obj->count && obj->count < obj->capacity) {{\n                        kiln_property *slot = &obj->properties[obj->count++];\n                        slot->key = ikey;\n                        slot->key_len = key.len;\n                        slot->enumerable = !(key.len >= 2 && key.ptr[0] == '@' && key.ptr[1] == '@');\n                        slot->writable = 1;\n                        slot->configurable = 1;\n                        slot->accessor = 0;\n                        slot->refused = 0;\n                        slot->getter = kiln_fast_undefined();\n                        slot->setter = kiln_fast_undefined();\n                        slot->value = member;\n                        continue;\n                    }}\n                }}\n            }}\n            status = kiln_c99_define_computed(target, key, member);\n            if (status == KILN_C99_THROWN) {unwind}\n            if (status != KILN_C99_OK) return status;\n        }}\n        sp -= (size_t){count} * 2;\n    }}"
                 )
                 .unwrap();
-            } else {
-                output.push_str("        status = kiln_c99_new_object(&built);\n");
-            }
-            output.push_str("        if (status != KILN_C99_OK) return status;\n");
-            if count > 0 {
+            } else if let Some(slot) = emitter.fused_stack_objects.get(&index) {
+                output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
                 writeln!(
                     output,
-                    "        for (pair = 0; pair < (size_t){count}; ++pair) {{ kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2]; kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1]; status = kiln_c99_define_computed(built, key, member); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                    "        local_obj_{slot}.count = 0;\n        local_obj_{slot}.accessor_count = 0;\n        local_obj_{slot}.read_only_seen = 0;\n        built = kiln_c99_value(KILN_VALUE_OBJECT, (uint64_t)(uintptr_t)&local_obj_{slot}, NULL, 0);\n        status = KILN_C99_OK;"
                 )
                 .unwrap();
-                writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
+                if count > 0 {
+                    writeln!(
+                        output,
+                        "        static const char *site_ikeys[{count}] = {{0}};\n        static const char *site_raw[{count}] = {{0}};\n        for (pair = 0; pair < (size_t){count}; ++pair) {{\n            kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2];\n            kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1];\n            const char *ikey = (site_raw[pair] == key.ptr && site_ikeys[pair] != NULL) ? site_ikeys[pair] : NULL;\n            if (KILN_UNLIKELY(ikey == NULL && key.tag == KILN_VALUE_STRING)) {{\n                ikey = kiln_c99_intern(key.ptr, key.len);\n                site_raw[pair] = key.ptr;\n                site_ikeys[pair] = ikey;\n            }}\n            if (KILN_LIKELY(ikey != NULL)) {{\n                kiln_object *obj = kiln_c99_object_of(built);\n                if (KILN_LIKELY((unsigned char)(key.ptr[0] - '0') > 9u && obj->count < obj->capacity)) {{\n                    size_t fi = 0;\n                    for (; fi < obj->count; ++fi) {{\n                        if (obj->properties[fi].key == ikey) {{\n                            obj->properties[fi].value = member;\n                            break;\n                        }}\n                    }}\n                    if (fi == obj->count) {{\n                        kiln_property *slot_prop = &obj->properties[obj->count++];\n                        slot_prop->key = ikey;\n                        slot_prop->key_len = key.len;\n                        slot_prop->enumerable = !(key.len >= 2 && key.ptr[0] == '@' && key.ptr[1] == '@');\n                        slot_prop->writable = 1;\n                        slot_prop->configurable = 1;\n                        slot_prop->accessor = 0;\n                        slot_prop->refused = 0;\n                        slot_prop->getter = kiln_fast_undefined();\n                        slot_prop->setter = kiln_fast_undefined();\n                        slot_prop->value = member;\n                        continue;\n                    }}\n                }}\n            }}\n            status = kiln_c99_define_computed(built, key, member);\n            if (status == KILN_C99_THROWN) {unwind}\n            if (status != KILN_C99_OK) return status;\n        }}"
+                    )
+                    .unwrap();
+                    writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
+                } else {
+                    output.push_str("        (void)pair;\n");
+                }
+                output.push_str("        stack[sp++] = built;\n    }\n");
             } else {
-                output.push_str("        (void)pair;\n");
+                output.push_str("    {\n        kiln_value built; size_t pair; int status;\n");
+                if count > 0 {
+                    writeln!(
+                        output,
+                        "        status = kiln_c99_new_object_with_capacity(&built, (size_t){count});"
+                    )
+                    .unwrap();
+                } else {
+                    output.push_str("        status = kiln_c99_new_object(&built);\n");
+                }
+                output.push_str("        if (status != KILN_C99_OK) return status;\n");
+                if count > 0 {
+                    writeln!(
+                        output,
+                        "        static const char *site_ikeys[{count}] = {{0}};\n        static const char *site_raw[{count}] = {{0}};\n        for (pair = 0; pair < (size_t){count}; ++pair) {{\n            kiln_value key = stack[sp - (size_t){count} * 2 + pair * 2];\n            kiln_value member = stack[sp - (size_t){count} * 2 + pair * 2 + 1];\n            const char *ikey = (site_raw[pair] == key.ptr && site_ikeys[pair] != NULL) ? site_ikeys[pair] : NULL;\n            if (KILN_UNLIKELY(ikey == NULL && key.tag == KILN_VALUE_STRING)) {{\n                ikey = kiln_c99_intern(key.ptr, key.len);\n                site_raw[pair] = key.ptr;\n                site_ikeys[pair] = ikey;\n            }}\n            if (KILN_LIKELY(ikey != NULL)) {{\n                kiln_object *obj = kiln_c99_object_of(built);\n                if (KILN_LIKELY((unsigned char)(key.ptr[0] - '0') > 9u && obj->count < obj->capacity)) {{\n                    size_t fi = 0;\n                    for (; fi < obj->count; ++fi) {{\n                        if (obj->properties[fi].key == ikey) {{\n                            obj->properties[fi].value = member;\n                            break;\n                        }}\n                    }}\n                    if (fi == obj->count) {{\n                        kiln_property *slot = &obj->properties[obj->count++];\n                        slot->key = ikey;\n                        slot->key_len = key.len;\n                        slot->enumerable = !(key.len >= 2 && key.ptr[0] == '@' && key.ptr[1] == '@');\n                        slot->writable = 1;\n                        slot->configurable = 1;\n                        slot->accessor = 0;\n                        slot->refused = 0;\n                        slot->getter = kiln_fast_undefined();\n                        slot->setter = kiln_fast_undefined();\n                        slot->value = member;\n                        continue;\n                    }}\n                }}\n            }}\n            status = kiln_c99_define_computed(built, key, member);\n            if (status == KILN_C99_THROWN) {unwind}\n            if (status != KILN_C99_OK) return status;\n        }}"
+                    )
+                    .unwrap();
+                    writeln!(output, "        sp -= (size_t){count} * 2;").unwrap();
+                } else {
+                    output.push_str("        (void)pair;\n");
+                }
+                output.push_str("        stack[sp++] = built;\n    }\n");
             }
-            output.push_str("        stack[sp++] = built;\n    }\n");
         }
         Instruction::NewArray { count } => {
             let count = usize::try_from(*count).unwrap();
@@ -3213,9 +3915,14 @@ fn emit_instruction(
             let Constant::String(text) = &constants[*name as usize] else {
                 unreachable!("verification rejects a non-string property name before emission")
             };
+            let fast_len = if text == "length" {
+                format!("if (KILN_LIKELY(target.tag == KILN_VALUE_ARRAY)) {{ stack[sp - 1] = kiln_fast_number((double)kiln_c99_array_of(target)->count); goto kiln_getprop_done_{index}; }} else if (KILN_LIKELY(target.tag == KILN_VALUE_TYPED_ARRAY)) {{ stack[sp - 1] = kiln_fast_number((double)kiln_c99_typed_array_of(target)->length); goto kiln_getprop_done_{index}; }} else if (KILN_LIKELY(target.tag == KILN_VALUE_STRING && kiln_fast_is_ascii(target.ptr, target.len))) {{ stack[sp - 1] = kiln_fast_number((double)target.len); goto kiln_getprop_done_{index}; }} ")
+            } else {
+                String::new()
+            };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value read; kiln_value target = stack[sp - 1]; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag; if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(target.bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value target = stack[sp - 1]; {fast_len}if (KILN_LIKELY(target.tag == KILN_VALUE_OBJECT)) {{ const kiln_object *obj = kiln_c99_object_of(target); if (KILN_LIKELY(site.own < obj->count && obj->properties[site.own].key == {symbol}_key_{name} && !obj->properties[site.own].accessor)) {{ stack[sp - 1] = obj->properties[site.own].value; goto kiln_getprop_done_{index}; }} }} kiln_value read; int status = kiln_c99_get_site(host, target, {symbol}_key_{name}, {}, &read, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag; if (target.tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(target.bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetProperty lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; kiln_getprop_done_{index}:; }}",
                 text.len()
             )
             .unwrap();
@@ -3228,7 +3935,8 @@ fn emit_instruction(
             // The written value stays on the stack, which is what makes `a = b.c = d` work.
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value member = stack[--sp]; int status = kiln_c99_put_site(host, stack[sp - 1], {symbol}_key_{name}, {}, member, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value member = stack[--sp]; kiln_value target = stack[sp - 1]; if (KILN_LIKELY(target.tag == KILN_VALUE_OBJECT)) {{ kiln_object *obj = kiln_c99_object_of(target); if (KILN_LIKELY(site.own < obj->count && obj->properties[site.own].key == {symbol}_key_{name} && !obj->frozen && !obj->module_namespace && !obj->properties[site.own].accessor && obj->properties[site.own].writable)) {{ obj->properties[site.own].value = member; stack[sp - 1] = member; goto kiln_setprop_done_{index}; }} else if (KILN_LIKELY(site.own == obj->count && obj->capacity > obj->count && !obj->frozen && !obj->module_namespace)) {{ kiln_property *property = &obj->properties[obj->count]; property->key = {symbol}_key_{name}; property->key_len = {}; property->value = member; property->enumerable = 1; property->writable = 1; property->configurable = 1; property->accessor = 0; property->refused = 0; property->getter = kiln_fast_undefined(); property->setter = kiln_fast_undefined(); obj->count += 1; stack[sp - 1] = member; goto kiln_setprop_done_{index}; }} }} int status = kiln_c99_put_site(host, target, {symbol}_key_{name}, {}, member, 0, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; kiln_setprop_done_{index}:; }}",
+                text.len(),
                 text.len()
             )
             .unwrap();
@@ -3240,7 +3948,8 @@ fn emit_instruction(
             };
             writeln!(
                 output,
-                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value member = stack[--sp]; int status = kiln_c99_put_site(host, stack[sp - 1], {symbol}_key_{name}, {}, member, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; }}",
+                "    {{ static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value member = stack[--sp]; kiln_value target = stack[sp - 1]; if (KILN_LIKELY(target.tag == KILN_VALUE_OBJECT)) {{ kiln_object *obj = kiln_c99_object_of(target); if (KILN_LIKELY(site.own < obj->count && obj->properties[site.own].key == {symbol}_key_{name} && !obj->frozen && !obj->module_namespace && !obj->properties[site.own].accessor && obj->properties[site.own].writable)) {{ obj->properties[site.own].value = member; stack[sp - 1] = member; goto kiln_setprop_done_{index}; }} else if (KILN_LIKELY(site.own == obj->count && obj->capacity > obj->count && !obj->frozen && !obj->module_namespace)) {{ kiln_property *property = &obj->properties[obj->count]; property->key = {symbol}_key_{name}; property->key_len = {}; property->value = member; property->enumerable = 1; property->writable = 1; property->configurable = 1; property->accessor = 0; property->refused = 0; property->getter = kiln_fast_undefined(); property->setter = kiln_fast_undefined(); obj->count += 1; stack[sp - 1] = member; goto kiln_setprop_done_{index}; }} }} int status = kiln_c99_put_site(host, target, {symbol}_key_{name}, {}, member, {}, depth, thrown, &site); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = member; kiln_setprop_done_{index}:; }}",
+                text.len(),
                 text.len(),
                 i32::from(*strict)
             )
@@ -3250,7 +3959,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value key = stack[--sp]; kiln_value read; int status = kiln_c99_get_computed(host, stack[sp - 1], key, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = stack[sp - 1].tag; if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {{ const char *named = stack[sp - 1].tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(stack[sp - 1].bits) : NULL; if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {{ int written = named != NULL ? snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%s.%.*s\", named, (int)key.len, key.ptr) : snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%.*s\", (int)key.len, key.ptr); if (written > 0) {{ kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose; kiln_c99_diagnostic_function_len = (size_t)written < sizeof kiln_c99_diagnostic_compose ? (size_t)written : sizeof kiln_c99_diagnostic_compose - 1; }} }} else if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetComputed lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; }}"
+                "    {{ kiln_value key = stack[--sp]; kiln_value target = stack[sp - 1]; if (KILN_LIKELY(target.tag == KILN_VALUE_ARRAY && key.tag == KILN_VALUE_NUMBER)) {{ double idx = kiln_c99_bits_to_double(key.bits); size_t i = (size_t)idx; const kiln_array *arr = kiln_c99_array_of(target); if (KILN_LIKELY(idx >= 0.0 && (double)i == idx && i < arr->count)) {{ kiln_value elem = arr->elements[i]; if (KILN_LIKELY(elem.tag != KILN_VALUE_HOLE)) {{ stack[sp - 1] = elem; goto kiln_getcomputed_done_{index}; }} }} }} kiln_value read; int status = kiln_c99_get_computed(host, target, key, &read, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = target.tag; if (kiln_c99_diagnostic_function == NULL && kiln_c99_diagnostic_detail != kiln_c99_diagnostic_compose) {{ const char *named = target.tag == KILN_VALUE_BUILTIN ? kiln_c99_builtin_name(target.bits) : NULL; if (key.tag == KILN_VALUE_STRING && key.ptr != NULL) {{ int written = named != NULL ? snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%s.%.*s\", named, (int)key.len, key.ptr) : snprintf(kiln_c99_diagnostic_compose, sizeof kiln_c99_diagnostic_compose, \"%.*s\", (int)key.len, key.ptr); if (written > 0) {{ kiln_c99_diagnostic_function = kiln_c99_diagnostic_compose; kiln_c99_diagnostic_function_len = (size_t)written < sizeof kiln_c99_diagnostic_compose ? (size_t)written : sizeof kiln_c99_diagnostic_compose - 1; }} }} else if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"GetComputed lookup refused\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; stack[sp - 1] = read; kiln_getcomputed_done_{index}:; }}"
             )
             .unwrap();
         }
@@ -3301,7 +4010,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value produced; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_super_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
+                "    {{ kiln_value produced; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_super_call(host, &produced, stack[sp - {argc} - 1], receiver, call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; status = kiln_c99_adopt_super(&receiver, produced); if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = produced; }}",
                 argc + 1
             )
             .unwrap();
@@ -3322,7 +4031,7 @@ fn emit_instruction(
             let unwind = unwind_or_return(handlers, site);
             writeln!(
                 output,
-                "    {{ kiln_value built; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; if (stack[sp - {argc} - 1].tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(stack[sp - {argc} - 1].bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
+                "    {{ kiln_value built; int status; const kiln_value *call_args = {argc} == 0 ? NULL : &stack[sp - {argc}]; status = kiln_c99_construct(host, &built, stack[sp - {argc} - 1], call_args, (size_t){argc}, depth, thrown); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = stack[sp - {argc} - 1].tag; if (stack[sp - {argc} - 1].tag == KILN_VALUE_BUILTIN && kiln_c99_diagnostic_function == NULL) {{ const char *named = kiln_c99_builtin_name(stack[sp - {argc} - 1].bits); if (named != NULL) {{ kiln_c99_diagnostic_function = named; kiln_c99_diagnostic_function_len = strlen(named); }} }} if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"New target is unsupported by the native constructor model\"; }} if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; sp -= (size_t){}; stack[sp++] = built; }}",
                 argc + 1
             )
             .unwrap();
@@ -3492,12 +4201,16 @@ fn emit_instruction(
             .unwrap();
         }
         Instruction::SpreadObject => {
-            let unwind = unwind_or_return(handlers, site);
-            writeln!(
-                output,
-                "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_spread_object(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
-            )
-            .unwrap();
+            if fused_spreads.contains(&index) {
+                output.push_str("    /* fused SpreadObject into preceding NewObject */\n");
+            } else {
+                let unwind = unwind_or_return(handlers, site);
+                writeln!(
+                    output,
+                    "    {{ kiln_value source = stack[--sp]; int status = kiln_c99_spread_object(host, stack[sp - 1], source, depth, thrown); if (status == KILN_C99_THROWN) {unwind} if (status != KILN_C99_OK) return status; }}"
+                )
+                .unwrap();
+            }
         }
         // `class D extends C` links the two prototype objects, which is what makes an instance
         // of `D` find a method of `C`.
@@ -3586,18 +4299,46 @@ fn emit_instruction(
             };
             let argc = usize::from(*argc);
             let unwind = unwind_or_return(handlers, site);
+            let invoke_check = format!("if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {{ {unwind} }} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; goto kiln_method_done_{index};");
             let fast_method = match (text.as_str(), argc) {
-                ("set", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_SET, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
-                ("get", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_GET, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
-                ("has", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_HAS, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
-                ("add", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_ADD, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
-                ("exec", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_REGEXP)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_REGEXP_EXEC, self_value, call_args, (size_t){argc}, depth, thrown); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} "),
-                ("sqrt", 1) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_BUILTIN && self_value.bits == KILN_C99_BUILTIN_MATH)) {{ double v = call_args != NULL ? kiln_c99_as_number(call_args[0]) : NAN; call_result = kiln_c99_number(sqrt(v)); goto kiln_method_done_{index}; }} "),
+                ("set", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_SET, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("get", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_GET, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("has", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_HAS, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("add", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_COLLECTION)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_COLLECTION_ADD, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("exec", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_REGEXP)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_REGEXP_EXEC, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("sqrt" | "floor" | "ceil" | "round" | "abs", 1) => {
+                    let c_fn = match text.as_str() {
+                        "sqrt" => "sqrt",
+                        "floor" => "floor",
+                        "ceil" => "ceil",
+                        "round" => "kiln_fast_round",
+                        "abs" => "fabs",
+                        _ => unreachable!(),
+                    };
+                    format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_BUILTIN && self_value.bits == KILN_C99_BUILTIN_MATH && call_args != NULL && call_args[0].tag == KILN_VALUE_NUMBER)) {{ double v = kiln_fast_to_double(call_args[0].bits); call_result = kiln_fast_number({c_fn}(v)); goto kiln_method_done_{index}; }} ")
+                }
+                ("concat", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_BUILTIN && self_value.bits == KILN_C99_BUILTIN_BUFFER)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_BUFFER_CONCAT, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} else if (KILN_LIKELY(self_value.tag == KILN_VALUE_ARRAY)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_CONCAT, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("from", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_BUILTIN && self_value.bits == KILN_C99_BUILTIN_BUFFER)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_BUFFER_FROM, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("repeat", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_STRING)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_REPEAT, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("split", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_STRING)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_SPLIT, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("substring", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_STRING)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_SUBSTRING, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("slice", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_ARRAY)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_SLICE, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} else if (KILN_LIKELY(self_value.tag == KILN_VALUE_STRING)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_STRING_SLICE, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("join", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_ARRAY)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_JOIN, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("indexOf", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_STRING)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_STRING_INDEX_OF, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} else if (KILN_LIKELY(self_value.tag == KILN_VALUE_ARRAY)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_INDEX_OF, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("push", 1) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_ARRAY)) {{ kiln_array *arr = kiln_c99_array_of(self_value); if (KILN_LIKELY(!arr->frozen && arr->count < arr->capacity)) {{ arr->elements[arr->count++] = call_args[0]; call_result = kiln_fast_number((double)arr->count); goto kiln_method_done_{index}; }} else if (!arr->frozen) {{ status = kiln_c99_array_push(self_value, call_args[0]); {invoke_check} }} }} "),
+                ("push", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_ARRAY)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_PUSH, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("pop", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_ARRAY)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_POP, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
+                ("charCodeAt", _) => format!("if (KILN_LIKELY(self_value.tag == KILN_VALUE_STRING)) {{ status = kiln_c99_invoke_method(host, &call_result, KILN_C99_METHOD_CHAR_CODE_AT, self_value, call_args, (size_t){argc}, depth, thrown); {invoke_check} }} "),
                 _ => String::new(),
+            };
+            let argbuf_setup = if argc == 0 {
+                "const kiln_value *call_args = NULL; ".to_string()
+            } else {
+                format!("const kiln_value *call_args = &stack[sp - {argc}]; ")
             };
             writeln!(
                 output,
-                "    {{ kiln_value call_result = kiln_fast_undefined(); kiln_value self_value = stack[sp - {argc} - 1]; int status; kiln_value call_argbuf[({argc}) + 1]; for (size_t i = 0; i < (size_t){argc}; i++) {{ call_argbuf[i] = stack[sp - {argc} + i]; }} const kiln_value *call_args = {argc} == 0 ? NULL : call_argbuf; {fast_method}static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value method; status = kiln_c99_get_site(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; {{ kiln_closure *plain = method.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(method) : NULL; if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = plain->body(host, &call_result, plain->upvalues, self_value, call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else {{ status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; kiln_method_done_{index}:; sp -= (size_t){}; stack[sp++] = call_result; }}",
+                "    {{ kiln_value call_result = kiln_fast_undefined(); kiln_value self_value = stack[sp - {argc} - 1]; int status; {argbuf_setup}{fast_method}static kiln_c99_site site = {{KILN_C99_SITE_NONE, KILN_C99_SITE_NONE, 0}}; kiln_value method; if (KILN_LIKELY(self_value.tag == KILN_VALUE_OBJECT)) {{ const kiln_object *object = kiln_c99_object_of(self_value); if (site.proto_cache[0] != NULL && KILN_LIKELY(object->prototype.tag == KILN_VALUE_OBJECT)) {{ const void *p = (const void *)kiln_c99_object_of(object->prototype); if (KILN_LIKELY(p == site.proto_cache[0])) {{ if (KILN_LIKELY(site.body_cache[0] != NULL && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = site.body_cache[0](host, &call_result, site.upvalues_cache[0], self_value, call_args, (size_t){argc}, depth + 1, thrown, NULL); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} method = site.method_cache[0]; goto kiln_call_method_{index}; }} if (p == site.proto_cache[1]) {{ if (KILN_LIKELY(site.body_cache[1] != NULL && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = site.body_cache[1](host, &call_result, site.upvalues_cache[1], self_value, call_args, (size_t){argc}, depth + 1, thrown, NULL); if (KILN_LIKELY(status == KILN_C99_OK)) goto kiln_method_done_{index}; }} method = site.method_cache[1]; goto kiln_call_method_{index}; }} }} else if (site.own < object->count && object->properties[site.own].key == {symbol}_key_{name} && !object->properties[site.own].accessor) {{ method = object->properties[site.own].value; goto kiln_call_method_{index}; }} }} status = kiln_c99_get_site(host, self_value, {symbol}_key_{name}, {}, &method, depth, thrown, &site); if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod property lookup threw\"; kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; kiln_call_method_{index}:; {{ kiln_closure *plain = method.tag == KILN_VALUE_FUNCTION ? kiln_c99_closure_of(method) : NULL; if (KILN_LIKELY(plain != NULL && (plain->arrow || plain->strict) && !plain->generator && !plain->publishes_frame && !kiln_c99_inheriting_new_target && depth < KILN_C99_MAX_CALL_DEPTH)) {{ status = plain->body(host, &call_result, plain->upvalues, self_value, call_args, (size_t){argc}, depth + 1, thrown, NULL); }} else {{ status = kiln_c99_call(host, &call_result, method, self_value, call_args, (size_t){argc}, depth, thrown); }} }} if (status == KILN_C99_CONTROL_ERROR && call_result.tag == KILN_VALUE_STRING) {{ *result = call_result; return status; }} if (status == KILN_C99_CONTROL_ERROR) {{ if (kiln_c99_diagnostic_receiver_tag == 0) kiln_c99_diagnostic_receiver_tag = self_value.tag; if (kiln_c99_diagnostic_detail == NULL) kiln_c99_diagnostic_detail = \"CallMethod invocation refused\"; }} if (status == KILN_C99_CONTROL_ERROR) kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); if (status == KILN_C99_THROWN) {{ if (kiln_c99_diagnostic_detail == NULL) {{ kiln_c99_diagnostic_receiver_tag = self_value.tag; kiln_c99_diagnostic_detail = \"CallMethod invocation threw\"; }} kiln_c99_note_refusal({instruction_site}, (size_t){index}, {instruction_operation}, (size_t)kiln_c99_diagnostic_active_depth); {unwind} }} if (status != KILN_C99_OK) return status; kiln_method_done_{index}:; sp -= (size_t){}; stack[sp++] = call_result; }}",
                 text.len(),
                 argc + 1
             )
@@ -3728,19 +4469,26 @@ fn emit_instruction(
             };
             writeln!(output, "    stack[sp++] = {pushed};").unwrap();
         }
-        Instruction::Pop => output.push_str("    --sp;\n"),
-        Instruction::Dup => output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n"),
+        Instruction::Pop => {
+            if fused_dup_store_pop.contains(&index) {
+                output.push_str("    /* fused pop */\n");
+            } else {
+                output.push_str("    --sp;\n");
+            }
+        }
+        Instruction::Dup => {
+            if fused_dup_store_pop.contains(&index) {
+                output.push_str("    /* fused dup */\n");
+            } else {
+                output.push_str("    stack[sp] = stack[sp - 1]; ++sp;\n");
+            }
+        }
         // A scalar program holds no reference to reduce, and has nowhere to put a thrown
         // value either, so its emitted bytes stay what they were.
         Instruction::Unary(operator) if !*callables => {
             writeln!(output, "    stack[sp - 1] = kiln_c99_unary({}, stack[sp - 1]);", unary_code(*operator)).unwrap()
         }
         Instruction::Unary(operator) => {
-            if known_number_binaries.contains(&index)
-                && let Some(fast) = numeric_fast_unary_body(*operator) {
-                writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; double a = kiln_fast_to_double(operand.bits); kiln_value answer; {fast} stack[sp - 1] = answer; }}").unwrap();
-                return;
-            }
             let unwind = unwind_or_return(handlers, site);
             match numeric_fast_unary_body(*operator) {
                 Some(fast) => writeln!(output, "    {{ kiln_value operand = stack[sp - 1]; kiln_value answer; if (KILN_LIKELY(operand.tag == KILN_VALUE_NUMBER)) {{ double a = kiln_fast_to_double(operand.bits); {fast} }} else {{ int status = kiln_c99_unary_checked({}, host, operand, &answer, depth, thrown); if (KILN_UNLIKELY(status == KILN_C99_THROWN)) {unwind} if (KILN_UNLIKELY(status != KILN_C99_OK)) return status; }} stack[sp - 1] = answer; }}", unary_code(*operator)).unwrap(),
@@ -3757,11 +4505,6 @@ fn emit_instruction(
             }
         }
         Instruction::Binary(operator) => {
-            if known_number_binaries.contains(&index)
-                && let Some(fast) = numeric_fast_body(*operator) {
-                writeln!(output, "    {{ kiln_value right = stack[--sp]; kiln_value left = stack[--sp]; double a = kiln_fast_to_double(left.bits); double b = kiln_fast_to_double(right.bits); kiln_value answer; {fast} stack[sp++] = answer; }}").unwrap();
-                return;
-            }
             // An operator throws only when a BigInt is involved, and `kiln_c99_binary_checked`
             // hands every other case straight back to `kiln_c99_binary`.
             let unwind = unwind_or_return(handlers, site);
@@ -3796,30 +4539,47 @@ fn emit_instruction(
             if *argc == 0 {
                 writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C(0), NULL, &host_result) != 0) return KILN_C99_HOST_ERROR; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
             } else {
-                writeln!(output, "    {{ kiln_value host_result; kiln_value host_args[{argc}]; for (size_t i = 0; i < (size_t){argc}; i++) {{ host_args[i] = stack[sp - {argc} + i]; }} if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), host_args, &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
+                writeln!(output, "    {{ kiln_value host_result; if (host == NULL || host->call == NULL || host->call(host->context, UINT16_C({}), UINT16_C({argc}), &stack[sp - {argc}], &host_result) != 0) return KILN_C99_HOST_ERROR; sp -= {argc}; stack[sp++] = host_result; }}", host_op_code(*op)).unwrap()
             }
         }
-        Instruction::Return => match site {
-            ReturnSite::Body => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
-            ),
-            ReturnSite::Entry {
-                exports: None, ..
-            } if !callables => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
-            ),
-            ReturnSite::Entry {
-                exports: None, ..
-            } => output.push_str(
-                "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
-            ),
-            ReturnSite::Entry {
-                exports: Some(exports),
-                commonjs,
-            } => {
-                output.push_str(
-                    "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
-                );
+        Instruction::Return => {
+            let mut cleanup = String::new();
+            let mut sorted_slots: Vec<u32> = emitter.fused_stack_slots.iter().copied().collect();
+            sorted_slots.sort_unstable();
+            for slot in sorted_slots {
+                cleanup.push_str(&format!("    if (local_obj_{slot}.properties != local_obj_{slot}.inline_properties) free(local_obj_{slot}.properties);\n"));
+            }
+            match site {
+                ReturnSite::Body => {
+                    output.push_str(&cleanup);
+                    output.push_str(
+                        "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
+                    );
+                }
+                ReturnSite::Entry {
+                    exports: None, ..
+                } if !callables => {
+                    output.push_str(&cleanup);
+                    output.push_str(
+                        "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp]; return KILN_C99_OK;\n",
+                    );
+                }
+                ReturnSite::Entry {
+                    exports: None, ..
+                } => {
+                    output.push_str(&cleanup);
+                    output.push_str(
+                        "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n    return KILN_C99_OK;\n",
+                    );
+                }
+                ReturnSite::Entry {
+                    exports: Some(exports),
+                    commonjs,
+                } => {
+                    output.push_str(&cleanup);
+                    output.push_str(
+                        "    *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];\n",
+                    );
                 if *callables {
                     output.push_str(
                         "    if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);\n",
@@ -3860,7 +4620,8 @@ fn emit_instruction(
                 }
                 output.push_str("    return KILN_C99_OK;\n");
             }
-        },
+        }
+    }
     }
     {
         let emitted = &mut output[before..];
