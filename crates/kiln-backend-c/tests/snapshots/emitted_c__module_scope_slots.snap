@@ -8,10 +8,10 @@ static void kiln_module_f4d3dbd71fb25e3e751b47bde606576f_gc_roots(void *heap, vo
     if (phase == KILN_GC_PHASE_MARK) kiln_c99_gc_mark_values((kiln_gc_heap *)heap, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals, 2);
     kiln_c99_gc_unit_roots(heap, context, phase);
 }
-static int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);
+static inline int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc);
 static const char kiln_module_f4d3dbd71fb25e3e751b47bde606576f_name_0[] = "read";
 /* function 0: read */
-static int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
+static inline int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0(kiln_call_context *ctx, kiln_value *result, kiln_value *upvalues, const kiln_value *receiver_ptr, const kiln_value *args, size_t argc) {
     size_t sp = 0;
     size_t slot;
     kiln_host *host = ctx ? ctx->host : NULL;
@@ -46,16 +46,14 @@ static int kiln_module_f4d3dbd71fb25e3e751b47bde606576f_body(kiln_host *host, ki
     kiln_value stack[1];
     kiln_value *locals = kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals;
     if (result == NULL) return KILN_C99_INVALID_ARGUMENT;
+    kiln_c99_reset_diagnostics();
     locals[0] = kiln_c99_undefined();
     locals[1] = kiln_c99_undefined();
 kiln_label_0:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = kiln_c99_number_bits(UINT64_C(4613937818241073152));
 kiln_label_1:;
-    kiln_c99_reset_diagnostics();
     kiln_module_f4d3dbd71fb25e3e751b47bde606576f_globals[0] = stack[--sp];
 kiln_label_2:;
-    kiln_c99_reset_diagnostics();
     {
         int status;
         status = kiln_c99_make_closure(&stack[sp], kiln_module_f4d3dbd71fb25e3e751b47bde606576f_fn_0, kiln_module_f4d3dbd71fb25e3e751b47bde606576f_name_0, 4, NULL, 0, "kiln_module_f4d3dbd71fb25e3e751b47bde606576f", UINT32_C(0), UINT32_C(0), 0, 0, 0, 0, 1, kiln_c99_undefined(), kiln_c99_new_target, UINT32_C(1), UINT32_C(1), UINT32_C(2), UINT32_C(0), NULL, 0);
@@ -64,13 +62,10 @@ kiln_label_2:;
         ++sp;
     }
 kiln_label_3:;
-    kiln_c99_reset_diagnostics();
     locals[1] = stack[--sp];
 kiln_label_4:;
-    kiln_c99_reset_diagnostics();
     stack[sp++] = locals[1];
 kiln_label_5:;
-    kiln_c99_reset_diagnostics();
     *result = sp == 0 ? kiln_c99_undefined() : stack[--sp];
     if (kiln_c99_crosses_boundary(*result)) *result = kiln_c99_text(*result);
     return KILN_C99_OK;
