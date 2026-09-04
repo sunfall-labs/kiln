@@ -45,3 +45,25 @@ this change lands on top of that one rather than beside it.
 Making the native backend *refuse* tagged templates instead would buy the 14 interpreter rows at
 the cost of a capability it currently has, which is the wrong trade and is why this is filed
 rather than half-done.
+
+
+## Tested 2026-09-03: the cheap route does not exist
+
+The obvious way to avoid a new instruction is a module-scope hidden binding per site: check it,
+build and store on first use, load on every later one. `declare_import` shows module-scope slots
+can be declared (`scopes[0]`, celled so nested functions capture them), so this looked like a
+compile.rs-only change reaching both engines for free.
+
+It is not, and the reason is one line: compiling a function does
+`std::mem::replace(&mut self.local_count, parameter_count)` and restores it afterwards. While a
+function body is being compiled `local_count` belongs to *that function*, so a module slot
+allocated from inside one would take the function's counter and collide. A tagged template inside
+a function -- which is the common case, and the one the failing tests use -- cannot allocate its
+cache slot where it is compiled.
+
+So the cheap route needs a pre-pass that walks for tagged-template sites and allocates their slots
+at module scope before any function is compiled. That is real work, and at that point the
+per-program table the instruction route wants is no harder and is the design the specification
+describes.
+
+Unchanged conclusion, now measured rather than assumed.
