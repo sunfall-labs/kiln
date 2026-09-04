@@ -91,7 +91,11 @@ step "crate tests" "$BASH" -c '
 	output="$(mbx test --workspace -- --test-threads=4 2>&1)"
 	# The failing *names* as well as the summary: a count says the suite is red and nothing
 	# about which part, and this step is the one that reports breakage in any other crate.
-	printf "%s\n" "$output" | grep -E "^(test result: FAILED|error|---- .* stdout)" | head -20
+	# The failure *bodies*, not just their names: a name says which test and nothing about
+	# why, and these failures have been transient enough that a second occurrence may be
+	# the only chance to read one.
+	printf "%s\n" "$output" | grep -E -A6 "^---- .* stdout" | head -60
+	printf "%s\n" "$output" | grep -E "^(test result: FAILED|error)" | head -10
 	printf "%s\n" "$output" | grep -E "^test result: ok" | tail -3
 	! grep -qE "^error|FAILED" <<<"$output"
 '
