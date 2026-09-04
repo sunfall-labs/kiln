@@ -12,12 +12,12 @@
 // it is that the table has no property store, so a name a program writes on the prototype has
 // nowhere to go. Reproducing that here would make the two engines agree on an incomplete object.
 //
-// `Temporal.Instant.fromEpochMilliseconds` and `fromEpochNanoseconds` are the other pair missing
-// here, and for the opposite reason: the native backend now answers both exactly as `deno` does,
-// and the *interpreter* is the one that cannot. It routes `fromEpochMilliseconds` to the instance
-// method `toInstant`, which then rejects the constructor as a receiver, and it has no
-// `fromEpochNanoseconds` at all. They belong with the three below: a divergence whose native side
-// is right.
+// `Temporal.Instant.fromEpochMilliseconds` and `fromEpochNanoseconds` were the other pair missing
+// here, and for the opposite reason: the native backend answered both exactly as `deno` does, and
+// the *interpreter* was the one that could not -- it routed `fromEpochMilliseconds` to the
+// instance method `toInstant`, which then rejected the constructor as a receiver, and it had no
+// `fromEpochNanoseconds` at all. Both are now the interpreter's own operations, so the two engines
+// agree and the pair is a candidate for the probe below rather than a divergence.
 
 const date = Temporal.PlainDate.from({ year: 2026, month: 8, day: 30 });
 console.log(date.toString());
@@ -188,8 +188,13 @@ try {
 	console.log("startOfDay on a date:", error instanceof TypeError);
 }
 
-// Every option is read, in the specified order, whichever ones the operation uses -- the reads are
-// observable and the specification runs them all, so reading fewer would hide a getter.
+// Which options an operation reads, and in what order. Both are observable -- every name below is
+// a getter that records itself -- so the set is part of the answer and not an implementation
+// detail. `add` on a `PlainDate` takes `overflow` and nothing else; both engines used to read all
+// eleven, which ran ten getters the specification does not, and Test262's `order-of-operations`
+// cases count exactly this. The option vocabulary lives in one place per engine
+// (`temporal::options` and `KILN_C99_TEMPORAL_OPTS_*`), and this probe is what stops the two
+// copies from drifting.
 const witnessed: string[] = [];
 const watched: Record<string, unknown> = {};
 for (const option of [

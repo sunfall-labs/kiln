@@ -326,6 +326,49 @@ fn a_sloppy_eval_var_takes_the_callers_binding_and_a_strict_one_shadows_it() {
     );
 }
 
+/// `EvalDeclarationInstantiation` refuses a `var` naming a binding in a record between the call's
+/// lexical environment and its variable one. The only such record this compiler cannot see from
+/// inside the eval program is a *parameter* environment -- parameters and body share one scope
+/// here -- so the names travel on the call site, and this is the check that consumes them.
+#[test]
+fn a_blocked_name_refuses_a_sloppy_eval_var_and_a_strict_one_is_untouched() {
+    let source = || module(vec![declaration(VariableKind::Var, "arguments", None)]);
+    let blocked = || vec!["arguments".to_owned(), "p".to_owned()];
+    let refused = compile_eval(
+        &source(),
+        &EvalOptions {
+            blocked_var_names: blocked(),
+            ..EvalOptions::default()
+        },
+    )
+    .expect_err("a blocked `var` is an early error");
+    assert!(
+        refused[0].message.contains("arguments"),
+        "the refusal names the binding: {refused:?}"
+    );
+    // Strict eval code has a variable environment of its own, so there is nothing between it and
+    // its declarations and the rule does not apply -- which is why the blocked names are only
+    // consulted for a sloppy source.
+    compile_eval(
+        &source(),
+        &EvalOptions {
+            blocked_var_names: blocked(),
+            strict: true,
+            ..EvalOptions::default()
+        },
+    )
+    .expect("a strict eval declares into its own scope");
+    // A name the record does not hold is an ordinary declaration.
+    compile_eval(
+        &module(vec![declaration(VariableKind::Var, "other", None)]),
+        &EvalOptions {
+            blocked_var_names: blocked(),
+            ..EvalOptions::default()
+        },
+    )
+    .expect("an unrelated `var` is unaffected");
+}
+
 fn errors(body: Vec<Statement>) -> Vec<String> {
     compile(&module(body))
         .expect_err("expected the module to be rejected")

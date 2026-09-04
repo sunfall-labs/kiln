@@ -814,6 +814,19 @@ fn finish_run(
         }
         Err(error) => {
             let message = error.to_string();
+            // A rejection nothing handled is not a failure of a *synchronous* case. The
+            // interpreter fails the run for one, which is the right judgement for `kiln run` --
+            // a silent rejection is how a program looks like it worked -- but Test262's contract
+            // for a case without `flags: [async]` is that it passes when nothing is thrown, and
+            // a rejection is not thrown. `import('')` in a syntax case is exactly this: the
+            // specifier is valid, the import rejects, and the case never looks at it.
+            // ...unless the rejection is the case's own assertion failing. A `Test262Error`
+            // that surfaced through a promise is the case saying it got a wrong answer, and
+            // passing it because of where it surfaced would hide exactly what the corpus is for.
+            if !is_async && message.contains("(in promise) ") && !message.contains("Test262Error") {
+                let stdout = host.into_stdout();
+                return CaseResult::new(Outcome::Pass, diagnostics, stdout, started);
+            }
             diagnostics.push(runtime_diagnostic(&error));
             // A missing host facility or a missing intrinsic is a gap in this implementation,
             // not a wrong answer from the language, and must not be counted as a failure.
@@ -890,16 +903,33 @@ const UNICODE_STRING_BUILDER_STEPS: u64 = 60_000_000;
 /// the note above applies unchanged to everything not on this list.
 const BUDGETED_INCLUDES: [&str; 2] = ["regExpUtils.js", "iteratorZipUtils.js"];
 
+/// What a case that does its own bulk work needs, short of the Unicode builder's budget.
+///
+/// The engine's default is a million steps, and a corpus case can outgrow that doing honest
+/// work: `built-ins/decodeURI/S15.1.3.1_A1.10_T1.js` walks the intervals `0x00..0x2F` through
+/// `0x67..0xFFFF` and calls `decodeURI` on each, 65,514 times. Measured, it needs between two
+/// and four million steps and finishes in 1.5 seconds -- it was never looping, it was paying for
+/// what the test asks. Forty-four rows across `decodeURI` and `decodeURIComponent` were failing
+/// as "execution exceeded 1000000 steps".
+///
+/// Eight million is a little over twice what the largest measured case needs, and an eighth of
+/// the Unicode builder's budget, so a case that really does loop still fails quickly.
+const BULK_WORK_STEPS: u64 = 8_000_000;
+
 /// Execution limits for a Test262 case.
 ///
-/// The default for everything except the cases that include `regExpUtils.js`. Raising the budget
-/// across the board was tried, on the theory that the assertion harness spends a share of it
-/// before the test starts; the same cases exhausted the larger budget, fifty times more slowly,
-/// which said they were not short of steps but looping. A step limit a passing test never
-/// approaches is doing its job, and enlarging it only makes a real hang cost more wall-clock --
-/// so the raise is spent on the one harness file that provably needs it and nowhere else.
+/// Raising the budget across the board was tried once before and reverted, on the evidence that
+/// the cases which exhausted it went on exhausting a larger one fifty times more slowly -- they
+/// were looping, not short of steps. That reasoning was right about *those* cases, which include
+/// `regExpUtils.js` and need the separate budget below. It does not hold for a case that is
+/// simply large: the decodeURI walks above finish, and finish quickly, once they can pay. So the
+/// corpus default is raised to a measured figure rather than the engine's, and the Unicode
+/// builder keeps a budget of its own on top of it.
 fn conformance_limits(case: &TestCase) -> ExecutionLimits {
-    let default = ExecutionLimits::default();
+    let default = ExecutionLimits {
+        max_steps: BULK_WORK_STEPS,
+        ..ExecutionLimits::default()
+    };
     if case_includes(case)
         .iter()
         .any(|include| BUDGETED_INCLUDES.contains(&include.as_str()))

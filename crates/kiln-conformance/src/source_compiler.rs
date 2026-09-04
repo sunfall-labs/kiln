@@ -74,6 +74,7 @@ fn compile_source(request: &EvalSource<'_>) -> Result<(Program, Strictness), Eva
             script: request.script,
             home: request.home.map(str::to_owned),
             private_scopes: request.private_scopes.to_vec(),
+            blocked_var_names: request.blocked_var_names.to_vec(),
         },
     )
     .map_err(|diagnostics| {
