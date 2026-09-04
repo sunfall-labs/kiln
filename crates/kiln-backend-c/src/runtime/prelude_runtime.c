@@ -2027,9 +2027,12 @@ static void kiln_c99_gc_trace(kiln_gc_heap *heap, kiln_gc_block *block) {
     case KILN_GC_OBJECT: {
         kiln_object *object = (kiln_object *)payload;
         size_t index;
-        if (object->shape != NULL && object->slots != NULL) {
+        if (object->shape != NULL) {
             for (index = 0; index < object->shape->property_count; ++index) {
-                kiln_c99_gc_mark_value(heap, &object->slots[index]);
+                kiln_c99_gc_mark_block(heap, object->shape->keys[index]);
+                if (object->slots != NULL) {
+                    kiln_c99_gc_mark_value(heap, &object->slots[index]);
+                }
             }
         }
         if (object->elements != NULL) {
@@ -2525,6 +2528,20 @@ static int kiln_c99_shape_find_slot(const kiln_shape *shape, const char *ikey, u
     return 0;
 }
 
+static void kiln_c99_pin_interned_key(const char *ikey) {
+    kiln_gc_heap *heap;
+    kiln_key_entry *entry;
+    size_t len;
+    if (ikey == NULL || ikey == kiln_c99_key_empty) return;
+    heap = kiln_c99_gc_heap();
+    if (heap == NULL) return;
+    len = strlen(ikey);
+    entry = kiln_c99_key_probe(&heap->keys, ikey, len, kiln_c99_key_hash(ikey, len));
+    if (entry != NULL) {
+        entry->pinned = 1;
+    }
+}
+
 static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln_shape **out_shape) {
     kiln_shape_transition *tr;
     kiln_shape *next_shape;
@@ -2551,6 +2568,7 @@ static int kiln_c99_shape_transition(kiln_shape *current, const char *ikey, kiln
     if (next_shape == NULL) {
         return 0;
     }
+    kiln_c99_pin_interned_key(ikey);
     next_shape->parent = current;
     next_shape->ikey = ikey;
     next_shape->slot_index = current->property_count;
